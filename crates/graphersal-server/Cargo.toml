@@ -22,8 +22,11 @@ path = "src/main.rs"
 # dependency, the engine writes the archive itself); `io`: imports of GraphSON and GraphML files
 # into new databases (adds graphersal's `quick-xml` dependency for GraphML).
 graphersal = { workspace = true, features = ["persist", "persist-zip", "io"] }
-# `ui-assets`: every database mount and the landing page at `/` serve the embedded playground.
-graphersal-serve = { workspace = true, features = ["ui-assets"] }
+# `ui-assets`: every database mount and the landing page at `/` serve the embedded playground;
+# `mcp`: each database context is a host of the shared MCP endpoint (`/db/<name>/mcp`, and the
+# graphs of the server-wide `/mcp`).
+graphersal-serve = { workspace = true, features = ["ui-assets", "mcp"] }
+graphersal-mcp = { workspace = true }
 graphersal-session = { workspace = true }
 toml = { workspace = true }
 serde = { workspace = true }

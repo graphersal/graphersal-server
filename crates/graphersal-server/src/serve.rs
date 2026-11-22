@@ -148,8 +148,9 @@ pub fn start(
             });
         }
     };
+    let mcp = crate::mcp::endpoint(&config.mcp);
     let registry = Registry::empty(&dir);
-    let loader = Loader::new(registry.clone(), host_check.clone());
+    let loader = Loader::with_mcp(registry.clone(), host_check.clone(), mcp.clone());
     let mut running = Running {
         dir,
         shared,
@@ -165,7 +166,7 @@ pub fn start(
     // The scan with the lock held and the listener up: the probes answer meanwhile.
     match Registry::scan(&running.dir) {
         Ok(registry) => {
-            running.loader = Loader::new(registry.clone(), host_check);
+            running.loader = Loader::with_mcp(registry.clone(), host_check, mcp);
             running.registry = registry;
         }
         Err(err) => {

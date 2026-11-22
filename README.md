@@ -20,7 +20,9 @@ loaded databases under `/db/<name>/` (playground, API, aliases resolved per requ
 playground's landing view at `/`, and the admin operations (create, delete, clone, load,
 unload, read-only, auto-load, aliases, backup into `backups/`, restore, `.gsnap` export, import
 of a `.gsnap`, a Store, GraphSON or GraphML, also by upload) over HTTP and from the console
-(`db ...`, `import`). Shared models and the server-wide MCP endpoint come in later versions.
+(`db ...`, `import`), the shared embedding models (`models/`), and the MCP endpoints: `/mcp`
+over every database (an agent lists the databases and picks one per MCP session) and
+`/db/<name>/mcp` per loaded database (`docs/mcp.md`).
 
 ## Use
 
@@ -59,7 +61,7 @@ core. `docs/admin-api.md` documents the admin API.
 
 ```
 <server-dir>/
-  server.toml     listen address, MCP options (placeholder), defaults for new databases
+  server.toml     listen address, MCP options, defaults for new databases, limits
   server.lock     one running server per directory
   server.run      the running server's address (only while it runs)
   aliases.toml    acme = "acme-2026.3"   (an alias names a database)
