@@ -131,6 +131,22 @@ impl Registry {
         })
     }
 
+    /// Clears the `needs_model` marker of the database `name` (a load found every model it
+    /// needs); nothing is written when it has none.
+    pub fn clear_needs_model(&self, name: &str) -> Result<(), ServerError> {
+        let marked = self
+            .get(name)?
+            .config
+            .is_some_and(|config| config.needs_model.is_some());
+        if marked {
+            self.update_config(name, |_, config| {
+                config.needs_model = None;
+                Ok(())
+            })?;
+        }
+        Ok(())
+    }
+
     /// Changes the configuration of the database `name` through `change`, then writes it.
     fn update_config(
         &self,
@@ -343,7 +359,7 @@ impl Registry {
             name: key.clone(),
             dir: old,
             config: Some(build.config.clone()),
-            state: DbState::Unloaded,
+            state: DbState::at_rest(Some(&build.config)),
         };
         inner.entries.insert(key.clone(), entry.clone());
         tracing::info!(
@@ -459,7 +475,7 @@ fn commit_build(
         name: build.name.clone(),
         dir: target,
         config: Some(build.config.clone()),
-        state: DbState::Unloaded,
+        state: DbState::at_rest(Some(&build.config)),
     };
     inner.entries.insert(entry.name.clone(), entry.clone());
     tracing::info!(target: "graphersal_server", "database '{}' registered", entry.name);

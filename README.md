@@ -18,9 +18,9 @@ This version holds `init`, `serve`, the server lock, the run file, the health pr
 `auto_load = true` are loaded in the background at start and unloaded cleanly at stop), the
 loaded databases under `/db/<name>/` (playground, API, aliases resolved per request), the
 playground's landing view at `/`, and the admin operations (create, delete, clone, load,
-unload, read-only, auto-load, aliases, backup into `backups/`, restore, `.gsnap` export) over
-HTTP and from the console (`db ...`). Imports, shared models and the server-wide MCP endpoint
-come in later versions.
+unload, read-only, auto-load, aliases, backup into `backups/`, restore, `.gsnap` export, import
+of a `.gsnap`, a Store, GraphSON or GraphML, also by upload) over HTTP and from the console
+(`db ...`, `import`). Shared models and the server-wide MCP endpoint come in later versions.
 
 ## Use
 
@@ -48,6 +48,7 @@ graphersal-server db backups acme --dir ./srv
 graphersal-server db restore acme <backup> --name acme-old --dir ./srv
 graphersal-server db export acme --out acme.gsnap --dir ./srv  # --no-models, --materialize
 graphersal-server db unload acme --dir ./srv && graphersal-server db delete acme --dir ./srv
+graphersal-server import ./srv acme.gsnap --name acme-2   # also a Store, .gstore, GraphSON, GraphML
 ```
 
 With a server running on the directory the `db` commands go through its admin API (address

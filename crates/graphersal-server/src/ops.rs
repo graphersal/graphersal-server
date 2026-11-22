@@ -24,6 +24,9 @@
 //!   `backups/<name>/<UTC time>.zip`, their restore (unloaded only; into the same name or a new
 //!   one; a layer's base checked by its identity) and `.gsnap` exports (with or without models;
 //!   a layer as a layer snapshot or materialized), in `ops_transfer.rs`.
+//! - [`Admin::import`]: another database (a packed snapshot, full or layer; a Store directory
+//!   or `.gstore`; GraphSON; GraphML) as a new database, built in `tmp/` like a create, in
+//!   `ops_import.rs`.
 //! - `load`, `unload`, `set_read_only`, `set_auto_load`, `alias_set`, `alias_remove`: delegated
 //!   to the [`Loader`] and the [`Registry`].
 //!
@@ -515,6 +518,11 @@ fn describe(config: Option<&DatabaseConfig>) -> String {
 
 #[path = "ops_transfer.rs"]
 mod transfer;
+pub(crate) use transfer::TmpFile;
+
+#[path = "ops_import.rs"]
+mod import;
+pub use import::{ImportFormat, ImportSource, Imported};
 pub(crate) use transfer::ExportFile;
 pub use transfer::{BackupInfo, ExportSpec, Exported, Restored};
 
@@ -525,3 +533,7 @@ mod tests;
 #[cfg(test)]
 #[path = "ops_transfer_tests.rs"]
 mod transfer_tests;
+
+#[cfg(test)]
+#[path = "ops_import_tests.rs"]
+mod import_tests;

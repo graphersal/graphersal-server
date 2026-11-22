@@ -11,6 +11,9 @@
 //! Either way the answer is the admin API's JSON, and a refusal is [`ServerError::Remote`]
 //! with the API's status, `error` and `help`. [`render`] turns an answer into the human text.
 //!
+//! `import` sends the source's absolute path (`POST /api/admin/import {"path", ...}`): a
+//! running server reads the file itself, on this machine; no upload.
+//!
 //! `db export` is a download: offline the admin core writes the file itself
 //! ([`Admin::export_to_file`]); through a server the client streams the API's answer into
 //! `<FILE>.part` and renames it. Its answer is the JSON `{"database", "file", "bytes",
@@ -119,6 +122,21 @@ pub enum DbCommand {
         /// The database restored into (default: `name`, which must be unloaded).
         target: Option<String>,
     },
+    /// `import DIR SOURCE --name NAME [--base BASE] [--format F] [--description TEXT]`: the
+    /// file or directory `source` (absolute: a running server reads it on this machine) as
+    /// the new database `name`.
+    Import {
+        /// The file or directory imported (absolute).
+        source: PathBuf,
+        /// The new database's name.
+        name: String,
+        /// A layer's base database.
+        base: Option<String>,
+        /// The format hint (`snapshot`, `store`, `graphson`, `graphml`).
+        format: Option<String>,
+        /// The new database's description.
+        description: Option<String>,
+    },
     /// `db export NAME --out FILE [--no-models] [--materialize]`.
     Export {
         /// The database.
@@ -192,6 +210,27 @@ impl DbCommand {
                     format!("databases/{name}/restore"),
                     Some(Value::Object(body)),
                 )
+            }
+            DbCommand::Import {
+                source,
+                name,
+                base,
+                format,
+                description,
+            } => {
+                let mut body = Map::new();
+                body.insert("path".into(), json!(source.to_string_lossy()));
+                body.insert("name".into(), json!(name));
+                if let Some(base) = base {
+                    body.insert("base".into(), json!(base));
+                }
+                if let Some(format) = format {
+                    body.insert("format".into(), json!(format));
+                }
+                if let Some(description) = description {
+                    body.insert("description".into(), json!(description));
+                }
+                (Method::Post, "import".into(), Some(Value::Object(body)))
             }
             DbCommand::Export { name, spec, .. } => (
                 Method::Get,
@@ -530,6 +569,23 @@ pub fn render(command: &DbCommand, answer: &Value) -> String {
             );
             if let Some(trash) = answer["trash"].as_str() {
                 text.push_str(&format!("; the replaced database moved to {trash}"));
+            }
+            text
+        }
+        DbCommand::Import { source, .. } => {
+            let import = &answer["import"];
+            let mut text = format!(
+                "imported {} ({}) as database '{}' ({}), {}",
+                source.display(),
+                import["format"].as_str().unwrap_or_default(),
+                s("name"),
+                kind(answer),
+                state(answer)
+            );
+            if let Some(notes) = import["notes"].as_array() {
+                for note in notes {
+                    text.push_str(&format!("\nnote: {}", note.as_str().unwrap_or_default()));
+                }
             }
             text
         }

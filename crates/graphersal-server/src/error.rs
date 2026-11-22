@@ -141,6 +141,21 @@ pub enum ServerError {
         /// The backup asked for.
         backup: String,
     },
+    /// An import's source file or directory does not exist.
+    #[non_exhaustive]
+    SourceNotFound {
+        /// The path given.
+        path: PathBuf,
+    },
+    /// An import's source is none of the formats an import reads (a packed snapshot, a Store
+    /// directory or `.gstore` file, GraphSON, GraphML).
+    #[non_exhaustive]
+    UnsupportedSource {
+        /// The path given (for an upload: its file in `tmp/`).
+        path: PathBuf,
+        /// Why it was not recognized.
+        message: String,
+    },
     /// The running server cannot be reached (the console's admin client).
     #[non_exhaustive]
     Connect {
@@ -232,6 +247,16 @@ impl fmt::Display for ServerError {
             ServerError::BackupNotFound { database, backup } => write!(
                 f,
                 "database '{database}' has no backup '{backup}' (backups/{database}/{backup}.zip)"
+            ),
+            ServerError::SourceNotFound { path } => {
+                write!(f, "the import source {} does not exist", path.display())
+            }
+            ServerError::UnsupportedSource { path, message } => write!(
+                f,
+                "cannot import {}: {message}; an import reads a packed snapshot (.gsnap), a \
+                 Store directory or .gstore file, GraphSON (.json, .jsonl, .graphson) or GraphML \
+                 (.xml, .graphml)",
+                path.display()
             ),
             ServerError::Connect { address, message } => write!(
                 f,

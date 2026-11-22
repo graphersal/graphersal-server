@@ -8,6 +8,8 @@
 //! read_only = false                # serve read-only (a base is always created read-only)
 //! created = "2026-11-22T10:00:00Z" # UTC, set when the database is created
 //! description = "Acme's graph"
+//! needs_model = "org/model"        # set by an import whose snapshot names a model it does not
+//!                                  # carry: listed as `needs-model` until a load succeeds
 //! ```
 //!
 //! Every key is optional (its default applies); an unknown key is an error, so a typo is never
@@ -106,6 +108,11 @@ pub struct DatabaseConfig {
     /// A free text shown in listings.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub description: String,
+    /// The embedding model (its repository) the database needs but does not keep: set by an
+    /// import of a snapshot or Store that names a model without carrying it, so a scan lists
+    /// the database as `needs-model` until a load succeeds (which clears it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub needs_model: Option<String>,
 }
 
 impl DatabaseConfig {

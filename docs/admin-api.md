@@ -12,7 +12,8 @@ Every request is checked by `Host` and `Origin` (DNS rebinding, cross-site pages
 ## Conventions
 
 - Request bodies are JSON objects with `Content-Type: application/json` (else `415`), at most
-  16 MiB (else `413`). Unknown fields are refused (`400`), so a typo is never ignored.
+  16 MiB (else `413`); the one exception is an import upload (the file itself as the body, see
+  Import). Unknown fields are refused (`400`), so a typo is never ignored.
 - Answers are JSON. An error is `{"error": "<sentence>", "help": "<what to do>"?}`.
 - The actions take **real database names**; an alias is not followed (`404`). Only
   `GET /api/admin/databases/<name>` also answers an alias. Names are case-insensitive and
@@ -21,7 +22,8 @@ Every request is checked by `Host` and `Origin` (DNS rebinding, cross-site pages
 - Status codes: `200`/`201`/`202` success; `400` invalid name, body or schema; `404` no such
   database, alias or endpoint; `405` method not allowed on an existing endpoint; `409` a rule
   refuses it (name taken, database loaded, named by an alias, base of layers, a base's
-  read-only, a failed database); `413`/`415` body; `500` a Store or file operation failed;
+  read-only, a failed database, a layer without its base); `413`/`415` body (`415` also: an
+  import source of no known format); `500` a Store or file operation failed;
   `503` the server is starting or stopping (retry, `Retry-After: 1`).
 
 ## Entry
@@ -42,6 +44,7 @@ The object describing one database (listing rows, and the answer of most actions
 | `reason` | string | `failed`, `needs-model` | why |
 | `model` | string | `needs-model` | the missing model's repository |
 | `aliasOf` | string | alias rows | the database the alias names (other fields are that database's) |
+| `import` | object | import answers | see Import |
 
 A `failed` database whose `database.toml` cannot be read has only `name`, `state`, `reason`.
 
@@ -62,6 +65,8 @@ A `failed` database whose `database.toml` cannot be read has only `name`, `state
 | GET | `/api/admin/databases/<name>/backups` | | `200 {"database", "backups": [backup...]}` (oldest first; also for the name of a deleted database) |
 | POST | `/api/admin/databases/<name>/restore` | `{"backup", "name"?}` | `201` entry + `"restoredFrom": {"database", "backup"}`, `"replaced": bool`, `"trash"` (when replaced) |
 | GET | `/api/admin/databases/<name>/export?models=true\|false&materialize=true\|false` | | `200` the `.gsnap` file as a download |
+| POST | `/api/admin/import?name=<n>&base=<b>&format=<f>&description=<d>` | the file itself (`Content-Type: application/octet-stream`, or anything but JSON) | `201` entry + `"import"` |
+| POST | `/api/admin/import` | JSON `{"path", "name", "base"?, "format"?, "description"?}` | `201` entry + `"import"` |
 | GET | `/api/admin/aliases` | | `200 {"aliases": {alias: database}}` |
 | PUT | `/api/admin/aliases/<alias>` | `{"target"}` | `200 {"alias", "target"}` (new alias or flip) |
 | DELETE | `/api/admin/aliases/<alias>` | | `200 {"alias", "removed": true}` |
@@ -177,12 +182,62 @@ commit; writes wait while it is encoded) and on an unloaded one (read from its f
 is written into `tmp/` first and streamed from there (removed after the answer), so an error
 is still a JSON answer.
 
+### Import
+
+A new database from another one, in two forms:
+
+- **Upload** (the playground): `POST /api/admin/import?name=<name>` with the file as the raw
+  request body (`Content-Type: application/octet-stream`; not multipart) and a
+  `Content-Length`. Query parameters (URL-encoded): `name` (required), `base` (a layer's base
+  database), `format` (`snapshot`, `store`, `graphson`, `graphml`; default: detected),
+  `description`; any other parameter `400`. The body is streamed into `tmp/upload-*.bin`, never
+  held in memory, imported, then removed. Its size limit is `server.toml`'s
+  `[limits] upload_bytes` (default 4 GiB), announced as `uploadBytes` by the root
+  `GET /api/info`: check the file's size against it before sending. A body over the limit is
+  `413`: when its declared `Content-Length` is at most 64 MiB the answer is ordinary (the body is
+  read and discarded first); when it declares more, the server answers `413` WITHOUT reading the
+  body and abandons the connection (the answer then has no `Content-Length`; its JSON body
+  follows the head). An invalid or taken name is answered after the body was read. Upload with
+  `XMLHttpRequest` for a progress bar (`xhr.upload.onprogress`; `fetch` has none); the import
+  itself runs within the request (the answer comes when the database is written).
+- **Path** (the console while a server runs): `POST /api/admin/import` with
+  `Content-Type: application/json` and `{"path": "/absolute/path", "name", "base"?, "format"?,
+  "description"?}`: the server reads the file or directory on its own machine. A relative path
+  is `400`, a missing one `404`.
+
+Sources, detected from the content (a file name never decides a snapshot):
+
+| Source | Result |
+|---|---|
+| packed snapshot `.gsnap`, full | a plain database; its embedding models come along when it carries them; when it names a model without carrying it the database is created in the state `needs-model` (`model` names it; kept across restarts, cleared by the first successful load) |
+| packed snapshot, layer (`.layer.gsnap`) | a layer database over the `role = "base"` database with the snapshot's base identity: `base` names it, else the only base database with it; none (or the named one does not match): `409` naming the identity |
+| Store directory or single-file `.gstore` | copied file by file into a directory Store (verified; its creation parameters come along); a layer Store is matched with its base like a layer snapshot |
+| GraphSON (`.json`, `.jsonl`, `.graphson`) or GraphML (`.xml`, `.graphml`) | a plain database holding the file's graph (the Store gets `server.toml`'s `[defaults]`); data GraphSON cannot hold is skipped and noted |
+
+Without an extension (an upload) a file that is neither a snapshot nor a Store is GraphSON when
+its first character is `{` or `[`, GraphML when it is `<`; anything else is `415`. `base` for a
+source that is not a layer is `400`; a file that does not read as its format `400`.
+
+The answer is the new entry (state `unloaded`, or `needs-model`) with `"import"`:
+
+| Field | Type | When | Meaning |
+|---|---|---|---|
+| `format` | string | always | `snapshot`, `store`, `graphson`, `graphml` |
+| `layerBase` | string | layers | the base identity the layer was built over |
+| `modelsMissing` | [string] | always | the models (repositories) named but not carried |
+| `skipped` | number | always | values, entries or elements the import skipped (GraphSON) |
+| `notes` | [string] | always | what was skipped or converted, missing models |
+
+The database is built in `tmp/` and renamed into `databases/` in one step: a failed import
+leaves nothing behind.
+
 ## Console
 
 ```
 graphersal-server db list|create|delete|clone|load|unload|read-only|auto-load|alias ... --dir DIR [--json]
 graphersal-server db backup NAME | backups NAME | restore NAME BACKUP [--name NEW] --dir DIR [--json]
 graphersal-server db export NAME --out FILE [--no-models] [--materialize] --dir DIR [--json]
+graphersal-server import DIR SOURCE --name NAME [--base BASE] [--format F] [--description TEXT] [--json]
 ```
 
 With a server running on `DIR` (its `server.lock` is held) the console sends these requests to
@@ -193,3 +248,8 @@ database). `--json` prints the answer above; errors go to stderr with `help:`; e
 `db export` writes `FILE` (through `FILE.part`, renamed when complete): offline the admin core
 writes it, through a server the console streams the download. Its `--json` answer is
 `{"database", "file", "bytes", "snapshot": "full" | "layer", "models": "included" | "excluded"}`.
+
+`import` takes the server directory first (as the design's command line does). Offline the
+admin core imports `SOURCE` itself; through a running server the console sends the path form
+with `SOURCE` made absolute (the server reads it; no upload). Its answer is the import answer
+above; the text names the format, the kind and the state, and lists the notes.

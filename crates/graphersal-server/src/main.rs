@@ -4,6 +4,7 @@
 //! graphersal-server init DIR
 //! graphersal-server serve --dir DIR [--listen ADDR]
 //! graphersal-server db list|create|delete|clone|load|unload|read-only|auto-load|alias|backup|backups|restore|export ... --dir DIR [--json]
+//! graphersal-server import DIR SOURCE --name NAME [--base BASE] [--format F] [--description TEXT] [--json]
 //! ```
 //!
 //! stdout carries only results, stderr diagnostics and the log. Exit codes: `0` ok, `1` the
@@ -62,6 +63,15 @@ Usage:
             unless --no-models; a layer as a layer snapshot (loads only over its base, no
             models) unless --materialize (a standalone full snapshot).
       --json prints the admin API's JSON answer instead of text.
+  graphersal-server import DIR SOURCE --name NAME [--base BASE] [--format FORMAT]
+                    [--description TEXT] [--json]
+      Import SOURCE into DIR as the new database NAME: a packed snapshot (.gsnap; a layer
+      snapshot needs a role=base database with its base identity, --base names it), a Store
+      directory or .gstore file (copied into a directory Store), or a GraphSON (.json,
+      .jsonl, .graphson) or GraphML (.xml, .graphml) file. FORMAT (snapshot, store,
+      graphson, graphml) overrides the detection. A snapshot naming an embedding model it
+      does not carry becomes a needs-model database. Through a running server the server
+      reads SOURCE itself (same machine).
   graphersal-server --help | --version
 
 Log level: RUST_LOG (default info).";
@@ -81,6 +91,7 @@ fn main() -> ExitCode {
         Some("init") => init(&args[1..]),
         Some("serve") => serve_command(&args[1..]),
         Some("db") => db_command(&args[1..]),
+        Some("import") => import_command(&args[1..]),
         Some(other) => usage_error(&format!("unknown command {other:?}")),
     }
 }
@@ -276,7 +287,12 @@ fn db_command(args: &[String]) -> ExitCode {
             return ExitCode::from(EXIT_FAILED);
         }
     };
-    match console::run(&dir, &command) {
+    print_outcome(&dir, &command, switch("--json"))
+}
+
+/// Runs `command` on `dir` and prints its answer (text, or JSON with `json`).
+fn print_outcome(dir: &ServerDir, command: &DbCommand, json: bool) -> ExitCode {
+    match console::run(dir, command) {
         Ok(outcome) => {
             if let Via::Server(address) = outcome.via {
                 eprintln!(
@@ -284,15 +300,15 @@ fn db_command(args: &[String]) -> ExitCode {
                     dir.root().display()
                 );
             }
-            if switch("--json") {
+            if json {
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&outcome.body).unwrap_or_default()
                 );
             } else {
-                println!("{}", console::render(&command, &outcome.body));
+                println!("{}", console::render(command, &outcome.body));
             }
-            if console::failed(&command, &outcome.body) {
+            if console::failed(command, &outcome.body) {
                 ExitCode::from(EXIT_FAILED)
             } else {
                 ExitCode::SUCCESS
@@ -309,6 +325,71 @@ fn db_command(args: &[String]) -> ExitCode {
             ExitCode::from(EXIT_FAILED)
         }
     }
+}
+
+/// `import DIR SOURCE --name NAME ...`.
+fn import_command(args: &[String]) -> ExitCode {
+    let mut positional: Vec<&String> = Vec::new();
+    let mut values: Vec<(String, String)> = Vec::new();
+    let mut json = false;
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        if !arg.starts_with("--") {
+            positional.push(arg);
+            continue;
+        }
+        let (flag, inline) = match arg.split_once('=') {
+            Some((flag, value)) => (flag.to_string(), Some(value.to_string())),
+            None => (arg.clone(), None),
+        };
+        match flag.as_str() {
+            "--name" | "--base" | "--format" | "--description" => {
+                let Some(value) = inline.or_else(|| rest.next().cloned()) else {
+                    return usage_error(&format!("import: {flag} needs a value"));
+                };
+                if values.iter().any(|(f, _)| *f == flag) {
+                    return usage_error(&format!("import: {flag} given twice"));
+                }
+                values.push((flag, value));
+            }
+            "--json" if inline.is_none() => json = true,
+            _ => return usage_error(&format!("import: unknown argument {arg:?}")),
+        }
+    }
+    let value = |flag: &str| {
+        values
+            .iter()
+            .find(|(f, _)| f == flag)
+            .map(|(_, v)| v.clone())
+    };
+    let [dir, source] = positional.as_slice() else {
+        return usage_error("import takes two arguments: the server directory and the source");
+    };
+    let Some(name) = value("--name") else {
+        return usage_error("import needs --name NAME (the new database's name)");
+    };
+    let source = match std::path::absolute(source) {
+        Ok(source) => source,
+        Err(err) => {
+            eprintln!("Error: cannot resolve {source}: {err}");
+            return ExitCode::from(EXIT_FAILED);
+        }
+    };
+    let command = DbCommand::Import {
+        source,
+        name,
+        base: value("--base"),
+        format: value("--format"),
+        description: value("--description"),
+    };
+    let dir = match ServerDir::open(dir) {
+        Ok(dir) => dir,
+        Err(err) => {
+            eprintln!("Error: {err}");
+            return ExitCode::from(EXIT_FAILED);
+        }
+    };
+    print_outcome(&dir, &command, json)
 }
 
 /// Why a `db` command line was refused.

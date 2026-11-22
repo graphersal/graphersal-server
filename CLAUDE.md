@@ -10,20 +10,27 @@ from published files). When this file disagrees with the code, the code wins: sa
 
 - Workspace root `Cargo.toml` (all dependency versions in `[workspace.dependencies]`, each with
   a one-line justification); one crate `crates/graphersal-server` (lib + bin, `publish = false`).
-- graphersal with features `persist` and `persist-zip` (verified ZIP backups); graphersal-serve
+- graphersal with features `persist`, `persist-zip` (verified ZIP backups) and `io` (GraphSON
+  and GraphML imports); graphersal-serve
   with feature `ui-assets` (the embedded playground per mount and at `/`).
 - Path dependencies on the graphersal repository's MAIN checkout beside this one:
   `../graphersal/crates/graphersal`, `../graphersal/crates/graphersal-serve` and
   `../graphersal/crates/graphersal-session` (later also `graphersal-mcp`). Never edit that
   repository from a task here. This repository keeps its own `target/` (never share
   graphersal's).
-- `src/lib.rs` modules: `config` (`server.toml`, `ServerConfig`, `parse_listen`), `layout`
+- `src/lib.rs` modules: `config` (`server.toml`, `ServerConfig`, `parse_listen`, `[limits]
+  upload_bytes` = `Limits`, default 4 GiB), `layout`
   (`ServerDir`, `init`, file names, `write_atomic`), `lock` (`ServerLock`, fd-lock on
   `server.lock`), `run_file` (`RunInfo`, `server.run`), `serve` (`start` -> `Running`, the
-  `tiny_http` listener adapted from graphersal-cli's dev server), `router` (probes and 503s
+  `tiny_http` listener adapted from graphersal-cli's dev server; a declared body over
+  `MAX_DECLARED_BODY_BYTES` (64 MiB) gets no answer, EXCEPT an import upload (`is_upload`: `POST
+  /api/admin/import` not JSON), allowed up to the upload limit (`Router::upload_limit`, read per
+  request); an upload declaring more is answered 413 through `Request::upgrade` without reading
+  and its stream leaked (tiny_http allocates the declared rest on drop; the answer has no
+  Content-Length); every unread declared rest is drained in small reads before the answer), `router` (probes and 503s
   through `graphersal_serve::Server`, then `HostCheck::check` on everything else, then the
   routes: `/db/<name>/...` via `mounts`, `GET /api/info` (root identity, `admin: true`, no
-  `mountPath` = the playground's landing view), `/api/admin/...` via `admin_api`, other `/api/*`
+  `mountPath` = the playground's landing view, `uploadBytes` = the upload limit), `/api/admin/...` via `admin_api`, other `/api/*`
   and `/mcp` 404, every other GET a file of the embedded playground at the root (`/` =
   `index.html`); `ready(loader)` installs the resolver), `mounts` (`/db/<name>/<rest>`:
   `registry.resolve` on EVERY request (alias flips at once), unknown -> 404 JSON, `/db/x` ->
@@ -41,7 +48,12 @@ from published files). When this file disagrees with the code, the code wins: sa
   `status_of` (400 invalid name/input, 404, 409 rule refusals, 500); the route table is in its
   module docs and `docs/admin-api.md` (the playground panel's contract: keep them in sync);
   `POST .../<name>/backup`, `GET .../<name>/backups`, `POST .../<name>/restore {"backup",
-  "name"?}`, `GET .../<name>/export?models=&materialize=`; the export is NOT answered by
+  "name"?}`, `GET .../<name>/export?models=&materialize=`; `POST import?name=&base=&format=&description=`
+  with the raw file as the body (streamed by `copy_body_to` into `tmp/upload-*.bin` = `TmpFile`,
+  quick 400/409 refusals before reading) or `POST import {"path", "name", ...}` (JSON, absolute
+  path read server-side; the console's form), both answered by `import_answer` (`201` entry +
+  `"import": {format, layerBase?, modelsMissing, skipped, notes}`, 415 for an unknown format);
+  the export is NOT answered by
   `route`: the router asks `export_target` first and answers `Answer::Download` (the `.gsnap`
   written into `tmp/` by `Admin::export_to_tmp`, streamed by `serve.rs` from the file with
   `Content-Length`, then removed); `Router::route` (tests) buffers it),
@@ -67,9 +79,19 @@ from published files). When this file disagrees with the code, the code wins: sa
   commit_seq, last_commit_at)`); export = `write_graph_snapshot` of the open graph, or of
   `Store::open_read_only` / `open_layer_read_only(...).into_graph()` for an unloaded one,
   `WriteOptions::with_materialize` for a materialized layer, `ModelCopy` from the spec (a
-  layer snapshot never carries models)); `#[cfg(test)] FailPoint` injects a failure/crash after
-  the Store is written (create and restore); tests in `ops_tests.rs` and
-  `ops_transfer_tests.rs` (tiny synthetic model in `test_models.rs`, copied from graphersal's
+  layer snapshot never carries models)); `import` in `ops_import.rs`
+  (`ImportSource`/`ImportFormat`/`Imported`; detection: dir with a Store, `read_snapshot_info`
+  head, single-file Store, extension, first character; full `.gsnap` =
+  `Store::create_from_packed_dir` + `models_missing` + `models_dir` Missing -> `needs_model`
+  marker in `database.toml` (state `needs-model`, kept by the scan via `DbState::at_rest`,
+  cleared by `Registry::clear_needs_model` after a successful load); layer `.gsnap` =
+  `matching_base` (shared with restore, refusal names the identity) + `read_layer_snapshot` +
+  `create_layer_with`; Store dir / `.gstore` = `Store::convert` then `inspect` for a layer;
+  GraphSON/GraphML = `GraphSONImport::load` / `GraphSource::from_graphml_reader` +
+  `Store::create_with`); `#[cfg(test)] FailPoint` injects a failure/crash after
+  the Store is written (create, restore, import); tests in `ops_tests.rs`,
+  `ops_transfer_tests.rs` and `ops_import_tests.rs` (uploads over a real listener: a 72 MiB
+  generated GraphSON body, the 413 paths) (tiny synthetic model in `test_models.rs`, copied from graphersal's
   `model_fixture.rs`), also over a real listener), `console` (`DbCommand` -> one admin API request;
   `run`: offline = the SAME `admin_api::route` over an offline `Admin` with a built `Request`,
   locked = `client` to `RunInfo.address` (503 retried 10 s; `load` polls until not loading);
@@ -111,7 +133,9 @@ from published files). When this file disagrees with the code, the code wins: sa
   `large` samples; `test_support::skip_on_ci`).
 - `src/main.rs`: the hand-parsed command line (no parser crate, like graphersal's CLI): `init`,
   `serve`, `db list|create|delete|clone|load|unload|read-only|auto-load|alias|backup|backups|
-  restore|export ... --dir DIR [--json]` (`db export` offline writes the file through
+  restore|export ... --dir DIR [--json]`, `import DIR SOURCE --name N [--base B] [--format F]
+  [--description D] [--json]` (`DbCommand::Import`: the JSON path form, SOURCE made absolute;
+  offline the same route over the offline admin) (`db export` offline writes the file through
   `Admin::export_to_file`, through a server streams the download into `FILE.part`) (prints `note: ... sent to its admin API at ADDR` on stderr when it went through a
   server, `help:` lines for refusals), the tracing subscriber, the ctrlc handler. stdout =
   results, stderr = diagnostics/log; exit codes 0 ok, 1 failed, 2 usage.

@@ -864,3 +864,90 @@ fn db_backup_restore_and_export_offline_and_through_a_server() {
     }
     let _ = &mut server;
 }
+
+/// Runs `graphersal-server import ARGS`: (exit code, stdout, stderr).
+fn import(args: &[&str]) -> (i32, String, String) {
+    let out = Command::new(BIN).arg("import").args(args).output().unwrap();
+    (
+        out.status.code().unwrap_or(-1),
+        text(&out.stdout),
+        text(&out.stderr),
+    )
+}
+
+#[test]
+fn import_offline_and_through_a_server() {
+    use graphersal::prelude::{Graph, GraphExport, TraversalGraph};
+    let temp = TempDir::new("console-import");
+    let dir = ServerDir::init(temp.path().join("srv")).unwrap().dir;
+    let root = dir.root().to_str().unwrap().to_string();
+    let graph = Graph::new(TraversalGraph::tinkerpop_modern());
+    let graphson = temp.path().join("modern.json");
+    graph
+        .export_graphson_writer(std::fs::File::create(&graphson).unwrap())
+        .unwrap();
+    let graphson_arg = graphson.to_str().unwrap();
+
+    // Offline.
+    let (code, out, err) = import(&[
+        &root,
+        graphson_arg,
+        "--name",
+        "gs",
+        "--description",
+        "From GraphSON",
+    ]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        out.contains("(graphson) as database 'gs' (plain), unloaded"),
+        "{out}"
+    );
+    assert!(!err.contains("sent to its admin API"), "{err}");
+    let (code, out, _) = db(dir.root(), &["list", "--json"]);
+    assert_eq!(code, 0);
+    assert_eq!(json(&out)["databases"][0]["description"], "From GraphSON");
+    // Usage errors (2) and refusals (1).
+    let (code, _, _) = import(&[&root, graphson_arg]);
+    assert_eq!(code, 2, "no --name");
+    let (code, _, _) = import(&[&root, "--name", "x"]);
+    assert_eq!(code, 2, "no source");
+    let (code, _, err) = import(&[&root, graphson_arg, "--name", "gs"]);
+    assert_eq!(code, 1);
+    assert!(err.contains("taken"), "{err}");
+    let (code, _, err) = import(&[&root, "missing.json", "--name", "x"]);
+    assert_eq!(code, 1);
+    assert!(err.contains("does not exist"), "{err}");
+    let file = temp.path().join("gs.gsnap");
+    let (code, _, err) = db(
+        dir.root(),
+        &["export", "gs", "--out", file.to_str().unwrap()],
+    );
+    assert_eq!(code, 0, "{err}");
+
+    // Through a running server: the server reads the file (path form).
+    let mut server = ServerProcess(
+        Command::new(BIN)
+            .args(["serve", "--dir", &root, "--listen", "127.0.0.1:0"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let info = wait_for_run_file(&dir);
+    let (code, out, err) = import(&[&root, file.to_str().unwrap(), "--name", "snap", "--json"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        err.contains(&format!("sent to its admin API at {}", info.address)),
+        "{err}"
+    );
+    let answer = json(&out);
+    assert_eq!(answer["name"], "snap");
+    assert_eq!(answer["import"]["format"], "snapshot");
+    let (code, _, err) = import(&[&root, file.to_str().unwrap(), "--name", "snap"]);
+    assert_eq!(code, 1);
+    assert!(err.contains("taken"), "{err}");
+    let (code, out, err) = db(dir.root(), &["load", "snap"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("is loaded"), "{out}");
+    stop_and_wait(&mut server);
+}

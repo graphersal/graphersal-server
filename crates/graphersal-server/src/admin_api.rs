@@ -16,6 +16,8 @@
 //! | GET | `databases/<name>/backups` | | `200 {"database", "backups": [backup...]}` (also for a deleted database's name) |
 //! | POST | `databases/<name>/restore` | `{"backup", "name"?}` | `201` entry + `"restoredFrom": {"database", "backup"}`, `"replaced"`, `"trash"?` |
 //! | GET | `databases/<name>/export?models=true\|false&materialize=true\|false` | | `200` the `.gsnap` file (download) |
+//! | POST | `import?name=<n>&base=<b>&format=<f>&description=<d>` | the file itself (any content type but JSON) | `201` entry + `"import"` |
+//! | POST | `import` | JSON `{"path", "name", "base"?, "format"?, "description"?}` (a file or directory on the server's machine, absolute) | `201` entry + `"import"` |
 //! | GET | `aliases` | | `200 {"aliases": {alias: database}}` |
 //! | PUT | `aliases/<alias>` | `{"target"}` | `200 {"alias", "target"}` |
 //! | DELETE | `aliases/<alias>` | | `200 {"alias", "removed": true}` |
@@ -23,7 +25,8 @@
 //! The actions take real database names (not aliases). Errors are `{"error", "help"?}` with
 //! `400` (invalid name, body or schema), `404` (no such database, alias or endpoint), `405`,
 //! `409` (a rule refuses it: name taken, loaded, named by an alias, base of layers, offline,
-//! failed database), `413` (body too large), `500` (a Store or file failed). The repository's
+//! failed database), `413` (body too large), `415` (an import source of no known format),
+//! `500` (a Store or file failed). The repository's
 //! `docs/admin-api.md` documents the routes for clients.
 //!
 //! A backup: `database`, `backup` (its name, the UTC time with dashes), `file`
@@ -34,6 +37,12 @@
 //! `X-Graphersal-Models: included | excluded`; it is written into `tmp/` first and streamed from
 //! there (removed after the answer).
 //!
+//! An import upload's body is streamed into `tmp/upload-*.bin` (never held in memory; at most
+//! `server.toml`'s `[limits] upload_bytes`, default 4 GiB, else `413`), imported, and removed.
+//! `"import"` of the answer: `{"format": "snapshot" | "store" | "graphson" | "graphml",
+//! "layerBase"?, "modelsMissing": [repo...], "skipped": n, "notes": [text...]}`; a database
+//! whose snapshot names a model it does not carry has the state `needs-model`.
+//!
 //! An entry: `name`, `state` (`unloaded` | `loading` | `loaded` | `needs-model` | `failed`),
 //! `kind` (`plain` | `layer`), `role` (`normal` | `base`), `readOnly` (a base is always
 //! read-only), `autoLoad`, `description`, and when they apply `base` (a layer's base), `created`,
@@ -43,7 +52,7 @@
 //! `autoLoad` or `description`. The field names are those of the playground's landing view.
 
 use std::fs::File;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use graphersal_serve::{HttpError, Method, Request, Response};
 use serde::Deserialize;
@@ -53,7 +62,9 @@ use crate::database::{DatabaseKind, DatabaseRole};
 use crate::error::ServerError;
 use crate::loader::LoadStart;
 use crate::names::fold;
-use crate::ops::{Admin, BackupInfo, CreateSpec, ExportFile, ExportSpec};
+use crate::ops::{
+    Admin, BackupInfo, CreateSpec, ExportFile, ExportSpec, ImportFormat, ImportSource, TmpFile,
+};
 use crate::registry::{DatabaseEntry, DbState, Registry};
 
 /// Answers a request below `/api/admin/` (`endpoint` = the path after `/api/admin/`, without
@@ -179,6 +190,13 @@ pub(crate) fn route(
                     (err, help)
                 })
         }
+        (Method::Post, ["import"]) => {
+            return if is_json(request) {
+                import_path(admin, request)
+            } else {
+                import_upload(admin, request)
+            };
+        }
         (_, ["aliases"]) if read => Ok(Response::json(
             200,
             &json!({ "aliases": registry.aliases() }),
@@ -211,7 +229,8 @@ pub(crate) fn route(
             ],
         )
         | (_, ["aliases"])
-        | (_, ["aliases", _]) => return Err(not_allowed()),
+        | (_, ["aliases", _])
+        | (_, ["import"]) => return Err(not_allowed()),
         _ => {
             return Err(HttpError::new(
                 404,
@@ -220,6 +239,237 @@ pub(crate) fn route(
         }
     };
     Ok(answer.unwrap_or_else(|(err, help)| error_answer(&err, help)))
+}
+
+/// Whether `request` carries a JSON body (`Content-Type: application/json`).
+fn is_json(request: &Request<'_>) -> bool {
+    request
+        .header("Content-Type")
+        .is_some_and(|value| value.to_ascii_lowercase().contains("application/json"))
+}
+
+/// Whether `method path` with the content type `content_type` is an import upload (the
+/// listener lets its body pass up to the upload limit).
+pub(crate) fn is_upload(method: &Method, path: &str, content_type: Option<&str>) -> bool {
+    matches!(method, Method::Post)
+        && path == "/api/admin/import"
+        && !content_type
+            .is_some_and(|value| value.to_ascii_lowercase().contains("application/json"))
+}
+
+/// `POST import {"path", ...}`: a file or directory on the server's machine.
+fn import_path(admin: &Admin, request: &mut Request<'_>) -> Result<Response, HttpError> {
+    let body: ImportBody = body_of(request)?;
+    let path = PathBuf::from(&body.path);
+    if !path.is_absolute() {
+        return Err(HttpError::bad_request(format!(
+            "import: the path {:?} is not absolute (the server resolves it on its own machine)",
+            body.path
+        )));
+    }
+    let format = parse_format(body.format.as_deref())?;
+    let source = ImportSource::new(path).with_format(format);
+    Ok(import_answer(
+        admin,
+        &source,
+        &body.name,
+        body.base.as_deref(),
+        body.description.as_deref(),
+    ))
+}
+
+/// `POST import?name=...` with the file as the body: streamed into `tmp/`, then imported.
+fn import_upload(admin: &Admin, request: &mut Request<'_>) -> Result<Response, HttpError> {
+    let query = request
+        .url()
+        .split_once('?')
+        .map(|(_, query)| query.to_string())
+        .unwrap_or_default();
+    let mut name = None;
+    let mut base = None;
+    let mut format = None;
+    let mut description = None;
+    for pair in query.split('&').filter(|p| !p.is_empty()) {
+        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+        let value = query_decode(value)
+            .ok_or_else(|| HttpError::bad_request(format!("import: {key}: a broken escape")))?;
+        let slot = match key {
+            "name" => &mut name,
+            "base" => &mut base,
+            "format" => &mut format,
+            "description" => &mut description,
+            other => {
+                return Err(HttpError::bad_request(format!(
+                    "import: unknown parameter {other:?} (name, base, format, description)"
+                )));
+            }
+        };
+        if slot.replace(value).is_some() {
+            return Err(HttpError::bad_request(format!("import: {key} given twice")));
+        }
+    }
+    let Some(name) = name.filter(|n| !n.is_empty()) else {
+        return Err(HttpError::bad_request(
+            "import: name the new database: POST /api/admin/import?name=<name> with the file \
+             as the body",
+        ));
+    };
+    let format = parse_format(format.as_deref())?;
+    // The quick refusals before the body is read (the listener drains it).
+    let key = fold(&name);
+    if let Err(err) = crate::names::validate_name(&key) {
+        return Ok(error_answer(&err, None));
+    }
+    if let Ok(entry) = admin.registry().get(&key) {
+        let err = ServerError::NameInUse {
+            name: entry.name,
+            holder: "database",
+        };
+        return Ok(error_answer(&err, None));
+    }
+    let registry = admin.registry();
+    let limit = match registry.dir().load_config() {
+        Ok(config) => config.limits.upload_bytes,
+        Err(err) => return Ok(error_answer(&err, None)),
+    };
+    let upload = match TmpFile::new(&registry.dir().tmp(), "upload", "bin") {
+        Ok(upload) => upload,
+        Err(err) => return Ok(error_answer(&err, None)),
+    };
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(upload.path())
+        .map_err(|err| HttpError::new(500, format!("cannot store the upload: {err}")))?;
+    let mut out = std::io::BufWriter::new(file);
+    let received = request.copy_body_to(&mut out, limit).map_err(|err| {
+        if err.status() == 413 {
+            HttpError::new(
+                413,
+                format!(
+                    "{}; the server's upload limit is [limits] upload_bytes in server.toml",
+                    err.message()
+                ),
+            )
+        } else {
+            err
+        }
+    })?;
+    let file = out
+        .into_inner()
+        .map_err(|err| HttpError::new(500, format!("cannot store the upload: {err}")))?;
+    file.sync_all()
+        .map_err(|err| HttpError::new(500, format!("cannot store the upload: {err}")))?;
+    drop(file);
+    if received == 0 {
+        return Err(HttpError::bad_request(
+            "import: the body is empty; send the file as the request body",
+        ));
+    }
+    tracing::info!(
+        target: "graphersal_server",
+        "import upload for '{key}': {received} bytes received"
+    );
+    let source = ImportSource::new(upload.path()).with_format(format);
+    let answer = import_answer(
+        admin,
+        &source,
+        &name,
+        base.as_deref(),
+        description.as_deref(),
+    );
+    // The upload is removed now (the import copied what it needs).
+    drop(upload);
+    Ok(answer)
+}
+
+/// The format hint of an import (`400` for an unknown one).
+fn parse_format(hint: Option<&str>) -> Result<Option<ImportFormat>, HttpError> {
+    match hint.filter(|h| !h.is_empty()) {
+        None => Ok(None),
+        Some(hint) => ImportFormat::parse(hint).map(Some).ok_or_else(|| {
+            HttpError::bad_request(format!(
+                "import: unknown format {hint:?} (snapshot, store, graphson, graphml)"
+            ))
+        }),
+    }
+}
+
+/// The answer of an import: `201` entry + `"import"`, or the error.
+fn import_answer(
+    admin: &Admin,
+    source: &ImportSource,
+    name: &str,
+    base: Option<&str>,
+    description: Option<&str>,
+) -> Response {
+    match admin.import(source, name, base, description) {
+        Ok(imported) => {
+            let mut entry = entry_json(&imported.entry, None);
+            let mut details = json!({
+                "format": imported.format.as_str(),
+                "modelsMissing": imported.models_missing,
+                "skipped": imported.skipped,
+                "notes": imported.notes,
+            });
+            if let Some(layer_base) = &imported.layer_base {
+                details["layerBase"] = json!(layer_base);
+            }
+            entry["import"] = details;
+            Response::json(201, &entry)
+        }
+        Err(err) => {
+            let help = match &err {
+                ServerError::Refused { .. } => Some(
+                    "a layer is imported over a base database with its base identity: import \
+                     or restore that base first (role = base), or name it with base=<name>"
+                        .to_string(),
+                ),
+                _ => None,
+            };
+            error_answer(&err, help)
+        }
+    }
+}
+
+/// A query value `%XX`- and `+`-decoded; `None` for a broken escape or a result that is not
+/// UTF-8.
+fn query_decode(value: &str) -> Option<String> {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'%' => {
+                let hex = value.get(i + 1..i + 3)?;
+                out.push(u8::from_str_radix(hex, 16).ok()?);
+                i += 3;
+            }
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            byte => {
+                out.push(byte);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+/// `POST import` with a JSON body.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ImportBody {
+    path: String,
+    name: String,
+    #[serde(default)]
+    base: Option<String>,
+    #[serde(default)]
+    format: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
 }
 
 /// The JSON body of `request` as `T` (`400` for a body that does not parse or fit).
@@ -312,7 +562,10 @@ struct AliasBody {
 pub(crate) fn status_of(err: &ServerError) -> u16 {
     match err {
         ServerError::InvalidName { .. } | ServerError::InvalidInput { .. } => 400,
-        ServerError::NotFound { .. } | ServerError::BackupNotFound { .. } => 404,
+        ServerError::NotFound { .. }
+        | ServerError::BackupNotFound { .. }
+        | ServerError::SourceNotFound { .. } => 404,
+        ServerError::UnsupportedSource { .. } => 415,
         ServerError::NameInUse { .. }
         | ServerError::Refused { .. }
         | ServerError::DatabaseFailed { .. }
