@@ -35,11 +35,9 @@ graphersal-server serve --dir .\srv
 ```
 
 Open `http://127.0.0.1:8484/` for the web UI. Other platforms build from source (Rust 1.88 or
-newer, with a checkout of the graphersal repository beside this one, until Graphersal 0.7.0 is
-on crates.io):
+newer; the Graphersal 0.7.0 crates come from crates.io):
 
 ```bash
-git clone https://github.com/graphersal/graphersal.git
 git clone https://github.com/graphersal/graphersal-server.git
 cd graphersal-server
 cargo build --release

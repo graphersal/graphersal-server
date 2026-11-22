@@ -17,10 +17,9 @@ name: Release
 # A tag must equal the workspace version (`version` in the root Cargo.toml), and the version's
 # release notes must exist (checked on dry runs too).
 #
-# Graphersal is cloned beside the checkout as in ci.yml (path dependencies until Graphersal 0.7.0
-# is on crates.io); `graphersal_ref` picks its branch or tag (default `main`), and the commit it
-# was built against is named in the run summary and the draft release text. No dependency cache:
-# a release binary is built from a clean tree.
+# Graphersal's crates come from crates.io at the exact versions of the committed Cargo.lock
+# (`--locked`); the Graphersal version is named in the run summary and the draft release text.
+# No dependency cache: a release binary is built from a clean tree.
 
 on:
   push:
@@ -29,11 +28,6 @@ on:
     inputs:
       ref:
         description: "Branch or tag of graphersal-server to build (a v<version> tag also drafts a release)"
-        type: string
-        required: true
-        default: main
-      graphersal_ref:
-        description: "Branch or tag of github.com/graphersal/graphersal to build against"
         type: string
         required: true
         default: main
@@ -59,7 +53,7 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
       tag: ${{ steps.version.outputs.tag }}
-      graphersal: ${{ steps.graphersal.outputs.commit }}
+      graphersal: ${{ steps.graphersal.outputs.version }}
     steps:
       - name: No line-ending conversion
         run: git config --global core.autocrlf false
@@ -91,16 +85,14 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "graphersal-server $version (ref $ref${tag:+, release tag $tag})" | tee -a "$GITHUB_STEP_SUMMARY"
-      - name: Clone graphersal beside the checkout (path dependencies)
+      - name: Graphersal version (Cargo.lock)
         id: graphersal
-        env:
-          GRAPHERSAL_REF: ${{ inputs.graphersal_ref || 'main' }}
         run: |
           set -euo pipefail
-          git clone --depth 1 --branch "$GRAPHERSAL_REF" https://github.com/graphersal/graphersal.git ../graphersal
-          commit="$(git -C ../graphersal rev-parse HEAD)"
-          echo "commit=$commit" >> "$GITHUB_OUTPUT"
-          echo "built against graphersal $GRAPHERSAL_REF at $commit" | tee -a "$GITHUB_STEP_SUMMARY"
+          version="$(awk '$0 == "name = \"graphersal\"" { getline; gsub(/^version = "|"$/, ""); print; exit }' Cargo.lock)"
+          test -n "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "built against graphersal $version (crates.io)" | tee -a "$GITHUB_STEP_SUMMARY"
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ env.TARGET }}
@@ -108,7 +100,7 @@ jobs:
         with:
           tool: cargo-about
       - name: Build
-        run: cargo build -p graphersal-server --profile dist --target "$TARGET"
+        run: cargo build --locked -p graphersal-server --profile dist --target "$TARGET"
       - name: Smoke test
         shell: pwsh
         run: ./scripts/smoke.ps1 -Bin "target/$env:TARGET/dist/graphersal-server.exe" -Version "${{ steps.version.outputs.version }}"
@@ -172,7 +164,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.build.outputs.tag }}
           VERSION: ${{ needs.build.outputs.version }}
-          GRAPHERSAL_COMMIT: ${{ needs.build.outputs.graphersal }}
+          GRAPHERSAL_VERSION: ${{ needs.build.outputs.graphersal }}
         run: |
           set -euo pipefail
           {
@@ -180,7 +172,7 @@ jobs:
             echo
             echo "---"
             echo
-            echo "Built against [graphersal](https://github.com/graphersal/graphersal) commit \`$GRAPHERSAL_COMMIT\`."
+            echo "Built against [graphersal](https://crates.io/crates/graphersal) $GRAPHERSAL_VERSION."
           } > "$RUNNER_TEMP/notes.md"
           gh release create "$TAG" --draft --verify-tag \
             --title "graphersal-server $VERSION" --notes-file "$RUNNER_TEMP/notes.md" \

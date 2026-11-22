@@ -26,13 +26,13 @@ an HTTP API, a console (`graphersal-server db ...`) and the server's own web UI 
 verify it (`certutil -hashfile <zip> SHA256`, or `Get-FileHash` in PowerShell). Unpack it and run
 `graphersal-server.exe` from a console; Ctrl+C (or Ctrl+Break) stops it cleanly.
 
-**Every other platform** (Linux, macOS, ...) builds from source, with Rust 1.88 or newer. Until
-Graphersal 0.7.0 is on crates.io the crate depends on Graphersal's crates by path: a checkout of
-the [`graphersal`](https://github.com/graphersal/graphersal) repository (branch `main`) must sit
-beside this one (`../graphersal`); it also provides the playground built into the binary.
+**Every other platform** (Linux, macOS, ...) builds from source, with Rust 1.88 or newer. The
+Graphersal crates come from crates.io (exact pins in the root `Cargo.toml`, versions in the
+committed `Cargo.lock`; `--locked` builds exactly those); the published `graphersal-serve` crate
+also carries the playground built into the binary.
 
 ```bash
-git clone https://github.com/graphersal/graphersal.git          # beside graphersal-server
+git clone https://github.com/graphersal/graphersal-server.git
 cd graphersal-server
 cargo build --release          # target/release/graphersal-server
 cargo build --profile dist     # the release binary's profile: fat LTO, stripped symbols
@@ -149,7 +149,9 @@ node --test crates/graphersal-server/ui/tests/*.test.mjs
 `profile.test.mjs` also checks the profile with the engine playground's own `validateProfile`,
 and that its `isEngineInfo` accepts the root info (the fixed fields in `ui/tests/root-info.json`,
 which a Rust test checks against the real answer) and refuses one without `protocol`, from `GRAPHERSAL_PLAYGROUND` (a playground
-directory), else `../graphersal/playground`.
+directory), else from the playground the binary embeds: the `ui/` directory of the
+`graphersal-serve` crate in Cargo's registry (found with `cargo metadata`; run `cargo fetch` or
+a build first, else these two tests are skipped).
 
 ## Server directory
 

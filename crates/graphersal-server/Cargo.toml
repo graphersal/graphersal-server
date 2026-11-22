@@ -9,7 +9,7 @@ edition.workspace = true
 rust-version.workspace = true
 description = "EXPERIMENTAL server for many Graphersal graph databases in one server directory"
 readme = "../../README.md"
-# Private until its first public version; it depends on graphersal by path.
+# Private until its first public version (binary releases on GitHub only).
 publish = false
 
 [[bin]]

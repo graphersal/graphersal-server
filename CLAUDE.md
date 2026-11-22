@@ -15,10 +15,12 @@ from published files). When this file disagrees with the code, the code wins: sa
   with features `ui-assets` (the embedded playground per mount and at `/`, where it shows the
   server's own `server` UI profile) and `mcp` (each
   context a host of the shared MCP endpoint); graphersal-mcp (the endpoint, directory mode).
-- Path dependencies on the graphersal repository's MAIN checkout beside this one:
-  `../graphersal/crates/graphersal`, `../graphersal/crates/graphersal-serve` and
-  `../graphersal/crates/graphersal-session` and `../graphersal/crates/graphersal-mcp`. Never edit that
-  repository from a task here. This repository keeps its own `target/` (never share
+- The four Graphersal crates (graphersal, graphersal-serve, graphersal-session, graphersal-mcp)
+  from crates.io, pinned exactly (`=0.7.0`: EXPERIMENTAL crates, exact pin during 0.x), all on
+  the same version; `Cargo.lock` is committed and CI builds `--locked`. The embedded playground
+  is the `ui/` of the published graphersal-serve crate. Moving to a new Graphersal version:
+  bump the four pins together, `cargo update -p graphersal ...`, commit the lock. Never edit the
+  graphersal repository from a task here. This repository keeps its own `target/` (never share
   graphersal's).
 - `src/lib.rs` modules: `config` (`server.toml`, `ServerConfig`, `parse_listen`, `[limits]
   upload_bytes` = `Limits`, default 4 GiB), `layout`
@@ -260,7 +262,8 @@ from published files). When this file disagrees with the code, the code wins: sa
   `ui/tests/profile.test.mjs`) and fetch `/api/admin/*` themselves with the host headers. A new
   file in `ui/` goes into `ui_assets::FILES`. Tests: `ui/tests/*.test.mjs` (node:http mocks of
   the admin API; the profile checked with the engine's `validateProfile` from
-  `GRAPHERSAL_PLAYGROUND` or `../graphersal/playground`).
+  `GRAPHERSAL_PLAYGROUND`, else the registry copy of graphersal-serve's `ui/` found through
+  `cargo metadata`; skipped when absent, failed on CI).
 - Docs (the contract for readers who did not follow the code; keep them in sync with it):
   `README.md` (what it is, run, console, HTTP, known limitations), `docs/server-dir.md` (every
   file and key of the server directory), `docs/admin-api.md` (every admin route, checked

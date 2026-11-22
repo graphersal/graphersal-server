@@ -2,25 +2,53 @@
 // the rule that every module imports only `vue` and the profile's own files (the playground's
 // files are not part of the profile's contract), and the engine's own check of the profile:
 // the playground's `validateProfile` (js/ui-profiles.js) and its check of the root info
-// (`isEngineInfo`, js/engine/http-engine.js) from GRAPHERSAL_PLAYGROUND, else from the
-// graphersal checkout beside this repository (`../graphersal/playground`, the path
-// dependency's), skipped when neither exists.
+// (`isEngineInfo`, js/engine/http-engine.js) from GRAPHERSAL_PLAYGROUND (a playground
+// directory), else from the playground the binary embeds: the `ui/` directory of the
+// graphersal-serve crate Cargo resolved (its `manifest_path` in `cargo metadata`, the registry
+// copy). Skipped when neither is found; on CI (`CI` set) a missing playground fails instead.
 // Run: node --test crates/graphersal-server/ui/tests/*.test.mjs
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
 
 const UI = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const profile = JSON.parse(readFileSync(join(UI, 'profile.json'), 'utf8'));
-const PLAYGROUND = process.env.GRAPHERSAL_PLAYGROUND || resolve(UI, '..', '..', '..', '..', 'graphersal', 'playground');
+
+/**
+ * The playground directory: GRAPHERSAL_PLAYGROUND, else `ui/` beside graphersal-serve's
+ * manifest as `cargo metadata` (offline, the lock file's versions) resolves it; null when
+ * cargo is missing or the crate is not downloaded yet (`cargo fetch` / `cargo build` first).
+ */
+function findPlayground() {
+  if (process.env.GRAPHERSAL_PLAYGROUND) return process.env.GRAPHERSAL_PLAYGROUND;
+  try {
+    const out = execFileSync(
+      'cargo',
+      ['metadata', '--format-version', '1', '--offline', '--locked',
+        '--manifest-path', join(UI, '..', 'Cargo.toml')],
+      { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'] },
+    );
+    const serve = JSON.parse(out).packages.find((p) => p.name === 'graphersal-serve');
+    return serve ? join(dirname(serve.manifest_path), 'ui') : null;
+  } catch {
+    return null;
+  }
+}
+
+const PLAYGROUND = findPlayground();
 
 /** The playground module `rel` (below PLAYGROUND), or null (the test skipped) when absent. */
 async function playgroundModule(t, rel) {
-  const file = join(PLAYGROUND, ...rel.split('/'));
-  if (!existsSync(file)) {
-    t.skip(`no playground at ${PLAYGROUND} (set GRAPHERSAL_PLAYGROUND)`);
+  const file = PLAYGROUND && join(PLAYGROUND, ...rel.split('/'));
+  if (!file || !existsSync(file)) {
+    const why = PLAYGROUND
+      ? `no playground at ${PLAYGROUND}`
+      : 'no graphersal-serve crate found by cargo metadata (run cargo fetch)';
+    if (process.env.CI) assert.fail(`${why} (set GRAPHERSAL_PLAYGROUND)`);
+    t.skip(`${why} (set GRAPHERSAL_PLAYGROUND)`);
     return null;
   }
   return import(pathToFileURL(file).href);
