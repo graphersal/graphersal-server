@@ -962,3 +962,91 @@ fn a_model_upload_refuses_malicious_archives_and_other_files() {
         Some("application/json")
     ));
 }
+
+#[test]
+fn a_gzip_compressed_model_archive_is_added_and_bombs_and_broken_files_are_refused() {
+    use crate::model_archive::tests::{archive, entry, gzip, model_tar};
+    let temp = TempDir::new("models-upload-gz");
+    let dir = server(&temp);
+    // A small upload limit: the decompressed bytes are held to it as well.
+    let config_file = dir.root().join(crate::layout::CONFIG_FILE);
+    let config = fs::read_to_string(&config_file).unwrap();
+    assert!(config.contains("upload_bytes = 4294967296"), "{config}");
+    fs::write(
+        &config_file,
+        config.replace("upload_bytes = 4294967296", "upload_bytes = 1048576"),
+    )
+    .unwrap();
+    let admin = offline(&dir);
+    let (_, without) = snapshots(&temp, &admin);
+    admin
+        .import(&ImportSource::new(&without), "waits", None, None)
+        .unwrap();
+
+    // A .tar.gz upload: detected from the content, and named by format=tar as well.
+    let tgz = gzip(&model_tar(1, Some("tiny")));
+    for query in [
+        "models?repo=acme%2Ftiny&license=mit",
+        "models?repo=acme%2Ftiny&format=tar",
+    ] {
+        let (status, answer) = upload(&admin, query, tgz.clone());
+        assert_eq!(status, 201, "{query}: {answer}");
+        assert_eq!(answer["added"][0]["repo"], "acme/tiny", "{answer}");
+        assert!(
+            tmp_is_empty(&dir),
+            "the upload, the .tar and the unpack are removed"
+        );
+    }
+    assert_eq!(
+        admin.registry().get("waits").unwrap().state,
+        DbState::Unloaded
+    );
+    let (status, answer) = upload(&admin, "models?format=gsnap", tgz.clone());
+    assert_eq!(status, 400, "{answer}");
+    assert!(
+        answer["error"]
+            .as_str()
+            .unwrap()
+            .contains("gzip-compressed tar archive"),
+        "{answer}"
+    );
+
+    // A decompression bomb: 8 MiB of zeros in a tar (a few KiB as gzip), over the 1 MiB limit.
+    let bomb = gzip(&archive(&[entry("weights.bin", b'0', &vec![0u8; 8 << 20])]));
+    assert!(bomb.len() < 64 * 1024);
+    let (status, answer) = upload(&admin, "models?repo=acme%2Fbomb", bomb);
+    assert_eq!(status, 400, "{answer}");
+    let error = answer["error"].as_str().unwrap();
+    assert!(
+        error.contains("not a usable model archive") && error.contains("more than 1048576"),
+        "{answer}"
+    );
+    assert!(tmp_is_empty(&dir));
+
+    // A corrupt gzip file (the magic intact), and a gzip that holds no tar.
+    let mut corrupt = tgz.clone();
+    for byte in &mut corrupt[20..80] {
+        *byte ^= 0x5a;
+    }
+    for (bytes, needle) in [
+        (corrupt, "not a readable gzip file"),
+        (gzip(b"not a tar"), "does not hold a tar archive"),
+    ] {
+        let (status, answer) = upload(&admin, "models?repo=acme%2Fbroken", bytes);
+        assert_eq!(status, 400, "{answer}");
+        assert!(
+            answer["error"].as_str().unwrap().contains(needle),
+            "{answer}"
+        );
+        assert!(tmp_is_empty(&dir));
+    }
+
+    // The console's path form takes a .tar.gz too.
+    let file = temp.path().join("tiny.tar.gz");
+    fs::write(&file, &tgz).unwrap();
+    let added = admin
+        .model_add(&ModelAddSpec::path(&file).with_repo(Some("acme/tiny".into())))
+        .expect("from a .tar.gz path");
+    assert_eq!(added.added[0].repo.as_deref(), Some("acme/tiny"));
+    assert!(tmp_is_empty(&dir));
+}

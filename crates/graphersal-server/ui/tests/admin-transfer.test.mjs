@@ -482,9 +482,10 @@ test('model upload: the request from the form, progress, the waiting database re
     assert.equal(modelFileFormat('potion.TAR'), 'tar');
     assert.equal(modelFileFormat('emb.gsnap'), 'gsnap');
     assert.equal(modelFileFormat('model'), '');
-    for (const name of ['m.tar.gz', 'm.tgz', 'm.zip', 'm.tar.zst']) assert.equal(modelFileFormat(name), null, name);
+    for (const name of ['m.tar.gz', 'm.tgz']) assert.equal(modelFileFormat(name), 'tar', name);
+    for (const name of ['m.zip', 'm.tar.zst']) assert.equal(modelFileFormat(name), null, name);
     assert.deepEqual(modelUploadRequest({ file: { name: 'm.zip', size: 10 } }, null).problems,
-      ['Upload a .gsnap or an uncompressed .tar of the model directory (a compressed archive is not taken).']);
+      ['Upload a .gsnap, or a .tar or .tar.gz of the model directory (other archives are not taken).']);
     assert.deepEqual(modelUploadRequest({}, null).problems, ['Choose a file.']);
     assert.deepEqual(modelUploadRequest({ file: { name: 'big.tar', size: 100 * 1024 } }, 64 * 1024).problems,
       ['The file has 100 KB; the server takes uploads up to 64 KB ([limits] upload_bytes in server.toml). Add it from a path on the server instead.']);
@@ -556,4 +557,16 @@ test('listing fields: sizeBytes, pooled/pooledBy, linkWarning; transfer actions 
   assert.deepEqual(enabled(transferActions({ name: 'a', state: 'failed', kind: '' })), ['backups']);
   assert.deepEqual(enabled(transferActions({ name: 'a', state: 'loaded', kind: 'plain', aliasOf: 'b' })), []);
   assert.deepEqual(enabled(transferActions({ name: 'a', state: 'loaded', kind: 'plain' }, { busy: true })), []);
+});
+
+test('model upload: a gzip-compressed tar is taken and sent as a tar', () => {
+  for (const name of ['potion.tar.gz', 'POTION.TGZ']) {
+    const built = modelUploadRequest({ file: { name, size: 10 }, repo: 'o/n' }, 64 * 1024);
+    assert.equal(built.problems, undefined, name);
+    assert.deepEqual(built.upload, { path: 'api/admin/models?repo=o%2Fn&format=tar', size: 10 }, name);
+  }
+  for (const name of ['m.tar.xz', 'm.tar.bz2', 'm.7z']) {
+    assert.deepEqual(modelUploadRequest({ file: { name, size: 10 } }, null).problems,
+      ['Upload a .gsnap, or a .tar or .tar.gz of the model directory (other archives are not taken).'], name);
+  }
 });

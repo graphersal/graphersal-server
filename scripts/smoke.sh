@@ -3,7 +3,7 @@
 #
 # Builds the binary, makes a server directory in a temporary directory, serves it on
 # 127.0.0.1:0 (the URL read from server.run) and walks through the admin API, the database
-# pages (with a promotion to a base and a layer over it), a model upload (.tar), the MCP endpoint
+# pages (with a promotion to a base and a layer over it), a model upload (.tar, .tar.gz), the MCP endpoint
 # and a clean stop.
 # Prints one `ok <step>` line per step, or `FAIL <step>: <why>` and exits 1 at the first
 # failure. The server is killed on any exit.
@@ -405,7 +405,7 @@ expect_status 200
 [ "$(jget missing)" = "[]" ] || fail "missing: $(jget missing)"
 ok
 
-STEP="model upload (.tar of a model directory)"
+STEP="model upload (.tar and .tar.gz of a model directory)"
 # A tiny synthetic Model2Vec model (4 tokens x 3 dimensions), as the unit tests' test_models.rs.
 mkdir -p "$WORK/tiny-model"
 python3 -I - "$WORK/tiny-model" <<'PY' || fail "cannot write the tiny model"
@@ -432,6 +432,12 @@ expect_status 201
 expect_json added.0.repo smoke/tiny
 req GET /api/admin/models
 expect_json models.0.repo smoke/tiny
+# The same model as a gzip-compressed tar (format detected): the same blob, added again.
+gzip -c "$WORK/tiny-model.tar" > "$WORK/tiny-model.tar.gz" || fail "cannot gzip the archive"
+req POST "/api/admin/models?repo=smoke%2Ftiny&license=mit" \
+  -H 'Content-Type: application/octet-stream' --data-binary "@$WORK/tiny-model.tar.gz"
+expect_status 201
+expect_json added.0.repo smoke/tiny
 ok
 
 # --- MCP ----------------------------------------------------------------------------------

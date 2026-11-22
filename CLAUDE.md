@@ -180,7 +180,10 @@ from published files). When this file disagrees with the code, the code wins: sa
   bind and before `ready()` (`/readyz` 503 meanwhile); `Running::registry()`.
 - `model_archive` (private, V18): `is_tar` (ustar magic + checksum) and `unpack(archive, dir)`,
   the safe unpack of a model directory's tar (rules in its module docs; tests beside it, their
-  `entry`/`archive`/`model_tar` builders reused by `models_tests.rs`).
+  `entry`/`archive`/`model_tar`/`gzip` builders reused by `models_tests.rs`); `is_gzip` (magic
+  `1f 8b 08`) and `gunzip(archive, out, max_bytes)` (V24: flate2 `MultiGzDecoder` into a `.tar`
+  file, refused past `max_bytes` = `[limits] upload_bytes`: the decompression-bomb guard; the
+  result must be a tar). Format by content, never by file name; no zstd.
 - `models` (`ModelsDir` over `models/`, U9): one physical copy of every model blob in
   `models/blobs/<2 hex>/<sha256>` (the Store blob layout), HARD-LINKED into each database's
   `store/blobs/`; no engine change. `adopt(store_dir)` = the dedupe pass (same name + length in
@@ -199,7 +202,7 @@ from published files). When this file disagrees with the code, the code wins: sa
   -> its blob unpacked into `tmp/` + `Store::import_model_dir`; then adopt. `copied_blobs` feeds
   the listing's `linkWarning`. Admin side in `ops_models.rs` (`models_index`, `model_add`
   (`ModelAddSpec`: a model dir via a scratch Store + `import_model_dir`, a ustar `.tar` of one
-  unpacked first by `model_archive::unpack` into a second scratch in `tmp/` (V18; refuses
+  (a `.tar.gz` gunzipped into a third scratch first) unpacked first by `model_archive::unpack` into a second scratch in `tmp/` (V18; refuses
   absolute paths, `..`, `\`/`:`, links, devices, GNU long names, > 1000 entries, depth > 16,
   duplicates; skips pax headers and `._*`; the model dir = the root or its only top dir), a
   `.gsnap` via `create_from_packed_dir`, harvested by adoption; or a repo `models/` holds; then

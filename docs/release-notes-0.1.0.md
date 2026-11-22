@@ -22,7 +22,8 @@ databases from ONE process and ONE server directory, over HTTP:
   admin API or works on the directory itself) and the server's web UI at `/`.
 - **Operations:** health and readiness probes (`/healthz`, `/readyz`), one server per directory
   (`server.lock`), the bound address in `server.run`, a clean stop on Ctrl+C / SIGTERM (Ctrl+C
-  or Ctrl+Break on Windows).
+  or Ctrl+Break on Windows); HTTP/1.1 and h2c on one port, a cap on open connections (`503`
+  with `Retry-After` over it) and header and idle timeouts (`[limits]` in `server.toml`).
 
 ## Getting started
 
@@ -56,12 +57,12 @@ holds the admin API (`admin-api.md`), MCP (`mcp.md`) and the server directory
   to listen elsewhere: keep it on the loopback. The `Host` and `Origin` checks guard against DNS
   rebinding and cross-site pages; they are not authentication. The MCP token guards only the MCP
   endpoints.
-- **HTTP/1.1 only**, plain HTTP: no TLS, no HTTP/2.
+- **Plain HTTP** (HTTP/1.1 and h2c with prior knowledge): no TLS, no negotiated HTTP/2.
 - **Prebuilt binary for Windows x86_64 only**; Linux, macOS and the rest build from source.
 - A **base is frozen forever**; promotion to a base is one way.
 - No admin tools over MCP; MCP sessions live in memory (a restart forgets them).
 - No memory figures per database in the listings (only the size on disk).
-- Model archives are uncompressed ustar `.tar` files only.
+- Model archives are ustar `.tar` files, uncompressed or gzip-compressed (no zstd, no `.zip`).
 - The README's "Known limitations" lists the rest.
 
 ## Licence

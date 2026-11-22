@@ -21,7 +21,7 @@
 //! | POST | `import` | JSON `{"path", "name", "base"?, "format"?, "description"?, "role"?}` (a file or directory on the server's machine, absolute) | `201` entry + `"import"` |
 //! | GET | `models` | | `200 {"models": [model...], "missing": [{"database", "model"}...]}` (rebuilds `models/models.toml`) |
 //! | POST | `models` | `{"path"?, "repo"?, "license"?}` (`path`: a Model2Vec directory or a `.gsnap`, absolute, on the server's machine; `repo` alone: a model `models/` holds) | `201` (from a path) / `200` `{"added": [model...], "resolved": [database...], "stillMissing": [{"database", "model"}...], "notes": [text...]}` |
-//! | POST | `models?repo=<r>&license=<l>&format=<gsnap\|tar>` | the file itself (any content type but JSON): a `.gsnap` carrying model blobs or a tar archive of a Model2Vec model directory (format detected unless given) | `201` as above |
+//! | POST | `models?repo=<r>&license=<l>&format=<gsnap\|tar>` | the file itself (any content type but JSON): a `.gsnap` carrying model blobs or a tar archive (or `.tar.gz`) of a Model2Vec model directory (format detected unless given) | `201` as above |
 //! | DELETE | `models/<repo or blob hash>` | | `200 {"model", "removed": [blob...], "bytes"}`; `409` while a database uses it |
 //! | GET | `aliases` | | `200 {"aliases": {alias: database}}` |
 //! | PUT | `aliases/<alias>` | `{"target"}` | `200 {"alias", "target"}` |
@@ -45,8 +45,8 @@
 //! An import upload's body is streamed into `tmp/upload-*.bin` (never held in memory; at most
 //! `server.toml`'s `[limits] upload_bytes`, default 4 GiB, else `413`), imported, and removed.
 //! A model upload (`POST models?...` with the file as the body) is streamed into `tmp/` the
-//! same way (same limit), then added like a path: a tar archive (ustar, uncompressed) is
-//! unpacked into `tmp/` first, refusing absolute paths, `..`, links, devices and more than
+//! same way (same limit), then added like a path: a tar archive (ustar, uncompressed or
+//! gzip-compressed: decompressed first, at most the upload limit) is unpacked into `tmp/` first, refusing absolute paths, `..`, links, devices and more than
 //! 1000 entries (`400`: `not a usable model archive: ...`); a file that is neither a `.gsnap`
 //! nor a tar archive, or not of the `format` given, is `400`.
 //!
@@ -1193,7 +1193,9 @@ fn model_upload(admin: &Admin, request: &mut Request<'_>) -> Result<Response, Ht
     let format = match non_empty(params.remove("format")).as_deref() {
         None => None,
         Some(hint) => Some(ModelFileFormat::parse(hint).ok_or_else(|| {
-            HttpError::bad_request(format!("models: unknown format {hint:?} (gsnap, tar)"))
+            HttpError::bad_request(format!(
+                "models: unknown format {hint:?} (gsnap, tar: also a .tar.gz)"
+            ))
         })?),
     };
     let (upload, received) = receive_upload(admin, request, "models")?;
@@ -1205,11 +1207,11 @@ fn model_upload(admin: &Admin, request: &mut Request<'_>) -> Result<Response, Ht
     match (format, found) {
         (_, None) => {
             return Err(HttpError::bad_request(
-                "models: the file is neither a packed snapshot (.gsnap) nor a tar archive of a \
-                 Model2Vec model directory",
+                "models: the file is neither a packed snapshot (.gsnap) nor a tar archive \
+                 (.tar, .tar.gz) of a Model2Vec model directory",
             ));
         }
-        (Some(hint), Some(found)) if hint != found => {
+        (Some(hint), Some(found)) if !hint.names(found) => {
             return Err(HttpError::bad_request(format!(
                 "models: the file is a {}, not a {}",
                 found.describe(),
@@ -1232,6 +1234,9 @@ fn model_upload(admin: &Admin, request: &mut Request<'_>) -> Result<Response, Ht
 enum ModelFileFormat {
     Snapshot,
     Tar,
+    /// A gzip-compressed tar archive (the hint `tar` names it too: compression is told by the
+    /// content).
+    TarGz,
 }
 
 impl ModelFileFormat {
@@ -1244,10 +1249,18 @@ impl ModelFileFormat {
         }
     }
 
+    /// Whether the hint `self` names a file of the format `found`.
+    fn names(self, found: Self) -> bool {
+        self == found || (self == Self::Tar && found == Self::TarGz)
+    }
+
     /// The format of the file at `path`, read from its content.
     fn of(path: &Path) -> Option<Self> {
         if crate::model_archive::is_tar(path) {
             return Some(Self::Tar);
+        }
+        if crate::model_archive::is_gzip(path) {
+            return Some(Self::TarGz);
         }
         let file = File::open(path).ok()?;
         graphersal::persist::read_snapshot_info(std::io::BufReader::new(file))
@@ -1259,6 +1272,7 @@ impl ModelFileFormat {
         match self {
             Self::Snapshot => "packed snapshot (gsnap)",
             Self::Tar => "tar archive (tar)",
+            Self::TarGz => "gzip-compressed tar archive (tar.gz)",
         }
     }
 }

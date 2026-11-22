@@ -129,7 +129,7 @@ Usage:
       links). Through a running server like db.
         models list              every model, its size and the databases using it
         models add SOURCE [--repo REPO] [--license SPDX]
-            SOURCE: a Model2Vec model directory, a tar archive of one (.tar, uncompressed)
+            SOURCE: a Model2Vec model directory, a tar archive of one (.tar, or .tar.gz)
             or a .gsnap carrying models (--repo and --license for a directory that does not
             name them), or the repository of a model the shared models hold. Every needs-model database whose model is then there
             gets it and can be loaded.

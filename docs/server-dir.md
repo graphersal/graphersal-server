@@ -174,7 +174,7 @@ size read from the model's own manifest inside the blob; the databases holding i
 listing and model change and never read back: edits are lost.
 
 `graphersal-server models list|add|remove` and `/api/admin/models` manage it
-(`docs/admin-api.md`): a model is added from a Model2Vec model directory, an uncompressed `.tar`
+(`docs/admin-api.md`): a model is added from a Model2Vec model directory, a `.tar` or `.tar.gz`
 of one (unpacked safely into `tmp/` first) or a `.gsnap` carrying models, on the server's machine
 or uploaded through the web UI's Models tab (the upload goes through `tmp/` too).
 

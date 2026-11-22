@@ -638,14 +638,15 @@ export function addModelBody(form) {
 export const MODEL_UPLOAD_FORMATS = Object.freeze(['', 'gsnap', 'tar']);
 
 /**
- * The model upload format a file name suggests: `gsnap`, `tar`, '' (another name: the server
- * detects it), or null for a compressed archive the server does not take (`.tar.gz`, `.tgz`,
- * `.zip`, ...).
+ * The model upload format a file name suggests: `gsnap`, `tar` (also a gzip-compressed
+ * `.tar.gz`/`.tgz`: the server tells the compression by the content), '' (another name: the
+ * server detects it), or null for an archive the server does not take (`.zip`, `.tar.zst`,
+ * `.tar.xz`, ...).
  */
 export function modelFileFormat(fileName) {
   const name = String(fileName || '').toLowerCase();
   if (name.endsWith('.gsnap')) return 'gsnap';
-  if (name.endsWith('.tar')) return 'tar';
+  if (name.endsWith('.tar') || name.endsWith('.tar.gz') || name.endsWith('.tgz')) return 'tar';
   if (/\.(tar\.[a-z0-9]+|tgz|tbz2?|txz|zip|7z|rar|gz|bz2|xz|zst)$/.test(name)) return null;
   return '';
 }
@@ -654,7 +655,7 @@ export function modelFileFormat(fileName) {
  * The model upload from the add-model form, or the problems: `{upload: {path, size}}` (the
  * file as the body of `POST api/admin/models?<query>`, for `uploadImport` with `kind: 'model'`)
  * or `{problems: [text]}`. Form: `{file ({name, size}), repo, license}`: a `.gsnap` carrying
- * model blobs, or an uncompressed `.tar` of a Model2Vec model directory (`repo`/`license` name
+ * model blobs, or a `.tar`/`.tar.gz` of a Model2Vec model directory (`repo`/`license` name
  * its model when the directory does not); `limit` = `uploadLimit(info)`. `format` is sent when
  * the file name says it; only set parameters are sent.
  */
@@ -665,7 +666,7 @@ export function modelUploadRequest(form, limit = null) {
   const sp = uploadSizeProblem(size, limit, 'model');
   if (sp) problems.push(sp);
   const format = f.file ? modelFileFormat(f.file.name) : '';
-  if (format === null) problems.push('Upload a .gsnap or an uncompressed .tar of the model directory (a compressed archive is not taken).');
+  if (format === null) problems.push('Upload a .gsnap, or a .tar or .tar.gz of the model directory (other archives are not taken).');
   if (problems.length) return { problems };
   const fields = {};
   const repo = typeof f.repo === 'string' ? f.repo.trim() : '';

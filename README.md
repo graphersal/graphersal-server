@@ -107,7 +107,7 @@ databases and missing models. Paths and commands are never wrapped.
 | `db restore NAME BACKUP [--name NEW]` | over NAME (unloaded) or into the new database NEW |
 | `db export NAME --out FILE [--no-models] [--materialize]` | a packed snapshot (`.gsnap`) |
 | `import DIR SOURCE --name NAME [--base BASE] [--format F] [--description TEXT] [--role normal\|base]` | a new database from a `.gsnap`, a Store (directory or `.gstore`), GraphSON or GraphML; an embedding model it names without carrying comes from `models/` (else the database is `needs-model` until `models add`); a model blob a Store lacks is filled from `models/` (else the import is refused: add the model, import again); `--role base` makes a base of a plain source |
-| `models list`, `models add SOURCE [--repo R] [--license L]`, `models remove REPO` | the shared embedding models; SOURCE: a Model2Vec model directory, an uncompressed `.tar` of one, a `.gsnap` carrying models, or a repository `models/` holds |
+| `models list`, `models add SOURCE [--repo R] [--license L]`, `models remove REPO` | the shared embedding models; SOURCE: a Model2Vec model directory, a `.tar` or `.tar.gz` of one, a `.gsnap` carrying models, or a repository `models/` holds |
 
 `graphersal-server --help` has the details. Exit codes: `0` ok, `1` failed (`Error: ...` and a
 `Help: ...` line on stderr; where the admin API's help names a route, the console names the
@@ -214,8 +214,8 @@ every file and key: [`docs/server-dir.md`](docs/server-dir.md).
   (`409`), not imported as `needs-model` like a snapshot: a Store copy is verified and cannot
   leave a referenced blob out. Add the model to `models/`, then import again (the blob is
   filled in and hard-linked).
-- A model archive is an **uncompressed ustar `.tar`** (`tar -cf model.tar -C <model dir> .`);
-  compressed archives and `.zip` are not taken.
+- A model archive is a **ustar `.tar`**, uncompressed or gzip-compressed (`tar -cf model.tar
+  -C <model dir> .`, `tar -czf model.tar.gz ...`); zstd, bzip2, xz and `.zip` are not taken.
 - A **layer `.gsnap` export carries no models** (an engine rule); export the layer with
   `materialize=true` (`--materialize`) for a standalone snapshot with the models.
 - **No memory figures** in the database listing (only `sizeBytes` on disk): a loaded database's
