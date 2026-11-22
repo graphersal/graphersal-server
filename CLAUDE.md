@@ -23,11 +23,18 @@ from published files). When this file disagrees with the code, the code wins: sa
   graphersal repository from a task here. This repository keeps its own `target/` (never share
   graphersal's).
 - `src/lib.rs` modules: `config` (`server.toml`, `ServerConfig`, `parse_listen`, `[limits]
-  upload_bytes` = `Limits`, default 4 GiB), `layout`
+  upload_bytes` (default 4 GiB), `max_connections`, `header_timeout_secs`, `idle_timeout_secs`
+  = `Limits`), `layout`
   (`ServerDir`, `init`, file names, `write_atomic`), `lock` (`ServerLock`, fd-lock on
   `server.lock`), `run_file` (`RunInfo`, `server.run`), `serve` (`start` -> `Running`, the
-  HTTP/1.1 listener: hyper 1.x `http1` server connections on a tokio multi-thread runtime owned
-  by `Running` (coordinator decision C7: no axum, the router is ours; graphersal-serve stays
+  listener: hyper 1.x `http1` server connections, and `http2` ones for h2c with prior
+  knowledge (`sniff` peeks the preface; the HTTP/1 path is unchanged otherwise), on a tokio
+  multi-thread runtime owned by `Running`; connection cap `[limits] max_connections`
+  (`ConnectionLimits`, a semaphore; over it `refuse_connection` answers 503 + `Retry-After: 1`
+  in the connection's protocol, at most `OVERFLOW_CONNECTIONS` at once, more are closed),
+  `header_timeout_secs` (hyper's HTTP/1 header read timeout + the sniff), `idle_timeout_secs`
+  (`Idle`: per-connection `Activity`, graceful shutdown when no request runs), `serve`
+  flags `--max-connections`/`--header-timeout`/`--idle-timeout` (coordinator decision C7: no axum, the router is ours; graphersal-serve stays
   HTTP-library-free); every request answered on the blocking pool (`spawn_blocking`: router,
   session jobs, file I/O never on an async worker); the body is `BodyReader` (an `io::Read`
   pulling hyper's body one frame per read via `Handle::block_on`, idle timeout 120 s), a download

@@ -241,6 +241,34 @@ fn init_creates_a_server_directory_and_refuses_a_foreign_one() {
 }
 
 #[test]
+fn serve_refuses_connection_limits_that_are_not_whole_numbers_of_at_least_1() {
+    let temp = TempDir::new("serve-limit-flags");
+    let dir = ServerDir::init(temp.path().join("srv")).unwrap().dir;
+    let root = dir.root().to_str().unwrap();
+    for (flag, value) in [
+        ("--max-connections", "0"),
+        ("--header-timeout", "x"),
+        ("--idle-timeout", "-1"),
+    ] {
+        let out = Command::new(BIN)
+            .args([
+                "serve",
+                "--dir",
+                root,
+                "--listen",
+                "127.0.0.1:0",
+                flag,
+                value,
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(2), "{flag} {value}");
+        let err = text(&out.stderr);
+        assert!(err.contains(flag) && err.contains("at least 1"), "{err}");
+    }
+}
+
+#[test]
 fn serve_answers_refuses_a_second_server_and_stops_cleanly() {
     let temp = TempDir::new("serve");
     let dir = ServerDir::init(temp.path()).unwrap().dir;

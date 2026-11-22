@@ -101,6 +101,19 @@ fn sections(running: &Running, config: Option<&ServerConfig>) -> Vec<Section> {
             ),
         );
     }
+    let limits = running.connection_limits();
+    server.row(
+        "connections",
+        format!("up to {} open (HTTP/1.1, h2c)", limits.max_connections),
+    );
+    server.row(
+        "timeouts",
+        format!(
+            "request head {} s, idle connection {} s",
+            limits.header_timeout.as_secs(),
+            limits.idle_timeout.as_secs()
+        ),
+    );
     server.row("stop", "Ctrl+C or SIGTERM");
 
     let registry = running.registry();

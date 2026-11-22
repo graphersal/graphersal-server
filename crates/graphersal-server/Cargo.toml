@@ -39,3 +39,7 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 ctrlc = { workspace = true }
+
+[dev-dependencies]
+# The h2c test's client (hyper's HTTP/2 client connection; no new crate).
+hyper = { workspace = true, features = ["client"] }

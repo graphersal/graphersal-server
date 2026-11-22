@@ -14,6 +14,9 @@
 //!
 //! [limits]
 //! upload_bytes = 4294967296   # the largest import upload (POST /api/admin/import), 4 GiB
+//! max_connections = 256       # open connections served at once (more: 503 + Retry-After)
+//! header_timeout_secs = 30    # a request's head must arrive within this (slow clients)
+//! idle_timeout_secs = 60      # a connection without a running request is closed after this
 //! ```
 //!
 //! Every key is optional (its default applies); an unknown key is an error (a typo must not be
@@ -54,6 +57,15 @@ pub struct ServerConfig {
 /// The default largest import upload: 4 GiB.
 pub const DEFAULT_UPLOAD_BYTES: u64 = 4 << 30;
 
+/// The default largest number of open connections served at once.
+pub const DEFAULT_MAX_CONNECTIONS: usize = 256;
+
+/// The default time a request's head may take to arrive, in seconds.
+pub const DEFAULT_HEADER_TIMEOUT_SECS: u64 = 30;
+
+/// The default time a connection without a running request stays open, in seconds.
+pub const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 60;
+
 /// The request limits of `server.toml` (`[limits]`).
 ///
 /// `#[non_exhaustive]`: further limits will be added.
@@ -66,18 +78,52 @@ pub struct Limits {
     /// streamed into `tmp/`, never held in memory; a larger one is refused with `413`.
     #[serde(default = "default_upload_bytes")]
     pub upload_bytes: u64,
+    /// The largest number of open connections the server serves at once (default
+    /// [`DEFAULT_MAX_CONNECTIONS`]); at least 1. A connection over it is answered `503` with
+    /// `Retry-After` and closed. Read at start; `serve --max-connections N` overrides it.
+    #[serde(default = "default_max_connections")]
+    pub max_connections: usize,
+    /// How long a request's head (request line and headers) may take to arrive, in seconds,
+    /// counted from the moment the server waits for it (a new connection, or the end of the
+    /// previous answer on a kept-alive HTTP/1.1 connection); default
+    /// [`DEFAULT_HEADER_TIMEOUT_SECS`], at least 1. A slower client is disconnected. A body is
+    /// never cut by it (a body read waits at most 120 s for each next piece instead). Read at
+    /// start; `serve --header-timeout SECS` overrides it.
+    #[serde(default = "default_header_timeout_secs")]
+    pub header_timeout_secs: u64,
+    /// How long a connection without a running request stays open, in seconds (default
+    /// [`DEFAULT_IDLE_TIMEOUT_SECS`]); at least 1. HTTP/1.1 waits for the next request's head
+    /// at most the shorter of this and `header_timeout_secs`. Read at start;
+    /// `serve --idle-timeout SECS` overrides it.
+    #[serde(default = "default_idle_timeout_secs")]
+    pub idle_timeout_secs: u64,
 }
 
 impl Default for Limits {
     fn default() -> Self {
         Self {
             upload_bytes: DEFAULT_UPLOAD_BYTES,
+            max_connections: DEFAULT_MAX_CONNECTIONS,
+            header_timeout_secs: DEFAULT_HEADER_TIMEOUT_SECS,
+            idle_timeout_secs: DEFAULT_IDLE_TIMEOUT_SECS,
         }
     }
 }
 
 fn default_upload_bytes() -> u64 {
     DEFAULT_UPLOAD_BYTES
+}
+
+fn default_max_connections() -> usize {
+    DEFAULT_MAX_CONNECTIONS
+}
+
+fn default_header_timeout_secs() -> u64 {
+    DEFAULT_HEADER_TIMEOUT_SECS
+}
+
+fn default_idle_timeout_secs() -> u64 {
+    DEFAULT_IDLE_TIMEOUT_SECS
 }
 
 /// The default number of MCP sessions the server remembers ([`McpConfig::max_sessions`]).
@@ -211,6 +257,29 @@ impl ServerConfig {
                 "limits.upload_bytes: must be at least 1 (default {DEFAULT_UPLOAD_BYTES})"
             )));
         }
+        for (key, value, default) in [
+            (
+                "max_connections",
+                config.limits.max_connections as u64,
+                DEFAULT_MAX_CONNECTIONS as u64,
+            ),
+            (
+                "header_timeout_secs",
+                config.limits.header_timeout_secs,
+                DEFAULT_HEADER_TIMEOUT_SECS,
+            ),
+            (
+                "idle_timeout_secs",
+                config.limits.idle_timeout_secs,
+                DEFAULT_IDLE_TIMEOUT_SECS,
+            ),
+        ] {
+            if value == 0 {
+                return Err(invalid(format!(
+                    "limits.{key}: must be at least 1 (default {default})"
+                )));
+            }
+        }
         Ok(config)
     }
 
@@ -281,8 +350,20 @@ pub fn default_config_text() -> String {
          [limits]\n\
          # The largest import upload (POST /api/admin/import, the file as the body) in bytes;\n\
          # it is streamed into tmp/, never held in memory.\n\
-         upload_bytes = {}\n",
-        DEFAULT_MCP_SESSIONS, defaults.chunk_bytes, defaults.damage_policy, DEFAULT_UPLOAD_BYTES
+         upload_bytes = {}\n\
+         # Open connections served at once; one more is answered 503 with Retry-After.\n\
+         max_connections = {}\n\
+         # Seconds a request's head (request line and headers) may take to arrive.\n\
+         header_timeout_secs = {}\n\
+         # Seconds a connection without a running request stays open.\n\
+         idle_timeout_secs = {}\n",
+        DEFAULT_MCP_SESSIONS,
+        defaults.chunk_bytes,
+        defaults.damage_policy,
+        DEFAULT_UPLOAD_BYTES,
+        DEFAULT_MAX_CONNECTIONS,
+        DEFAULT_HEADER_TIMEOUT_SECS,
+        DEFAULT_IDLE_TIMEOUT_SECS
     )
 }
 
@@ -321,6 +402,36 @@ mod tests {
         let err = parse("[limits]\nupload_bytes = 0").unwrap_err().to_string();
         assert!(err.contains("upload_bytes"), "{err}");
         assert!(parse("[limits]\nupload = 1").is_err());
+    }
+
+    #[test]
+    fn the_connection_limits_default_and_are_at_least_1() {
+        let limits = parse(&default_config_text()).unwrap().limits;
+        assert_eq!(limits.max_connections, DEFAULT_MAX_CONNECTIONS);
+        assert_eq!(limits.header_timeout_secs, DEFAULT_HEADER_TIMEOUT_SECS);
+        assert_eq!(limits.idle_timeout_secs, DEFAULT_IDLE_TIMEOUT_SECS);
+        let limits =
+            parse("[limits]\nmax_connections = 2\nheader_timeout_secs = 3\nidle_timeout_secs = 4")
+                .unwrap()
+                .limits;
+        assert_eq!(
+            (
+                limits.max_connections,
+                limits.header_timeout_secs,
+                limits.idle_timeout_secs
+            ),
+            (2, 3, 4)
+        );
+        for key in [
+            "max_connections",
+            "header_timeout_secs",
+            "idle_timeout_secs",
+        ] {
+            let err = parse(&format!("[limits]\n{key} = 0"))
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(key) && err.contains("at least 1"), "{err}");
+        }
     }
 
     #[test]

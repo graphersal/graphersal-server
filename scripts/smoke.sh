@@ -220,6 +220,20 @@ expect_json admin null
 expect_json product null
 ok
 
+STEP="connection limits in the start block, h2c"
+grep -q "connections: *up to 256 open (HTTP/1.1, h2c)$" "$LOG" ||
+  fail "no connections row in the start block: $(head -c 900 "$LOG")"
+grep -q "timeouts: *request head 30 s, idle connection 60 s$" "$LOG" ||
+  fail "no timeouts row in the start block: $(head -c 900 "$LOG")"
+# HTTP/2 with prior knowledge on the same port (skipped when this curl has no HTTP/2).
+if curl -V | grep -q HTTP2; then
+  req GET /api/info --http2-prior-knowledge
+  expect_status 200
+  expect_json protocol graphersal/1
+  head -n 1 "$HEAD" | grep -q '^HTTP/2 200' || fail "not an HTTP/2 answer: $(head -n 1 "$HEAD")"
+fi
+ok
+
 STEP="the server UI at /"
 req GET /
 expect_status 200

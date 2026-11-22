@@ -55,6 +55,20 @@ only the address line `Graphersal server: http://...` on stdout. The log follows
 Ctrl+C or SIGTERM stops it cleanly (databases are unloaded, the run file is removed). A second
 `serve` on the same directory is refused (`server.lock`).
 
+`serve` speaks HTTP/1.1 and h2c (HTTP/2 over plain TCP with prior knowledge, e.g. `curl
+--http2-prior-knowledge`) on the same port. Connection limits (`server.toml`'s `[limits]`, each
+overridden by a `serve` option; the start block's `connections` and `timeouts` rows show
+them):
+
+| Limit | Default | `serve` option | What |
+|---|---|---|---|
+| `max_connections` | 256 | `--max-connections N` | open connections served at once; one more is accepted, answered `503` with `Retry-After: 1` and closed (a client learns at once instead of hanging) |
+| `header_timeout_secs` | 30 | `--header-timeout SECS` | a request's head must arrive within this, counted from the moment the connection waits for it; a slower (or silent) client is disconnected |
+| `idle_timeout_secs` | 60 | `--idle-timeout SECS` | a connection without a running request is closed after this (HTTP/1.1 waits for the next request's head at most the shorter of the two) |
+
+No timeout covers a whole request: an upload streams as long as it keeps sending (each read of
+a body waits at most 120 s for the next piece).
+
 A first session from the console (in a second terminal while the server runs):
 
 ```bash
@@ -207,8 +221,10 @@ every file and key: [`docs/server-dir.md`](docs/server-dir.md).
 - **No memory figures** in the database listing (only `sizeBytes` on disk): a loaded database's
   memory is known only inside its session thread.
 - No admin tools over MCP; MCP sessions live in memory (a restart forgets them).
-- **HTTP/1.1 only**, plain HTTP (no TLS, no HTTP/2): put a reverse proxy in front for anything
-  beyond the loopback.
+- **Plain HTTP** (HTTP/1.1 and h2c, no TLS, so no HTTP/2 negotiation by ALPN): put a reverse
+  proxy in front for anything beyond the loopback. On HTTP/2 an answer of a request whose body
+  the route did not read resets that stream (HTTP/1.1 closes the connection with a lingering
+  close instead).
 - **Prebuilt binary for Windows x86_64 only**; other platforms build from source (see
   [Download / build](#download--build)). On Windows the clean stop is Ctrl+C or Ctrl+Break in
   the server's console (there is no SIGTERM); a killed server leaves `server.run` behind, and the

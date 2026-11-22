@@ -49,6 +49,9 @@ damage_policy = "maintenance"   # or "continue": what a Store does on damage
 
 [limits]
 upload_bytes = 4294967296   # the largest import upload (POST /api/admin/import), 4 GiB
+max_connections = 256       # open connections served at once (one more: 503 + Retry-After)
+header_timeout_secs = 30    # a request's head must arrive within this
+idle_timeout_secs = 60      # a connection without a running request is closed after this
 ```
 
 | Key | Default | Read | Meaning |
@@ -60,6 +63,9 @@ upload_bytes = 4294967296   # the largest import upload (POST /api/admin/import)
 | `[defaults] chunk_bytes` | `1048576` | at every create | a new Store's chunk size (fixed for the database's life) |
 | `[defaults] damage_policy` | `"maintenance"` | at every create | a new Store's damage policy (fixed for the database's life) |
 | `[limits] upload_bytes` | `4294967296` | at every upload | the largest import upload body, announced as `uploadBytes` by `GET /api/info` |
+| `[limits] max_connections` | `256` | at start | open connections served at once (at least 1); one more is accepted, answered `503` (`Retry-After: 1`, JSON `error` and `help`, in its own protocol) and closed; beyond 64 such refusals at once a connection is closed unanswered. `serve --max-connections N` overrides it |
+| `[limits] header_timeout_secs` | `30` | at start | seconds a request's head may take to arrive, counted from the moment the connection waits for it (a new connection, or after the previous answer); a slower or silent client is disconnected. Never cuts a body. `serve --header-timeout SECS` overrides it |
+| `[limits] idle_timeout_secs` | `60` | at start | seconds a connection without a running request stays open (HTTP/1.1: at most the shorter of this and `header_timeout_secs`). `serve --idle-timeout SECS` overrides it |
 
 The `[defaults]` apply to databases created empty (`db create`) and to snapshot (`.gsnap`),
 GraphSON and GraphML imports. A clone, a restore and a Store (`.gstore`, Store directory) import
