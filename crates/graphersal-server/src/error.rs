@@ -68,6 +68,45 @@ pub enum ServerError {
         /// The OS's reason.
         message: String,
     },
+    /// A database or alias name is not `[a-z0-9][a-z0-9._-]{0,62}` (or is reserved).
+    #[non_exhaustive]
+    InvalidName {
+        /// The name given.
+        name: String,
+        /// Why it was refused.
+        message: String,
+    },
+    /// A name is taken: databases and aliases share one namespace (case-insensitive).
+    #[non_exhaustive]
+    NameInUse {
+        /// The name given.
+        name: String,
+        /// What holds it (`"database"`, `"alias"`, `"database being built"`, ...).
+        holder: &'static str,
+    },
+    /// No database (or alias) has this name.
+    #[non_exhaustive]
+    NotFound {
+        /// The name given.
+        name: String,
+    },
+    /// The database is failed (its `database.toml` cannot be read): it cannot be changed.
+    #[non_exhaustive]
+    DatabaseFailed {
+        /// The database.
+        name: String,
+        /// Its state with the reason.
+        reason: String,
+    },
+    /// A registry rule refuses the operation (a base's read-only flag, a layer's base, an
+    /// alias naming an alias, ...).
+    #[non_exhaustive]
+    Refused {
+        /// The database, alias or file concerned.
+        name: String,
+        /// The rule, as a sentence.
+        message: String,
+    },
 }
 
 impl ServerError {
@@ -119,6 +158,22 @@ impl fmt::Display for ServerError {
                 write!(f, "cannot listen on {address}: {message}")
             }
             ServerError::Thread { message } => write!(f, "cannot start a thread: {message}"),
+            ServerError::InvalidName { name, message } => {
+                write!(f, "invalid name {name:?}: {message}")
+            }
+            ServerError::NameInUse { name, holder } => write!(
+                f,
+                "the name '{name}' is taken by a {holder} (databases and aliases share one \
+                 namespace, case-insensitive)"
+            ),
+            ServerError::NotFound { name } => {
+                write!(f, "no database or alias '{name}' on this server")
+            }
+            ServerError::DatabaseFailed { name, reason } => write!(
+                f,
+                "database '{name}' is {reason}; fix or remove its directory and restart the server"
+            ),
+            ServerError::Refused { name, message } => write!(f, "'{name}': {message}"),
         }
     }
 }

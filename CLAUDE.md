@@ -19,7 +19,19 @@ from published files). When this file disagrees with the code, the code wins: sa
   `server.lock`), `run_file` (`RunInfo`, `server.run`), `serve` (`start` -> `Running`, the
   `tiny_http` listener adapted from graphersal-cli's dev server), `router` (probes and 503s
   through `graphersal_serve::Server`, `HostCheck`, own routes `/`, `/api/info`; the graph
-  resolver `NoDatabases` answers 404 until the registry exists), `error` (`ServerError`).
+  resolver `NoDatabases` answers 404 until the HTTP routes of the registry exist, V4), `error`
+  (`ServerError`), `names` (name rule `[a-z0-9][a-z0-9._-]{0,62}`, Windows device names refused,
+  `fold` = lower case for case-insensitive lookups), `database` (`database.toml`:
+  `DatabaseConfig`, `DatabaseKind`, `DatabaseRole`, `deny_unknown_fields`, `utc_now`),
+  `registry` (`Registry`: NO registry file, the registry IS `databases/*/database.toml`; `scan`
+  at start with the lock held: cleans `tmp/`, broken entries -> `DbState::Failed`, broken aliases
+  dropped into `problems()`, never fatal; entries behind an `RwLock`; `DbState`), `admin` (the
+  admin core as `impl Registry`: `list`, `get`, `resolve`, aliases (target must be a database:
+  no chains), `set_auto_load`, `set_read_only` (persists the flag only; a base with layers stays
+  read-only), `prepare_tmp` -> `TmpBuild` -> `commit` (build in `tmp/`, atomic rename into
+  `databases/`; a dropped build is removed)). Every admin change writes its file first
+  (atomically), then memory, under the registry's write lock. `serve::start` scans after the
+  bind and before `ready()` (`/readyz` 503 meanwhile); `Running::registry()`.
 - `src/main.rs`: the hand-parsed command line (no parser crate, like graphersal's CLI), the
   tracing subscriber, the ctrlc handler. stdout = results, stderr = diagnostics/log; exit codes
   0 ok, 1 failed, 2 usage.
