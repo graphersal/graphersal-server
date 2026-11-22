@@ -116,6 +116,41 @@ pub enum ServerError {
         /// What failed, with the runtime's reason.
         message: String,
     },
+    /// A request's input does not fit (a schema that does not parse or does not fit the data,
+    /// a bad value in a request body).
+    #[non_exhaustive]
+    InvalidInput {
+        /// The database (or the request) concerned.
+        name: String,
+        /// What is wrong.
+        message: String,
+    },
+    /// A Store operation of an admin action failed (create, fork, reading a base).
+    #[non_exhaustive]
+    Store {
+        /// The database.
+        name: String,
+        /// What failed, with the Store's reason.
+        message: String,
+    },
+    /// The running server cannot be reached (the console's admin client).
+    #[non_exhaustive]
+    Connect {
+        /// The server's address.
+        address: String,
+        /// The reason.
+        message: String,
+    },
+    /// The running server refused an admin request (the console's admin client): its answer.
+    #[non_exhaustive]
+    Remote {
+        /// The HTTP status.
+        status: u16,
+        /// The answer's `error`.
+        message: String,
+        /// The answer's `help`, if any.
+        help: Option<String>,
+    },
 }
 
 impl ServerError {
@@ -184,6 +219,13 @@ impl fmt::Display for ServerError {
             ),
             ServerError::Refused { name, message } => write!(f, "'{name}': {message}"),
             ServerError::Serve { name, message } => write!(f, "database '{name}': {message}"),
+            ServerError::InvalidInput { name, message } => write!(f, "'{name}': {message}"),
+            ServerError::Store { name, message } => write!(f, "database '{name}': {message}"),
+            ServerError::Connect { address, message } => write!(
+                f,
+                "cannot reach the running graphersal-server at {address}: {message}"
+            ),
+            ServerError::Remote { message, .. } => f.write_str(message),
         }
     }
 }

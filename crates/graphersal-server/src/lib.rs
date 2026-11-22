@@ -10,8 +10,10 @@
 //! ([`serve::start`]) with the health probes, the loaded databases under `/db/<name>/` (aliases
 //! resolved per request, `409` for a database that is not loaded), the embedded playground at
 //! `/` (its landing view lists the databases), `/api/info` and the admin listing
-//! `GET /api/admin/databases`. The admin actions over HTTP and the server-wide MCP endpoint come
-//! in later versions.
+//! the admin API (`/api/admin/...`: list, create, delete, clone, load, unload, read-only,
+//! auto-load, aliases) over ONE admin core ([`ops::Admin`]) that the console's `db` commands
+//! ([`console`]) use too, on the directory itself or through the running server's API. The
+//! server-wide MCP endpoint, backups, imports and models come in later versions.
 //!
 //! The server has NO access control: it listens on the loopback by default and warns when it
 //! listens on any other address.
@@ -20,7 +22,9 @@
 
 pub mod admin;
 mod admin_api;
+mod client;
 pub mod config;
+pub mod console;
 pub mod database;
 pub mod error;
 pub mod layout;
@@ -28,6 +32,7 @@ pub mod loader;
 pub mod lock;
 mod mounts;
 pub mod names;
+pub mod ops;
 pub mod registry;
 mod router;
 pub mod run_file;
@@ -42,6 +47,7 @@ pub use error::ServerError;
 pub use layout::{InitReport, ServerDir};
 pub use loader::{LoadStart, Loader};
 pub use lock::ServerLock;
+pub use ops::{Admin, CreateSpec, Deleted};
 pub use registry::{DatabaseEntry, DbState, Registry};
 pub use run_file::RunInfo;
 pub use serve::{Running, ServeOptions};

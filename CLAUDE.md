@@ -34,7 +34,27 @@ from published files). When this file disagrees with the code, the code wins: sa
   duration; `DatabaseInfo` hooks add `database` (real name) and `admin: true` to the per-DB
   `/api/info`), `admin_api` (`GET /api/admin/databases` `{databases, aliases, problems}`, alias
   rows carry `aliasOf`; `GET /api/admin/databases/<name|alias>`; field names = the playground's
-  landing view; V5 adds the actions here), `error`
+  landing view; the actions: `POST databases` create, `DELETE databases/<name>`, `POST
+  .../<name>/clone|load|unload`, `PUT .../<name>/read-only|auto-load`, `GET aliases`, `PUT|DELETE
+  aliases/<alias>`; JSON bodies `deny_unknown_fields`; core errors -> `{"error","help"?}` via
+  `status_of` (400 invalid name/input, 404, 409 rule refusals, 500); the route table is in its
+  module docs and `docs/admin-api.md` (the playground panel's contract: keep them in sync)),
+  `ops` (`Admin`: THE admin core of the API and the console; online = with the `Loader`,
+  offline = `Admin::open_offline` takes the server lock and scans; `create` (empty, optional
+  schema, plain/layer, built in `tmp/` via `prepare_tmp`/`commit`, Store options from
+  `server.toml` `[defaults]` read per create; a layer's base from the loader's pool or
+  `layer_base_of_store`), `delete` (unloaded only, under `Loader::while_idle`; refused while an
+  alias names it or layers name it as base; to `trash/<name>-<UTC time with - for :>`),
+  `clone_database` (loaded: the open Store's `fork` with the context held so an unload waits;
+  unloaded: `Store::fork_dir` / `fork_layer_dir`; config copied, `auto_load` off), load/unload
+  (offline: refused naming `serve`), read-only (offline: base refuses `false`), auto-load,
+  aliases; `#[cfg(test)] FailPoint` injects a failure/crash after the Store is written; tests in
+  `ops_tests.rs`, also over a real listener), `console` (`DbCommand` -> one admin API request;
+  `run`: offline = the SAME `admin_api::route` over an offline `Admin` with a built `Request`,
+  locked = `client` to `RunInfo.address` (503 retried 10 s; `load` polls until not loading);
+  refusals = `ServerError::Remote {status, message, help}`; `render` = human text), `client`
+  (minimal std `TcpStream` HTTP/1.1 client: `Host` = address, no `Origin`, `Connection: close`,
+  Content-Length/chunked/close bodies, timeouts), `error`
   (`ServerError`), `names` (name rule `[a-z0-9][a-z0-9._-]{0,62}`, Windows device names refused,
   `fold` = lower case for case-insensitive lookups), `database` (`database.toml`:
   `DatabaseConfig`, `DatabaseKind`, `DatabaseRole`, `deny_unknown_fields`, `utc_now`),
@@ -44,7 +64,8 @@ from published files). When this file disagrees with the code, the code wins: sa
   admin core as `impl Registry`: `list`, `get`, `resolve`, aliases (target must be a database:
   no chains), `set_auto_load`, `set_read_only` (persists the flag only; a base with layers stays
   read-only), `prepare_tmp` -> `TmpBuild` -> `commit` (build in `tmp/`, atomic rename into
-  `databases/`; a dropped build is removed)). Every admin change writes its file first
+  `databases/`; a dropped build is removed), `delete` (the registry half of a delete: move into
+  `trash/`, refusals)). Every admin change writes its file first
   (atomically), then memory, under the registry's write lock. `serve::start` scans after the
   bind and before `ready()` (`/readyz` 503 meanwhile); `Running::registry()`.
 - `loader` (`Loader`, beside the registry, `Running::loader()`): `load` (background thread,
@@ -65,11 +86,14 @@ from published files). When this file disagrees with the code, the code wins: sa
   pool with its last user; unloading a base with loaded layers is refused. Lock order: loader
   state, then registry. Tests in `loader_tests.rs` (synthetic stores from the `modern` and
   `large` samples; `test_support::skip_on_ci`).
-- `src/main.rs`: the hand-parsed command line (no parser crate, like graphersal's CLI), the
-  tracing subscriber, the ctrlc handler. stdout = results, stderr = diagnostics/log; exit codes
-  0 ok, 1 failed, 2 usage.
+- `src/main.rs`: the hand-parsed command line (no parser crate, like graphersal's CLI): `init`,
+  `serve`, `db list|create|delete|clone|load|unload|read-only|auto-load|alias ... --dir DIR
+  [--json]` (prints `note: ... sent to its admin API at ADDR` on stderr when it went through a
+  server, `help:` lines for refusals), the tracing subscriber, the ctrlc handler. stdout =
+  results, stderr = diagnostics/log; exit codes 0 ok, 1 failed, 2 usage.
 - Tests: unit tests beside the code (`test_support::TempDir`), end-to-end tests in
-  `crates/graphersal-server/tests/server_tests.rs` (spawns the binary, port 0, SIGTERM).
+  `crates/graphersal-server/tests/server_tests.rs` (spawns the binary, port 0, SIGTERM; the
+  `db` console offline and through a running server).
 
 ## Commands
 
