@@ -241,6 +241,34 @@ fn init_creates_a_server_directory_and_refuses_a_foreign_one() {
 }
 
 #[test]
+fn serve_refuses_connection_limits_that_are_not_whole_numbers_of_at_least_1() {
+    let temp = TempDir::new("serve-limit-flags");
+    let dir = ServerDir::init(temp.path().join("srv")).unwrap().dir;
+    let root = dir.root().to_str().unwrap();
+    for (flag, value) in [
+        ("--max-connections", "0"),
+        ("--header-timeout", "x"),
+        ("--idle-timeout", "-1"),
+    ] {
+        let out = Command::new(BIN)
+            .args([
+                "serve",
+                "--dir",
+                root,
+                "--listen",
+                "127.0.0.1:0",
+                flag,
+                value,
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(2), "{flag} {value}");
+        let err = text(&out.stderr);
+        assert!(err.contains(flag) && err.contains("at least 1"), "{err}");
+    }
+}
+
+#[test]
 fn serve_answers_refuses_a_second_server_and_stops_cleanly() {
     let temp = TempDir::new("serve");
     let dir = ServerDir::init(temp.path()).unwrap().dir;
@@ -1447,6 +1475,45 @@ fn import_offline_and_through_a_server() {
     let (code, out, err) = db(dir.root(), &["load", "snap"]);
     assert_eq!(code, 0, "{err}");
     assert!(out.contains("Database 'snap' is loaded"), "{out}");
+    stop_and_wait(&mut server);
+}
+
+#[test]
+fn import_on_a_taken_name_shows_the_console_help_offline_and_through_a_server() {
+    use graphersal::prelude::{Graph, GraphExport, TraversalGraph};
+    let temp = TempDir::new("console-import-taken");
+    let dir = ServerDir::init(temp.path().join("srv")).unwrap().dir;
+    let root = dir.root().to_str().unwrap().to_string();
+    let graphson = temp.path().join("modern.json");
+    Graph::new(TraversalGraph::tinkerpop_modern())
+        .export_graphson_writer(std::fs::File::create(&graphson).unwrap())
+        .unwrap();
+    let source = graphson.to_str().unwrap();
+    let (code, _, err) = import(&[&root, source, "--name", "gs"]);
+    assert_eq!(code, 0, "{err}");
+    let help = format!(
+        "\nHelp: choose another name: graphersal-server db list --dir {root} lists the taken \
+         names (databases and aliases share one namespace, case-insensitive)"
+    );
+
+    // Offline.
+    let (code, _, err) = import(&[&root, source, "--name", "gs"]);
+    assert_eq!(code, 1);
+    assert!(err.contains(&help), "{err}");
+    assert!(!err.contains("/api/admin"), "{err}");
+
+    // Through a running server (the path form of the route).
+    let mut server = ServerProcess::spawn(
+        Command::new(BIN)
+            .args(["serve", "--dir", &root, "--listen", "127.0.0.1:0"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped()),
+    );
+    wait_for_run_file(&dir);
+    let (code, _, err) = import(&[&root, source, "--name", "gs"]);
+    assert_eq!(code, 1);
+    assert!(err.contains(&help), "{err}");
+    assert!(!err.contains("/api/admin"), "{err}");
     stop_and_wait(&mut server);
 }
 

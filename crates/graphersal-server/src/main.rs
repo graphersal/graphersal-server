@@ -2,7 +2,8 @@
 //!
 //! ```text
 //! graphersal-server init DIR
-//! graphersal-server serve --dir DIR [--listen ADDR]
+//! graphersal-server serve --dir DIR [--listen ADDR] [--max-connections N]
+//!     [--header-timeout SECS] [--idle-timeout SECS]
 //! graphersal-server db list|create|delete|clone|load|unload|promote|read-only|auto-load|alias|backup|backups|restore|export ... --dir DIR [--json]
 //! graphersal-server import DIR SOURCE --name NAME [--base BASE] [--format F] [--description TEXT] [--role normal|base] [--json]
 //! graphersal-server models list|add|remove ... --dir DIR [--json]
@@ -71,9 +72,12 @@ Usage:
       Create a server directory (server.toml, databases/, models/blobs/, backups/, trash/,
       tmp/). DIR must be missing, empty, or a server directory (then only missing
       parts are created; server.toml is kept).
-  graphersal-server serve --dir DIR [--listen ADDR]
-      Serve the server directory DIR. ADDR (IP:PORT, port 0 = a free port) overrides
-      server.toml's listen. The bound address is written to DIR/server.run while the server
+  graphersal-server serve --dir DIR [--listen ADDR] [--max-connections N]
+                         [--header-timeout SECS] [--idle-timeout SECS]
+      Serve the server directory DIR (HTTP/1.1 and h2c). ADDR (IP:PORT, port 0 = a free
+      port) overrides server.toml's listen; the other options override its [limits]
+      max_connections (open connections served at once; one more is answered 503),
+      header_timeout_secs and idle_timeout_secs. The bound address is written to DIR/server.run while the server
       runs. Ctrl+C or SIGTERM stops it.
   graphersal-server db COMMAND ... --dir DIR [--json]
       Administer the databases of DIR. When a server runs on DIR the command goes through
@@ -125,7 +129,7 @@ Usage:
       links). Through a running server like db.
         models list              every model, its size and the databases using it
         models add SOURCE [--repo REPO] [--license SPDX]
-            SOURCE: a Model2Vec model directory, a tar archive of one (.tar, uncompressed)
+            SOURCE: a Model2Vec model directory, a tar archive of one (.tar, or .tar.gz)
             or a .gsnap carrying models (--repo and --license for a directory that does not
             name them), or the repository of a model the shared models hold. Every needs-model database whose model is then there
             gets it and can be loaded.
@@ -201,6 +205,9 @@ fn init(args: &[String]) -> ExitCode {
 fn serve_command(args: &[String]) -> ExitCode {
     let mut dir = None;
     let mut listen = None;
+    let mut max_connections = None;
+    let mut header_timeout = None;
+    let mut idle_timeout = None;
     let mut rest = args.iter();
     while let Some(arg) = rest.next() {
         let (flag, inline) = match arg.split_once('=') {
@@ -210,6 +217,9 @@ fn serve_command(args: &[String]) -> ExitCode {
         let slot = match flag {
             "--dir" => &mut dir,
             "--listen" => &mut listen,
+            "--max-connections" => &mut max_connections,
+            "--header-timeout" => &mut header_timeout,
+            "--idle-timeout" => &mut idle_timeout,
             _ => return usage_error(&format!("serve: unknown argument {arg:?}")),
         };
         let Some(value) = inline.or_else(|| rest.next().cloned()) else {
@@ -227,6 +237,33 @@ fn serve_command(args: &[String]) -> ExitCode {
         match parse_listen(&listen) {
             Ok(addr) => options = options.with_listen(addr),
             Err(err) => return usage_error(&format!("--listen: {err}")),
+        }
+    }
+    // A whole number of at least 1.
+    let positive = |flag: &str, value: &str| match value.trim().parse::<u64>() {
+        Ok(n) if n > 0 => Ok(n),
+        _ => Err(usage_error(&format!(
+            "{flag}: {value:?} is not a whole number of at least 1"
+        ))),
+    };
+    if let Some(value) = max_connections {
+        match positive("--max-connections", &value) {
+            Ok(n) => {
+                options = options.with_max_connections(usize::try_from(n).unwrap_or(usize::MAX))
+            }
+            Err(code) => return code,
+        }
+    }
+    if let Some(value) = header_timeout {
+        match positive("--header-timeout", &value) {
+            Ok(n) => options = options.with_header_timeout_secs(n),
+            Err(code) => return code,
+        }
+    }
+    if let Some(value) = idle_timeout {
+        match positive("--idle-timeout", &value) {
+            Ok(n) => options = options.with_idle_timeout_secs(n),
+            Err(code) => return code,
         }
     }
     init_logging();

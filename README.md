@@ -26,13 +26,13 @@ an HTTP API, a console (`graphersal-server db ...`) and the server's own web UI 
 verify it (`certutil -hashfile <zip> SHA256`, or `Get-FileHash` in PowerShell). Unpack it and run
 `graphersal-server.exe` from a console; Ctrl+C (or Ctrl+Break) stops it cleanly.
 
-**Every other platform** (Linux, macOS, ...) builds from source, with Rust 1.88 or newer. Until
-Graphersal 0.7.0 is on crates.io the crate depends on Graphersal's crates by path: a checkout of
-the [`graphersal`](https://github.com/graphersal/graphersal) repository (branch `main`) must sit
-beside this one (`../graphersal`); it also provides the playground built into the binary.
+**Every other platform** (Linux, macOS, ...) builds from source, with Rust 1.88 or newer. The
+Graphersal crates come from crates.io (exact pins in the root `Cargo.toml`, versions in the
+committed `Cargo.lock`; `--locked` builds exactly those); the published `graphersal-serve` crate
+also carries the playground built into the binary.
 
 ```bash
-git clone https://github.com/graphersal/graphersal.git          # beside graphersal-server
+git clone https://github.com/graphersal/graphersal-server.git
 cd graphersal-server
 cargo build --release          # target/release/graphersal-server
 cargo build --profile dist     # the release binary's profile: fat LTO, stripped symbols
@@ -54,6 +54,20 @@ only the address line `Graphersal server: http://...` on stdout. The log follows
 `serve` writes the address it bound into `./srv/server.run` while it runs;
 Ctrl+C or SIGTERM stops it cleanly (databases are unloaded, the run file is removed). A second
 `serve` on the same directory is refused (`server.lock`).
+
+`serve` speaks HTTP/1.1 and h2c (HTTP/2 over plain TCP with prior knowledge, e.g. `curl
+--http2-prior-knowledge`) on the same port. Connection limits (`server.toml`'s `[limits]`, each
+overridden by a `serve` option; the start block's `connections` and `timeouts` rows show
+them):
+
+| Limit | Default | `serve` option | What |
+|---|---|---|---|
+| `max_connections` | 256 | `--max-connections N` | open connections served at once; one more is accepted, answered `503` with `Retry-After: 1` and closed (a client learns at once instead of hanging) |
+| `header_timeout_secs` | 30 | `--header-timeout SECS` | a request's head must arrive within this, counted from the moment the connection waits for it; a slower (or silent) client is disconnected |
+| `idle_timeout_secs` | 60 | `--idle-timeout SECS` | a connection without a running request is closed after this (HTTP/1.1 waits for the next request's head at most the shorter of the two) |
+
+No timeout covers a whole request: an upload streams as long as it keeps sending (each read of
+a body waits at most 120 s for the next piece).
 
 A first session from the console (in a second terminal while the server runs):
 
@@ -93,7 +107,7 @@ databases and missing models. Paths and commands are never wrapped.
 | `db restore NAME BACKUP [--name NEW]` | over NAME (unloaded) or into the new database NEW |
 | `db export NAME --out FILE [--no-models] [--materialize]` | a packed snapshot (`.gsnap`) |
 | `import DIR SOURCE --name NAME [--base BASE] [--format F] [--description TEXT] [--role normal\|base]` | a new database from a `.gsnap`, a Store (directory or `.gstore`), GraphSON or GraphML; an embedding model it names without carrying comes from `models/` (else the database is `needs-model` until `models add`); a model blob a Store lacks is filled from `models/` (else the import is refused: add the model, import again); `--role base` makes a base of a plain source |
-| `models list`, `models add SOURCE [--repo R] [--license L]`, `models remove REPO` | the shared embedding models; SOURCE: a Model2Vec model directory, an uncompressed `.tar` of one, a `.gsnap` carrying models, or a repository `models/` holds |
+| `models list`, `models add SOURCE [--repo R] [--license L]`, `models remove REPO` | the shared embedding models; SOURCE: a Model2Vec model directory, a `.tar` or `.tar.gz` of one, a `.gsnap` carrying models, or a repository `models/` holds |
 
 `graphersal-server --help` has the details. Exit codes: `0` ok, `1` failed (`Error: ...` and a
 `Help: ...` line on stderr; where the admin API's help names a route, the console names the
@@ -149,7 +163,9 @@ node --test crates/graphersal-server/ui/tests/*.test.mjs
 `profile.test.mjs` also checks the profile with the engine playground's own `validateProfile`,
 and that its `isEngineInfo` accepts the root info (the fixed fields in `ui/tests/root-info.json`,
 which a Rust test checks against the real answer) and refuses one without `protocol`, from `GRAPHERSAL_PLAYGROUND` (a playground
-directory), else `../graphersal/playground`.
+directory), else from the playground the binary embeds: the `ui/` directory of the
+`graphersal-serve` crate in Cargo's registry (found with `cargo metadata`; run `cargo fetch` or
+a build first, else these two tests are skipped).
 
 ## Server directory
 
@@ -198,15 +214,17 @@ every file and key: [`docs/server-dir.md`](docs/server-dir.md).
   (`409`), not imported as `needs-model` like a snapshot: a Store copy is verified and cannot
   leave a referenced blob out. Add the model to `models/`, then import again (the blob is
   filled in and hard-linked).
-- A model archive is an **uncompressed ustar `.tar`** (`tar -cf model.tar -C <model dir> .`);
-  compressed archives and `.zip` are not taken.
+- A model archive is a **ustar `.tar`**, uncompressed or gzip-compressed (`tar -cf model.tar
+  -C <model dir> .`, `tar -czf model.tar.gz ...`); zstd, bzip2, xz and `.zip` are not taken.
 - A **layer `.gsnap` export carries no models** (an engine rule); export the layer with
   `materialize=true` (`--materialize`) for a standalone snapshot with the models.
 - **No memory figures** in the database listing (only `sizeBytes` on disk): a loaded database's
   memory is known only inside its session thread.
 - No admin tools over MCP; MCP sessions live in memory (a restart forgets them).
-- **HTTP/1.1 only**, plain HTTP (no TLS, no HTTP/2): put a reverse proxy in front for anything
-  beyond the loopback.
+- **Plain HTTP** (HTTP/1.1 and h2c, no TLS, so no HTTP/2 negotiation by ALPN): put a reverse
+  proxy in front for anything beyond the loopback. On HTTP/2 an answer of a request whose body
+  the route did not read resets that stream (HTTP/1.1 closes the connection with a lingering
+  close instead).
 - **Prebuilt binary for Windows x86_64 only**; other platforms build from source (see
   [Download / build](#download--build)). On Windows the clean stop is Ctrl+C or Ctrl+Break in
   the server's console (there is no SIGTERM); a killed server leaves `server.run` behind, and the

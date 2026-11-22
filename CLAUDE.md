@@ -15,17 +15,26 @@ from published files). When this file disagrees with the code, the code wins: sa
   with features `ui-assets` (the embedded playground per mount and at `/`, where it shows the
   server's own `server` UI profile) and `mcp` (each
   context a host of the shared MCP endpoint); graphersal-mcp (the endpoint, directory mode).
-- Path dependencies on the graphersal repository's MAIN checkout beside this one:
-  `../graphersal/crates/graphersal`, `../graphersal/crates/graphersal-serve` and
-  `../graphersal/crates/graphersal-session` and `../graphersal/crates/graphersal-mcp`. Never edit that
-  repository from a task here. This repository keeps its own `target/` (never share
+- The four Graphersal crates (graphersal, graphersal-serve, graphersal-session, graphersal-mcp)
+  from crates.io, pinned exactly (`=0.7.0`: EXPERIMENTAL crates, exact pin during 0.x), all on
+  the same version; `Cargo.lock` is committed and CI builds `--locked`. The embedded playground
+  is the `ui/` of the published graphersal-serve crate. Moving to a new Graphersal version:
+  bump the four pins together, `cargo update -p graphersal ...`, commit the lock. Never edit the
+  graphersal repository from a task here. This repository keeps its own `target/` (never share
   graphersal's).
 - `src/lib.rs` modules: `config` (`server.toml`, `ServerConfig`, `parse_listen`, `[limits]
-  upload_bytes` = `Limits`, default 4 GiB), `layout`
+  upload_bytes` (default 4 GiB), `max_connections`, `header_timeout_secs`, `idle_timeout_secs`
+  = `Limits`), `layout`
   (`ServerDir`, `init`, file names, `write_atomic`), `lock` (`ServerLock`, fd-lock on
   `server.lock`), `run_file` (`RunInfo`, `server.run`), `serve` (`start` -> `Running`, the
-  HTTP/1.1 listener: hyper 1.x `http1` server connections on a tokio multi-thread runtime owned
-  by `Running` (coordinator decision C7: no axum, the router is ours; graphersal-serve stays
+  listener: hyper 1.x `http1` server connections, and `http2` ones for h2c with prior
+  knowledge (`sniff` peeks the preface; the HTTP/1 path is unchanged otherwise), on a tokio
+  multi-thread runtime owned by `Running`; connection cap `[limits] max_connections`
+  (`ConnectionLimits`, a semaphore; over it `refuse_connection` answers 503 + `Retry-After: 1`
+  in the connection's protocol, at most `OVERFLOW_CONNECTIONS` at once, more are closed),
+  `header_timeout_secs` (hyper's HTTP/1 header read timeout + the sniff), `idle_timeout_secs`
+  (`Idle`: per-connection `Activity`, graceful shutdown when no request runs), `serve`
+  flags `--max-connections`/`--header-timeout`/`--idle-timeout` (coordinator decision C7: no axum, the router is ours; graphersal-serve stays
   HTTP-library-free); every request answered on the blocking pool (`spawn_blocking`: router,
   session jobs, file I/O never on an async worker); the body is `BodyReader` (an `io::Read`
   pulling hyper's body one frame per read via `Handle::block_on`, idle timeout 120 s), a download
@@ -171,7 +180,10 @@ from published files). When this file disagrees with the code, the code wins: sa
   bind and before `ready()` (`/readyz` 503 meanwhile); `Running::registry()`.
 - `model_archive` (private, V18): `is_tar` (ustar magic + checksum) and `unpack(archive, dir)`,
   the safe unpack of a model directory's tar (rules in its module docs; tests beside it, their
-  `entry`/`archive`/`model_tar` builders reused by `models_tests.rs`).
+  `entry`/`archive`/`model_tar`/`gzip` builders reused by `models_tests.rs`); `is_gzip` (magic
+  `1f 8b 08`) and `gunzip(archive, out, max_bytes)` (V24: flate2 `MultiGzDecoder` into a `.tar`
+  file, refused past `max_bytes` = `[limits] upload_bytes`: the decompression-bomb guard; the
+  result must be a tar). Format by content, never by file name; no zstd.
 - `models` (`ModelsDir` over `models/`, U9): one physical copy of every model blob in
   `models/blobs/<2 hex>/<sha256>` (the Store blob layout), HARD-LINKED into each database's
   `store/blobs/`; no engine change. `adopt(store_dir)` = the dedupe pass (same name + length in
@@ -190,7 +202,7 @@ from published files). When this file disagrees with the code, the code wins: sa
   -> its blob unpacked into `tmp/` + `Store::import_model_dir`; then adopt. `copied_blobs` feeds
   the listing's `linkWarning`. Admin side in `ops_models.rs` (`models_index`, `model_add`
   (`ModelAddSpec`: a model dir via a scratch Store + `import_model_dir`, a ustar `.tar` of one
-  unpacked first by `model_archive::unpack` into a second scratch in `tmp/` (V18; refuses
+  (a `.tar.gz` gunzipped into a third scratch first) unpacked first by `model_archive::unpack` into a second scratch in `tmp/` (V18; refuses
   absolute paths, `..`, `\`/`:`, links, devices, GNU long names, > 1000 entries, depth > 16,
   duplicates; skips pax headers and `._*`; the model dir = the root or its only top dir), a
   `.gsnap` via `create_from_packed_dir`, harvested by adoption; or a repo `models/` holds; then
@@ -260,7 +272,8 @@ from published files). When this file disagrees with the code, the code wins: sa
   `ui/tests/profile.test.mjs`) and fetch `/api/admin/*` themselves with the host headers. A new
   file in `ui/` goes into `ui_assets::FILES`. Tests: `ui/tests/*.test.mjs` (node:http mocks of
   the admin API; the profile checked with the engine's `validateProfile` from
-  `GRAPHERSAL_PLAYGROUND` or `../graphersal/playground`).
+  `GRAPHERSAL_PLAYGROUND`, else the registry copy of graphersal-serve's `ui/` found through
+  `cargo metadata`; skipped when absent, failed on CI).
 - Docs (the contract for readers who did not follow the code; keep them in sync with it):
   `README.md` (what it is, run, console, HTTP, known limitations), `docs/server-dir.md` (every
   file and key of the server directory), `docs/admin-api.md` (every admin route, checked

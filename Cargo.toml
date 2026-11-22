@@ -9,21 +9,22 @@ repository = "https://github.com/graphersal/graphersal-server"
 homepage = "https://graphersal.dev"
 license = "Apache-2.0"
 edition = "2024"
-# The same MSRV as Graphersal (its path dependencies need 1.88).
+# The same MSRV as Graphersal (its crates need 1.88).
 rust-version = "1.88"
 
 [workspace.dependencies]
-# Graphersal's hosting pieces, from the MAIN checkout of the graphersal repository beside this
-# one (path dependencies; this repository is private and never published while it uses them).
-graphersal = { path = "../graphersal/crates/graphersal" }
-graphersal-serve = { path = "../graphersal/crates/graphersal-serve" }
+# Graphersal's hosting pieces, from crates.io. graphersal-serve, graphersal-session and
+# graphersal-mcp are EXPERIMENTAL crates: exact pin (`=`) during 0.x, all four on the same
+# version (graphersal-serve ships the playground UI it embeds in its `ui/`).
+graphersal = { version = "=0.7.0" }
+graphersal-serve = { version = "=0.7.0" }
 # The session a served database runs in: `graphersal_serve::launch` takes its `SessionPresets`,
 # and `Context::call` jobs receive its `Session` (already in the tree through graphersal-serve).
-graphersal-session = { path = "../graphersal/crates/graphersal-session" }
+graphersal-session = { version = "=0.7.0" }
 # The MCP endpoint: `/mcp` over every database of the registry (its directory mode,
 # `Mcp::handle_directory`) and `/db/<name>/mcp` per loaded database, one shared `Mcp` (sessions,
 # token, statistics); already in the tree through graphersal-serve's `mcp` feature.
-graphersal-mcp = { path = "../graphersal/crates/graphersal-mcp" }
+graphersal-mcp = { version = "=0.7.0" }
 
 # `server.toml` and the run file: the TOML reader/writer (serde based).
 toml = "1"
@@ -39,12 +40,20 @@ fd-lock = "4"
 # keeps its own router): hyper's server connections answer an over-limit upload at once and
 # close it cleanly, never read or allocate a body nobody asked for (`Expect: 100-continue` only
 # when the body is read), and give the IO back for a lingering close.
-hyper = { version = "1", default-features = false, features = ["server", "http1"] }
-# `TokioIo` (tokio sockets as hyper IO) and `TokioTimer` (hyper's header read timeout).
+# `http2`: h2c with prior knowledge (a connection starting with the HTTP/2 preface) beside
+# HTTP/1.1; it adds the `h2` crate (hyper's own HTTP/2 implementation, the one hyper-based
+# servers use; no TLS, no ALPN).
+hyper = { version = "1", default-features = false, features = ["server", "http1", "http2"] }
+# `TokioIo` (tokio sockets as hyper IO), `TokioTimer` (hyper's header read timeout) and
+# `TokioExecutor` (the tasks of an HTTP/2 connection).
 hyper-util = { version = "0.1", default-features = false, features = ["tokio"] }
 # The runtime under hyper, owned by `serve`: the multi-thread scheduler and its blocking pool
 # (the router and the file I/O run there), TCP sockets, the stop signal, timeouts.
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "net", "sync", "time", "macros", "io-util"] }
+# Gzip-compressed model archives (`.tar.gz`/`.tgz` model uploads and `models add`): the
+# de-facto standard gzip crate, on its pure-Rust backend (miniz_oxide: no C toolchain, builds
+# the same on Windows and in CI). zstd is not offered: nothing in the tree brings it.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 # Library logging (as in graphersal) and the binary's stderr log subscriber.
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std", "env-filter", "ansi"] }

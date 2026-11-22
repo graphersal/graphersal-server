@@ -83,7 +83,7 @@ A `failed` database whose `database.toml` cannot be read has only `name`, `state
 | POST | `/api/admin/import` | JSON `{"path", "name", "base"?, "format"?, "description"?, "role"?}` | `201` entry + `"import"` |
 | GET | `/api/admin/models` | | `200 {"models": [model...], "missing": [{"database", "model"}...]}` |
 | POST | `/api/admin/models` | `{"path"?, "repo"?, "license"?}` | `201` (from a path) or `200` (a repository) `{"added": [model...], "resolved": [database...], "stillMissing": [{"database", "model"}...], "notes": [string...]}` |
-| POST | `/api/admin/models?repo=<r>&license=<l>&format=<gsnap\|tar>` | the file itself (anything but JSON): a `.gsnap` carrying model blobs or an uncompressed `.tar` of a Model2Vec model directory | `201`, the same answer |
+| POST | `/api/admin/models?repo=<r>&license=<l>&format=<gsnap\|tar>` | the file itself (anything but JSON): a `.gsnap` carrying model blobs or a `.tar` (or gzip-compressed `.tar.gz`/`.tgz`) of a Model2Vec model directory | `201`, the same answer |
 | DELETE | `/api/admin/models/<repo or blob hash>` | | `200 {"model", "removed": [blob...], "bytes"}` |
 | GET | `/api/admin/aliases` | | `200 {"aliases": {alias: database}}` |
 | PUT | `/api/admin/aliases/<alias>` | `{"target"}` | `200 {"alias", "target"}` (new alias or flip) |
@@ -310,8 +310,8 @@ A model (one blob):
 | `links` | number | unix | the hard links of the file in `models/blobs/` (`1`: no database links it) |
 
 `POST /api/admin/models` adds models: `{"path": "/absolute/path"}` names a Model2Vec model
-directory (`repo` and `license` for a directory that does not name them), an uncompressed tar
-archive of one, or a `.gsnap` carrying model blobs, read on the server's machine (a relative path `400`, a missing one `404`, one
+directory (`repo` and `license` for a directory that does not name them), a tar archive of
+one (uncompressed or gzip-compressed), or a `.gsnap` carrying model blobs, read on the server's machine (a relative path `400`, a missing one `404`, one
 that holds no model `400`); `{"repo"}` alone names a model `models/` already holds (`404` with
 help when it does not). Then every plain `needs-model` database whose repository `models/` now
 holds gets it (the blob its catalog references restored from `models/`, or, when its catalog
@@ -323,19 +323,24 @@ Import), so only a model `models/` lacks leaves a database `needs-model`.
 
 The **upload form** sends the file itself as the body (`Content-Type:
 application/octet-stream`, anything but JSON) with the query parameters `repo`, `license` (as
-in the JSON form) and `format` (`gsnap` or `tar`; default: detected from the content; a file
-of another format than the one named is `400`); any other parameter `400`. The body is
+in the JSON form) and `format` (`gsnap` or `tar`, which also names a gzip-compressed tar;
+default: detected from the content; a file of another format than the one named is `400`); any other parameter `400`. The body is
 streamed into `tmp/` exactly like an import upload (same `[limits] upload_bytes`, same `413`
 behaviour, an empty body `400`), added as a path, and removed. A file that is neither a packed
-snapshot nor a tar archive is `400`. A tar archive is POSIX ustar, uncompressed (`tar -cf
-model.tar -C potion-base-8M .`, or `tar -cf model.tar potion-base-8M`): the model directory is
-the archive's root or its only top-level directory. It is unpacked into `tmp/` first and
+snapshot nor a tar archive is `400`. A tar archive is POSIX ustar (`tar -cf
+model.tar -C potion-base-8M .`, or `tar -cf model.tar potion-base-8M`), uncompressed or
+gzip-compressed (`tar -czf model.tar.gz ...`; told apart by the gzip magic bytes, not the file
+name; zstd and other compressions are not taken): the model directory is the archive's root or
+its only top-level directory. A gzip file is decompressed into `tmp/` first, at most
+`[limits] upload_bytes` bytes (a decompression bomb is refused with `400` once it passes them;
+a corrupt or truncated gzip file, or one that does not hold a tar archive, is `400` too, all
+as `not a usable model archive: ...`). It is unpacked into `tmp/` first and
 refused as a whole (`400`, `not a usable model archive: ...`) for an absolute path, a `..`
 component, a backslash or a colon in a name, a symbolic or hard link, a device or FIFO, a GNU
 long name, more than 1000 entries, nesting deeper than 16 directories, a file in it twice, an
 entry past the end or a broken header checksum; pax headers and macOS resource forks (`._*`)
-are skipped. The bytes written are bounded by the upload itself. The console's `models add
-FILE.tar` takes the same archives.
+are skipped. The bytes written are bounded by the (uncompressed) archive itself. The console's
+`models add FILE.tar` (or `FILE.tar.gz`) takes the same archives.
 
 `DELETE /api/admin/models/<repo>` (the repository's slash is part of the path) removes every
 blob of the repository from `models/` (a blob hash removes that blob); refused (`409`, the
@@ -344,7 +349,7 @@ names it in its Store's catalog.
 
 ### Help on refusals
 
-Besides the cases above, a taken name (create, clone, restore, alias) answers help naming the
+Besides the cases above, a taken name (create, clone, restore, import, alias) answers help naming the
 listing; `PUT .../read-only {"readOnly": false}` on a base names the layer to create instead;
 deleting a base that layers name names each layer's `DELETE`; a refused promotion names the
 unload, the materialized export or the model to add (see Promote); unloading a base that loaded
@@ -377,7 +382,7 @@ admin core imports `SOURCE` itself; through a running server the console sends t
 with `SOURCE` made absolute (the server reads it; no upload). Its answer is the import answer
 above; the text names the format, the kind and the state, and lists the notes.
 
-`models add SOURCE` (a model directory, a `.tar` of one or a `.gsnap`) sends the path form
+`models add SOURCE` (a model directory, a `.tar` or `.tar.gz` of one or a `.gsnap`) sends the path form
 with `SOURCE` made absolute when it exists, else
 `SOURCE` as a repository (`{"repo"}`). `models list` prints one line per model blob (repository,
 bytes, short hash, the databases using it, a link warning) and the `needs-model` databases

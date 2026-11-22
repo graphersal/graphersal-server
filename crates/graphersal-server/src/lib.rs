@@ -53,7 +53,9 @@ mod ui_assets;
 
 pub use admin::TmpBuild;
 pub use config::{
-    DEFAULT_LISTEN, DEFAULT_MCP_SESSIONS, DatabaseDefaults, Limits, McpConfig, ServerConfig,
+    DEFAULT_HEADER_TIMEOUT_SECS, DEFAULT_IDLE_TIMEOUT_SECS, DEFAULT_LISTEN,
+    DEFAULT_MAX_CONNECTIONS, DEFAULT_MCP_SESSIONS, DatabaseDefaults, Limits, McpConfig,
+    ServerConfig,
 };
 pub use database::{DatabaseConfig, DatabaseKind, DatabaseRole};
 pub use error::ServerError;
@@ -67,4 +69,4 @@ pub use ops::{
 };
 pub use registry::{DatabaseEntry, DbState, Registry};
 pub use run_file::RunInfo;
-pub use serve::{Running, ServeOptions};
+pub use serve::{ConnectionLimits, Running, ServeOptions};

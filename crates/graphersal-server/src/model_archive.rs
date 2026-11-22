@@ -2,9 +2,12 @@
 //! `POST /api/admin/models`): its detection and a SAFE unpack into a new directory in `tmp/`.
 //!
 //! The format is POSIX ustar (`tar -cf model.tar -C potion-base-8M .`, or `tar -cf model.tar
-//! potion-base-8M`; GNU tar and bsdtar write it, Windows 10+ ships bsdtar), uncompressed: the
-//! weights (f32 safetensors) barely compress, and the server reads ustar already (a model blob
-//! is one), so no dependency is needed. What the unpack takes:
+//! potion-base-8M`; GNU tar and bsdtar write it, Windows 10+ ships bsdtar), uncompressed or
+//! gzip-compressed (`tar -czf model.tar.gz ...`, `.tgz`), told apart by the first bytes (the
+//! gzip magic), never by the file name. A gzip file is first decompressed into a `.tar` file
+//! beside the unpack ([`gunzip`]), at most the caller's cap of bytes (the server's upload
+//! limit): a decompression bomb is refused as soon as the output passes it. What the unpack
+//! takes:
 //! - regular files and directories, at relative paths of plain names (a leading `./` and empty
 //!   components are dropped); an absolute path, a `..` component, a backslash or a `:` in a
 //!   name refuses the WHOLE archive, as do symbolic links, hard links, devices, FIFOs, GNU long
@@ -12,12 +15,13 @@
 //!   a name is always the ustar one), and so are macOS resource forks (`._*`);
 //! - at most [`MAX_ENTRIES`] entries, [`MAX_DEPTH`] directory levels; a file written twice
 //!   refuses the archive; every entry must lie inside the file and pass its header checksum.
-//!   The bytes written are bounded by the archive's own length (the upload limit).
+//!   The bytes written are bounded by the (uncompressed) archive's own length (the upload
+//!   limit).
 //!
 //! The model directory is the archive's root, or its only top-level directory.
 
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Seek, SeekFrom};
+use std::io::{self, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 /// The most entries an archive may hold.
@@ -26,6 +30,60 @@ pub const MAX_ENTRIES: usize = 1000;
 pub const MAX_DEPTH: usize = 16;
 /// The ustar block size.
 const BLOCK: u64 = 512;
+
+/// The first bytes of a gzip member: the magic `1f 8b` and the method 8 (deflate).
+const GZIP_MAGIC: [u8; 3] = [0x1f, 0x8b, 0x08];
+
+/// Whether the file at `path` starts like a gzip file (magic and the deflate method).
+pub(crate) fn is_gzip(path: &Path) -> bool {
+    let mut head = [0u8; 3];
+    File::open(path)
+        .and_then(|mut file| file.read_exact(&mut head))
+        .is_ok()
+        && head == GZIP_MAGIC
+}
+
+/// Decompresses the gzip file `archive` (every member, as `gzip -d` does) into the new file
+/// `out`, at most `max_bytes` bytes, and checks that the result is a tar archive. `Err`: why it
+/// is refused, in words (a corrupt stream, more than `max_bytes`, not a tar inside); whatever
+/// was written stays in `out` for the caller to remove.
+pub(crate) fn gunzip(archive: &Path, out: &Path, max_bytes: u64) -> Result<(), String> {
+    let file = File::open(archive).map_err(|err| format!("cannot read it: {err}"))?;
+    let mut decoder = flate2::read::MultiGzDecoder::new(BufReader::new(file));
+    let mut target = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(out)
+        .map_err(|err| format!("cannot create {}: {err}", out.display()))?;
+    let mut buffer = vec![0u8; 64 * 1024];
+    let mut written = 0u64;
+    loop {
+        let read = match decoder.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(read) => read,
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+            Err(err) => return Err(format!("not a readable gzip file: {err}")),
+        };
+        written += read as u64;
+        if written > max_bytes {
+            return Err(format!(
+                "it decompresses to more than {max_bytes} bytes, the upload limit ([limits] \
+                 upload_bytes in server.toml)"
+            ));
+        }
+        target
+            .write_all(&buffer[..read])
+            .map_err(|err| format!("cannot write {}: {err}", out.display()))?;
+    }
+    target
+        .sync_all()
+        .map_err(|err| format!("cannot write {}: {err}", out.display()))?;
+    drop(target);
+    if !is_tar(out) {
+        return Err("the gzip file does not hold a tar archive".to_string());
+    }
+    Ok(())
+}
 
 /// Whether the file at `path` starts with a ustar header (magic and checksum).
 pub(crate) fn is_tar(path: &Path) -> bool {
@@ -326,6 +384,66 @@ pub(crate) mod tests {
             entries.push(entry(&path, b'0', &data));
         }
         archive(&entries)
+    }
+
+    /// `bytes` gzip-compressed (one member).
+    pub(crate) fn gzip(bytes: &[u8]) -> Vec<u8> {
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(bytes).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    fn gunzip_bytes(bytes: &[u8], max: u64) -> (TempDir, Result<PathBuf, String>) {
+        let temp = TempDir::new("model-gunzip");
+        let file = temp.path().join("a.tar.gz");
+        fs::write(&file, bytes).unwrap();
+        let out = temp.path().join("a.tar");
+        let result = gunzip(&file, &out, max).map(|()| out);
+        (temp, result)
+    }
+
+    #[test]
+    fn a_gzip_tar_decompresses_to_the_same_tar() {
+        let tar = model_tar(3, Some("tiny"));
+        let gz = gzip(&tar);
+        let (temp, out) = gunzip_bytes(&gz, tar.len() as u64);
+        let out = out.unwrap();
+        assert_eq!(fs::read(&out).unwrap(), tar);
+        let file = temp.path().join("a.tar.gz");
+        assert!(is_gzip(&file) && !is_tar(&file));
+        assert!(!is_gzip(&out) && is_tar(&out));
+        // Two members (as `cat a.gz b.gz`) are read as one stream.
+        let (half_a, half_b) = tar.split_at(1024);
+        let mut members = gzip(half_a);
+        members.extend(gzip(half_b));
+        let (_temp, out) = gunzip_bytes(&members, u64::MAX);
+        assert_eq!(fs::read(out.unwrap()).unwrap(), tar);
+    }
+
+    #[test]
+    fn a_decompression_bomb_and_broken_gzip_files_are_refused() {
+        // 64 MiB of zeros compress to about 64 KiB; the cap is 1 MiB.
+        let bomb = gzip(&vec![0u8; 64 << 20]);
+        assert!(bomb.len() < 1 << 20);
+        let (temp, result) = gunzip_bytes(&bomb, 1 << 20);
+        let err = result.unwrap_err();
+        assert!(err.contains("more than 1048576 bytes"), "{err}");
+        // It stopped at the cap (plus at most one buffer), not at 64 MiB.
+        assert!(fs::metadata(temp.path().join("a.tar")).unwrap().len() <= (1 << 20) + 65536);
+        // A corrupt stream, a truncated one, a gzip of something that is not a tar.
+        let mut corrupt = gzip(&model_tar(1, None));
+        for byte in &mut corrupt[20..60] {
+            *byte ^= 0x5a;
+        }
+        let err = gunzip_bytes(&corrupt, u64::MAX).1.unwrap_err();
+        assert!(err.contains("not a readable gzip file"), "{err}");
+        let whole = gzip(&model_tar(1, None));
+        let err = gunzip_bytes(&whole[..whole.len() / 2], u64::MAX)
+            .1
+            .unwrap_err();
+        assert!(err.contains("not a readable gzip file"), "{err}");
+        let err = gunzip_bytes(&gzip(b"plain text"), u64::MAX).1.unwrap_err();
+        assert!(err.contains("does not hold a tar archive"), "{err}");
     }
 
     fn unpack_bytes(bytes: &[u8]) -> (TempDir, Result<PathBuf, String>) {

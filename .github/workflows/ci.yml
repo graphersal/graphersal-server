@@ -4,14 +4,10 @@ name: CI
 # platform the maintainer does not test on locally; macOS and Linux are built and tested by hand):
 # format, clippy, the Rust tests, the web UI's node tests and a smoke test of the built binary.
 #
-# graphersal-server depends on Graphersal's crates by path (`../graphersal/crates/...` in the
-# root Cargo.toml) until Graphersal 0.7.0 is on crates.io. CI therefore clones the public
-# repository https://github.com/graphersal/graphersal (branch `main`, shallow) BESIDE this
-# checkout, into `$GITHUB_WORKSPACE/../graphersal` (actions/checkout cannot write outside the
-# workspace; a plain `git clone` step can), so the committed Cargo.toml resolves unchanged. The
-# same clone provides the playground that graphersal-serve's `ui-assets` feature embeds. No
-# `--locked`: Cargo.lock records the versions of those path crates, which move with Graphersal's
-# `main`.
+# Graphersal's crates come from crates.io, pinned exactly in the root Cargo.toml; every cargo
+# command runs `--locked` against the committed Cargo.lock. The playground the binary embeds
+# ships in the published graphersal-serve crate (its `ui/`), and the node tests find it there
+# through `cargo metadata` (ui/tests/profile.test.mjs; they fail on CI when it is missing).
 #
 # The MSRV (1.88) is not checked here: a second toolchain doubles the build on the slowest
 # runner; check it locally (`cargo +1.88 check --all-targets`).
@@ -49,11 +45,6 @@ jobs:
       - name: No line-ending conversion
         run: git config --global core.autocrlf false
       - uses: actions/checkout@v4
-      - name: Clone graphersal beside the checkout (path dependencies)
-        run: |
-          set -euo pipefail
-          git clone --depth 1 --branch main https://github.com/graphersal/graphersal.git ../graphersal
-          echo "graphersal main at $(git -C ../graphersal rev-parse HEAD)" | tee -a "$GITHUB_STEP_SUMMARY"
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -63,12 +54,12 @@ jobs:
       - name: cargo fmt
         run: cargo fmt --all --check
       - name: cargo clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets -- -D warnings
       # Unit tests (admin core, ops, models, router, console) and tests/server_tests.rs (the
       # binary end to end: init, serve on port 0, the console through a running server, a clean
       # stop by Ctrl+Break). Also builds target/debug/graphersal-server.exe for the smoke test.
       - name: cargo test
-        run: cargo test
+        run: cargo test --locked
       - uses: actions/setup-node@v4
         with:
           node-version: "24"
@@ -79,6 +70,6 @@ jobs:
       - name: Smoke test of the binary (PowerShell)
         shell: pwsh
         run: |
-          cargo build -p graphersal-server
+          cargo build --locked -p graphersal-server
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ./scripts/smoke.ps1 -Bin target/debug/graphersal-server.exe

@@ -237,7 +237,7 @@ impl Admin {
         Ok(out)
     }
 
-    /// The blobs of a model directory, `.tar` or `.gsnap` `path`, adopted into `models/` through a
+    /// The blobs of a model directory, `.tar`, `.tar.gz` or `.gsnap` `path`, adopted into `models/` through a
     /// scratch Store in `tmp/` (removed afterwards).
     fn harvest(
         &self,
@@ -261,6 +261,23 @@ impl Admin {
             let root = model_archive::unpack(path, unpacked.path()).map_err(|why| {
                 model_input(&label, &format!("not a usable model archive: {why}"))
             })?;
+            import_dir(scratch.path(), &root, spec, &label, notes)?;
+        } else if model_archive::is_gzip(path) {
+            // A gzip-compressed tar archive: decompressed into `tmp/` (at most the upload
+            // limit: a decompression bomb is refused), then unpacked like a `.tar`.
+            let limit = self.registry.dir().load_config()?.limits.upload_bytes;
+            let plain = Scratch::new(&tmp, "models-gunzip")?;
+            fs::create_dir_all(plain.path())
+                .map_err(|err| ServerError::io("create directory", plain.path(), err))?;
+            let tar = plain.path().join("model.tar");
+            model_archive::gunzip(path, &tar, limit).map_err(|why| {
+                model_input(&label, &format!("not a usable model archive: {why}"))
+            })?;
+            let unpacked = Scratch::new(&tmp, "models-unpack")?;
+            let root = model_archive::unpack(&tar, unpacked.path()).map_err(|why| {
+                model_input(&label, &format!("not a usable model archive: {why}"))
+            })?;
+            drop(plain);
             import_dir(scratch.path(), &root, spec, &label, notes)?;
         } else {
             let file = File::open(path).map_err(|err| ServerError::io("read", path, err))?;

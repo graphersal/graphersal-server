@@ -6,8 +6,21 @@
 //! `server.run`, scans the database registry ([`Registry::scan`]; `/readyz` answers
 //! `503 loading` until it is done), starts loading the `auto_load` databases in the background
 //! ([`Loader::auto_load`]), shares the model blobs of every idle database through `models/`
-//! on a background thread ([`crate::ops::Admin::adopt_all`]), and serves HTTP/1.1 with
-//! `hyper` server connections on a `tokio` multi-thread runtime that [`Running`] owns.
+//! on a background thread ([`crate::ops::Admin::adopt_all`]), and serves HTTP/1.1 and h2c
+//! (HTTP/2 over plain TCP with prior knowledge: a connection that starts with the HTTP/2
+//! preface) with `hyper` server connections on a `tokio` multi-thread runtime that
+//! [`Running`] owns.
+//!
+//! Connections: at most `[limits] max_connections` are served at once ([`ConnectionLimits`]);
+//! one more is accepted, answered `503` with `Retry-After: 1` (in its own protocol) and closed,
+//! so a client learns at once instead of hanging in the accept queue (beyond a further
+//! [`OVERFLOW_CONNECTIONS`] being refused that way, a connection is closed unanswered). A
+//! request's head must arrive within `header_timeout_secs` (HTTP/1.1: hyper's header read
+//! timeout, counted from the moment the connection waits for a request; HTTP/2: the idle
+//! timeout below covers a connection that never completes a request); a connection without a
+//! running request is closed after `idle_timeout_secs`. A body is never cut by a whole-request
+//! timeout (a large upload streams for minutes): its reads wait at most 120 s for each next
+//! piece.
 //!
 //! The router, the session jobs and every file I/O are blocking: each request is answered on
 //! the runtime's blocking pool (`spawn_blocking`), never on an async worker. The request body
@@ -23,7 +36,9 @@
 //! the answer (a short declared rest is drained instead, keeping the connection). A connection
 //! ends with a lingering close: the server shuts its sending side (the client sees the answer,
 //! then EOF) and discards what the client still sends for at most two seconds before the socket
-//! is closed, so the answer is never lost to a reset.
+//! is closed, so the answer is never lost to a reset. All of this is HTTP/1.1; on HTTP/2 the
+//! oversize answer is the same `413` (the stream is reset after it, the connection stays), and
+//! the connection ends with HTTP/2's own GOAWAY instead of a lingering close.
 //!
 //! [`Running::stop`] stops it: the lifecycle answers `503 stopping`, the listening socket is
 //! closed, idle connections are closed and running requests get five seconds to finish,
@@ -42,22 +57,23 @@ use std::io::{self, ErrorKind, Read};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use graphersal_serve::{Exposure, HostCheck, Method};
 use hyper::body::{Body, Bytes, Frame, Incoming, SizeHint};
 use hyper::header::{CONNECTION, CONTENT_LENGTH, EXPECT, HeaderName, HeaderValue};
-use hyper::server::conn::http1;
+use hyper::server::conn::{http1, http2};
 use hyper::service::service_fn;
-use hyper::{HeaderMap, StatusCode};
-use hyper_util::rt::{TokioIo, TokioTimer};
+use hyper::{HeaderMap, StatusCode, Version};
+use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::runtime::{Handle, Runtime};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch};
 use tokio::task::JoinHandle;
 
+use crate::config::Limits;
 use crate::error::ServerError;
 use crate::layout::ServerDir;
 use crate::loader::Loader;
@@ -93,6 +109,53 @@ const DOWNLOAD_CHUNK: usize = 64 * 1024;
 /// How many chunks of a download wait for the client.
 const DOWNLOAD_QUEUE: usize = 8;
 
+/// How many connections over the cap are still answered `503` at once; more are closed
+/// unanswered (a flood must not cost more than this).
+pub const OVERFLOW_CONNECTIONS: usize = 64;
+
+/// How long an over-the-cap connection may take to send its request before it is closed.
+const OVERFLOW_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The streams one HTTP/2 connection may run at once (every request runs on the blocking pool).
+const H2_MAX_STREAMS: u32 = 64;
+
+/// The HTTP/2 connection preface a client with prior knowledge starts with.
+const H2_PREFACE: &[u8; 24] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
+
+/// The connection limits a server runs with: `server.toml`'s `[limits]` with the `serve`
+/// options over them (module docs).
+///
+/// `#[non_exhaustive]`: read it from [`Running::connection_limits`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ConnectionLimits {
+    /// The largest number of open connections served at once.
+    pub max_connections: usize,
+    /// How long a request's head may take to arrive.
+    pub header_timeout: Duration,
+    /// How long a connection without a running request stays open.
+    pub idle_timeout: Duration,
+}
+
+impl ConnectionLimits {
+    /// The limits of `limits` with the options' overrides.
+    fn of(limits: &Limits, options: &ServeOptions) -> Self {
+        Self {
+            max_connections: options.max_connections.unwrap_or(limits.max_connections),
+            header_timeout: Duration::from_secs(
+                options
+                    .header_timeout_secs
+                    .unwrap_or(limits.header_timeout_secs),
+            ),
+            idle_timeout: Duration::from_secs(
+                options
+                    .idle_timeout_secs
+                    .unwrap_or(limits.idle_timeout_secs),
+            ),
+        }
+    }
+}
+
 /// The options of [`start`].
 ///
 /// `#[non_exhaustive]`: build it with [`ServeOptions::new`] and its setters.
@@ -101,6 +164,12 @@ const DOWNLOAD_QUEUE: usize = 8;
 pub struct ServeOptions {
     /// The listen address, overriding `server.toml`'s `listen`.
     pub listen: Option<SocketAddr>,
+    /// The largest number of open connections, overriding `[limits] max_connections`.
+    pub max_connections: Option<usize>,
+    /// The header timeout in seconds, overriding `[limits] header_timeout_secs`.
+    pub header_timeout_secs: Option<u64>,
+    /// The idle timeout in seconds, overriding `[limits] idle_timeout_secs`.
+    pub idle_timeout_secs: Option<u64>,
 }
 
 impl ServeOptions {
@@ -114,6 +183,27 @@ impl ServeOptions {
         self.listen = Some(listen);
         self
     }
+
+    /// The options with the largest number of open connections (at least 1, else `start`
+    /// refuses it) overriding `[limits] max_connections`.
+    pub fn with_max_connections(mut self, max: usize) -> Self {
+        self.max_connections = Some(max);
+        self
+    }
+
+    /// The options with the header timeout in seconds (at least 1) overriding
+    /// `[limits] header_timeout_secs`.
+    pub fn with_header_timeout_secs(mut self, secs: u64) -> Self {
+        self.header_timeout_secs = Some(secs);
+        self
+    }
+
+    /// The options with the idle timeout in seconds (at least 1) overriding
+    /// `[limits] idle_timeout_secs`.
+    pub fn with_idle_timeout_secs(mut self, secs: u64) -> Self {
+        self.idle_timeout_secs = Some(secs);
+        self
+    }
 }
 
 /// What the connections share.
@@ -121,6 +211,14 @@ struct Shared {
     router: Router,
     /// The requests being answered (a download until its last byte is handed over).
     in_flight: AtomicUsize,
+    /// The connection limits.
+    limits: ConnectionLimits,
+    /// One permit per served connection (`max_connections`).
+    connections: Arc<Semaphore>,
+    /// One permit per connection being refused with `503` ([`OVERFLOW_CONNECTIONS`]).
+    overflow: Arc<Semaphore>,
+    /// Whether the cap was reached and not left since (one warning per episode).
+    saturated: AtomicBool,
 }
 
 /// The listener: its runtime, the accept task and the stop signal.
@@ -143,6 +241,23 @@ pub struct Running {
     exposure: Exposure,
 }
 
+/// A `ServerError::Config`-style refusal of a `serve` option that is 0.
+fn check_limits(limits: &ConnectionLimits) -> Result<(), ServerError> {
+    for (name, zero) in [
+        ("max_connections", limits.max_connections == 0),
+        ("header_timeout_secs", limits.header_timeout.is_zero()),
+        ("idle_timeout_secs", limits.idle_timeout.is_zero()),
+    ] {
+        if zero {
+            return Err(ServerError::Config {
+                path: std::path::PathBuf::from(crate::layout::CONFIG_FILE),
+                message: format!("limits.{name}: must be at least 1"),
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Starts serving the server directory `root` (module docs).
 pub fn start(
     root: impl Into<std::path::PathBuf>,
@@ -154,6 +269,8 @@ pub fn start(
         Some(listen) => listen,
         None => config.listen_addr()?,
     };
+    let limits = ConnectionLimits::of(&config.limits, &options);
+    check_limits(&limits)?;
     // The lock before the bind: a second server is refused for what it is, not for its port.
     let lock = ServerLock::acquire(&dir)?;
     let bind_error = |message: String| ServerError::Bind {
@@ -190,6 +307,10 @@ pub fn start(
     let shared = Arc::new(Shared {
         router: Router::new(host_check.clone()),
         in_flight: AtomicUsize::new(0),
+        limits,
+        connections: Arc::new(Semaphore::new(limits.max_connections)),
+        overflow: Arc::new(Semaphore::new(OVERFLOW_CONNECTIONS)),
+        saturated: AtomicBool::new(false),
     });
     RunInfo::new(address, url.clone()).write(&dir)?;
     let (stop, stop_rx) = watch::channel(false);
@@ -289,6 +410,11 @@ impl Running {
         &self.loader
     }
 
+    /// The connection limits the server runs with.
+    pub fn connection_limits(&self) -> ConnectionLimits {
+        self.shared.limits
+    }
+
     /// Stops the server (module docs): `Err` only when `server.run` cannot be removed (the
     /// server is stopped and its lock released anyway).
     pub fn stop(mut self) -> Result<(), ServerError> {
@@ -357,7 +483,7 @@ async fn accept(
             accepted = socket.accept() => match accepted {
                 Ok((stream, _peer)) => {
                     let _ = stream.set_nodelay(true);
-                    tokio::spawn(connection(stream, shared.clone(), stop.clone()));
+                    admit(stream, &shared, &stop);
                 }
                 Err(err) => {
                     tracing::warn!(
@@ -373,39 +499,302 @@ async fn accept(
     }
 }
 
+/// Serves `stream` when a connection permit is free; else refuses it with `503` (or, past
+/// [`OVERFLOW_CONNECTIONS`] refusals at once, closes it).
+fn admit(stream: tokio::net::TcpStream, shared: &Arc<Shared>, stop: &watch::Receiver<bool>) {
+    match shared.connections.clone().try_acquire_owned() {
+        Ok(permit) => {
+            shared.saturated.store(false, Ordering::Relaxed);
+            tokio::spawn(connection(stream, shared.clone(), stop.clone(), permit));
+        }
+        Err(_) => {
+            if !shared.saturated.swap(true, Ordering::Relaxed) {
+                tracing::warn!(
+                    target: "graphersal_server",
+                    "{} connections are open, the limit ([limits] max_connections): further \
+                     connections are answered 503 until one closes",
+                    shared.limits.max_connections
+                );
+            }
+            match shared.overflow.clone().try_acquire_owned() {
+                Ok(permit) => {
+                    tokio::spawn(refuse_connection(stream, shared.limits, permit));
+                }
+                Err(_) => drop(stream),
+            }
+        }
+    }
+}
+
+/// The protocol a connection speaks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Protocol {
+    Http1,
+    Http2,
+}
+
+/// The protocol of `stream` from its first bytes, peeked (never consumed): HTTP/2 when they
+/// are the HTTP/2 preface, HTTP/1.1 as soon as they differ from it (at once for every HTTP/1
+/// method but a `P...` one, after a byte or two for those) or the client closes. `None` when
+/// the client sends nothing decisive within `timeout`.
+async fn sniff(stream: &tokio::net::TcpStream, timeout: Duration) -> Option<Protocol> {
+    let decide = async {
+        let mut buffer = [0u8; H2_PREFACE.len()];
+        loop {
+            let read = stream.peek(&mut buffer).await.ok()?;
+            if read == 0 || buffer[..read] != H2_PREFACE[..read] {
+                return Some(Protocol::Http1);
+            }
+            if read == H2_PREFACE.len() {
+                return Some(Protocol::Http2);
+            }
+            // A prefix of the preface so far: wait for the rest (peeking again at once would
+            // spin, the socket stays readable).
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    };
+    tokio::time::timeout(timeout, decide).await.ok().flatten()
+}
+
+/// The activity of one connection: its running requests and when the last one ended (the
+/// idle timeout).
+struct Activity {
+    /// The requests of this connection being answered.
+    active: AtomicUsize,
+    /// When the connection became idle, in milliseconds after `epoch`.
+    idle_since: AtomicU64,
+    epoch: Instant,
+}
+
+impl Activity {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            active: AtomicUsize::new(0),
+            idle_since: AtomicU64::new(0),
+            epoch: Instant::now(),
+        })
+    }
+
+    /// When the connection times out if nothing happens: `None` while a request runs.
+    fn idle_deadline(&self, idle: Duration) -> Option<Instant> {
+        if self.active.load(Ordering::SeqCst) > 0 {
+            return None;
+        }
+        let since = Duration::from_millis(self.idle_since.load(Ordering::SeqCst));
+        Some(self.epoch + since + idle)
+    }
+
+    fn begin(&self) {
+        self.active.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn end(&self) {
+        let millis = u64::try_from(self.epoch.elapsed().as_millis()).unwrap_or(u64::MAX);
+        self.idle_since.store(millis, Ordering::SeqCst);
+        self.active.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 /// The boxed future of one answer (hyper wants an `Unpin` service future).
 type Answering =
     Pin<Box<dyn Future<Output = Result<hyper::Response<Outgoing>, Infallible>> + Send>>;
 
-/// Serves one connection until it ends, then closes it with a lingering close.
+/// Serves one connection until it ends (HTTP/1.1: then closes it with a lingering close);
+/// `_permit` is its place under the connection cap.
 async fn connection(
     stream: tokio::net::TcpStream,
     shared: Arc<Shared>,
-    mut stop: watch::Receiver<bool>,
+    stop: watch::Receiver<bool>,
+    _permit: OwnedSemaphorePermit,
 ) {
-    let service = service_fn(move |request: hyper::Request<Incoming>| -> Answering {
-        Box::pin(respond(shared.clone(), request))
-    });
-    let mut conn = http1::Builder::new()
-        .timer(TokioTimer::new())
-        .title_case_headers(true)
-        .serve_connection(TokioIo::new(stream), service);
-    let mut stopping = *stop.borrow();
-    let mut shut = false;
-    let result = loop {
-        if stopping && !shut {
-            shut = true;
-            Pin::new(&mut conn).graceful_shutdown();
+    let limits = shared.limits;
+    let Some(protocol) = sniff(&stream, limits.header_timeout).await else {
+        tracing::debug!(target: "graphersal_server", "a connection sent no request in time");
+        return;
+    };
+    let activity = Activity::new();
+    let service = {
+        let activity = activity.clone();
+        service_fn(move |request: hyper::Request<Incoming>| -> Answering {
+            Box::pin(respond(shared.clone(), activity.clone(), request))
+        })
+    };
+    match protocol {
+        Protocol::Http1 => {
+            let mut conn = http1::Builder::new()
+                .timer(TokioTimer::new())
+                .header_read_timeout(limits.header_timeout)
+                .title_case_headers(true)
+                .serve_connection(TokioIo::new(stream), service);
+            let mut idle = Idle::new(stop, &activity, limits.idle_timeout);
+            let result = loop {
+                if idle.shut_now() {
+                    Pin::new(&mut conn).graceful_shutdown();
+                }
+                tokio::select! {
+                    result = std::future::poll_fn(|cx| conn.poll_without_shutdown(cx)) => {
+                        break result;
+                    }
+                    () = idle.next() => {}
+                }
+            };
+            if let Err(err) = result {
+                tracing::debug!(target: "graphersal_server", "a connection ended: {err}");
+            }
+            linger(conn.into_parts().io.into_inner()).await;
         }
+        Protocol::Http2 => {
+            let conn = http2::Builder::new(TokioExecutor::new())
+                .max_concurrent_streams(H2_MAX_STREAMS)
+                .serve_connection(TokioIo::new(stream), service);
+            let mut conn = std::pin::pin!(conn);
+            let mut idle = Idle::new(stop, &activity, limits.idle_timeout);
+            let result = loop {
+                if idle.shut_now() {
+                    conn.as_mut().graceful_shutdown();
+                }
+                tokio::select! {
+                    result = conn.as_mut() => break result,
+                    () = idle.next() => {}
+                }
+            };
+            if let Err(err) = result {
+                tracing::debug!(target: "graphersal_server", "an HTTP/2 connection ended: {err}");
+            }
+        }
+    }
+}
+/// When a served connection is shut down gracefully: the server stops, or the connection was
+/// idle (no running request) for the idle timeout.
+struct Idle<'a> {
+    stop: watch::Receiver<bool>,
+    activity: &'a Activity,
+    timeout: Duration,
+    /// The server stops, or the idle timeout passed.
+    due: bool,
+    /// The graceful shutdown was started.
+    shut: bool,
+}
+
+impl<'a> Idle<'a> {
+    fn new(stop: watch::Receiver<bool>, activity: &'a Activity, timeout: Duration) -> Self {
+        let due = *stop.borrow();
+        Self {
+            stop,
+            activity,
+            timeout,
+            due,
+            shut: false,
+        }
+    }
+
+    /// Whether the graceful shutdown starts now (once).
+    fn shut_now(&mut self) -> bool {
+        if self.due && !self.shut {
+            self.shut = true;
+            return true;
+        }
+        false
+    }
+
+    /// Resolves when the server stops or the idle deadline passes (never once due); the
+    /// caller then asks [`Self::shut_now`].
+    async fn next(&mut self) {
+        if self.due {
+            return std::future::pending().await;
+        }
+        let deadline = self.activity.idle_deadline(self.timeout);
         tokio::select! {
-            result = std::future::poll_fn(|cx| conn.poll_without_shutdown(cx)) => break result,
-            _ = stop.changed(), if !stopping => stopping = true,
+            _ = self.stop.changed() => self.due = true,
+            () = sleep_until(deadline) => {
+                // A request may have begun or ended meanwhile: due only when still idle past
+                // the deadline.
+                if self
+                    .activity
+                    .idle_deadline(self.timeout)
+                    .is_some_and(|deadline| Instant::now() >= deadline)
+                {
+                    tracing::debug!(target: "graphersal_server", "closing an idle connection");
+                    self.due = true;
+                }
+            }
+        }
+    }
+}
+
+/// Sleeps until `deadline`; `None` (a request runs) re-checks after a second.
+async fn sleep_until(deadline: Option<Instant>) {
+    let deadline = deadline.unwrap_or_else(|| Instant::now() + Duration::from_secs(1));
+    tokio::time::sleep_until(deadline.into()).await;
+}
+
+/// Answers an over-the-cap connection `503` with `Retry-After: 1` in its own protocol, then
+/// closes it (`_permit` is its place among [`OVERFLOW_CONNECTIONS`]).
+async fn refuse_connection(
+    stream: tokio::net::TcpStream,
+    limits: ConnectionLimits,
+    _permit: OwnedSemaphorePermit,
+) {
+    let refuse = async move {
+        let protocol = sniff(&stream, OVERFLOW_TIMEOUT).await?;
+        let service = service_fn(move |request: hyper::Request<Incoming>| {
+            std::future::ready(Ok::<_, Infallible>(over_capacity(
+                limits,
+                request.version(),
+            )))
+        });
+        match protocol {
+            Protocol::Http1 => {
+                let mut conn = http1::Builder::new()
+                    .timer(TokioTimer::new())
+                    .header_read_timeout(OVERFLOW_TIMEOUT)
+                    .keep_alive(false)
+                    .title_case_headers(true)
+                    .serve_connection(TokioIo::new(stream), service);
+                let _ = std::future::poll_fn(|cx| conn.poll_without_shutdown(cx)).await;
+                Some(conn.into_parts().io.into_inner())
+            }
+            Protocol::Http2 => {
+                let conn = http2::Builder::new(TokioExecutor::new())
+                    .max_concurrent_streams(1)
+                    .serve_connection(TokioIo::new(stream), service);
+                let mut conn = std::pin::pin!(conn);
+                // GOAWAY at once: the request the client sent with its preface is still
+                // answered, then the connection ends.
+                conn.as_mut().graceful_shutdown();
+                let _ = conn.await;
+                None
+            }
         }
     };
-    if let Err(err) = result {
-        tracing::debug!(target: "graphersal_server", "a connection ended: {err}");
+    if let Ok(Some(stream)) = tokio::time::timeout(OVERFLOW_TIMEOUT * 2, refuse).await {
+        linger(stream).await;
     }
-    linger(conn.into_parts().io.into_inner()).await;
+}
+
+/// The `503` of a connection over the cap.
+fn over_capacity(limits: ConnectionLimits, version: Version) -> hyper::Response<Outgoing> {
+    let body = serde_json::json!({
+        "error": format!(
+            "the server is at its connection limit ({} open connections); try again shortly",
+            limits.max_connections
+        ),
+        "help": "the limit is [limits] max_connections in server.toml (serve --max-connections N)",
+    });
+    let mut response = build(
+        503,
+        &[
+            ("Content-Type".to_string(), "application/json".to_string()),
+            ("Retry-After".to_string(), "1".to_string()),
+        ],
+        Outgoing::full(body.to_string().into_bytes()),
+    );
+    if version != Version::HTTP_2 {
+        response
+            .headers_mut()
+            .insert(CONNECTION, HeaderValue::from_static("close"));
+    }
+    response
 }
 
 /// Shuts the sending side (the client reads the answer, then EOF), then discards what the
@@ -425,18 +814,21 @@ async fn linger(mut stream: tokio::net::TcpStream) {
     .await;
 }
 
-/// A request being answered: counted down however its answer ends.
-struct InFlight(Arc<Shared>);
+/// A request being answered: counted down (on the server and on its connection) however its
+/// answer ends.
+struct InFlight(Arc<Shared>, Arc<Activity>);
 
 impl InFlight {
-    fn new(shared: &Arc<Shared>) -> Self {
+    fn new(shared: &Arc<Shared>, activity: &Arc<Activity>) -> Self {
         shared.in_flight.fetch_add(1, Ordering::SeqCst);
-        Self(shared.clone())
+        activity.begin();
+        Self(shared.clone(), activity.clone())
     }
 }
 
 impl Drop for InFlight {
     fn drop(&mut self) {
+        self.1.end();
         self.0.in_flight.fetch_sub(1, Ordering::SeqCst);
     }
 }
@@ -451,9 +843,11 @@ struct Reply {
 /// Answers one request: the router on the blocking pool, then the answer as hyper writes it.
 async fn respond(
     shared: Arc<Shared>,
+    activity: Arc<Activity>,
     request: hyper::Request<Incoming>,
 ) -> Result<hyper::Response<Outgoing>, Infallible> {
-    let in_flight = InFlight::new(&shared);
+    let in_flight = InFlight::new(&shared, &activity);
+    let version = request.version();
     let handle = Handle::current();
     let blocking = handle.clone();
     let reply = tokio::task::spawn_blocking(move || answer(&shared, request, blocking)).await;
@@ -485,7 +879,8 @@ async fn respond(
             build(200, &headers, Outgoing::stream(rx, length))
         }
     };
-    if reply.close {
+    // HTTP/2 has no `Connection` header (the stream ends on its own).
+    if reply.close && version != Version::HTTP_2 {
         response
             .headers_mut()
             .insert(CONNECTION, HeaderValue::from_static("close"));
@@ -496,7 +891,16 @@ async fn respond(
 /// The blocking part of a request: the limits, the router, the unread body.
 fn answer(shared: &Shared, request: hyper::Request<Incoming>, handle: Handle) -> Reply {
     let (parts, body) = request.into_parts();
-    let headers = header_list(&parts.headers);
+    let mut headers = header_list(&parts.headers);
+    // HTTP/2 names the host in `:authority`, not `Host`: the Host check reads it as `Host`.
+    if parts.version == Version::HTTP_2
+        && !headers
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("Host"))
+        && let Some(authority) = parts.uri.authority()
+    {
+        headers.push(("host".to_string(), authority.as_str().to_string()));
+    }
     let declared = parts
         .headers
         .get(CONTENT_LENGTH)
@@ -800,3 +1204,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "serve_tests.rs"]
+mod connection_tests;

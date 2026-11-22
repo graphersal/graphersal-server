@@ -3,9 +3,9 @@
 // the ones waiting for it with "Give to waiting" (`{repo}`), a warning when a database holds a
 // copy instead of a hard link), the `needs-model` databases whose model models/ does not hold,
 // add (`POST api/admin/models`: a file uploaded from this browser (a .gsnap carrying model blobs
-// or an uncompressed .tar of a Model2Vec model directory, the raw body through XMLHttpRequest
+// or a .tar / .tar.gz of a Model2Vec model directory, the raw body through XMLHttpRequest
 // for the progress bar like the Import tab, the size checked against the root `/api/info`
-// `uploadBytes` (`api.info.host`) first; Cancel aborts it), a model directory, .tar or .gsnap on
+// `uploadBytes` (`api.info.host`) first; Cancel aborts it), a model directory, .tar(.gz) or .gsnap on
 // the server, or a repository models/ already holds; every add also resolves the waiting
 // databases) and remove (`DELETE api/admin/models/<repo>`; refused with help while a database
 // uses it). Rules and texts: ./admin-api.js (`modelUploadRequest`, `addModelBody`). The models
@@ -206,7 +206,7 @@ export default {
             <td class="mono">{{ m.model }}</td>
             <td class="srv-actions">
               <button v-if="held(m.model)" type="button" class="btn small" :disabled="!!busy['repo:' + m.model]" title="models/ holds it: give it to the waiting databases" @click="addByRepo(m.model)">Use from models/</button>
-              <button v-else type="button" class="btn small" title="Add it: upload a .gsnap or a .tar of the model directory, or name one on the server" @click="openAdd({ repo: m.model })">Add…</button>
+              <button v-else type="button" class="btn small" title="Add it: upload a .gsnap or a .tar / .tar.gz of the model directory, or name one on the server" @click="openAdd({ repo: m.model })">Add…</button>
             </td>
           </tr>
         </tbody>
@@ -224,11 +224,11 @@ export default {
           <fieldset :disabled="dialog.busy">
             <legend>From</legend>
             <label class="inline"><input type="radio" value="upload" v-model="dialog.form.source"> A file from this computer (uploaded)</label>
-            <label class="inline"><input type="radio" value="path" v-model="dialog.form.source"> A Model2Vec model directory, .tar or .gsnap on the server's machine</label>
+            <label class="inline"><input type="radio" value="path" v-model="dialog.form.source"> A Model2Vec model directory, .tar, .tar.gz or .gsnap on the server's machine</label>
             <label class="inline"><input type="radio" value="repo" v-model="dialog.form.source"> A repository models/ already holds</label>
           </fieldset>
-          <label v-if="dialog.form.source === 'upload'">File (.gsnap carrying models, or an uncompressed .tar of a model directory)
-            <input ref="fileInput" type="file" name="file" accept=".gsnap,.tar" @change="pickFile" :disabled="dialog.busy">
+          <label v-if="dialog.form.source === 'upload'">File (.gsnap carrying models, or a .tar or .tar.gz of a model directory)
+            <input ref="fileInput" type="file" name="file" accept=".gsnap,.tar,.tar.gz,.tgz" @change="pickFile" :disabled="dialog.busy">
             <span class="muted srv-sub">{{ limit ? 'Up to ' + bytesText(limit) + ' per upload.' : '' }}<template v-if="dialog.form.file"> This file: {{ bytesText(dialog.form.file.size) }}.</template></span></label>
           <p v-if="fileProblem" class="srv-problems" role="alert">{{ fileProblem }}</p>
           <label v-if="dialog.form.source === 'path'">Absolute path
