@@ -722,3 +722,46 @@ fn uploads_over_the_limit_are_refused_with_413() {
     running.stop().unwrap();
     assert_eq!(tmp_count(&dir), 0);
 }
+
+#[test]
+fn an_import_on_a_taken_name_answers_the_help_by_upload_and_by_path() {
+    let temp = TempDir::new("import-taken-help");
+    let dir = server(&temp);
+    let file = temp.path().join("modern.gsnap");
+    modern_snapshot(&file);
+    let running = start(&dir);
+    let address = running.address();
+    let help = "choose another name: GET /api/admin/databases lists the taken names (databases \
+                and aliases share one namespace, case-insensitive)";
+
+    let bytes = fs::read(&file).unwrap();
+    let (status, answer) = upload(
+        address,
+        "/api/admin/import?name=taken",
+        bytes.len() as u64,
+        Some(&mut bytes.as_slice()),
+    );
+    assert_eq!(status, 201, "{answer}");
+    // The upload form: refused before the body is read, case-insensitive.
+    for name in ["taken", "TAKEN"] {
+        let (status, answer) = upload(
+            address,
+            &format!("/api/admin/import?name={name}"),
+            bytes.len() as u64,
+            Some(&mut bytes.as_slice()),
+        );
+        assert_eq!(status, 409, "{answer}");
+        assert_eq!(answer["help"], help, "{answer}");
+    }
+    // The path form (the console's while a server runs).
+    let (status, answer) = crate::client::request(
+        address,
+        "POST",
+        "/api/admin/import",
+        Some(&json!({ "path": file.to_str().unwrap(), "name": "taken" })),
+    )
+    .unwrap();
+    assert_eq!(status, 409, "{answer}");
+    assert_eq!(answer["help"], help, "{answer}");
+    assert_eq!(tmp_count(&dir), 0);
+}

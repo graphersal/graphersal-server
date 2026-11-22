@@ -412,7 +412,8 @@ fn import_upload(admin: &Admin, request: &mut Request<'_>) -> Result<Response, H
             name: entry.name,
             holder: "database",
         };
-        return Ok(error_answer(&err, None));
+        let help = name_taken_help(&err);
+        return Ok(error_answer(&err, help));
     }
     let (upload, received) = receive_upload(admin, request, "import")?;
     tracing::info!(
@@ -573,7 +574,7 @@ fn import_answer(
                      or restore that base first (role = base), or name it with base=<name>"
                         .to_string(),
                 ),
-                _ => None,
+                _ => name_taken_help(&err),
             };
             error_answer(&err, help)
         }
@@ -817,7 +818,7 @@ fn layers_of(registry: &Registry, key: &str) -> Vec<String> {
         .collect()
 }
 
-/// The help of a name already taken (create, clone, restore, alias).
+/// The help of a name already taken (create, clone, restore, import, alias).
 fn name_taken_help(err: &ServerError) -> Option<String> {
     matches!(err, ServerError::NameInUse { .. }).then(|| {
         "choose another name: GET /api/admin/databases lists the taken names (databases and \

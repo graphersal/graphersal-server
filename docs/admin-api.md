@@ -344,7 +344,7 @@ names it in its Store's catalog.
 
 ### Help on refusals
 
-Besides the cases above, a taken name (create, clone, restore, alias) answers help naming the
+Besides the cases above, a taken name (create, clone, restore, import, alias) answers help naming the
 listing; `PUT .../read-only {"readOnly": false}` on a base names the layer to create instead;
 deleting a base that layers name names each layer's `DELETE`; a refused promotion names the
 unload, the materialized export or the model to add (see Promote); unloading a base that loaded

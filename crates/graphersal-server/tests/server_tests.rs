@@ -1450,6 +1450,45 @@ fn import_offline_and_through_a_server() {
     stop_and_wait(&mut server);
 }
 
+#[test]
+fn import_on_a_taken_name_shows_the_console_help_offline_and_through_a_server() {
+    use graphersal::prelude::{Graph, GraphExport, TraversalGraph};
+    let temp = TempDir::new("console-import-taken");
+    let dir = ServerDir::init(temp.path().join("srv")).unwrap().dir;
+    let root = dir.root().to_str().unwrap().to_string();
+    let graphson = temp.path().join("modern.json");
+    Graph::new(TraversalGraph::tinkerpop_modern())
+        .export_graphson_writer(std::fs::File::create(&graphson).unwrap())
+        .unwrap();
+    let source = graphson.to_str().unwrap();
+    let (code, _, err) = import(&[&root, source, "--name", "gs"]);
+    assert_eq!(code, 0, "{err}");
+    let help = format!(
+        "\nHelp: choose another name: graphersal-server db list --dir {root} lists the taken \
+         names (databases and aliases share one namespace, case-insensitive)"
+    );
+
+    // Offline.
+    let (code, _, err) = import(&[&root, source, "--name", "gs"]);
+    assert_eq!(code, 1);
+    assert!(err.contains(&help), "{err}");
+    assert!(!err.contains("/api/admin"), "{err}");
+
+    // Through a running server (the path form of the route).
+    let mut server = ServerProcess::spawn(
+        Command::new(BIN)
+            .args(["serve", "--dir", &root, "--listen", "127.0.0.1:0"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped()),
+    );
+    wait_for_run_file(&dir);
+    let (code, _, err) = import(&[&root, source, "--name", "gs"]);
+    assert_eq!(code, 1);
+    assert!(err.contains(&help), "{err}");
+    assert!(!err.contains("/api/admin"), "{err}");
+    stop_and_wait(&mut server);
+}
+
 /// Runs `graphersal-server models ARGS --dir DIR`: (exit code, stdout, stderr).
 fn models(dir: &Path, args: &[&str]) -> (i32, String, String) {
     let out = Command::new(BIN)
