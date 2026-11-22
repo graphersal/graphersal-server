@@ -44,6 +44,49 @@ impl Drop for TempDir {
 /// A server process, killed on drop if it still runs.
 struct ServerProcess(Child);
 
+impl ServerProcess {
+    /// Spawns `command` (a `serve`). On Windows in its own process group, so that
+    /// [`send_stop`] can send it Ctrl+Break without reaching the test process.
+    fn spawn(command: &mut Command) -> Self {
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+            command.creation_flags(CREATE_NEW_PROCESS_GROUP);
+        }
+        Self(command.spawn().unwrap())
+    }
+}
+
+/// Asks the server to stop cleanly: SIGTERM on Unix, Ctrl+Break to its process group on Windows
+/// (the console event the `ctrlc` handler of `serve` takes for SIGTERM there).
+fn send_stop(server: &ServerProcess) {
+    #[cfg(unix)]
+    {
+        let status = Command::new("kill")
+            .args(["-TERM", &server.0.id().to_string()])
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+    #[cfg(windows)]
+    {
+        const CTRL_BREAK_EVENT: u32 = 1;
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GenerateConsoleCtrlEvent(event: u32, process_group: u32) -> i32;
+        }
+        // SAFETY: a plain Win32 call with integer arguments; the group id is the child's pid
+        // (it was spawned with CREATE_NEW_PROCESS_GROUP by `ServerProcess::spawn`).
+        let sent = unsafe { GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, server.0.id()) };
+        assert!(
+            sent != 0,
+            "GenerateConsoleCtrlEvent failed: {}",
+            std::io::Error::last_os_error()
+        );
+    }
+}
+
 impl Drop for ServerProcess {
     fn drop(&mut self) {
         let _ = self.0.kill();
@@ -202,13 +245,11 @@ fn serve_answers_refuses_a_second_server_and_stops_cleanly() {
     let temp = TempDir::new("serve");
     let dir = ServerDir::init(temp.path()).unwrap().dir;
     let root = temp.path().to_str().unwrap();
-    let mut server = ServerProcess(
+    let mut server = ServerProcess::spawn(
         Command::new(BIN)
             .args(["serve", "--dir", root, "--listen", "127.0.0.1:0"])
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap(),
+            .stderr(Stdio::piped()),
     );
     let info = wait_for_run_file(&dir);
     assert_eq!(info.pid, server.0.id());
@@ -327,13 +368,11 @@ fn a_network_bind_warns_exactly_once_in_the_start_block() {
     let temp = TempDir::new("network");
     let dir = ServerDir::init(temp.path()).unwrap().dir;
     let root = temp.path().to_str().unwrap();
-    let mut server = ServerProcess(
+    let mut server = ServerProcess::spawn(
         Command::new(BIN)
             .args(["serve", "--dir", root, "--listen", "0.0.0.0:0"])
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap(),
+            .stderr(Stdio::piped()),
     );
     let info = wait_for_run_file(&dir);
     let (_, stderr) = stop_and_wait(&mut server);
@@ -360,15 +399,10 @@ fn a_network_bind_warns_exactly_once_in_the_start_block() {
     );
 }
 
-/// Sends SIGTERM (Unix) and checks a clean exit (`0`) within 30 s; elsewhere kills it.
+/// Stops the server cleanly ([`send_stop`]) and checks a clean exit (`0`) within 30 s.
 /// Returns what the server wrote: (stdout, stderr).
-#[cfg(unix)]
 fn stop_and_wait(server: &mut ServerProcess) -> (String, String) {
-    let status = Command::new("kill")
-        .args(["-TERM", &server.0.id().to_string()])
-        .status()
-        .unwrap();
-    assert!(status.success());
+    send_stop(server);
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         if let Some(status) = server.0.try_wait().unwrap() {
@@ -387,22 +421,6 @@ fn stop_and_wait(server: &mut ServerProcess) -> (String, String) {
         assert!(Instant::now() < deadline, "the server did not stop");
         std::thread::sleep(Duration::from_millis(20));
     }
-}
-
-#[cfg(not(unix))]
-fn stop_and_wait(server: &mut ServerProcess) -> (String, String) {
-    // No portable SIGTERM from a test: the in-process tests cover the stop path. Killed, the
-    // server wrote its start block but no stop lines.
-    let _ = server.0.kill();
-    let _ = server.0.wait();
-    let mut out = (String::new(), String::new());
-    if let Some(mut pipe) = server.0.stdout.take() {
-        let _ = pipe.read_to_string(&mut out.0);
-    }
-    if let Some(mut pipe) = server.0.stderr.take() {
-        let _ = pipe.read_to_string(&mut out.1);
-    }
-    out
 }
 
 #[test]
@@ -1131,15 +1149,13 @@ fn db_commands_go_through_a_running_server() {
     let temp = TempDir::new("console-online");
     let dir = ServerDir::init(temp.path()).unwrap().dir;
     let root = temp.path();
-    let mut server = ServerProcess(
+    let mut server = ServerProcess::spawn(
         Command::new(BIN)
             .args(["serve", "--dir"])
             .arg(root)
             .args(["--listen", "127.0.0.1:0"])
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap(),
+            .stderr(Stdio::null()),
     );
     let info = wait_for_run_file(&dir);
     let note = format!("sent to its admin API at {}", info.address);
@@ -1198,20 +1214,12 @@ fn db_commands_go_through_a_running_server() {
     assert_eq!(names, ["acme-2"]);
     assert_eq!(get(info.address, "/db/acme/api/info").0, 404);
 
-    #[cfg(unix)]
-    {
-        let status = Command::new("kill")
-            .args(["-TERM", &server.0.id().to_string()])
-            .status()
-            .unwrap();
-        assert!(status.success());
-        let deadline = Instant::now() + Duration::from_secs(30);
-        while server.0.try_wait().unwrap().is_none() {
-            assert!(Instant::now() < deadline, "the server did not stop");
-            std::thread::sleep(Duration::from_millis(20));
-        }
+    send_stop(&server);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while server.0.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < deadline, "the server did not stop");
+        std::thread::sleep(Duration::from_millis(20));
     }
-    let _ = &mut server;
 }
 
 #[test]
@@ -1274,15 +1282,13 @@ fn db_backup_restore_and_export_offline_and_through_a_server() {
     );
 
     // Through a running server.
-    let mut server = ServerProcess(
+    let mut server = ServerProcess::spawn(
         Command::new(BIN)
             .args(["serve", "--dir"])
             .arg(&root)
             .args(["--listen", "127.0.0.1:0"])
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap(),
+            .stderr(Stdio::null()),
     );
     let info = wait_for_run_file(&dir);
     let note = format!("sent to its admin API at {}", info.address);
@@ -1328,20 +1334,12 @@ fn db_backup_restore_and_export_offline_and_through_a_server() {
     assert_eq!(code, 0);
     assert_eq!(json(&out)["backups"].as_array().unwrap().len(), 2);
 
-    #[cfg(unix)]
-    {
-        let status = Command::new("kill")
-            .args(["-TERM", &server.0.id().to_string()])
-            .status()
-            .unwrap();
-        assert!(status.success());
-        let deadline = Instant::now() + Duration::from_secs(30);
-        while server.0.try_wait().unwrap().is_none() {
-            assert!(Instant::now() < deadline, "the server did not stop");
-            std::thread::sleep(Duration::from_millis(20));
-        }
+    send_stop(&server);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while server.0.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < deadline, "the server did not stop");
+        std::thread::sleep(Duration::from_millis(20));
     }
-    let _ = &mut server;
 }
 
 /// Runs `graphersal-server import ARGS`: (exit code, stdout, stderr).
@@ -1427,13 +1425,11 @@ fn import_offline_and_through_a_server() {
     assert_eq!(code, 0, "{err}");
 
     // Through a running server: the server reads the file (path form).
-    let mut server = ServerProcess(
+    let mut server = ServerProcess::spawn(
         Command::new(BIN)
             .args(["serve", "--dir", &root, "--listen", "127.0.0.1:0"])
             .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap(),
+            .stderr(Stdio::piped()),
     );
     let info = wait_for_run_file(&dir);
     let (code, out, err) = import(&[&root, file.to_str().unwrap(), "--name", "snap", "--json"]);
@@ -1559,13 +1555,11 @@ fn models_commands_offline_and_through_a_server() {
     assert!(err.contains("\nHelp: "), "{err}");
 
     // Through a running server.
-    let mut server = ServerProcess(
+    let mut server = ServerProcess::spawn(
         Command::new(BIN)
             .args(["serve", "--dir", &root, "--listen", "127.0.0.1:0"])
             .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap(),
+            .stderr(Stdio::piped()),
     );
     let info = wait_for_run_file(&dir);
     let (code, out, err) = models(dir.root(), &["list", "--json"]);
@@ -1994,13 +1988,11 @@ fn bases_with_data_by_import_and_promote_offline_and_through_a_server() {
 
     // Through a running server: promote refuses a loaded database, then promotes it; a
     // layer over it sees its data.
-    let mut server = ServerProcess(
+    let mut server = ServerProcess::spawn(
         Command::new(BIN)
             .args(["serve", "--dir", &root, "--listen", "127.0.0.1:0"])
             .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap(),
+            .stderr(Stdio::piped()),
     );
     let info = wait_for_run_file(&dir);
     let (code, _, err) = db(dir.root(), &["load", "other"]);

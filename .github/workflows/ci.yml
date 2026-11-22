@@ -1,0 +1,84 @@
+name: CI
+
+# One job on Windows (a decision of 2026-11-22: CI minutes are limited, and Windows is the
+# platform the maintainer does not test on locally; macOS and Linux are built and tested by hand):
+# format, clippy, the Rust tests, the web UI's node tests and a smoke test of the built binary.
+#
+# graphersal-server depends on Graphersal's crates by path (`../graphersal/crates/...` in the
+# root Cargo.toml) until Graphersal 0.7.0 is on crates.io. CI therefore clones the public
+# repository https://github.com/graphersal/graphersal (branch `main`, shallow) BESIDE this
+# checkout, into `$GITHUB_WORKSPACE/../graphersal` (actions/checkout cannot write outside the
+# workspace; a plain `git clone` step can), so the committed Cargo.toml resolves unchanged. The
+# same clone provides the playground that graphersal-serve's `ui-assets` feature embeds. No
+# `--locked`: Cargo.lock records the versions of those path crates, which move with Graphersal's
+# `main`.
+#
+# The MSRV (1.88) is not checked here: a second toolchain doubles the build on the slowest
+# runner; check it locally (`cargo +1.88 check --all-targets`).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # Incremental compilation only costs time and cache space on a fresh CI runner.
+  CARGO_INCREMENTAL: 0
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  windows:
+    name: test (windows-latest)
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      # Byte-identical files on every platform (the runner's git converts to CRLF by default):
+      # the embedded playground and the test data stay as committed.
+      - name: No line-ending conversion
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+      - name: Clone graphersal beside the checkout (path dependencies)
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch main https://github.com/graphersal/graphersal.git ../graphersal
+          echo "graphersal main at $(git -C ../graphersal rev-parse HEAD)" | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: cargo fmt
+        run: cargo fmt --all --check
+      - name: cargo clippy
+        run: cargo clippy --all-targets -- -D warnings
+      # Unit tests (admin core, ops, models, router, console) and tests/server_tests.rs (the
+      # binary end to end: init, serve on port 0, the console through a running server, a clean
+      # stop by Ctrl+Break). Also builds target/debug/graphersal-server.exe for the smoke test.
+      - name: cargo test
+        run: cargo test
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - name: Web UI node tests
+        run: node --test crates/graphersal-server/ui/tests/*.test.mjs
+      # scripts/smoke.sh (the full walk) needs SIGTERM, curl and python3 and runs on Unix only;
+      # scripts/smoke.ps1 is its Windows counterpart for the built binary.
+      - name: Smoke test of the binary (PowerShell)
+        shell: pwsh
+        run: |
+          cargo build -p graphersal-server
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./scripts/smoke.ps1 -Bin target/debug/graphersal-server.exe

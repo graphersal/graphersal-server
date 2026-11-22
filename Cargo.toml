@@ -50,3 +50,11 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std", "env-filter", "ansi"] }
 # SIGINT/SIGTERM stop the server cleanly; the same crate and features as the graphersal CLI.
 ctrlc = { version = "3.4", features = ["termination"] }
+
+# The prebuilt release binary (release.yml): release code, fat link-time optimization, stripped
+# symbols; panics still unwind (never `panic = "abort"`: a panic in one request must not take the
+# server and its databases down), as Graphersal's own `dist` profile.
+[profile.dist]
+inherits = "release"
+lto = "fat"
+strip = true

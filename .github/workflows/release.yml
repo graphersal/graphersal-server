@@ -1,0 +1,187 @@
+name: Release
+
+# Builds the prebuilt graphersal-server binary for Windows x86_64 (the only platform for now, a
+# decision of 2026-11-22: CI minutes are limited; other platforms build from source, README
+# "Download / build") with the `dist` profile of the root Cargo.toml (release + fat LTO +
+# stripped symbols, panics unwind), smoke-tests it (scripts/smoke.ps1), and packs
+# `graphersal-server-v<version>-windows-x86_64.zip` (the binary, LICENSE-APACHE, NOTICE,
+# README.md and THIRD-PARTY-LICENSES.html from cargo-about, about.toml) plus `SHA256SUMS`, uploaded
+# as the artifact `graphersal-server-windows-x86_64`. On a release tag it also creates a DRAFT
+# GitHub Release with both files; its text is `docs/release-notes-<version>.md`. The maintainer
+# checks the draft and publishes it by hand. Nothing goes to crates.io (`publish = false`).
+#
+# Triggers:
+#   git push origin v0.1.0                         # a release tag: build + draft release
+#   gh workflow run Release -f ref=<branch>        # a dry run: build + artifact, no release
+#   gh workflow run Release -f ref=v0.1.0          # a tag by hand: build + draft release
+# A tag must equal the workspace version (`version` in the root Cargo.toml), and the version's
+# release notes must exist (checked on dry runs too).
+#
+# Graphersal is cloned beside the checkout as in ci.yml (path dependencies until Graphersal 0.7.0
+# is on crates.io); `graphersal_ref` picks its branch or tag (default `main`), and the commit it
+# was built against is named in the run summary and the draft release text. No dependency cache:
+# a release binary is built from a clean tree.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch or tag of graphersal-server to build (a v<version> tag also drafts a release)"
+        type: string
+        required: true
+        default: main
+      graphersal_ref:
+        description: "Branch or tag of github.com/graphersal/graphersal to build against"
+        type: string
+        required: true
+        default: main
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  TARGET: x86_64-pc-windows-msvc
+  PLATFORM: windows-x86_64
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: graphersal-server (windows-x86_64)
+    runs-on: windows-latest
+    timeout-minutes: 90
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      graphersal: ${{ steps.graphersal.outputs.commit }}
+    steps:
+      - name: No line-ending conversion
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          fetch-depth: 0
+      - name: Version, tag and release notes
+        id: version
+        env:
+          REF: ${{ inputs.ref || github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"$/\1/p' Cargo.toml)"
+          test -n "$version"
+          ref="${REF#refs/tags/}"
+          tag=""
+          if git rev-parse -q --verify "refs/tags/$ref" > /dev/null; then
+            case "$ref" in
+              v*) tag="$ref" ;;
+            esac
+          fi
+          if [ -n "$tag" ] && [ "$tag" != "v$version" ]; then
+            echo "::error::The tag $tag does not match the workspace version $version"
+            exit 1
+          fi
+          notes="docs/release-notes-$version.md"
+          test -f "$notes" || { echo "::error::$notes (the release text) is missing"; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "graphersal-server $version (ref $ref${tag:+, release tag $tag})" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Clone graphersal beside the checkout (path dependencies)
+        id: graphersal
+        env:
+          GRAPHERSAL_REF: ${{ inputs.graphersal_ref || 'main' }}
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch "$GRAPHERSAL_REF" https://github.com/graphersal/graphersal.git ../graphersal
+          commit="$(git -C ../graphersal rev-parse HEAD)"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+          echo "built against graphersal $GRAPHERSAL_REF at $commit" | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ env.TARGET }}
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about
+      - name: Build
+        run: cargo build -p graphersal-server --profile dist --target "$TARGET"
+      - name: Smoke test
+        shell: pwsh
+        run: ./scripts/smoke.ps1 -Bin "target/$env:TARGET/dist/graphersal-server.exe" -Version "${{ steps.version.outputs.version }}"
+      - name: THIRD-PARTY-LICENSES.html
+        run: |
+          set -euo pipefail
+          cargo about generate --config about.toml \
+            --manifest-path crates/graphersal-server/Cargo.toml about.hbs > THIRD-PARTY-LICENSES.html
+          test -s THIRD-PARTY-LICENSES.html
+      - name: Archive and SHA256SUMS
+        run: |
+          set -euo pipefail
+          name="graphersal-server-v${{ steps.version.outputs.version }}-$PLATFORM"
+          mkdir -p "dist/$name"
+          cp "target/$TARGET/dist/graphersal-server.exe" "dist/$name/"
+          cp LICENSE-APACHE NOTICE README.md THIRD-PARTY-LICENSES.html "dist/$name/"
+          cd dist
+          7z a -tzip -bso0 "$name.zip" "$name"
+          rm -r "$name"
+          sha256sum "$name.zip" > SHA256SUMS
+          cat SHA256SUMS
+          ls -l
+      - uses: actions/upload-artifact@v4
+        with:
+          name: graphersal-server-${{ env.PLATFORM }}
+          path: |
+            dist/graphersal-server-v*.zip
+            dist/SHA256SUMS
+          if-no-files-found: error
+      # Build provenance attestations need GitHub Enterprise Cloud for a PRIVATE repository (public
+      # repositories have them on every plan). Enable once the repository is public or the plan
+      # allows it, and add `id-token: write` and `attestations: write` to this job's permissions:
+      # - uses: actions/attest-build-provenance@v2
+      #   with:
+      #     subject-path: dist/graphersal-server-v*.zip
+
+  github-release:
+    name: draft GitHub Release
+    needs: build
+    if: needs.build.outputs.tag != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.build.outputs.tag }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: graphersal-server-windows-x86_64
+          path: dist
+      - name: The archive and its SHA256SUMS
+        run: |
+          set -euo pipefail
+          cd dist
+          ls -l
+          test "$(find . -maxdepth 1 -name 'graphersal-server-v*.zip' | wc -l)" -eq 1
+          sha256sum -c SHA256SUMS
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.build.outputs.tag }}
+          VERSION: ${{ needs.build.outputs.version }}
+          GRAPHERSAL_COMMIT: ${{ needs.build.outputs.graphersal }}
+        run: |
+          set -euo pipefail
+          {
+            cat "docs/release-notes-$VERSION.md"
+            echo
+            echo "---"
+            echo
+            echo "Built against [graphersal](https://github.com/graphersal/graphersal) commit \`$GRAPHERSAL_COMMIT\`."
+          } > "$RUNNER_TEMP/notes.md"
+          gh release create "$TAG" --draft --verify-tag \
+            --title "graphersal-server $VERSION" --notes-file "$RUNNER_TEMP/notes.md" \
+            dist/graphersal-server-v* dist/SHA256SUMS

@@ -18,13 +18,24 @@ an HTTP API, a console (`graphersal-server db ...`) and the server's own web UI 
 > that is not authentication. The optional MCP token (`docs/mcp.md`) guards only the MCP
 > endpoints.
 
-## Build
+## Download / build
 
-The crate depends on Graphersal's crates by path: a checkout of the `graphersal` repository
-must sit beside this one (`../graphersal`).
+**Windows x86_64:** each release on GitHub carries a prebuilt binary,
+`graphersal-server-v<version>-windows-x86_64.zip` (`graphersal-server.exe` with
+`LICENSE-APACHE`, `NOTICE`, this README and `THIRD-PARTY-LICENSES.html`), and `SHA256SUMS` to
+verify it (`certutil -hashfile <zip> SHA256`, or `Get-FileHash` in PowerShell). Unpack it and run
+`graphersal-server.exe` from a console; Ctrl+C (or Ctrl+Break) stops it cleanly.
+
+**Every other platform** (Linux, macOS, ...) builds from source, with Rust 1.88 or newer. Until
+Graphersal 0.7.0 is on crates.io the crate depends on Graphersal's crates by path: a checkout of
+the [`graphersal`](https://github.com/graphersal/graphersal) repository (branch `main`) must sit
+beside this one (`../graphersal`); it also provides the playground built into the binary.
 
 ```bash
+git clone https://github.com/graphersal/graphersal.git          # beside graphersal-server
+cd graphersal-server
 cargo build --release          # target/release/graphersal-server
+cargo build --profile dist     # the release binary's profile: fat LTO, stripped symbols
 ```
 
 ## Run
@@ -163,7 +174,12 @@ every file and key: [`docs/server-dir.md`](docs/server-dir.md).
 - [`docs/admin-api.md`](docs/admin-api.md): every admin route, its body and answer.
 - [`docs/mcp.md`](docs/mcp.md): the MCP endpoints, configuring an agent, the request headers.
 - `scripts/smoke.sh`: an end-to-end smoke test (build, init, serve, the admin API, the
-  database pages, MCP, a clean stop); needs only bash, curl and python3.
+  database pages, MCP, a clean stop); needs only bash, curl and python3 (Unix).
+- `scripts/smoke.ps1`: the smoke test of a built binary in PowerShell 7 for Windows (CI and
+  the release build): `pwsh scripts/smoke.ps1 -Bin <path to graphersal-server.exe>`.
+- [`docs/release-notes-0.1.0.md`](docs/release-notes-0.1.0.md): what 0.1.0 is and its known
+  limits. CI (`.github/workflows/ci.yml`) and the release build (`release.yml`) run on Windows
+  only for now.
 
 ## Known limitations
 
@@ -189,6 +205,12 @@ every file and key: [`docs/server-dir.md`](docs/server-dir.md).
 - **No memory figures** in the database listing (only `sizeBytes` on disk): a loaded database's
   memory is known only inside its session thread.
 - No admin tools over MCP; MCP sessions live in memory (a restart forgets them).
+- **HTTP/1.1 only**, plain HTTP (no TLS, no HTTP/2): put a reverse proxy in front for anything
+  beyond the loopback.
+- **Prebuilt binary for Windows x86_64 only**; other platforms build from source (see
+  [Download / build](#download--build)). On Windows the clean stop is Ctrl+C or Ctrl+Break in
+  the server's console (there is no SIGTERM); a killed server leaves `server.run` behind, and the
+  next `serve` replaces it (the lock is released by the OS).
 
 ## Licence
 
