@@ -176,9 +176,6 @@ every file and key: [`docs/server-dir.md`](docs/server-dir.md).
   add the model, then promote it.
 - A **layer `.gsnap` export carries no models** (an engine rule); export the layer with
   `materialize=true` (`--materialize`) for a standalone snapshot with the models.
-- An **upload declaring more than the upload limit** gets its `413`, but the server abandons
-  the connection without reading the body (tiny_http 0.12); clients should check the size
-  against `uploadBytes` of `GET /api/info` before sending.
 - **No memory figures** in the database listing (only `sizeBytes` on disk): a loaded database's
   memory is known only inside its session thread.
 - No admin tools over MCP; MCP sessions live in memory (a restart forgets them).

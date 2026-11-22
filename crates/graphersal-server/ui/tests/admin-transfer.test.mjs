@@ -22,8 +22,8 @@ const BLOB = 'ab'.repeat(32);
 
 /**
  * A stateful mock of the transfer routes. `limit` is the upload limit (bytes); an upload over it
- * is read, discarded and answered `413` WITHOUT help (as the server does for a body declared at
- * most 64 MiB). Uploads whose first byte is `N` import as `needs-model`. Requests without the
+ * is read, discarded and answered `413` WITHOUT help (as the server does for a body without a
+ * declared length that grows over the limit). Uploads whose first byte is `N` import as `needs-model`. Requests without the
  * host's `Authorization` header are refused.
  */
 async function mockServer({ limit = 1 << 20 } = {}) {

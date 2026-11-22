@@ -230,10 +230,12 @@ A new database from another one, in two forms:
   held in memory, imported, then removed. Its size limit is `server.toml`'s
   `[limits] upload_bytes` (default 4 GiB), announced as `uploadBytes` by the root
   `GET /api/info`: check the file's size against it before sending. A body over the limit is
-  `413`: when its declared `Content-Length` is at most 64 MiB the answer is ordinary (the body is
-  read and discarded first); when it declares more, the server answers `413` WITHOUT reading the
-  body and abandons the connection (the answer then has no `Content-Length`; its JSON body
-  follows the head). An invalid or taken name is answered after the body was read. Upload with
+  `413` with `Connection: close`: a declared `Content-Length` over the limit is answered at once,
+  WITHOUT reading the body (`{"error", "help"}`; a client sending `Expect: 100-continue` gets the
+  `413` instead of its `100`); a body without a declared length (chunked) is answered `413` as
+  soon as it grows over the limit (`{"error"}`, naming `upload_bytes`). Either way the server
+  then closes the connection cleanly: the client reads the whole answer, then EOF. An invalid or
+  taken name is answered before the body is read (the connection is then closed too). Upload with
   `XMLHttpRequest` for a progress bar (`xhr.upload.onprogress`; `fetch` has none); the import
   itself runs within the request (the answer comes when the database is written).
 - **Path** (the console while a server runs): `POST /api/admin/import` with
