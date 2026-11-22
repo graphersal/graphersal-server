@@ -119,7 +119,16 @@ from published files). When this file disagrees with the code, the code wins: sa
   `model_fixture.rs`), also over a real listener), `console` (`DbCommand` -> one admin API request;
   `run`: offline = the SAME `admin_api::route` over an offline `Admin` with a built `Request`,
   locked = `client` to `RunInfo.address` (503 retried 10 s; `load` polls until not loading);
-  refusals = `ServerError::Remote {status, message, help}`; `render` = human text), `client`
+  refusals = `ServerError::Remote {status, message, help}`; the text in `console/render.rs`
+  (`render(command, answer, dir)`, `init_text`, `error_text` (`Error:` + `Help:`),
+  `usage_error_text` (`Error:` + `# show the usage` + `graphersal-server --help`)) and
+  `console/start.rs` (the `serve` start block: banner (+ the network warning), sections
+  Server / Databases / Problems / Embedding models / MCP; `address_line` = the one stdout line;
+  stop lines)), `text` (crate-private: the graphersal CLI's layout, copied from its
+  `sections.rs` + `Note`: `Section`/`render` (`── Title ───` headings at 78, `key: value` in
+  one column, wrapped; `unwrapped` for paths/commands; `note`; `lines` + `table` for aligned
+  columns), `Note` (headline, aligned details, commands under `# comment`, never wrapped),
+  `bytes` = graphersal-session's `bytes_text`), `client`
   (minimal std `TcpStream` HTTP/1.1 client: `Host` = address, no `Origin`, `Connection: close`,
   Content-Length/chunked/close bodies, timeouts; `download` streams a `200` body into a writer:
   `db export` through a server), `error`
@@ -202,8 +211,11 @@ from published files). When this file disagrees with the code, the code wins: sa
   (`DbCommand::Import`: the JSON path form, SOURCE made absolute;
   offline the same route over the offline admin) (`db export` offline writes the file through
   `Admin::export_to_file`, through a server streams the download into `FILE.part`) (prints `note: ... sent to its admin API at ADDR` on stderr when it went through a
-  server, `help:` lines for refusals), the tracing subscriber, the ctrlc handler. stdout =
-  results, stderr = diagnostics/log; exit codes 0 ok, 1 failed, 2 usage.
+  server), the tracing subscriber (ANSI colours only when stderr is a terminal), the ctrlc
+  handler; it only WRITES the console's text (`out`/`err`, never `println!`: a closed pipe
+  must not panic). stdout = results (`serve`: the address line only), stderr =
+  diagnostics/log; exit codes 0 ok, 1 failed, 2 usage, 141 stdout closed. No `logs/`: the
+  server logs to stderr.
 - `crates/graphersal-server/ui/`: the server's web UI, the playground UI profile `server`
   (the graphersal-memory `memory` profile's pattern; the engine's playground mechanism: its
   `playground/CLAUDE.md` "UI profiles"): `profile.json` (module tabs Databases, Backups, Import,

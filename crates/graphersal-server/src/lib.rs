@@ -47,6 +47,7 @@ pub mod serve;
 pub(crate) mod test_models;
 #[cfg(test)]
 pub(crate) mod test_support;
+pub(crate) mod text;
 mod ui_assets;
 
 pub use admin::TmpBuild;

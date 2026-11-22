@@ -36,7 +36,11 @@ graphersal-server serve --dir ./srv --listen 127.0.0.1:0   # on a free port
 ```
 
 Open `http://127.0.0.1:8484/`: the server's web UI lists the databases with their states (see
-[Web UI](#web-ui)). `serve` writes the address it bound into `./srv/server.run` while it runs;
+[Web UI](#web-ui)). `serve` prints its start block on stderr (a banner, then the sections
+Server, Databases, Embedding models and MCP, laid out like the graphersal CLI's dev server) and
+only the address line `Graphersal server: http://...` on stdout. The log follows on stderr
+(`RUST_LOG`, default `info`; colours only on a terminal): redirect stderr to keep a log file.
+`serve` writes the address it bound into `./srv/server.run` while it runs;
 Ctrl+C or SIGTERM stops it cleanly (databases are unloaded, the run file is removed). A second
 `serve` on the same directory is refused (`server.lock`).
 
@@ -58,6 +62,10 @@ Every command takes `--dir DIR`; `--json` prints the admin API's JSON answer ins
 With a server running on `DIR` the command goes to its admin API (address from
 `DIR/server.run`, noted on stderr); otherwise it works on the directory itself (then `load` and
 `unload` are refused: nothing would serve the database). Both paths call the same admin core.
+The text output follows the graphersal CLI's layout: a result is a headline with its details in
+one column and every command on its own line under a `# comment`; listings (`db list`, `db
+backups`, `models list`) are sections of aligned columns, with a Problems section for failed
+databases and missing models. Paths and commands are never wrapped.
 
 | Command | What |
 |---|---|
@@ -75,8 +83,9 @@ With a server running on `DIR` the command goes to its admin API (address from
 | `import DIR SOURCE --name NAME [--base BASE] [--format F] [--description TEXT] [--role normal\|base]` | a new database from a `.gsnap`, a Store (directory or `.gstore`), GraphSON or GraphML; an embedding model it names without carrying comes from `models/` (else the database is `needs-model` until `models add`); `--role base` makes a base of a plain source |
 | `models list`, `models add SOURCE [--repo R] [--license L]`, `models remove REPO` | the shared embedding models |
 
-`graphersal-server --help` has the details. Exit codes: `0` ok, `1` failed (the error and a
-`help:` line on stderr), `2` invalid invocation.
+`graphersal-server --help` has the details. Exit codes: `0` ok, `1` failed (`Error: ...` and a
+`Help: ...` line on stderr), `2` invalid invocation (`Error: ...` and the command that shows
+the usage), `141` stdout closed before the result was written (`| head`).
 
 ## HTTP
 
@@ -137,7 +146,7 @@ directory), else `../graphersal/playground`.
   aliases.toml    current = "acme-2026.3"
   databases/<name>/database.toml + store/
   models/         one copy of every embedding model, hard-linked into the databases
-  backups/  trash/  tmp/  logs/
+  backups/  trash/  tmp/
 ```
 
 There is no registry file: the databases are the directories under `databases/`. Details of
@@ -173,7 +182,6 @@ every file and key: [`docs/server-dir.md`](docs/server-dir.md).
 - **No memory figures** in the database listing (only `sizeBytes` on disk): a loaded database's
   memory is known only inside its session thread.
 - No admin tools over MCP; MCP sessions live in memory (a restart forgets them).
-- `logs/` is created but not written: the server logs to stderr.
 
 ## Licence
 

@@ -172,10 +172,12 @@ fi
 ok
 
 STEP="init"
-"$BIN" init "$DIR" >/dev/null 2>"$WORK/init.err" || fail "$(cat "$WORK/init.err")"
-for part in server.toml databases models/blobs backups trash tmp logs; do
+"$BIN" init "$DIR" >"$WORK/init.out" 2>"$WORK/init.err" || fail "$(cat "$WORK/init.err")"
+for part in server.toml databases models/blobs backups trash tmp; do
   [ -e "$DIR/$part" ] || fail "init made no $part"
 done
+grep -q "^  graphersal-server serve --dir " "$WORK/init.out" ||
+  fail "init does not show the serve command on its own line: $(cat "$WORK/init.out")"
 ok
 
 STEP="serve"
@@ -195,6 +197,15 @@ for _ in $(seq 1 150); do
   sleep 0.2
 done
 [ "$STATUS" = 200 ] || fail "/readyz answers $STATUS"
+# stdout: the address line only; stderr: the start block, no colour codes (not a terminal).
+for _ in $(seq 1 50); do
+  [ -s "$WORK/server.out" ] && break
+  sleep 0.1
+done
+[ "$(cat "$WORK/server.out")" = "Graphersal server: $URL/" ] ||
+  fail "serve's stdout is not the address line: $(cat "$WORK/server.out")"
+grep -q "^── Databases (0) ─" "$LOG" || fail "no start block on stderr: $(head -c 600 "$LOG")"
+if grep -q "$(printf '\033')" "$LOG"; then fail "ANSI codes in the log"; fi
 req GET /api/info
 expect_status 200
 expect_json server graphersal-server
@@ -447,6 +458,7 @@ SERVER_PID=""
 [ "$CODE" = 0 ] || fail "exit code $CODE"
 [ ! -e "$DIR/server.run" ] || fail "server.run is still there"
 if grep -q "panicked" "$LOG"; then fail "the log shows a panic"; fi
+grep -q "^Stopped: " "$LOG" || fail "no stop line on stderr: $(tail -c 400 "$LOG")"
 ok
 
 echo "smoke: all steps passed"
