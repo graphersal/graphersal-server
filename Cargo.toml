@@ -1,0 +1,38 @@
+[workspace]
+resolver = "3"
+members = ["crates/graphersal-server"]
+
+[workspace.package]
+version = "0.1.0"
+authors = ["Aleksandr Dederer <aleks@graphersal.dev>"]
+repository = "https://github.com/graphersal/graphersal-server"
+homepage = "https://graphersal.dev"
+license = "Apache-2.0"
+edition = "2024"
+# The same MSRV as Graphersal (its path dependencies need 1.88).
+rust-version = "1.88"
+
+[workspace.dependencies]
+# Graphersal's hosting pieces, from the MAIN checkout of the graphersal repository beside this
+# one (path dependencies; this repository is private and never published while it uses them).
+graphersal = { path = "../graphersal/crates/graphersal" }
+graphersal-serve = { path = "../graphersal/crates/graphersal-serve" }
+
+# `server.toml` and the run file: the TOML reader/writer (serde based).
+toml = "1"
+serde = { version = "1.0", features = ["derive"] }
+# The JSON answers of the HTTP API (`graphersal_serve::Response::json` takes a `serde_json::Value`;
+# already in the tree through graphersal-serve).
+serde_json = "1.0"
+# `server.lock`: one running server per directory through the OS's advisory lock (`flock` /
+# `LockFileEx`), released by the OS when the process ends, also on a crash; the same crate and
+# version as the Store's lock in graphersal.
+fd-lock = "4"
+# The HTTP/1.1 listener: small, synchronous, pure Rust, no async runtime; the same crate and
+# version as the graphersal CLI's dev server.
+tiny_http = "0.12"
+# Library logging (as in graphersal) and the binary's stderr log subscriber.
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std", "env-filter", "ansi"] }
+# SIGINT/SIGTERM stop the server cleanly; the same crate and features as the graphersal CLI.
+ctrlc = { version = "3.4", features = ["termination"] }
