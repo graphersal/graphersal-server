@@ -185,6 +185,16 @@ from published files). When this file disagrees with the code, the code wins: sa
   `Admin::export_to_file`, through a server streams the download into `FILE.part`) (prints `note: ... sent to its admin API at ADDR` on stderr when it went through a
   server, `help:` lines for refusals), the tracing subscriber, the ctrlc handler. stdout =
   results, stderr = diagnostics/log; exit codes 0 ok, 1 failed, 2 usage.
+- Docs (the contract for readers who did not follow the code; keep them in sync with it):
+  `README.md` (what it is, run, console, HTTP, known limitations), `docs/server-dir.md` (every
+  file and key of the server directory), `docs/admin-api.md` (every admin route, checked
+  against `admin_api.rs`), `docs/mcp.md` (endpoints, request headers, flow).
+- `scripts/smoke.sh`: the end-to-end smoke test (bash + curl + python3 only): builds, inits a
+  temp server dir, serves on `127.0.0.1:0` (URL from `server.run`), walks create/load/execute/
+  alias/read-only/backup/restore/export/upload import/models/MCP/unload/delete, SIGTERM stop;
+  `ok <step>` / `FAIL <step>: why` lines, exit 1 on failure, the server killed in a trap
+  (`SMOKE_BIN` skips the build, `SMOKE_KEEP=1` keeps the temp dir). Extend it with a new
+  user-visible feature.
 - Tests: unit tests beside the code (`test_support::TempDir`), end-to-end tests in
   `crates/graphersal-server/tests/server_tests.rs` (spawns the binary, port 0, SIGTERM; the
   `db`/`import`/`models` console offline and through a running server).
@@ -198,6 +208,7 @@ Run every build/test/server under `../graphersal/ai/bench/watchdog.sh` (RSS ceil
 cargo fmt --all --check                      # rustfmt.toml: max_width = 100
 ../graphersal/ai/bench/watchdog.sh cargo clippy --all-targets -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps -p graphersal-server
+WD_TIMEOUT=600 ../graphersal/ai/bench/watchdog.sh scripts/smoke.sh   # end to end, ok/FAIL lines
 ```
 
 ## Rules (graphersal's rules in spirit)
