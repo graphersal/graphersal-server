@@ -21,8 +21,10 @@ holds `server.toml`.
   backups/<name>/      <UTC time>.zip + <UTC time>.toml per backup
   trash/               deleted and replaced databases: <name>-<UTC time>/
   tmp/                 builds and uploads in progress (emptied at start)
-  logs/                created by init, not written in this version
 ```
+
+There is no log directory: the server logs to stderr (redirect it to keep a log file). A
+`logs/` directory an earlier version's `init` created is left alone.
 
 `init DIR` accepts a missing or empty directory, or an existing server directory (then it only
 creates the missing parts and keeps `server.toml` as it is).

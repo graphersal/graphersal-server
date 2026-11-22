@@ -59,6 +59,11 @@ fn text(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
+/// `path` (`/`-separated) with the platform's separator, as the console shows paths.
+fn sep(path: &str) -> String {
+    path.replace('/', std::path::MAIN_SEPARATOR_STR)
+}
+
 /// The run file of `dir` once a server wrote it (panics after 30 s).
 fn wait_for_run_file(dir: &ServerDir) -> RunInfo {
     let deadline = Instant::now() + Duration::from_secs(30);
@@ -109,7 +114,20 @@ fn init_creates_a_server_directory_and_refuses_a_foreign_one() {
     let root_text = root.to_str().unwrap();
     let out = run(&["init", root_text]);
     assert!(out.status.success(), "{}", text(&out.stderr));
-    assert!(text(&out.stdout).contains("created server directory"));
+    // The layout of the result (the graphersal CLI's note layout): a headline, aligned
+    // details, every command on its own line under a `# comment`.
+    let config_path = root.join("server.toml");
+    assert_eq!(
+        text(&out.stdout),
+        format!(
+            "Created the server directory {root_text}\n  config: {} (listen 127.0.0.1:8484, MCP \
+             on: edit it before serving)\n  # start it\n  graphersal-server serve --dir \
+             {root_text}\n  # or create a database first\n  graphersal-server db create NAME \
+             --dir {root_text}\n",
+            config_path.display()
+        )
+    );
+    assert!(out.stderr.is_empty(), "{}", text(&out.stderr));
     for parts in [
         &["server.toml"][..],
         &["databases"],
@@ -117,11 +135,12 @@ fn init_creates_a_server_directory_and_refuses_a_foreign_one() {
         &["backups"],
         &["trash"],
         &["tmp"],
-        &["logs"],
     ] {
         let path = parts.iter().fold(root.clone(), |p, c| p.join(c));
         assert!(path.exists(), "{}", path.display());
     }
+    // No log directory: the server logs to stderr.
+    assert!(!root.join("logs").exists());
     let config = std::fs::read_to_string(root.join("server.toml")).unwrap();
     assert!(config.contains("listen = \"127.0.0.1:8484\""), "{config}");
     assert!(
@@ -131,7 +150,13 @@ fn init_creates_a_server_directory_and_refuses_a_foreign_one() {
 
     let again = run(&["init", root_text]);
     assert!(again.status.success());
-    assert!(text(&again.stdout).contains("already a server directory"));
+    assert!(
+        text(&again.stdout).starts_with(&format!(
+            "{root_text} is already a server directory: nothing to do\n  # start it\n"
+        )),
+        "{}",
+        text(&again.stdout)
+    );
     assert_eq!(
         std::fs::read_to_string(root.join("server.toml")).unwrap(),
         config
@@ -149,7 +174,15 @@ fn init_creates_a_server_directory_and_refuses_a_foreign_one() {
     );
     assert!(!foreign.join("server.toml").exists());
 
-    assert_eq!(run(&["init"]).status.code(), Some(2));
+    let usage = run(&["init"]);
+    assert_eq!(usage.status.code(), Some(2));
+    // A usage error names the problem and the command that shows the usage, not the usage.
+    assert_eq!(
+        text(&usage.stderr),
+        "Error: init takes exactly one argument: the directory\n  # show the usage\n  \
+         graphersal-server --help\n"
+    );
+    assert!(usage.stdout.is_empty());
     assert_eq!(run(&["serve"]).status.code(), Some(2));
     assert_eq!(run(&["serve", "--dir"]).status.code(), Some(2));
     assert_eq!(
@@ -172,7 +205,7 @@ fn serve_answers_refuses_a_second_server_and_stops_cleanly() {
     let mut server = ServerProcess(
         Command::new(BIN)
             .args(["serve", "--dir", root, "--listen", "127.0.0.1:0"])
-            .stdout(Stdio::null())
+            .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .unwrap(),
@@ -210,15 +243,87 @@ fn serve_answers_refuses_a_second_server_and_stops_cleanly() {
     assert_eq!(RunInfo::read(&dir).unwrap(), Some(info.clone()));
     assert_eq!(get(info.address, "/healthz").0, 200);
 
-    stop_and_wait(&mut server);
+    let (stdout, stderr) = stop_and_wait(&mut server);
     assert_eq!(RunInfo::read(&dir).unwrap(), None);
     assert!(!ServerLock::is_held(&dir).unwrap());
     assert!(TcpStream::connect(info.address).is_err());
+
+    // stdout: the address line only; stderr: the start block (the graphersal CLI's layout),
+    // the log without colours (not a terminal), the stop lines.
+    assert_eq!(stdout, format!("Graphersal server: {}\n", info.url));
+    assert!(
+        !stderr.contains('\u{1b}'),
+        "ANSI codes in a piped log: {stderr}"
+    );
+    let lines: Vec<&str> = stderr.lines().collect();
+    let banner = lines
+        .iter()
+        .position(|l| l.starts_with("====="))
+        .unwrap_or_else(|| panic!("no banner: {stderr}"));
+    assert_eq!(lines[banner].chars().count(), 78, "{stderr}");
+    assert!(lines[banner + 2].contains("Loopback only"), "{stderr}");
+    let headings: Vec<&str> = lines
+        .iter()
+        .filter(|l| l.starts_with("── "))
+        .map(|l| l.trim_end_matches('─').trim())
+        .collect();
+    assert_eq!(
+        headings,
+        [
+            "── Server",
+            "── Databases (0)",
+            "── Embedding models",
+            "── MCP"
+        ],
+        "{stderr}"
+    );
+    assert!(
+        lines
+            .iter()
+            .filter(|l| l.starts_with("── "))
+            .all(|l| l.chars().count() == 78),
+        "{stderr}"
+    );
+    let row = |key: &str| -> String {
+        lines
+            .iter()
+            .find(|l| l.starts_with(&format!("  {key}:")))
+            .unwrap_or_else(|| panic!("no row {key}: {stderr}"))
+            .to_string()
+    };
+    // Values in one column across the sections.
+    let column = row("directory").find(root).unwrap();
+    assert_eq!(
+        row("listening"),
+        format!(
+            "  {:w$}{} (loopback, this machine only)",
+            "listening:",
+            info.address,
+            w = column - 2
+        )
+    );
+    assert_eq!(row("UI")[column..], info.url[..]);
+    assert_eq!(row("endpoint")[column..], format!("{}mcp", info.url));
+    assert!(
+        row("connect").ends_with(&format!("{}mcp", info.url)),
+        "{stderr}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("graphersal-server db create NAME --dir")),
+        "{stderr}"
+    );
+    if cfg!(unix) {
+        assert!(stderr.contains("\nStopping: "), "{stderr}");
+        assert!(stderr.trim_end().ends_with("lock released)."), "{stderr}");
+    }
 }
 
 /// Sends SIGTERM (Unix) and checks a clean exit (`0`) within 30 s; elsewhere kills it.
+/// Returns what the server wrote: (stdout, stderr).
 #[cfg(unix)]
-fn stop_and_wait(server: &mut ServerProcess) {
+fn stop_and_wait(server: &mut ServerProcess) -> (String, String) {
     let status = Command::new("kill")
         .args(["-TERM", &server.0.id().to_string()])
         .status()
@@ -231,9 +336,13 @@ fn stop_and_wait(server: &mut ServerProcess) {
             if let Some(mut pipe) = server.0.stderr.take() {
                 let _ = pipe.read_to_string(&mut stderr);
             }
+            let mut stdout = String::new();
+            if let Some(mut pipe) = server.0.stdout.take() {
+                let _ = pipe.read_to_string(&mut stdout);
+            }
             assert!(status.success(), "{status}: {stderr}");
-            assert!(stderr.contains("stopping"), "{stderr}");
-            return;
+            assert!(stderr.contains("Stopping"), "{stderr}");
+            return (stdout, stderr);
         }
         assert!(Instant::now() < deadline, "the server did not stop");
         std::thread::sleep(Duration::from_millis(20));
@@ -241,8 +350,19 @@ fn stop_and_wait(server: &mut ServerProcess) {
 }
 
 #[cfg(not(unix))]
-fn stop_and_wait(_server: &mut ServerProcess) {
-    // No portable SIGTERM from a test: the in-process tests cover the stop path.
+fn stop_and_wait(server: &mut ServerProcess) -> (String, String) {
+    // No portable SIGTERM from a test: the in-process tests cover the stop path. Killed, the
+    // server wrote its start block but no stop lines.
+    let _ = server.0.kill();
+    let _ = server.0.wait();
+    let mut out = (String::new(), String::new());
+    if let Some(mut pipe) = server.0.stdout.take() {
+        let _ = pipe.read_to_string(&mut out.0);
+    }
+    if let Some(mut pipe) = server.0.stderr.take() {
+        let _ = pipe.read_to_string(&mut out.1);
+    }
+    out
 }
 
 #[test]
@@ -645,27 +765,50 @@ fn db_commands_act_on_the_directory_when_no_server_runs() {
         ],
     );
     assert_eq!(code, 0, "{err}");
-    assert!(out.contains("created database 'acme' (plain)"), "{out}");
+    assert_eq!(
+        out,
+        "Created database 'acme'\n  kind:        plain\n  description: Acme graph\n  \
+         state:       unloaded\n"
+    );
     assert!(!err.contains("note:"), "offline: {err}");
     let (code, out, err) = db(root, &["create", "base", "--role", "base"]);
     assert_eq!(code, 0, "{err}");
-    assert!(out.contains("base, read-only"), "{out}");
+    assert!(out.contains("  kind:  base\n  flags: read-only\n"), "{out}");
     let (code, out, err) = db(root, &["create", "l1", "--base", "base"]);
     assert_eq!(code, 0, "{err}");
-    assert!(out.contains("layer over 'base'"), "{out}");
+    assert!(out.contains("  kind:  layer over 'base'\n"), "{out}");
     let (code, _, err) = db(root, &["create", "l2", "--base", "acme"]);
     assert_eq!(code, 1);
     assert!(err.contains("not a base database"), "{err}");
 
     let (code, out, _) = db(root, &["list"]);
     assert_eq!(code, 0);
+    // The layout: a section heading as wide as the CLI's blocks, then the table in aligned
+    // columns (the size depends on the file system, its column is checked by position).
     let lines: Vec<&str> = out.lines().collect();
-    assert!(lines[0].starts_with("NAME"), "{out}");
+    assert!(lines[0].starts_with("── Databases (3) ───"), "{out}");
+    assert_eq!(lines[0].chars().count(), 78, "{out}");
+    let cells = |name: &str, state: &str, kind: &str, flags: &str| {
+        format!("  {name:4}  {state:8}  {kind:17}  {flags:9}  ")
+    };
     assert!(
-        lines[1].starts_with("acme") && lines[1].contains("Acme graph"),
+        lines[1].starts_with(&format!("{}SIZE", cells("NAME", "STATE", "KIND", "FLAGS"))),
         "{out}"
     );
-    assert!(lines[2].contains("read-only"), "{out}");
+    let size_at = lines[1].find("SIZE").unwrap();
+    let description_at = lines[1].find("DESCRIPTION").unwrap();
+    assert_eq!(lines[2][..size_at], cells("acme", "unloaded", "plain", ""));
+    assert_eq!(&lines[2][description_at..], "Acme graph");
+    assert!(lines[2][size_at..description_at].contains("KiB"), "{out}");
+    assert_eq!(
+        lines[3][..size_at],
+        cells("base", "unloaded", "base", "read-only")
+    );
+    assert_eq!(
+        lines[4][..size_at],
+        cells("l1", "unloaded", "layer over 'base'", "")
+    );
+    assert_eq!(lines.len(), 5, "{out}");
     let (code, out, _) = db(root, &["list", "--json"]);
     assert_eq!(code, 0);
     assert_eq!(json(&out)["databases"].as_array().unwrap().len(), 3);
@@ -677,27 +820,37 @@ fn db_commands_act_on_the_directory_when_no_server_runs() {
     let (code, out, _) = db(root, &["read-only", "acme", "on"]);
     assert_eq!(
         (code, out.trim()),
-        (0, "read-only is on for database 'acme'")
+        (0, "Read-only is on for database 'acme'")
     );
     let (code, _, _) = db(root, &["auto-load", "acme", "on"]);
     assert_eq!(code, 0);
     let (code, out, err) = db(root, &["clone", "acme", "acme-2"]);
     assert_eq!(code, 0, "{err}");
     assert!(
-        out.contains("cloned database 'acme' into 'acme-2'"),
+        out.starts_with("Cloned database 'acme' into 'acme-2'\n"),
         "{out}"
     );
     let (code, _, _) = db(root, &["alias", "set", "current", "acme"]);
     assert_eq!(code, 0);
+    let (code, out, _) = db(root, &["list"]);
+    assert_eq!(code, 0);
+    assert!(
+        out.contains("── Aliases ───") && out.contains("\n  ALIAS    DATABASE\n  current  acme"),
+        "{out}"
+    );
     let (code, _, err) = db(root, &["delete", "acme"]);
     assert_eq!(code, 1);
     assert!(err.contains("current"), "{err}");
-    assert!(err.contains("help: remove the alias first"), "{err}");
+    assert!(err.contains("\nHelp: remove the alias first"), "{err}");
     let (code, _, _) = db(root, &["alias", "remove", "current"]);
     assert_eq!(code, 0);
     let (code, out, err) = db(root, &["delete", "acme"]);
     assert_eq!(code, 0, "{err}");
-    assert!(out.contains("moved to trash/acme-"), "{out}");
+    assert!(
+        out.starts_with("Deleted database 'acme'\n  moved to: "),
+        "{out}"
+    );
+    assert!(out.contains(&sep("trash/acme-")), "{out}");
     assert!(!dir.databases().join("acme").exists());
     assert!(
         !ServerLock::is_held(&dir).unwrap(),
@@ -732,7 +885,7 @@ fn db_commands_go_through_a_running_server() {
 
     let (code, out, err) = db(root, &["create", "acme"]);
     assert_eq!(code, 0, "{err}");
-    assert!(out.contains("created database 'acme'"), "{out}");
+    assert!(out.starts_with("Created database 'acme'\n"), "{out}");
     assert!(err.contains(&note), "through the server: {err}");
     let (code, out, err) = db(root, &["list"]);
     assert_eq!(code, 0, "{err}");
@@ -741,22 +894,22 @@ fn db_commands_go_through_a_running_server() {
     // Load waits for the end of the load; the database is served at once.
     let (code, out, err) = db(root, &["load", "acme"]);
     assert_eq!(code, 0, "{err}");
-    assert_eq!(out.trim(), "database 'acme' is loaded");
+    assert_eq!(out.trim(), "Database 'acme' is loaded");
     let (status, _) = get(info.address, "/db/acme/api/info");
     assert_eq!(status, 200);
     // Delete of a loaded database: refused with the API's help.
     let (code, _, err) = db(root, &["delete", "acme"]);
     assert_eq!(code, 1);
     assert!(err.contains("unload it first"), "{err}");
-    assert!(err.contains("help:"), "{err}");
+    assert!(err.contains("\nHelp: "), "{err}");
     let (code, out, err) = db(root, &["clone", "acme", "acme-2"]);
     assert_eq!(code, 0, "{err}");
     assert!(out.contains("'acme-2'"), "{out}");
     let (code, out, _) = db(root, &["unload", "acme"]);
-    assert_eq!((code, out.trim()), (0, "unloaded database 'acme'"));
+    assert_eq!((code, out.trim()), (0, "Unloaded database 'acme'"));
     let (code, out, err) = db(root, &["delete", "acme"]);
     assert_eq!(code, 0, "{err}");
-    assert!(out.contains("trash/acme-"), "{out}");
+    assert!(out.contains(&sep("trash/acme-")), "{out}");
     let (code, out, _) = db(root, &["list", "--json"]);
     assert_eq!(code, 0);
     let names: Vec<String> = json(&out)["databases"]
@@ -796,9 +949,10 @@ fn db_backup_restore_and_export_offline_and_through_a_server() {
     let (code, out, err) = db(&root, &["backup", "acme"]);
     assert_eq!(code, 0, "{err}");
     assert!(
-        out.contains("backed up database 'acme' into backups/acme/"),
+        out.starts_with("Backed up database 'acme'\n  file: "),
         "{out}"
     );
+    assert!(out.contains(&sep("backups/acme/")), "{out}");
     let (code, out, _) = db(&root, &["backups", "acme", "--json"]);
     assert_eq!(code, 0);
     let backup = json(&out)["backups"][0]["backup"]
@@ -807,15 +961,28 @@ fn db_backup_restore_and_export_offline_and_through_a_server() {
         .to_string();
     let (code, out, _) = db(&root, &["backups", "acme"]);
     assert_eq!(code, 0);
-    assert!(out.starts_with(&backup), "{out}");
+    let lines: Vec<&str> = out.lines().collect();
+    assert!(
+        lines[0].starts_with("── Backups of 'acme' (1) ───"),
+        "{out}"
+    );
+    assert!(lines[1].starts_with("  BACKUP  "), "{out}");
+    assert!(lines[2].starts_with(&format!("  {backup}  ")), "{out}");
     let (code, out, err) = db(&root, &["restore", "acme", &backup, "--name", "acme-2"]);
     assert_eq!(code, 0, "{err}");
-    assert!(out.contains("into database 'acme-2'"), "{out}");
+    assert!(out.starts_with("Restored database 'acme-2'\n"), "{out}");
+    assert!(
+        out.contains(&format!(" backup {backup} of 'acme'\n")),
+        "{out}"
+    );
     let file = temp.path().join("acme.gsnap");
     let file_arg = file.to_str().unwrap();
     let (code, out, err) = db(&root, &["export", "acme", "--out", file_arg]);
     assert_eq!(code, 0, "{err}");
-    assert!(out.contains("full snapshot, models included"), "{out}");
+    assert!(
+        out.contains("  snapshot: full\n  models:   included\n"),
+        "{out}"
+    );
     let info = read_snapshot_info(std::fs::File::open(&file).unwrap()).unwrap();
     assert_eq!(info.vertex_count, 6);
     let (code, _, err) = db(&root, &["export", "acme"]);
@@ -825,7 +992,7 @@ fn db_backup_restore_and_export_offline_and_through_a_server() {
     let (code, _, err) = db(&root, &["restore", "acme", "nope"]);
     assert_eq!(code, 1);
     assert!(
-        err.contains("no backup 'nope'") && err.contains("help:"),
+        err.contains("no backup 'nope'") && err.contains("\nHelp: "),
         "{err}"
     );
 
@@ -857,7 +1024,7 @@ fn db_backup_restore_and_export_offline_and_through_a_server() {
     );
     assert_eq!(code, 0, "{err}");
     assert!(err.contains(&note), "{err}");
-    assert!(out.contains("models excluded"), "{out}");
+    assert!(out.contains("  models:   excluded\n"), "{out}");
     assert_eq!(
         read_snapshot_info(std::fs::File::open(&served).unwrap())
             .unwrap()
@@ -866,22 +1033,20 @@ fn db_backup_restore_and_export_offline_and_through_a_server() {
     );
     let (code, out, err) = db(&root, &["backup", "acme"]);
     assert_eq!(code, 0, "{err}");
-    assert!(out.contains("backups/acme/"), "{out}");
+    assert!(out.contains(&sep("backups/acme/")), "{out}");
     // Restore over the loaded database: refused with the API's help; unloaded: replaced.
     let (code, _, err) = db(&root, &["restore", "acme", &backup]);
     assert_eq!(code, 1);
     assert!(
-        err.contains("unload it first") && err.contains("help:"),
+        err.contains("unload it first") && err.contains("\nHelp: "),
         "{err}"
     );
     let (code, _, _) = db(&root, &["unload", "acme"]);
     assert_eq!(code, 0);
     let (code, out, err) = db(&root, &["restore", "acme", &backup]);
     assert_eq!(code, 0, "{err}");
-    assert!(
-        out.contains("the replaced database moved to trash/acme-"),
-        "{out}"
-    );
+    assert!(out.contains("  replaced:    moved to "), "{out}");
+    assert!(out.contains(&sep("trash/acme-")), "{out}");
     let (code, out, _) = db(&root, &["backups", "acme", "--json"]);
     assert_eq!(code, 0);
     assert_eq!(json(&out)["backups"].as_array().unwrap().len(), 2);
@@ -935,9 +1100,13 @@ fn import_offline_and_through_a_server() {
         "From GraphSON",
     ]);
     assert_eq!(code, 0, "{err}");
-    assert!(
-        out.contains("(graphson) as database 'gs' (plain), unloaded"),
-        "{out}"
+    // The layout: a headline, then the details in one column.
+    assert_eq!(
+        out,
+        format!(
+            "Imported database 'gs'\n  source:      {graphson_arg}\n  format:      graphson\n  \
+             kind:        plain\n  description: From GraphSON\n  state:       unloaded\n"
+        )
     );
     assert!(!err.contains("sent to its admin API"), "{err}");
     let (code, out, _) = db(dir.root(), &["list", "--json"]);
@@ -985,7 +1154,7 @@ fn import_offline_and_through_a_server() {
     assert!(err.contains("taken"), "{err}");
     let (code, out, err) = db(dir.root(), &["load", "snap"]);
     assert_eq!(code, 0, "{err}");
-    assert!(out.contains("is loaded"), "{out}");
+    assert!(out.contains("Database 'snap' is loaded"), "{out}");
     stop_and_wait(&mut server);
 }
 
@@ -1066,21 +1235,32 @@ fn models_commands_offline_and_through_a_server() {
         ],
     );
     assert_eq!(code, 0, "{err}");
-    assert!(out.contains("model acme/e2e"), "{out}");
+    assert!(
+        out.starts_with("Model acme/e2e is in the shared models\n  model: "),
+        "{out}"
+    );
     assert!(!err.contains("sent to its admin API"), "{err}");
     let (code, out, _) = models(dir.root(), &["list"]);
     assert_eq!(code, 0);
-    assert!(
-        out.contains("acme/e2e") && out.contains("used by: nobody"),
-        "{out}"
-    );
+    // The layout: a section, the models as a table in aligned columns.
+    let lines: Vec<&str> = out.lines().collect();
+    assert!(lines[0].starts_with("── Shared models (1) ───"), "{out}");
+    assert!(lines[1].starts_with("  MODEL     SIZE "), "{out}");
+    let column = |name: &str| lines[1].find(name).unwrap();
+    assert!(lines[2].starts_with("  acme/e2e  "), "{out}");
+    assert_eq!(&lines[2][column("LICENSE")..column("BLOB")], "mit      ");
+    assert_eq!(&lines[2][column("USED BY")..], "nobody");
+    assert_eq!(lines.len(), 3, "{out}");
     assert!(dir.models().join("models.toml").is_file());
     let (code, _, _) = models(dir.root(), &[]);
     assert_eq!(code, 2, "no command");
     let (code, _, err) = models(dir.root(), &["add", "nobody/none"]);
     assert_eq!(code, 1);
-    assert!(err.contains("no model 'nobody/none'"), "{err}");
-    assert!(err.contains("help:"), "{err}");
+    assert!(
+        err.starts_with("Error: ") && err.contains("no model 'nobody/none'"),
+        "{err}"
+    );
+    assert!(err.contains("\nHelp: "), "{err}");
 
     // Through a running server.
     let mut server = ServerProcess(
@@ -1101,7 +1281,10 @@ fn models_commands_offline_and_through_a_server() {
     assert_eq!(json(&out)["models"][0]["repo"], "acme/e2e");
     let (code, out, err) = models(dir.root(), &["remove", "acme/e2e"]);
     assert_eq!(code, 0, "{err}");
-    assert!(out.contains("removed model 'acme/e2e'"), "{out}");
+    assert!(
+        out.starts_with("Removed model 'acme/e2e' from the shared models\n  blobs: 1\n"),
+        "{out}"
+    );
     let (code, _, err) = models(dir.root(), &["remove", "acme/e2e"]);
     assert_eq!(code, 1);
     assert!(err.contains("no model 'acme/e2e'"), "{err}");
@@ -1483,8 +1666,9 @@ fn bases_with_data_by_import_and_promote_offline_and_through_a_server() {
     // Offline: import --role base, import plain + promote, refusals.
     let (code, out, err) = import(&[&root, graphson_arg, "--name", "prod", "--role", "base"]);
     assert_eq!(code, 0, "{err}");
+    assert!(out.starts_with("Imported database 'prod'\n"), "{out}");
     assert!(
-        out.contains("as database 'prod' (base, read-only)"),
+        out.contains("  kind:   base\n  flags:  read-only\n"),
         "{out}"
     );
     let (code, _, err) = import(&[&root, graphson_arg, "--name", "x", "--role", "boss"]);
@@ -1494,7 +1678,7 @@ fn bases_with_data_by_import_and_promote_offline_and_through_a_server() {
     let (code, out, err) = db(dir.root(), &["promote", "acme"]);
     assert_eq!(code, 0, "{err}");
     assert!(
-        out.contains("database 'acme' is a base now") && out.contains("frozen"),
+        out.starts_with("Database 'acme' is a base now\n") && out.contains("frozen"),
         "{out}"
     );
     let (code, _, err) = db(dir.root(), &["promote", "acme"]);
@@ -1505,7 +1689,7 @@ fn bases_with_data_by_import_and_promote_offline_and_through_a_server() {
     let (code, _, err) = db(dir.root(), &["promote", "l1"]);
     assert_eq!(code, 1);
     assert!(
-        err.contains("help:") && err.contains("materialize"),
+        err.contains("\nHelp: ") && err.contains("materialize"),
         "{err}"
     );
     assert_eq!(db(dir.root(), &["promote"]).0, 2);
@@ -1528,7 +1712,7 @@ fn bases_with_data_by_import_and_promote_offline_and_through_a_server() {
     let (code, _, err) = db(dir.root(), &["promote", "other"]);
     assert_eq!(code, 1);
     assert!(
-        err.contains("unload it first") && err.contains("help:"),
+        err.contains("unload it first") && err.contains("\nHelp: "),
         "{err}"
     );
     let (code, _, err) = db(dir.root(), &["unload", "other"]);

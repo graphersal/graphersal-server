@@ -9,8 +9,12 @@
 //! ```
 //!
 //! stdout carries only results, stderr diagnostics and the log. Exit codes: `0` ok, `1` the
-//! command failed, `2` invalid invocation.
+//! command failed, `2` invalid invocation, `141` stdout closed before the result was written
+//! (`| head`; as the graphersal CLI). The text comes from [`console`] in the graphersal CLI's
+//! layout; this file only writes it ([`out`], [`err`]: never `println!`, which panics when the
+//! reader of the pipe is gone).
 
+use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -24,14 +28,48 @@ use graphersal_server::{
 
 const EXIT_FAILED: u8 = 1;
 const EXIT_USAGE: u8 = 2;
+/// stdout was closed before the result was written (128 + SIGPIPE, as the graphersal CLI).
+const EXIT_CLOSED_PIPE: u8 = 141;
 
-const USAGE: &str = "graphersal-server (EXPERIMENTAL): many Graphersal graph databases in one \
+/// Whether a write to stdout failed (its reader went away): later writes are dropped and the
+/// exit code is [`EXIT_CLOSED_PIPE`].
+static STDOUT_CLOSED: AtomicBool = AtomicBool::new(false);
+
+/// Writes `text` and a newline to stdout (the result), flushed; a failure is remembered.
+fn out(text: &str) {
+    if STDOUT_CLOSED.load(Ordering::Relaxed) {
+        return;
+    }
+    let mut stdout = std::io::stdout().lock();
+    if writeln!(stdout, "{text}")
+        .and_then(|()| stdout.flush())
+        .is_err()
+    {
+        STDOUT_CLOSED.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Writes `text` and a newline to stderr (diagnostics), best effort.
+fn err(text: &str) {
+    let _ = writeln!(std::io::stderr().lock(), "{text}");
+}
+
+/// `code`, or [`EXIT_CLOSED_PIPE`] for a successful run whose stdout was closed.
+fn exit(code: u8) -> ExitCode {
+    if code == 0 && STDOUT_CLOSED.load(Ordering::Relaxed) {
+        ExitCode::from(EXIT_CLOSED_PIPE)
+    } else {
+        ExitCode::from(code)
+    }
+}
+
+const USAGE: &str = "graphersal-server (EXPERIMENTAL): many Graphersal graph databases in one
 server directory, over HTTP. No access control: keep it on a loopback address.
 
 Usage:
   graphersal-server init DIR
       Create a server directory (server.toml, databases/, models/blobs/, backups/, trash/,
-      tmp/, logs/). DIR must be missing, empty, or a server directory (then only missing
+      tmp/). DIR must be missing, empty, or a server directory (then only missing
       parts are created; server.toml is kept).
   graphersal-server serve --dir DIR [--listen ADDR]
       Serve the server directory DIR. ADDR (IP:PORT, port 0 = a free port) overrides
@@ -93,19 +131,20 @@ Usage:
         models remove REPO       refused while a database uses it
   graphersal-server --help | --version
 
-Log level: RUST_LOG (default info).";
+stdout carries only results, stderr diagnostics and the log (level: RUST_LOG, default
+info). Exit codes: 0 ok, 1 the command failed, 2 invalid invocation.";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         None => usage_error("no command given"),
         Some("-h" | "--help" | "help") => {
-            println!("{USAGE}");
-            ExitCode::SUCCESS
+            out(USAGE);
+            exit(0)
         }
         Some("-V" | "--version") => {
-            println!("graphersal-server {}", env!("CARGO_PKG_VERSION"));
-            ExitCode::SUCCESS
+            out(&format!("graphersal-server {}", env!("CARGO_PKG_VERSION")));
+            exit(0)
         }
         Some("init") => init(&args[1..]),
         Some("serve") => serve_command(&args[1..]),
@@ -117,15 +156,29 @@ fn main() -> ExitCode {
 }
 
 fn usage_error(message: &str) -> ExitCode {
-    eprintln!("Error: {message}\n\n{USAGE}");
+    err(&console::usage_error_text(message));
     ExitCode::from(EXIT_USAGE)
+}
+
+/// Prints the error `error` (and its help) on stderr: exit code 1.
+fn failure(error: &graphersal_server::ServerError) -> ExitCode {
+    err(&console::error_text(error));
+    ExitCode::from(EXIT_FAILED)
+}
+
+/// Prints `Error: <message>` on stderr: exit code 1.
+fn failure_text(message: &str) -> ExitCode {
+    err(&format!("Error: {message}"));
+    ExitCode::from(EXIT_FAILED)
 }
 
 fn init_logging() {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    // Colours only for a terminal: a log redirected into a file or a pipe stays plain text.
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
+        .with_ansi(std::io::stderr().is_terminal())
         .with_writer(std::io::stderr)
         .try_init();
 }
@@ -136,43 +189,12 @@ fn init(args: &[String]) -> ExitCode {
         _ => return usage_error("init takes exactly one argument: the directory"),
     };
     match ServerDir::init(&dir) {
-        Ok(report) if report.existed && report.created.is_empty() => {
-            println!(
-                "{} is already a server directory; nothing to do",
-                dir.display()
-            );
-            ExitCode::SUCCESS
+        Ok(report) => {
+            out(&console::init_text(&report, &dir));
+            exit(0)
         }
-        Ok(report) if report.existed => {
-            println!(
-                "{} is already a server directory; created the missing {}",
-                dir.display(),
-                names(&report.created)
-            );
-            ExitCode::SUCCESS
-        }
-        Ok(_) => {
-            println!(
-                "created server directory {}; start it with: graphersal-server serve --dir {}",
-                dir.display(),
-                dir.display()
-            );
-            ExitCode::SUCCESS
-        }
-        Err(err) => {
-            eprintln!("Error: {err}");
-            ExitCode::from(EXIT_FAILED)
-        }
+        Err(error) => failure(&error),
     }
-}
-
-/// The created paths for the init message.
-fn names(paths: &[PathBuf]) -> String {
-    paths
-        .iter()
-        .map(|p| p.display().to_string())
-        .collect::<Vec<_>>()
-        .join(", ")
 }
 
 fn serve_command(args: &[String]) -> ExitCode {
@@ -217,32 +239,27 @@ fn serve_command(args: &[String]) -> ExitCode {
         }
         let _ = stop_tx.send(());
     }) {
-        eprintln!("Error: cannot install the signal handler: {err}");
-        return ExitCode::from(EXIT_FAILED);
+        return failure_text(&format!("cannot install the signal handler: {err}"));
     }
 
     let running = match serve::start(&dir, options) {
         Ok(running) => running,
-        Err(err) => {
-            eprintln!("Error: {err}");
-            return ExitCode::from(EXIT_FAILED);
-        }
+        Err(error) => return failure(&error),
     };
-    eprintln!(
-        "graphersal-server {} (EXPERIMENTAL) serves {} at {} (Ctrl+C stops it)",
-        env!("CARGO_PKG_VERSION"),
-        dir,
-        running.url()
-    );
+    // The start block on stderr, the address alone on stdout (scripts read it).
+    err(&console::start_block(&running));
+    out(&console::address_line(&running));
     // Wait for a signal (a closed channel cannot happen while the handler lives).
     let _ = stop_rx.recv();
-    eprintln!("stopping...");
+    err(&console::stopping_text());
+    let root = running.dir().root().to_path_buf();
     match running.stop() {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(err) => {
-            eprintln!("Error: {err}");
-            ExitCode::from(EXIT_FAILED)
+        Ok(()) => {
+            err(&console::stopped_text(&root));
+            // A closed stdout does not fail a server that served.
+            ExitCode::SUCCESS
         }
+        Err(error) => failure(&error),
     }
 }
 
@@ -295,17 +312,11 @@ fn db_command(args: &[String]) -> ExitCode {
     let command = match parse_db(&positional, &value, &switch) {
         Ok(command) => command,
         Err(Problem::Usage(message)) => return usage_error(&format!("db: {message}")),
-        Err(Problem::Failed(message)) => {
-            eprintln!("Error: {message}");
-            return ExitCode::from(EXIT_FAILED);
-        }
+        Err(Problem::Failed(message)) => return failure_text(&message),
     };
     let dir = match ServerDir::open(&dir) {
         Ok(dir) => dir,
-        Err(err) => {
-            eprintln!("Error: {err}");
-            return ExitCode::from(EXIT_FAILED);
-        }
+        Err(error) => return failure(&error),
     };
     print_outcome(&dir, &command, switch("--json"))
 }
@@ -315,35 +326,23 @@ fn print_outcome(dir: &ServerDir, command: &DbCommand, json: bool) -> ExitCode {
     match console::run(dir, command) {
         Ok(outcome) => {
             if let Via::Server(address) = outcome.via {
-                eprintln!(
+                err(&format!(
                     "note: a server runs on {}; sent to its admin API at {address}",
                     dir.root().display()
-                );
+                ));
             }
             if json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&outcome.body).unwrap_or_default()
-                );
+                out(&serde_json::to_string_pretty(&outcome.body).unwrap_or_default());
             } else {
-                println!("{}", console::render(command, &outcome.body));
+                out(&console::render(command, &outcome.body, dir.root()));
             }
             if console::failed(command, &outcome.body) {
                 ExitCode::from(EXIT_FAILED)
             } else {
-                ExitCode::SUCCESS
+                exit(0)
             }
         }
-        Err(err) => {
-            eprintln!("Error: {err}");
-            if let graphersal_server::ServerError::Remote {
-                help: Some(help), ..
-            } = &err
-            {
-                eprintln!("help: {help}");
-            }
-            ExitCode::from(EXIT_FAILED)
-        }
+        Err(error) => failure(&error),
     }
 }
 
@@ -390,10 +389,7 @@ fn import_command(args: &[String]) -> ExitCode {
     };
     let source = match std::path::absolute(source) {
         Ok(source) => source,
-        Err(err) => {
-            eprintln!("Error: cannot resolve {source}: {err}");
-            return ExitCode::from(EXIT_FAILED);
-        }
+        Err(err) => return failure_text(&format!("cannot resolve {source}: {err}")),
     };
     let role = match value("--role").as_deref() {
         None => DatabaseRole::Normal,
@@ -412,10 +408,7 @@ fn import_command(args: &[String]) -> ExitCode {
     };
     let dir = match ServerDir::open(dir) {
         Ok(dir) => dir,
-        Err(err) => {
-            eprintln!("Error: {err}");
-            return ExitCode::from(EXIT_FAILED);
-        }
+        Err(error) => return failure(&error),
     };
     print_outcome(&dir, &command, json)
 }
@@ -472,13 +465,11 @@ fn models_command(args: &[String]) -> ExitCode {
                         license: value("--license"),
                     },
                     Err(err) => {
-                        eprintln!("Error: cannot resolve {source}: {err}");
-                        return ExitCode::from(EXIT_FAILED);
+                        return failure_text(&format!("cannot resolve {source}: {err}"));
                     }
                 }
             } else if add_flags {
-                eprintln!("Error: {source} does not exist");
-                return ExitCode::from(EXIT_FAILED);
+                return failure_text(&format!("{source} does not exist"));
             } else {
                 // Not a path: the repository of a model the shared models hold.
                 DbCommand::ModelsAdd {
@@ -502,10 +493,7 @@ fn models_command(args: &[String]) -> ExitCode {
     };
     let dir = match ServerDir::open(&dir) {
         Ok(dir) => dir,
-        Err(err) => {
-            eprintln!("Error: {err}");
-            return ExitCode::from(EXIT_FAILED);
-        }
+        Err(error) => return failure(&error),
     };
     print_outcome(&dir, &command, json)
 }
@@ -606,10 +594,14 @@ fn parse_db(
         }
         [] => return Err(usage("no db command given")),
         [other, ..] => {
-            return Err(Problem::Usage(format!(
-                "unknown command or wrong arguments: db {other} {}",
-                words[1..].join(" ")
-            )));
+            return Err(Problem::Usage(
+                format!(
+                    "unknown command or wrong arguments: db {other} {}",
+                    words[1..].join(" ")
+                )
+                .trim_end()
+                .to_string(),
+            ));
         }
     };
     only_create_flags()?;

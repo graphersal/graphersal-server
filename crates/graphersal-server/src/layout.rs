@@ -8,8 +8,10 @@
 //!   aliases.toml     alias -> database name (crate::registry)
 //!   databases/       one directory per database: database.toml + store/ (crate::registry)
 //!   models/          the shared embedding models: blobs/<2 hex>/<sha256>, models.toml (crate::models)
-//!   backups/  trash/  tmp/  logs/
+//!   backups/  trash/  tmp/
 //! ```
+//!
+//! There is no log directory: the server logs to stderr (redirect it to keep a log file).
 //!
 //! A directory is a server directory when it holds `server.toml`. Every path is built with
 //! [`Path::join`] one component at a time (Windows).
@@ -37,7 +39,6 @@ const SUBDIRS: &[&[&str]] = &[
     &["backups"],
     &["trash"],
     &["tmp"],
-    &["logs"],
 ];
 
 /// A server directory (its root path; nothing is checked until it is opened).
@@ -200,11 +201,6 @@ impl ServerDir {
         self.root.join("tmp")
     }
 
-    /// `logs/`.
-    pub fn logs(&self) -> PathBuf {
-        self.root.join("logs")
-    }
-
     /// Reads and checks `server.toml`.
     pub fn load_config(&self) -> Result<ServerConfig, ServerError> {
         let path = self.config_path();
@@ -272,7 +268,6 @@ mod tests {
             dir.backups(),
             dir.trash(),
             dir.tmp(),
-            dir.logs(),
         ] {
             assert!(path.is_dir(), "{}", path.display());
         }
@@ -290,9 +285,11 @@ mod tests {
             "listen = \"127.0.0.1:0\"\n"
         );
         // An interrupted init (a subdirectory missing) is completed.
-        fs::remove_dir(dir.logs()).unwrap();
+        fs::remove_dir(dir.tmp()).unwrap();
         let completed = ServerDir::init(&root).unwrap();
-        assert_eq!(completed.created, vec![dir.logs()]);
+        assert_eq!(completed.created, vec![dir.tmp()]);
+        // No log directory: the server logs to stderr.
+        assert!(!root.join("logs").exists());
     }
 
     #[test]
