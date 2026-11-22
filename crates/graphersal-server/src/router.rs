@@ -210,8 +210,8 @@ fn error_response(error: HttpError) -> Response {
     }
 }
 
-/// `GET /api/info` at the root: the server's identity (`server: "graphersal-server"`) and its
-/// UI. The playground served at `/` takes the answer as its engine's because it names its host
+/// `GET /api/info` at the root: the server's identity (`server: "graphersal-server"`), the
+/// host-neutral protocol marker of a Graphersal host (`protocol: "graphersal/1"`) and its UI. The playground served at `/` takes the answer as its engine's because it names its host
 /// and carries `uiProfile`, the `server` profile ([`crate::ui_assets::profile`]: the database
 /// list and the admin tabs, no workspace, so the page never asks the root for a graph).
 /// `uploadBytes` is the largest import upload (a client checks a file's size before it sends
@@ -226,6 +226,7 @@ fn info(upload_bytes: u64, mcp: Option<serde_json::Value>) -> Result<Response, H
         200,
         &json!({
             "server": "graphersal-server",
+            "protocol": "graphersal/1",
             "version": env!("CARGO_PKG_VERSION"),
             "experimental": true,
             "uploadBytes": upload_bytes,
@@ -341,6 +342,7 @@ mod tests {
             "the root shows the profile, not a landing"
         );
         assert_eq!(info["server"], "graphersal-server");
+        assert_eq!(info["protocol"], "graphersal/1");
         assert!(info.get("product").is_none());
         assert_eq!(info["experimental"], true);
         assert_eq!(info["uiProfile"]["name"], "server");

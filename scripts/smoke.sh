@@ -198,6 +198,7 @@ done
 req GET /api/info
 expect_status 200
 expect_json server graphersal-server
+expect_json protocol graphersal/1
 expect_json uiProfile.name server
 expect_json uiProfile.styles.0 server-ui.css
 expect_json admin null

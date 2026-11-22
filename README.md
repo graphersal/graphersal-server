@@ -83,7 +83,7 @@ With a server running on `DIR` the command goes to its admin API (address from
 | Path | What |
 |---|---|
 | `GET /healthz`, `GET /readyz` | liveness `200`; readiness `200` or `503` while starting or stopping |
-| `GET /api/info` | the server's identity (`server: "graphersal-server"`), its UI profile `uiProfile`, `uploadBytes`, the MCP endpoint |
+| `GET /api/info` | the server's identity (`server: "graphersal-server"`, `protocol: "graphersal/1"`), its UI profile `uiProfile`, `uploadBytes`, the MCP endpoint |
 | `GET /` | the server's web UI (the playground showing the `server` UI profile) |
 | `GET /server-ui/<file>` | the `server` UI profile's files (its modules and style sheet) |
 | `/db/<name>/...` | the playground and its HTTP API (`POST /db/<name>/api/execute {"script"}`, ...) on the database or alias `<name>`, resolved per request; `409` with help when it is not loaded (never loaded implicitly), `404` when unknown |
@@ -110,7 +110,9 @@ database keeps the ordinary playground under `/db/<name>/`; its `/api/info` carr
 (the link back to the server's UI) and `database`.
 
 The root `GET /api/info` answers `"server": "graphersal-server"` with `uiProfile`; the
-playground takes such an answer (a named host delivering a UI profile) as its engine's.
+playground takes such an answer (a named host delivering a UI profile) as its engine's. It also
+carries `"protocol": "graphersal/1"`, the host-neutral marker of a Graphersal host (the
+playground will recognise hosts by it instead of by `server`).
 
 Tests of the UI's modules (Node only, no browser):
 

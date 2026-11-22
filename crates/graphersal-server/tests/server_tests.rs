@@ -492,6 +492,7 @@ fn databases_are_served_under_their_names_and_aliases() {
     let root = json(&get(address, "/api/info").1);
     assert!(root.get("admin").is_none());
     assert_eq!(root["server"], "graphersal-server");
+    assert_eq!(root["protocol"], "graphersal/1");
     assert!(root.get("product").is_none());
     assert_eq!(root["uiProfile"]["name"], "server");
     assert_eq!(root["uiProfile"]["version"], env!("CARGO_PKG_VERSION"));

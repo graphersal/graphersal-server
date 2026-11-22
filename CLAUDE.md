@@ -33,7 +33,7 @@ from published files). When this file disagrees with the code, the code wins: sa
   through `graphersal_serve::Server`, then `HostCheck::check` on everything else, then the
   routes: `/db/<name>/...` via `mounts`, `GET /api/info` (root identity: `server:
   "graphersal-server"` (the playground takes a named host's info that carries `uiProfile`,
-  `isEngineInfo`), no `product`, no `admin`, `uiProfile` = `ui_assets::profile()`, `uploadBytes` = the upload limit, `mcp` =
+  `isEngineInfo`), `protocol: "graphersal/1"` (host-neutral marker), no `product`, no `admin`, `uiProfile` = `ui_assets::profile()`, `uploadBytes` = the upload limit, `mcp` =
   `Mcp::status()` or null), `/mcp` (every method) via `mcp::route` (404 when MCP is off),
   `/api/admin/...` via `admin_api`, other `/api/*` 404, `GET /server-ui/<file>` the profile's
   files (`ui_assets::file`), every other GET a file of the embedded playground at the root (`/` =
