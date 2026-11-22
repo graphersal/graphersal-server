@@ -320,6 +320,7 @@ dependencies = [
  "fd-lock",
  "graphersal",
  "graphersal-serve",
+ "graphersal-session",
  "serde",
  "serde_json",
  "tiny_http",

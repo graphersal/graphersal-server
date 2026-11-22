@@ -17,6 +17,9 @@ rust-version = "1.88"
 # one (path dependencies; this repository is private and never published while it uses them).
 graphersal = { path = "../graphersal/crates/graphersal" }
 graphersal-serve = { path = "../graphersal/crates/graphersal-serve" }
+# The session a served database runs in: `graphersal_serve::launch` takes its `SessionPresets`,
+# and `Context::call` jobs receive its `Session` (already in the tree through graphersal-serve).
+graphersal-session = { path = "../graphersal/crates/graphersal-session" }
 
 # `server.toml` and the run file: the TOML reader/writer (serde based).
 toml = "1"

@@ -14,8 +14,10 @@ Graphersal playground.
 ## Status
 
 This version holds `init`, `serve`, the server lock, the run file, the health probes,
-`/api/info` and the database registry (read at start, no HTTP routes yet). Loading databases,
-the admin API, the playground and MCP come in later versions.
+`/api/info`, the database registry (read at start) and the loader (databases with
+`auto_load = true` are loaded in the background at start and unloaded cleanly at stop; no HTTP
+routes to them yet). The HTTP routes of the databases, the admin API, the playground and MCP come
+in later versions.
 
 ## Use
 

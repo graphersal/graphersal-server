@@ -31,3 +31,14 @@ impl Drop for TempDir {
         let _ = std::fs::remove_dir_all(&self.0);
     }
 }
+
+/// Whether this run is on a CI runner (`CI` set and not empty, "false" or "0"), as in
+/// graphersal's `tests/all/ci_support.rs`. A test whose result depends on how much CPU time or
+/// memory the machine gives it (an upper bound on wall-clock time) returns early there.
+pub(crate) fn skip_on_ci(what: &str) -> bool {
+    let on_ci = std::env::var("CI").is_ok_and(|v| !v.is_empty() && v != "false" && v != "0");
+    if on_ci {
+        eprintln!("skipped on CI ({what}): depends on the runner's CPU or memory");
+    }
+    on_ci
+}
