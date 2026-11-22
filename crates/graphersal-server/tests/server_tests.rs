@@ -485,6 +485,11 @@ fn databases_are_served_under_their_names_and_aliases() {
     assert_eq!(info["database"], "a");
     assert!(info.get("admin").is_none());
     assert_eq!(info["home"], "/");
+    // A mount names this server (not the CLI's dev server), carries the protocol marker the
+    // playground recognises a Graphersal host by, and is no dev server (no DEV badge).
+    assert_eq!(info["server"], "graphersal-server");
+    assert_eq!(info["protocol"], "graphersal/1");
+    assert_eq!(info["dev"], false);
     let info = json(&call(address, "GET", "/db/current/api/info", &[], "").2);
     assert_eq!(info["database"], "b", "an alias shows the real database");
     assert_eq!(info["mountPath"], "/db/b");
@@ -493,6 +498,7 @@ fn databases_are_served_under_their_names_and_aliases() {
     assert!(root.get("admin").is_none());
     assert_eq!(root["server"], "graphersal-server");
     assert_eq!(root["protocol"], "graphersal/1");
+    assert_eq!(root["dev"], false);
     assert!(root.get("product").is_none());
     assert_eq!(root["uiProfile"]["name"], "server");
     assert_eq!(root["uiProfile"]["version"], env!("CARGO_PKG_VERSION"));

@@ -79,9 +79,17 @@ test('the engine\'s playground takes the root info as its engine\'s (isEngineInf
   const mod = await playgroundModule(t, 'js/engine/http-engine.js');
   if (!mod) return;
   const { isEngineInfo } = mod;
-  // The root /api/info as src/router.rs `info` answers it (without the fields the check ignores).
+  // The root /api/info as src/router.rs `info` answers it: root-info.json holds its fixed
+  // fields (the Rust test `the_node_tests_root_info_is_the_answer` checks them against the
+  // real answer), the profile is added as the binary adds it.
+  const root = JSON.parse(readFileSync(join(UI, 'tests', 'root-info.json'), 'utf8'));
+  assert.equal(root.protocol, 'graphersal/1');
   const uiProfile = { ...profile, version: '0.1.0' };
-  assert.equal(isEngineInfo({ server: 'graphersal-server', uiProfile }), true);
-  assert.equal(isEngineInfo({ server: 'graphersal-server', experimental: true, uploadBytes: 1024, mcp: null, uiProfile }), true);
-  assert.equal(isEngineInfo({ server: 'graphersal-server' }), false, 'a named host needs its profile');
+  assert.equal(isEngineInfo({ ...root, uiProfile }), true);
+  assert.equal(isEngineInfo({ ...root, uploadBytes: 1024, mcp: null, uiProfile }), true);
+  // The playground recognises a Graphersal host only by its protocol marker: a named host
+  // without it is not taken, even with a profile.
+  const { protocol, ...unmarked } = root;
+  assert.equal(isEngineInfo({ ...unmarked, uiProfile }), false, 'no protocol: not a Graphersal host');
+  assert.equal(isEngineInfo({ server: 'graphersal-server', uiProfile }), false, 'a name and a profile are not enough');
 });

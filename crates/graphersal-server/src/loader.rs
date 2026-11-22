@@ -676,6 +676,7 @@ impl Loader {
         };
         let mut builder = launched
             .context_builder(self.host_check.clone())
+            .server_name(crate::router::SERVER_NAME)
             .mount_path(Some(format!("/db/{key}")))
             .hooks(Arc::new(DatabaseInfo { name: key.clone() }))
             .read_only(read_only)

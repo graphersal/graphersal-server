@@ -1,0 +1,6 @@
+{
+  "server": "graphersal-server",
+  "protocol": "graphersal/1",
+  "dev": false,
+  "experimental": true
+}

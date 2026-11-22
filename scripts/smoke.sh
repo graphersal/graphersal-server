@@ -199,6 +199,7 @@ req GET /api/info
 expect_status 200
 expect_json server graphersal-server
 expect_json protocol graphersal/1
+expect_json dev false
 expect_json uiProfile.name server
 expect_json uiProfile.styles.0 server-ui.css
 expect_json admin null
@@ -253,6 +254,9 @@ expect_status 200
 expect_json database acme
 expect_json home /
 expect_json admin null
+expect_json server graphersal-server
+expect_json protocol graphersal/1
+expect_json dev false
 ok
 
 STEP="write and read through /db/<name>/api/execute"
