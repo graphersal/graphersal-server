@@ -197,8 +197,21 @@ done
 [ "$STATUS" = 200 ] || fail "/readyz answers $STATUS"
 req GET /api/info
 expect_status 200
-expect_json server graphersal-server
-expect_json admin true
+expect_json product graphersal-server
+expect_json uiProfile.name server
+expect_json admin null
+ok
+
+STEP="the server UI at /"
+req GET /
+expect_status 200
+expect_body_contains 'server-ui/server-ui.css'
+req GET /server-ui/profile.json
+expect_status 200
+expect_json name server
+req GET /server-ui/databases-tab.js
+expect_status 200
+[ "$(header Content-Type)" = "text/javascript; charset=utf-8" ] || fail "databases-tab.js: $(header Content-Type)"
 ok
 
 # --- databases ----------------------------------------------------------------------------
@@ -225,6 +238,13 @@ load acme
 load acme-l
 req GET /api/admin/databases/product
 expect_json pooled true
+ok
+
+STEP="database page info links home"
+req GET /db/acme/api/info
+expect_status 200
+expect_json database acme
+expect_json home /
 ok
 
 STEP="write and read through /db/<name>/api/execute"

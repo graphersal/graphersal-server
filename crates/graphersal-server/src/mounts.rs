@@ -43,8 +43,10 @@ impl GraphResolver for Databases {
 }
 
 /// The host's additions to a database's `GET /db/<name>/api/info`: `database` (its real name,
-/// shown in the playground's header) and `admin: true` (the server has the admin API; the
-/// playground links the name to the landing page).
+/// shown in the playground's header), `home: "/"` (the server's own UI, the `server` profile at
+/// the root: the playground's generic link back to it) and `admin: true` (the server has the
+/// admin API; today's playground links the name to the root through it; kept until the
+/// playground reads `home`).
 pub(crate) struct DatabaseInfo {
     /// The database's real name.
     pub(crate) name: String,
@@ -53,6 +55,7 @@ pub(crate) struct DatabaseInfo {
 impl Hooks for DatabaseInfo {
     fn add_info(&self, _context: &Context, info: &mut Value) {
         info["database"] = Value::String(self.name.clone());
+        info["home"] = Value::String("/".to_string());
         info["admin"] = Value::Bool(true);
     }
 }

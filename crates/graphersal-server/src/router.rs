@@ -5,13 +5,16 @@
 //!   request), its playground, API and MCP endpoint, with the prefix stripped
 //!   ([`crate::mounts`]); `/db/<name>` redirects to `/db/<name>/`; `404` for an unknown name,
 //!   `409` for a database that is not loaded;
-//! - `GET /api/info`: the server's identity, announcing `admin`;
+//! - `GET /api/info`: the server's identity and its UI profile (`uiProfile`, the `server`
+//!   profile of [`crate::ui_assets`]);
 //! - `/api/admin/...`: the admin API ([`crate::admin_api`]);
 //! - `/mcp`: the server-wide MCP endpoint over every database ([`crate::mcp`]; `404` when
 //!   `server.toml` turns MCP off);
 //! - any other `/api/...` path: `404`;
-//! - every other `GET`: a file of the embedded playground at the root (`/` = its `index.html`,
-//!   which shows the landing view: the database list), `404` when there is no such file.
+//! - `GET /server-ui/<file>`: a file of the `server` UI profile ([`crate::ui_assets`]);
+//! - every other `GET`: a file of the embedded playground at the root (`/` = its `index.html`
+//!   with the profile's style sheet added; the page shows the `server` profile: the database
+//!   list and the admin tabs, no graph), `404` when there is no such file.
 
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
@@ -137,10 +140,7 @@ impl Router {
             }
         } else if path == "/api/info" {
             if read {
-                Ok(info(
-                    self.upload_limit(),
-                    loader.mcp().map(|mcp| mcp.status()),
-                ))
+                info(self.upload_limit(), loader.mcp().map(|mcp| mcp.status()))
             } else {
                 Err(not_allowed(&method, path))
             }
@@ -155,6 +155,12 @@ impl Router {
             crate::admin_api::route(&admin, &method, endpoint, &mut request)
         } else if path == "/api" || path.starts_with("/api/") {
             Err(HttpError::new(404, format!("unknown endpoint {path}")))
+        } else if let Some(name) = path.strip_prefix(crate::ui_assets::FILES_PREFIX) {
+            if read {
+                profile_file(path, name)
+            } else {
+                Err(not_allowed(&method, path))
+            }
         } else if read {
             self.serve_ui(path)
         } else {
@@ -163,7 +169,8 @@ impl Router {
         Answer::Response(answer.unwrap_or_else(error_response))
     }
 
-    /// A file of the playground at the root (`/` and a directory: its `index.html`).
+    /// A file of the playground at the root (`/` and a directory: its `index.html`; the root
+    /// `index.html` gets the `server` profile's style sheet, [`crate::ui_assets::BOOT_TAGS`]).
     fn serve_ui(&self, path: &str) -> Result<Response, HttpError> {
         let not_found = || HttpError::new(404, format!("not found: {path}"));
         let decoded = percent_decode(path).ok_or_else(not_found)?;
@@ -171,11 +178,27 @@ impl Router {
             .ui
             .read(decoded.trim_start_matches('/'))
             .ok_or_else(not_found)?;
+        let bytes = if name == "index.html" {
+            crate::ui_assets::with_boot_tags(bytes)
+        } else {
+            bytes
+        };
         Ok(Response::new(200, bytes)
             .with_header("Content-Type", content_type(Path::new(&name)))
             .with_header("Cache-Control", "no-store")
             .with_header("X-Content-Type-Options", "nosniff"))
     }
+}
+
+/// A file of the `server` UI profile (`name` = the path after `/server-ui/`), `404` when the
+/// profile has no such file.
+fn profile_file(path: &str, name: &str) -> Result<Response, HttpError> {
+    let (bytes, kind) = crate::ui_assets::file(name)
+        .ok_or_else(|| HttpError::new(404, format!("not found: {path}")))?;
+    Ok(Response::new(200, bytes.to_vec())
+        .with_header("Content-Type", kind)
+        .with_header("Cache-Control", "no-store")
+        .with_header("X-Content-Type-Options", "nosniff"))
 }
 
 /// `405` for `method` on `path`.
@@ -193,22 +216,32 @@ fn error_response(error: HttpError) -> Response {
     }
 }
 
-/// `GET /api/info`: the server's identity; `admin: true` with no `mountPath` tells the
-/// playground served at `/` to show its landing view (the database list); `uploadBytes` is the
-/// largest import upload (a client checks a file's size before it sends it); `mcp` is the MCP
-/// endpoint's status (`{endpoint: "/mcp", readOnly, client}`), null when MCP is off.
-fn info(upload_bytes: u64, mcp: Option<serde_json::Value>) -> Response {
-    Response::json(
+/// `GET /api/info` at the root: the server's identity and its UI. The playground served at `/`
+/// takes an answer as its engine's only when `server` is `graphersal-dev` (the dev server's
+/// identity; the playground knows no other), so the root answers that, with `product` naming
+/// graphersal-server; `uiProfile` is the `server` profile ([`crate::ui_assets::profile`]: the
+/// database list and the admin tabs, no workspace, so the page never asks the root for a graph);
+/// no `admin` (the playground would show its own landing view instead of the profile; a
+/// database's info keeps it). `uploadBytes` is the largest import upload (a client checks a
+/// file's size before it sends it); `mcp` is the MCP endpoint's status (`{endpoint: "/mcp",
+/// readOnly, client}`), null when MCP is off.
+fn info(upload_bytes: u64, mcp: Option<serde_json::Value>) -> Result<Response, HttpError> {
+    let profile = crate::ui_assets::profile().map_err(|err| {
+        tracing::error!("{err}");
+        HttpError::new(500, err)
+    })?;
+    Ok(Response::json(
         200,
         &json!({
-            "server": "graphersal-server",
+            "server": "graphersal-dev",
+            "product": "graphersal-server",
             "version": env!("CARGO_PKG_VERSION"),
             "experimental": true,
-            "admin": true,
             "uploadBytes": upload_bytes,
             "mcp": mcp,
+            "uiProfile": profile,
         }),
-    )
+    ))
 }
 
 /// `%XX` decoded (as `graphersal_serve` decodes static paths); `None` for a broken escape or
@@ -312,12 +345,45 @@ mod tests {
         let info = get(&router, "/api/info?x=1", Some("localhost:8484"));
         assert_eq!(info.status(), 200);
         let info = json_of(&info);
-        assert_eq!(info["admin"], true);
-        assert_eq!(info["server"], "graphersal-server");
+        assert!(
+            info.get("admin").is_none(),
+            "the root shows the profile, not a landing"
+        );
+        assert_eq!(info["server"], "graphersal-dev");
+        assert_eq!(info["product"], "graphersal-server");
         assert_eq!(info["experimental"], true);
+        assert_eq!(info["uiProfile"]["name"], "server");
+        assert_eq!(info["uiProfile"]["version"], env!("CARGO_PKG_VERSION"));
         let landing = get(&router, "/", Some("127.0.0.1:8484"));
         assert_eq!(landing.status(), 200);
-        assert!(String::from_utf8_lossy(landing.body()).contains("<html"));
+        let page = String::from_utf8_lossy(landing.body()).into_owned();
+        assert!(page.contains("<html"));
+        assert!(page.contains(crate::ui_assets::BOOT_TAGS), "{page}");
+        let module = get(
+            &router,
+            "/server-ui/databases-tab.js",
+            Some("127.0.0.1:8484"),
+        );
+        assert_eq!(module.status(), 200);
+        assert!(module.headers().iter().any(
+            |(name, value)| name == "Content-Type" && value == "text/javascript; charset=utf-8"
+        ));
+        assert_eq!(
+            get(&router, "/server-ui/nope.js", Some("127.0.0.1:8484")).status(),
+            404
+        );
+        assert_eq!(
+            get(
+                &router,
+                "/server-ui/tests/profile.test.mjs",
+                Some("127.0.0.1:8484")
+            )
+            .status(),
+            404
+        );
+        let other = get(&router, "/js/main.js", Some("127.0.0.1:8484"));
+        assert_eq!(other.status(), 200);
+        assert!(!String::from_utf8_lossy(other.body()).contains("server-ui.css"));
         let missing = get(&router, "/db/x/api/info", Some("127.0.0.1:8484"));
         assert_eq!(missing.status(), 404);
         assert!(json_of(&missing)["error"].as_str().unwrap().contains("'x'"));

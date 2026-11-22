@@ -9,8 +9,7 @@ or a layer over a shared, frozen base database (many layers, one base in memory)
 database gets the Graphersal playground and its HTTP API under `/db/<name>/`; one MCP endpoint
 (`/mcp`) lets an AI agent list the databases and pick one per session; the admin operations
 (create, load, clone, back up, restore, export, import, aliases, shared embedding models) are
-an HTTP API, a console (`graphersal-server db ...`) and an admin panel in the playground's
-landing view at `/`.
+an HTTP API, a console (`graphersal-server db ...`) and the server's own web UI at `/`.
 
 > **No access control.** Anyone who reaches the port can read, change and delete every
 > database. The server listens on the loopback (`127.0.0.1:8484`) by default and logs a warning
@@ -36,8 +35,8 @@ graphersal-server serve --dir ./srv                   # serve it on 127.0.0.1:84
 graphersal-server serve --dir ./srv --listen 127.0.0.1:0   # on a free port
 ```
 
-Open `http://127.0.0.1:8484/`: the landing view lists the databases with their states and holds
-the admin panel. `serve` writes the address it bound into `./srv/server.run` while it runs;
+Open `http://127.0.0.1:8484/`: the server's web UI lists the databases with their states (see
+[Web UI](#web-ui)). `serve` writes the address it bound into `./srv/server.run` while it runs;
 Ctrl+C or SIGTERM stops it cleanly (databases are unloaded, the run file is removed). A second
 `serve` on the same directory is refused (`server.lock`).
 
@@ -84,11 +83,41 @@ With a server running on `DIR` the command goes to its admin API (address from
 | Path | What |
 |---|---|
 | `GET /healthz`, `GET /readyz` | liveness `200`; readiness `200` or `503` while starting or stopping |
-| `GET /api/info` | the server's identity: `admin: true`, `uploadBytes`, the MCP endpoint |
-| `GET /` | the playground's landing view and admin panel |
+| `GET /api/info` | the server's identity (`product: "graphersal-server"`), its UI profile `uiProfile`, `uploadBytes`, the MCP endpoint |
+| `GET /` | the server's web UI (the playground showing the `server` UI profile) |
+| `GET /server-ui/<file>` | the `server` UI profile's files (its modules and style sheet) |
 | `/db/<name>/...` | the playground and its HTTP API (`POST /db/<name>/api/execute {"script"}`, ...) on the database or alias `<name>`, resolved per request; `409` with help when it is not loaded (never loaded implicitly), `404` when unknown |
 | `/api/admin/...` | the admin API: [`docs/admin-api.md`](docs/admin-api.md) |
 | `/mcp`, `/db/<name>/mcp` | the MCP endpoints: [`docs/mcp.md`](docs/mcp.md) |
+
+## Web UI
+
+`/` serves Graphersal's playground showing graphersal-server's own UI profile, `server` (the
+same mechanism graphersal-memory uses for its `memory` profile; the playground's book page
+"UI profiles"). The profile and its modules live in `crates/graphersal-server/ui/` and are
+built into the binary: `profile.json`, the tabs `databases-tab.js` (the list with load,
+unload, clone, promote, delete, read-only and auto-load, create, aliases), `backups-tab.js`
+(back up, list, restore), `import-tab.js` (upload with progress, or a path on the server),
+`export-tab.js` (`.gsnap` download) and `models-tab.js` (the shared models), the pure model
+`admin-api.js` and `databases.js`, the tabs' shared state `shared.js` and the style sheet
+`server-ui.css` (on the playground's theme tokens). Every module imports only `vue` and the
+profile's own files and calls the admin API itself, sending the host's request headers
+(`window.GRAPHERSAL_ENGINE.headers`) when a page sets them. The root has no graph: the profile
+has no workspace tab, so the page only reads `GET /api/info` and the admin API. Each loaded
+database keeps the ordinary playground under `/db/<name>/`; its `/api/info` carries `home: "/"`
+(the link back to the server's UI) and `database`.
+
+The root `GET /api/info` answers `"server": "graphersal-dev"` (the identity the playground
+requires before it takes a server's `uiProfile`) and names the product in `product`.
+
+Tests of the UI's modules (Node only, no browser):
+
+```bash
+node --test crates/graphersal-server/ui/tests/*.test.mjs
+```
+
+`profile.test.mjs` also checks the profile with the engine playground's own `validateProfile`
+from `GRAPHERSAL_PLAYGROUND` (a playground directory), else `../graphersal/playground`.
 
 ## Server directory
 

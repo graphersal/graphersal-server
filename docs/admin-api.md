@@ -1,7 +1,7 @@
 # Admin API (EXPERIMENTAL)
 
-The admin HTTP API of `graphersal-server`, below `/api/admin/`. The playground's admin panel
-and the console (`graphersal-server db ...`, when a server runs on the directory) are its
+The admin HTTP API of `graphersal-server`, below `/api/admin/`. The server's web UI at `/` (the
+`server` UI profile, `crates/graphersal-server/ui/`, model `ui/admin-api.js`) and the console (`graphersal-server db ...`, when a server runs on the directory) are its
 clients. Both the API and the console's offline mode call the same admin core, so the answers
 below are also what `graphersal-server db ... --json` prints.
 
@@ -221,7 +221,7 @@ is still a JSON answer.
 
 A new database from another one, in two forms:
 
-- **Upload** (the playground): `POST /api/admin/import?name=<name>` with the file as the raw
+- **Upload** (the web UI's Import tab): `POST /api/admin/import?name=<name>` with the file as the raw
   request body (`Content-Type: application/octet-stream`; not multipart) and a
   `Content-Length`. Query parameters (URL-encoded): `name` (required), `base` (a layer's base
   database), `format` (`snapshot`, `store`, `graphson`, `graphml`; default: detected),

@@ -8,8 +8,9 @@
 //! ([`Loader`]: background loads into served contexts, the shared pool of layer bases,
 //! unload, the runtime read-only toggle, `auto_load` at start) and the HTTP listener
 //! ([`serve::start`]) with the health probes, the loaded databases under `/db/<name>/` (aliases
-//! resolved per request, `409` for a database that is not loaded), the embedded playground at
-//! `/` (its landing view lists the databases), `/api/info` and the admin listing
+//! resolved per request, `409` for a database that is not loaded), the server's own UI at `/`
+//! (the embedded playground showing the `server` UI profile: its Databases, Backups, Import,
+//! Export and Models tabs, served from `/server-ui/`), `/api/info` and
 //! the admin API (`/api/admin/...`: list, create, delete, clone, load, unload, read-only,
 //! auto-load, aliases, backup, backups, restore, export, import, models) over ONE admin core ([`ops::Admin`]) that the console's `db` and `models` commands
 //! ([`console`]) use too, on the directory itself or through the running server's API, and
@@ -46,6 +47,7 @@ pub mod serve;
 pub(crate) mod test_models;
 #[cfg(test)]
 pub(crate) mod test_support;
+mod ui_assets;
 
 pub use admin::TmpBuild;
 pub use config::{
