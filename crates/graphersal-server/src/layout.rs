@@ -5,8 +5,8 @@
 //!   server.toml      configuration (crate::config)
 //!   server.lock      one running server per directory (crate::lock)
 //!   server.run       the address of the running server (crate::run_file), removed at stop
-//!   aliases.toml     (later) alias -> database name
-//!   databases/       one directory per database (later)
+//!   aliases.toml     alias -> database name (crate::registry)
+//!   databases/       one directory per database: database.toml + store/ (crate::registry)
 //!   models/blobs/    the shared model blobs (later)
 //!   backups/  trash/  tmp/  logs/
 //! ```
@@ -27,7 +27,7 @@ pub const CONFIG_FILE: &str = "server.toml";
 pub const LOCK_FILE: &str = "server.lock";
 /// The run file's name.
 pub const RUN_FILE: &str = "server.run";
-/// The alias file's name (used from a later version on).
+/// The alias file's name.
 pub const ALIASES_FILE: &str = "aliases.toml";
 
 /// The subdirectories `init` creates, each as its path components.

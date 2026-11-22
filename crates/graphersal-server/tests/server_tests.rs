@@ -8,7 +8,9 @@ use std::process::{Child, Command, Output, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use graphersal_server::{RunInfo, ServeOptions, ServerDir, ServerError, ServerLock, serve};
+use graphersal_server::{
+    DbState, RunInfo, ServeOptions, ServerDir, ServerError, ServerLock, serve,
+};
 
 const BIN: &str = env!("CARGO_BIN_EXE_graphersal-server");
 
@@ -270,6 +272,32 @@ fn start_and_stop_in_process() {
         .err()
         .unwrap();
     assert!(matches!(err, ServerError::NotServerDir { .. }), "{err}");
+}
+
+#[test]
+fn start_scans_the_registry_and_broken_databases_are_not_fatal() {
+    let temp = TempDir::new("registry-scan");
+    let dir = ServerDir::init(temp.path()).unwrap().dir;
+    let good = dir.databases().join("good");
+    std::fs::create_dir_all(good.join("store")).unwrap();
+    std::fs::write(good.join("database.toml"), "auto_load = true\n").unwrap();
+    let broken = dir.databases().join("broken");
+    std::fs::create_dir_all(&broken).unwrap();
+    std::fs::write(broken.join("database.toml"), "kind = ").unwrap();
+    std::fs::write(dir.aliases_path(), "g = \"good\"\n").unwrap();
+    let debris = dir.tmp().join("build-old-0");
+    std::fs::create_dir_all(&debris).unwrap();
+
+    let listen: SocketAddr = "127.0.0.1:0".parse().unwrap();
+    let running = serve::start(temp.path(), ServeOptions::new().with_listen(listen)).unwrap();
+    assert_eq!(get(running.address(), "/readyz").0, 200);
+    let registry = running.registry();
+    assert_eq!(registry.list().len(), 2);
+    assert_eq!(registry.resolve("G").unwrap().name, "good");
+    assert_eq!(registry.get("good").unwrap().state, DbState::Unloaded);
+    assert_eq!(registry.get("broken").unwrap().state.as_str(), "failed");
+    assert!(!debris.exists());
+    running.stop().unwrap();
 }
 
 #[test]

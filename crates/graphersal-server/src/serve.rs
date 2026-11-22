@@ -3,7 +3,8 @@
 //! [`start`] opens the server directory, takes its `server.lock` (a second server on the same
 //! directory is refused with [`ServerError::Locked`]), binds the listen address (`--listen`
 //! over `server.toml`'s `listen`; port `0` picks a free port), writes the bound address into
-//! `server.run`, and serves on a `tiny_http` listener (adapted from the graphersal CLI's dev
+//! `server.run`, scans the database registry ([`Registry::scan`]; `/readyz` answers
+//! `503 loading` until it is done), and serves on a `tiny_http` listener (adapted from the graphersal CLI's dev
 //! server): one accept thread, one thread per request. [`Running::stop`] stops it: the
 //! lifecycle answers `503 stopping`, the accept loop ends, running requests get a moment to
 //! finish, `server.run` is removed and the lock released.
@@ -24,6 +25,7 @@ use graphersal_serve::{Exposure, HostCheck, Method};
 use crate::error::ServerError;
 use crate::layout::ServerDir;
 use crate::lock::ServerLock;
+use crate::registry::Registry;
 use crate::router::Router;
 use crate::run_file::RunInfo;
 
@@ -77,6 +79,7 @@ pub struct Running {
     http: Option<Arc<tiny_http::Server>>,
     accept: Option<JoinHandle<()>>,
     lock: Option<ServerLock>,
+    registry: Arc<Registry>,
     address: SocketAddr,
     url: String,
     exposure: Exposure,
@@ -137,16 +140,26 @@ pub fn start(
             });
         }
     };
+    let registry = Registry::empty(&dir);
     let mut running = Running {
         dir,
         shared,
         http: Some(http),
         accept: Some(accept),
         lock: Some(lock),
+        registry,
         address,
         url,
         exposure,
     };
+    // The scan with the lock held and the listener up: the probes answer meanwhile.
+    match Registry::scan(&running.dir) {
+        Ok(registry) => running.registry = registry,
+        Err(err) => {
+            let _ = running.shutdown();
+            return Err(err);
+        }
+    }
     if let Err(err) = running.shared.router.ready() {
         let _ = running.shutdown();
         return Err(ServerError::Thread {
@@ -190,6 +203,11 @@ impl Running {
     /// The server directory.
     pub fn dir(&self) -> &ServerDir {
         &self.dir
+    }
+
+    /// The database registry (scanned at start).
+    pub fn registry(&self) -> &Arc<Registry> {
+        &self.registry
     }
 
     /// Stops the server (module docs): `Err` only when `server.run` cannot be removed (the

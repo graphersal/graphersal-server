@@ -13,8 +13,9 @@ Graphersal playground.
 
 ## Status
 
-This version is the skeleton: `init`, `serve`, the server lock, the run file, the health
-probes and `/api/info`. Databases, the admin API, the playground and MCP come in later versions.
+This version holds `init`, `serve`, the server lock, the run file, the health probes,
+`/api/info` and the database registry (read at start, no HTTP routes yet). Loading databases,
+the admin API, the playground and MCP come in later versions.
 
 ## Use
 
@@ -35,8 +36,19 @@ stop); a second `serve` on the same directory is refused (`server.lock`).
   server.toml     listen address, MCP options (placeholder), defaults for new databases
   server.lock     one running server per directory
   server.run      the running server's address (only while it runs)
-  databases/  models/blobs/  backups/  trash/  tmp/  logs/
+  aliases.toml    acme = "acme-2026.3"   (an alias names a database)
+  databases/<name>/
+    database.toml kind, role, base, auto_load, read_only, created, description
+    store/        the Store
+  models/blobs/  backups/  trash/  tmp/  logs/
 ```
+
+There is no registry file: the databases are the directories under `databases/`. Names are
+`[a-z0-9][a-z0-9._-]{0,62}`, unique case-insensitively across databases and aliases. A broken
+database directory is listed as `failed` with the reason; it never stops the server. New
+databases are built in `tmp/` and renamed into `databases/`; what a crash leaves in `tmp/` is
+removed at the next start. A `role = "base"` database is created read-only and stays read-only
+while a layer names it.
 
 ## HTTP
 
