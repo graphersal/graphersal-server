@@ -4,10 +4,12 @@
 //! directory is refused with [`ServerError::Locked`]), binds the listen address (`--listen`
 //! over `server.toml`'s `listen`; port `0` picks a free port), writes the bound address into
 //! `server.run`, scans the database registry ([`Registry::scan`]; `/readyz` answers
-//! `503 loading` until it is done), and serves on a `tiny_http` listener (adapted from the graphersal CLI's dev
+//! `503 loading` until it is done), starts loading the `auto_load` databases in the background
+//! ([`Loader::auto_load`]), and serves on a `tiny_http` listener (adapted from the graphersal CLI's dev
 //! server): one accept thread, one thread per request. [`Running::stop`] stops it: the
 //! lifecycle answers `503 stopping`, the accept loop ends, running requests get a moment to
-//! finish, `server.run` is removed and the lock released.
+//! finish, every database is unloaded ([`Loader::shutdown`]: its Store closed cleanly),
+//! `server.run` is removed and the lock released.
 //!
 //! Safety: the server has no access control. The default listen address is the loopback; any
 //! other address logs a warning. The `Host`/`Origin` checks of `graphersal_serve` (DNS
@@ -24,6 +26,7 @@ use graphersal_serve::{Exposure, HostCheck, Method};
 
 use crate::error::ServerError;
 use crate::layout::ServerDir;
+use crate::loader::Loader;
 use crate::lock::ServerLock;
 use crate::registry::Registry;
 use crate::router::Router;
@@ -80,6 +83,7 @@ pub struct Running {
     accept: Option<JoinHandle<()>>,
     lock: Option<ServerLock>,
     registry: Arc<Registry>,
+    loader: Arc<Loader>,
     address: SocketAddr,
     url: String,
     exposure: Exposure,
@@ -118,7 +122,7 @@ pub fn start(
     let host_check = HostCheck::new(exposure, address.port(), &url)
         .with_hint(format!("open this server at {url}"));
     let shared = Arc::new(Shared {
-        router: Router::new(host_check),
+        router: Router::new(host_check.clone()),
         stopping: AtomicBool::new(false),
         in_flight: AtomicUsize::new(0),
     });
@@ -141,6 +145,7 @@ pub fn start(
         }
     };
     let registry = Registry::empty(&dir);
+    let loader = Loader::new(registry.clone(), host_check.clone());
     let mut running = Running {
         dir,
         shared,
@@ -148,13 +153,17 @@ pub fn start(
         accept: Some(accept),
         lock: Some(lock),
         registry,
+        loader,
         address,
         url,
         exposure,
     };
     // The scan with the lock held and the listener up: the probes answer meanwhile.
     match Registry::scan(&running.dir) {
-        Ok(registry) => running.registry = registry,
+        Ok(registry) => {
+            running.loader = Loader::new(registry.clone(), host_check);
+            running.registry = registry;
+        }
         Err(err) => {
             let _ = running.shutdown();
             return Err(err);
@@ -166,6 +175,8 @@ pub fn start(
             message: err.to_string(),
         });
     }
+    // The databases with `auto_load = true`, each on a background thread of its own.
+    running.loader.auto_load();
     if exposure == Exposure::Network {
         tracing::warn!(
             target: "graphersal_server",
@@ -210,6 +221,11 @@ impl Running {
         &self.registry
     }
 
+    /// The loaded databases and their loads ([`Loader`]).
+    pub fn loader(&self) -> &Arc<Loader> {
+        &self.loader
+    }
+
     /// Stops the server (module docs): `Err` only when `server.run` cannot be removed (the
     /// server is stopped and its lock released anyway).
     pub fn stop(mut self) -> Result<(), ServerError> {
@@ -233,6 +249,10 @@ impl Running {
         let left = self.shared.in_flight.load(Ordering::SeqCst);
         if left > 0 {
             tracing::warn!(target: "graphersal_server", "stopping with {left} requests still running");
+        }
+        // Every database unloaded, its Store closed cleanly, before the lock is released.
+        if let Err(err) = self.loader.shutdown() {
+            tracing::warn!(target: "graphersal_server", "stopping: {err}");
         }
         // Closes the listening socket (the last reference: the accept thread has ended).
         drop(http);

@@ -280,7 +280,8 @@ fn start_scans_the_registry_and_broken_databases_are_not_fatal() {
     let dir = ServerDir::init(temp.path()).unwrap().dir;
     let good = dir.databases().join("good");
     std::fs::create_dir_all(good.join("store")).unwrap();
-    std::fs::write(good.join("database.toml"), "auto_load = true\n").unwrap();
+    // Not `auto_load`: its empty `store/` would be loaded at start and fail (V3).
+    std::fs::write(good.join("database.toml"), "description = \"good\"\n").unwrap();
     let broken = dir.databases().join("broken");
     std::fs::create_dir_all(&broken).unwrap();
     std::fs::write(broken.join("database.toml"), "kind = ").unwrap();

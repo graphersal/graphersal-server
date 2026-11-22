@@ -107,6 +107,15 @@ pub enum ServerError {
         /// The rule, as a sentence.
         message: String,
     },
+    /// The serving runtime of a loaded database failed an operation (its read-only toggle, the
+    /// close of its Store, ...).
+    #[non_exhaustive]
+    Serve {
+        /// The database.
+        name: String,
+        /// What failed, with the runtime's reason.
+        message: String,
+    },
 }
 
 impl ServerError {
@@ -174,6 +183,7 @@ impl fmt::Display for ServerError {
                 "database '{name}' is {reason}; fix or remove its directory and restart the server"
             ),
             ServerError::Refused { name, message } => write!(f, "'{name}': {message}"),
+            ServerError::Serve { name, message } => write!(f, "database '{name}': {message}"),
         }
     }
 }

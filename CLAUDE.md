@@ -11,9 +11,10 @@ from published files). When this file disagrees with the code, the code wins: sa
 - Workspace root `Cargo.toml` (all dependency versions in `[workspace.dependencies]`, each with
   a one-line justification); one crate `crates/graphersal-server` (lib + bin, `publish = false`).
 - Path dependencies on the graphersal repository's MAIN checkout beside this one:
-  `../graphersal/crates/graphersal` and `../graphersal/crates/graphersal-serve` (later also
-  `graphersal-mcp`). Never edit that repository from a task here. This repository keeps its own
-  `target/` (never share graphersal's).
+  `../graphersal/crates/graphersal`, `../graphersal/crates/graphersal-serve` and
+  `../graphersal/crates/graphersal-session` (later also `graphersal-mcp`). Never edit that
+  repository from a task here. This repository keeps its own `target/` (never share
+  graphersal's).
 - `src/lib.rs` modules: `config` (`server.toml`, `ServerConfig`, `parse_listen`), `layout`
   (`ServerDir`, `init`, file names, `write_atomic`), `lock` (`ServerLock`, fd-lock on
   `server.lock`), `run_file` (`RunInfo`, `server.run`), `serve` (`start` -> `Running`, the
@@ -32,6 +33,24 @@ from published files). When this file disagrees with the code, the code wins: sa
   `databases/`; a dropped build is removed)). Every admin change writes its file first
   (atomically), then memory, under the registry's write lock. `serve::start` scans after the
   bind and before `ready()` (`/readyz` 503 meanwhile); `Running::registry()`.
+- `loader` (`Loader`, beside the registry, `Running::loader()`): `load` (background thread,
+  state `loading` -> `loaded` / `failed (reason)` / `needs-model (repo)` when a model blob is
+  missing; a load of a loaded/loading DB answers `LoadStart::Already*`, no error), `wait`,
+  `unload` (map entry removed first, ticker stopped, bounded wait `UNLOAD_WAIT` for
+  `background_runs() == 0` and for the requests holding the `Arc<Context>` (strong count),
+  context dropped, `Store::shutdown`), `set_read_only` (persist via the admin core, then
+  `Context::set_read_only`; a base refuses `false`), `auto_load` (after `router.ready()`),
+  `shutdown` (at server stop: joins the loads, unloads layers before bases), `context(name)`
+  for V4's resolver. Contexts: `launch` + `context_builder(listener HostCheck clone)`,
+  `mount_path("/db/<name>")`, `read_only(config)` + `runtime_read_only(help)`, a job ticker
+  (plain/layer). Plain = `open_store` + `ServedSource::Store`; layer = pooled base +
+  `open_layer_store` + `ServedSource::layer_store`; base (`role = "base"`) = an EMPTY layer
+  over the pooled base (`ServedSource::graph(base.new_layer())`) with the read-only gate on for
+  good (C3), no ticker, no Store opened. Base pool: one `LayerBase` per base name
+  (`layer_base_of_store`, no lock), users = its loaded layers + the base itself; it leaves the
+  pool with its last user; unloading a base with loaded layers is refused. Lock order: loader
+  state, then registry. Tests in `loader_tests.rs` (synthetic stores from the `modern` and
+  `large` samples; `test_support::skip_on_ci`).
 - `src/main.rs`: the hand-parsed command line (no parser crate, like graphersal's CLI), the
   tracing subscriber, the ctrlc handler. stdout = results, stderr = diagnostics/log; exit codes
   0 ok, 1 failed, 2 usage.
