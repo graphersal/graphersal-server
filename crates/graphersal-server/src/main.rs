@@ -3,7 +3,7 @@
 //! ```text
 //! graphersal-server init DIR
 //! graphersal-server serve --dir DIR [--listen ADDR]
-//! graphersal-server db list|create|delete|clone|load|unload|read-only|auto-load|alias ... --dir DIR [--json]
+//! graphersal-server db list|create|delete|clone|load|unload|read-only|auto-load|alias|backup|backups|restore|export ... --dir DIR [--json]
 //! ```
 //!
 //! stdout carries only results, stderr diagnostics and the log. Exit codes: `0` ok, `1` the
@@ -16,7 +16,9 @@ use std::sync::mpsc;
 
 use graphersal_server::config::parse_listen;
 use graphersal_server::console::{self, DbCommand, Via};
-use graphersal_server::{CreateSpec, DatabaseKind, DatabaseRole, ServeOptions, ServerDir, serve};
+use graphersal_server::{
+    CreateSpec, DatabaseKind, DatabaseRole, ExportSpec, ServeOptions, ServerDir, serve,
+};
 
 const EXIT_FAILED: u8 = 1;
 const EXIT_USAGE: u8 = 2;
@@ -48,6 +50,17 @@ Usage:
         db auto-load NAME on|off
         db alias set ALIAS DATABASE
         db alias remove ALIAS
+        db backup NAME           a verified ZIP backup into DIR/backups/NAME/<UTC time>.zip
+                                 (it may be loaded)
+        db backups NAME          the backups of NAME (also of a deleted database)
+        db restore NAME BACKUP [--name NEW]
+            Restores the backup BACKUP (a name from db backups) of NAME into NAME (it must
+            be unloaded; the replaced database moves to DIR/trash/) or into the new
+            database NEW. A layer's backup needs its base (checked by identity).
+        db export NAME --out FILE [--no-models] [--materialize]
+            A packed snapshot (.gsnap) of NAME's latest state: with its embedding models
+            unless --no-models; a layer as a layer snapshot (loads only over its base, no
+            models) unless --materialize (a standalone full snapshot).
       --json prints the admin API's JSON answer instead of text.
   graphersal-server --help | --version
 
@@ -219,7 +232,8 @@ fn db_command(args: &[String]) -> ExitCode {
             None => (arg.clone(), None),
         };
         match flag.as_str() {
-            "--dir" | "--kind" | "--role" | "--base" | "--schema" | "--description" => {
+            "--dir" | "--kind" | "--role" | "--base" | "--schema" | "--description" | "--out"
+            | "--name" => {
                 let Some(value) = inline.or_else(|| rest.next().cloned()) else {
                     return usage_error(&format!("db: {flag} needs a value"));
                 };
@@ -228,7 +242,10 @@ fn db_command(args: &[String]) -> ExitCode {
                 }
                 values.push((flag, value));
             }
-            "--json" | "--auto-load" | "--read-only" | "--no-wait" if inline.is_none() => {
+            "--json" | "--auto-load" | "--read-only" | "--no-wait" | "--no-models"
+            | "--materialize"
+                if inline.is_none() =>
+            {
                 switches.push(flag);
             }
             _ => return usage_error(&format!("db: unknown argument {arg:?}")),
@@ -362,6 +379,29 @@ fn parse_db(
         ["alias", "remove", alias] => DbCommand::AliasRemove {
             alias: alias.to_string(),
         },
+        ["backup", name] => DbCommand::Backup {
+            name: name.to_string(),
+        },
+        ["backups", name] => DbCommand::Backups {
+            name: name.to_string(),
+        },
+        ["restore", name, backup] => DbCommand::Restore {
+            name: name.to_string(),
+            backup: backup.to_string(),
+            target: value("--name"),
+        },
+        ["export", name] => {
+            let Some(out) = value("--out") else {
+                return Err(usage("db export needs --out FILE"));
+            };
+            DbCommand::Export {
+                name: name.to_string(),
+                spec: ExportSpec::new()
+                    .with_models(!switch("--no-models"))
+                    .with_materialize(switch("--materialize")),
+                out: PathBuf::from(out),
+            }
+        }
         [] => return Err(usage("no db command given")),
         [other, ..] => {
             return Err(Problem::Usage(format!(
@@ -374,6 +414,18 @@ fn parse_db(
     if switch("--no-wait") && !matches!(command, DbCommand::Load { .. }) {
         return Err(usage("--no-wait belongs to db load"));
     }
+    if value("--name").is_some() && !matches!(command, DbCommand::Restore { .. }) {
+        return Err(usage("--name belongs to db restore"));
+    }
+    let export = matches!(command, DbCommand::Export { .. });
+    if !export && value("--out").is_some() {
+        return Err(usage("--out belongs to db export"));
+    }
+    for flag in ["--no-models", "--materialize"] {
+        if !export && switch(flag) {
+            return Err(Problem::Usage(format!("{flag} belongs to db export")));
+        }
+    }
     Ok(command)
 }
 
@@ -385,6 +437,18 @@ fn create_command(
 ) -> Result<DbCommand, Problem> {
     if switch("--no-wait") {
         return Err(Problem::Usage("--no-wait belongs to db load".to_string()));
+    }
+    for flag in ["--no-models", "--materialize"] {
+        if switch(flag) {
+            return Err(Problem::Usage(format!("{flag} belongs to db export")));
+        }
+    }
+    for flag in ["--out", "--name"] {
+        if value(flag).is_some() {
+            return Err(Problem::Usage(format!(
+                "{flag} is not an option of db create"
+            )));
+        }
     }
     let base = value("--base");
     let kind = match value("--kind").as_deref() {

@@ -29,7 +29,7 @@ use crate::layout::ServerDir;
 use crate::loader::Loader;
 use crate::lock::ServerLock;
 use crate::registry::Registry;
-use crate::router::Router;
+use crate::router::{Answer, Router};
 use crate::run_file::RunInfo;
 
 /// Largest declared body (`Content-Length`) a request may name (as the graphersal CLI's dev
@@ -341,14 +341,43 @@ fn handle(shared: &Shared, mut request: tiny_http::Request) {
         for (name, value) in &headers {
             converted = converted.with_header(name, value);
         }
-        shared.router.route(converted)
+        shared.router.answer(converted)
     };
     // The unread rest of a declared body, in small reads (see MAX_DECLARED_BODY_BYTES).
     if let Some(len) = declared {
         let limit = u64::try_from(len).unwrap_or(u64::MAX);
         let _ = io::copy(&mut request.as_reader().take(limit), &mut io::sink());
     }
-    let _ = request.respond(tiny_answer(response));
+    match response {
+        Answer::Response(response) => {
+            let _ = request.respond(tiny_answer(response));
+        }
+        Answer::Download(download) => {
+            let headers = download.headers();
+            let length = usize::try_from(download.length()).unwrap_or(usize::MAX);
+            let (file, guard) = download.into_parts();
+            let mut response = tiny_http::Response::new(
+                tiny_http::StatusCode(200),
+                Vec::new(),
+                file,
+                Some(length),
+                None,
+            )
+            // `Content-Length` (a progress bar), never chunked.
+            .with_chunked_threshold(usize::MAX);
+            for (name, value) in &headers {
+                if let Ok(header) = tiny_http::Header::from_bytes(name.as_bytes(), value.as_bytes())
+                {
+                    response = response.with_header(header);
+                }
+            }
+            if let Err(err) = request.respond(response) {
+                tracing::warn!(target: "graphersal_server", "an export download broke off: {err}");
+            }
+            // The file is closed (the response is gone): now the export is removed.
+            drop(guard);
+        }
+    }
 }
 
 /// An answer as `tiny_http` writes it (a header `tiny_http` cannot carry is left out).

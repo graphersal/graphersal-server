@@ -22,6 +22,14 @@ use serde_json::json;
 use crate::loader::Loader;
 use crate::mounts::{self, Databases};
 
+/// The answer to a request ([`Router::answer`]).
+pub(crate) enum Answer {
+    /// An answer in memory.
+    Response(Response),
+    /// A file streamed to the client (an export download), removed once it is sent.
+    Download(crate::admin_api::Download),
+}
+
 /// The state the router answers from.
 pub(crate) struct Router {
     /// The lifecycle, the probes and the graph resolver.
@@ -53,21 +61,30 @@ impl Router {
         self.lifecycle.ready_with(Arc::new(Databases { loader }))
     }
 
-    /// Answers one request.
-    pub(crate) fn route(&self, mut request: Request<'_>) -> Response {
+    /// Answers one request, a download buffered into the answer (tests).
+    #[cfg(test)]
+    pub(crate) fn route(&self, request: Request<'_>) -> Response {
+        match self.answer(request) {
+            Answer::Response(response) => response,
+            Answer::Download(download) => download.into_response(),
+        }
+    }
+
+    /// Answers one request: an in-memory answer, or a file to stream (an export download).
+    pub(crate) fn answer(&self, mut request: Request<'_>) -> Answer {
         // Probes first: no Host check (a Kubernetes probe names the pod IP), no lock.
         if let Some(answer) = self.lifecycle.probe(request.method(), request.url()) {
-            return answer;
+            return Answer::Response(answer);
         }
         // Loading or stopping: the lifecycle's 503.
         let Some(loader) = self.loader.get() else {
-            return self.lifecycle.handle(request);
+            return Answer::Response(self.lifecycle.handle(request));
         };
         if self.lifecycle.state() != Lifecycle::Ready {
-            return self.lifecycle.handle(request);
+            return Answer::Response(self.lifecycle.handle(request));
         }
         if let Err(refused) = self.host_check.check(&request) {
-            return error_response(refused);
+            return Answer::Response(error_response(refused));
         }
         let url = request.url().to_string();
         let (path, query) = match url.split_once('?') {
@@ -77,22 +94,24 @@ impl Router {
         let method = request.method().clone();
         if let Some((name, rest)) = mounts::split_db_path(path) {
             let Ok(entry) = loader.registry().resolve(name) else {
-                return mounts::unknown_database(name);
+                return Answer::Response(mounts::unknown_database(name));
             };
             let Some(rest) = rest else {
-                return mounts::redirect_to_slash(path, query);
+                return Answer::Response(mounts::redirect_to_slash(path, query));
             };
             // Only a check: the resolver takes the context again and holds it for the request.
             if loader.context(&entry.name).is_none() {
-                return mounts::not_loaded(&entry);
+                return Answer::Response(mounts::not_loaded(&entry));
             }
             let target = match query {
                 Some(query) => format!("/{rest}?{query}"),
                 None => format!("/{rest}"),
             };
-            return self
-                .lifecycle
-                .handle(mounts::forward(&mut request, &target, &entry.name));
+            return Answer::Response(self.lifecycle.handle(mounts::forward(
+                &mut request,
+                &target,
+                &entry.name,
+            )));
         }
         let read = matches!(method, Method::Get | Method::Head);
         let answer = if path == "/api/info" {
@@ -103,6 +122,12 @@ impl Router {
             }
         } else if let Some(endpoint) = path.strip_prefix("/api/admin/") {
             let admin = crate::ops::Admin::online(loader.clone());
+            if let Some(name) = crate::admin_api::export_target(&method, endpoint) {
+                return match crate::admin_api::export(&admin, name, query) {
+                    Ok(download) => Answer::Download(download),
+                    Err(response) => Answer::Response(response),
+                };
+            }
             crate::admin_api::route(&admin, &method, endpoint, &mut request)
         } else if path == "/api" || path.starts_with("/api/") {
             Err(HttpError::new(404, format!("unknown endpoint {path}")))
@@ -117,7 +142,7 @@ impl Router {
         } else {
             Err(not_allowed(&method, path))
         };
-        answer.unwrap_or_else(error_response)
+        Answer::Response(answer.unwrap_or_else(error_response))
     }
 
     /// A file of the playground at the root (`/` and a directory: its `index.html`).

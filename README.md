@@ -18,8 +18,9 @@ This version holds `init`, `serve`, the server lock, the run file, the health pr
 `auto_load = true` are loaded in the background at start and unloaded cleanly at stop), the
 loaded databases under `/db/<name>/` (playground, API, aliases resolved per request), the
 playground's landing view at `/`, and the admin operations (create, delete, clone, load,
-unload, read-only, auto-load, aliases) over HTTP and from the console (`db ...`). Backups,
-imports, models and the server-wide MCP endpoint come in later versions.
+unload, read-only, auto-load, aliases, backup into `backups/`, restore, `.gsnap` export) over
+HTTP and from the console (`db ...`). Imports, shared models and the server-wide MCP endpoint
+come in later versions.
 
 ## Use
 
@@ -42,6 +43,10 @@ graphersal-server db load acme --dir ./srv                   # running server on
 graphersal-server db clone acme acme-copy --dir ./srv
 graphersal-server db read-only acme on --dir ./srv
 graphersal-server db alias set current acme --dir ./srv
+graphersal-server db backup acme --dir ./srv                 # backups/acme/<UTC time>.zip
+graphersal-server db backups acme --dir ./srv
+graphersal-server db restore acme <backup> --name acme-old --dir ./srv
+graphersal-server db export acme --out acme.gsnap --dir ./srv  # --no-models, --materialize
 graphersal-server db unload acme --dir ./srv && graphersal-server db delete acme --dir ./srv
 ```
 
@@ -81,7 +86,7 @@ while a layer names it.
 | `/db/<name>/...` | the playground and its API on the database `<name>` (or the database the alias `<name>` names, resolved per request); `/db/<name>` redirects to `/db/<name>/`; `404` for an unknown name; `409 {"error": "database 'x' is not loaded", "help": "load it: POST /api/admin/databases/x/load"}` for a database that is not loaded (never an implicit load) |
 | `GET /api/admin/databases` | `{"databases": [{"name", "state", "kind", "role", "readOnly", "autoLoad", "description", "base"?, "reason"?, "aliasOf"?}], "aliases": {...}, "problems": [...]}` |
 | `GET /api/admin/databases/<name>` | one entry (`<name>` may be an alias) |
-| `/api/admin/...` | create, delete (into `trash/`), clone, load, unload, read-only, auto-load, aliases: `docs/admin-api.md` |
+| `/api/admin/...` | create, delete (into `trash/`), clone, load, unload, read-only, auto-load, aliases, backup, backups, restore, export (download): `docs/admin-api.md` |
 
 Every path but the probes is checked by Host and Origin (DNS rebinding, cross-site pages).
 

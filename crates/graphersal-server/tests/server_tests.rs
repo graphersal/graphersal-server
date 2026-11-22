@@ -746,3 +746,121 @@ fn db_commands_go_through_a_running_server() {
     }
     let _ = &mut server;
 }
+
+#[test]
+fn db_backup_restore_and_export_offline_and_through_a_server() {
+    use graphersal::persist::read_snapshot_info;
+    let temp = TempDir::new("console-transfer");
+    let dir = ServerDir::init(temp.path().join("srv")).unwrap().dir;
+    let root = dir.root().to_path_buf();
+    modern_db(&dir, "acme");
+
+    // Offline.
+    let (code, out, err) = db(&root, &["backup", "acme"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        out.contains("backed up database 'acme' into backups/acme/"),
+        "{out}"
+    );
+    let (code, out, _) = db(&root, &["backups", "acme", "--json"]);
+    assert_eq!(code, 0);
+    let backup = json(&out)["backups"][0]["backup"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (code, out, _) = db(&root, &["backups", "acme"]);
+    assert_eq!(code, 0);
+    assert!(out.starts_with(&backup), "{out}");
+    let (code, out, err) = db(&root, &["restore", "acme", &backup, "--name", "acme-2"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("into database 'acme-2'"), "{out}");
+    let file = temp.path().join("acme.gsnap");
+    let file_arg = file.to_str().unwrap();
+    let (code, out, err) = db(&root, &["export", "acme", "--out", file_arg]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("full snapshot, models included"), "{out}");
+    let info = read_snapshot_info(std::fs::File::open(&file).unwrap()).unwrap();
+    assert_eq!(info.vertex_count, 6);
+    let (code, _, err) = db(&root, &["export", "acme"]);
+    assert_eq!(code, 2, "{err}");
+    let (code, _, err) = db(&root, &["backup", "acme", "--out", file_arg]);
+    assert_eq!(code, 2, "{err}");
+    let (code, _, err) = db(&root, &["restore", "acme", "nope"]);
+    assert_eq!(code, 1);
+    assert!(
+        err.contains("no backup 'nope'") && err.contains("help:"),
+        "{err}"
+    );
+
+    // Through a running server.
+    let mut server = ServerProcess(
+        Command::new(BIN)
+            .args(["serve", "--dir"])
+            .arg(&root)
+            .args(["--listen", "127.0.0.1:0"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let info = wait_for_run_file(&dir);
+    let note = format!("sent to its admin API at {}", info.address);
+    let (code, _, err) = db(&root, &["load", "acme"]);
+    assert_eq!(code, 0, "{err}");
+    let served = temp.path().join("served.gsnap");
+    let (code, out, err) = db(
+        &root,
+        &[
+            "export",
+            "acme",
+            "--out",
+            served.to_str().unwrap(),
+            "--no-models",
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    assert!(err.contains(&note), "{err}");
+    assert!(out.contains("models excluded"), "{out}");
+    assert_eq!(
+        read_snapshot_info(std::fs::File::open(&served).unwrap())
+            .unwrap()
+            .vertex_count,
+        6
+    );
+    let (code, out, err) = db(&root, &["backup", "acme"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("backups/acme/"), "{out}");
+    // Restore over the loaded database: refused with the API's help; unloaded: replaced.
+    let (code, _, err) = db(&root, &["restore", "acme", &backup]);
+    assert_eq!(code, 1);
+    assert!(
+        err.contains("unload it first") && err.contains("help:"),
+        "{err}"
+    );
+    let (code, _, _) = db(&root, &["unload", "acme"]);
+    assert_eq!(code, 0);
+    let (code, out, err) = db(&root, &["restore", "acme", &backup]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        out.contains("the replaced database moved to trash/acme-"),
+        "{out}"
+    );
+    let (code, out, _) = db(&root, &["backups", "acme", "--json"]);
+    assert_eq!(code, 0);
+    assert_eq!(json(&out)["backups"].as_array().unwrap().len(), 2);
+
+    #[cfg(unix)]
+    {
+        let status = Command::new("kill")
+            .args(["-TERM", &server.0.id().to_string()])
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while server.0.try_wait().unwrap().is_none() {
+            assert!(Instant::now() < deadline, "the server did not stop");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+    let _ = &mut server;
+}

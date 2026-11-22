@@ -12,6 +12,10 @@
 //! | POST | `databases/<name>/unload` | | `200` entry + `"unloaded": bool` |
 //! | PUT | `databases/<name>/read-only` | `{"readOnly": bool}` | `200` entry |
 //! | PUT | `databases/<name>/auto-load` | `{"autoLoad": bool}` | `200` entry |
+//! | POST | `databases/<name>/backup` | | `201` backup |
+//! | GET | `databases/<name>/backups` | | `200 {"database", "backups": [backup...]}` (also for a deleted database's name) |
+//! | POST | `databases/<name>/restore` | `{"backup", "name"?}` | `201` entry + `"restoredFrom": {"database", "backup"}`, `"replaced"`, `"trash"?` |
+//! | GET | `databases/<name>/export?models=true\|false&materialize=true\|false` | | `200` the `.gsnap` file (download) |
 //! | GET | `aliases` | | `200 {"aliases": {alias: database}}` |
 //! | PUT | `aliases/<alias>` | `{"target"}` | `200 {"alias", "target"}` |
 //! | DELETE | `aliases/<alias>` | | `200 {"alias", "removed": true}` |
@@ -22,6 +26,14 @@
 //! failed database), `413` (body too large), `500` (a Store or file failed). The repository's
 //! `docs/admin-api.md` documents the routes for clients.
 //!
+//! A backup: `database`, `backup` (its name, the UTC time with dashes), `file`
+//! (`backups/<name>/<backup>.zip`), `bytes`, and from its sidecar `created`, `kind`, `role`,
+//! `base`, `layerBase` (a layer's base identity). An export answers the file with
+//! `Content-Disposition: attachment; filename="<name>.gsnap"` (`<name>.layer.gsnap` for a layer
+//! snapshot), `Content-Length`, and `X-Graphersal-Snapshot: full | layer`,
+//! `X-Graphersal-Models: included | excluded`; it is written into `tmp/` first and streamed from
+//! there (removed after the answer).
+//!
 //! An entry: `name`, `state` (`unloaded` | `loading` | `loaded` | `needs-model` | `failed`),
 //! `kind` (`plain` | `layer`), `role` (`normal` | `base`), `readOnly` (a base is always
 //! read-only), `autoLoad`, `description`, and when they apply `base` (a layer's base), `created`,
@@ -30,6 +42,7 @@
 //! that database's). A database whose `database.toml` cannot be read has no `kind`, `role`,
 //! `autoLoad` or `description`. The field names are those of the playground's landing view.
 
+use std::fs::File;
 use std::path::Path;
 
 use graphersal_serve::{HttpError, Method, Request, Response};
@@ -40,7 +53,7 @@ use crate::database::{DatabaseKind, DatabaseRole};
 use crate::error::ServerError;
 use crate::loader::LoadStart;
 use crate::names::fold;
-use crate::ops::{Admin, CreateSpec};
+use crate::ops::{Admin, BackupInfo, CreateSpec, ExportFile, ExportSpec};
 use crate::registry::{DatabaseEntry, DbState, Registry};
 
 /// Answers a request below `/api/admin/` (`endpoint` = the path after `/api/admin/`, without
@@ -133,6 +146,39 @@ pub(crate) fn route(
                 .map(|entry| Response::json(200, &entry_json(&entry, None)))
                 .map_err(|err| (err, None))
         }
+        (Method::Post, ["databases", name, "backup"]) => admin
+            .backup(name)
+            .map(|info| Response::json(201, &backup_json(registry, &info)))
+            .map_err(|err| (err, None)),
+        (_, ["databases", name, "backups"]) if read => admin
+            .backups(name)
+            .map(|list| {
+                let rows: Vec<Value> = list.iter().map(|b| backup_json(registry, b)).collect();
+                Response::json(200, &json!({ "database": fold(name), "backups": rows }))
+            })
+            .map_err(|err| (err, None)),
+        (Method::Post, ["databases", name, "restore"]) => {
+            let body: RestoreBody = body_of(request)?;
+            admin
+                .restore(name, &body.backup, body.name.as_deref())
+                .map(|restored| {
+                    let mut entry = entry_json(&restored.entry, None);
+                    entry["restoredFrom"] = json!({
+                        "database": restored.from_database,
+                        "backup": restored.backup,
+                    });
+                    entry["replaced"] = Value::Bool(restored.replaced.is_some());
+                    if let Some(trash) = &restored.replaced {
+                        entry["trash"] = Value::String(relative(registry.dir().root(), trash));
+                    }
+                    Response::json(201, &entry)
+                })
+                .map_err(|err| {
+                    let target = body.name.as_deref().unwrap_or(name);
+                    let help = restore_help(registry, target, &err);
+                    (err, help)
+                })
+        }
         (_, ["aliases"]) if read => Ok(Response::json(
             200,
             &json!({ "aliases": registry.aliases() }),
@@ -160,7 +206,8 @@ pub(crate) fn route(
             [
                 "databases",
                 _,
-                "clone" | "load" | "unload" | "read-only" | "auto-load",
+                "clone" | "load" | "unload" | "read-only" | "auto-load" | "backup" | "backups"
+                | "restore" | "export",
             ],
         )
         | (_, ["aliases"])
@@ -231,6 +278,14 @@ impl CreateBody {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct RestoreBody {
+    backup: String,
+    #[serde(default)]
+    name: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CloneBody {
     name: String,
 }
@@ -257,7 +312,7 @@ struct AliasBody {
 pub(crate) fn status_of(err: &ServerError) -> u16 {
     match err {
         ServerError::InvalidName { .. } | ServerError::InvalidInput { .. } => 400,
-        ServerError::NotFound { .. } => 404,
+        ServerError::NotFound { .. } | ServerError::BackupNotFound { .. } => 404,
         ServerError::NameInUse { .. }
         | ServerError::Refused { .. }
         | ServerError::DatabaseFailed { .. }
@@ -273,6 +328,9 @@ fn error_answer(err: &ServerError, help: Option<String>) -> Response {
         ServerError::NotFound { .. } => {
             Some("GET /api/admin/databases lists the databases and aliases".to_string())
         }
+        ServerError::BackupNotFound { database, .. } => Some(format!(
+            "GET /api/admin/databases/{database}/backups lists its backups"
+        )),
         _ => None,
     });
     let mut body = json!({ "error": err.to_string() });
@@ -299,6 +357,174 @@ fn delete_help(registry: &Registry, name: &str) -> Option<String> {
         "remove the alias first: DELETE /api/admin/aliases/{}, or point it at another          database: PUT /api/admin/aliases/{} {{\"target\": \"<database>\"}}",
         alias.0, alias.0
     ))
+}
+
+/// The help of a refused restore: unload the target first.
+fn restore_help(registry: &Registry, target: &str, err: &ServerError) -> Option<String> {
+    let key = fold(target);
+    let entry = registry.get(&key).ok()?;
+    (matches!(err, ServerError::Refused { .. })
+        && matches!(entry.state, DbState::Loaded | DbState::Loading))
+    .then(|| format!("unload it first: POST /api/admin/databases/{key}/unload"))
+}
+
+/// A backup as JSON (module docs).
+fn backup_json(registry: &Registry, info: &BackupInfo) -> Value {
+    let mut row = json!({
+        "database": info.database,
+        "backup": info.backup,
+        "file": relative(registry.dir().root(), &info.file),
+        "bytes": info.bytes,
+    });
+    if let Some(created) = &info.created {
+        row["created"] = json!(created);
+    }
+    if let Some(kind) = info.kind {
+        row["kind"] = json!(kind.as_str());
+    }
+    if let Some(role) = info.role {
+        row["role"] = json!(role.as_str());
+    }
+    if let Some(base) = &info.base {
+        row["base"] = json!(base);
+    }
+    if let Some(layer_base) = &info.layer_base {
+        row["layerBase"] = json!(layer_base);
+    }
+    row
+}
+
+/// The database of `GET databases/<name>/export` (the router streams its answer), else `None`.
+pub(crate) fn export_target<'a>(method: &Method, endpoint: &'a str) -> Option<&'a str> {
+    match endpoint.split('/').collect::<Vec<_>>().as_slice() {
+        ["databases", name, "export"] if matches!(method, Method::Get) && !name.is_empty() => {
+            Some(name)
+        }
+        _ => None,
+    }
+}
+
+/// The export spec of the query `models=true|false&materialize=true|false` (`400` for any
+/// other parameter or value).
+pub(crate) fn export_spec(query: Option<&str>) -> Result<ExportSpec, HttpError> {
+    let mut spec = ExportSpec::new();
+    for pair in query
+        .unwrap_or_default()
+        .split('&')
+        .filter(|p| !p.is_empty())
+    {
+        let (key, value) = pair.split_once('=').unwrap_or((pair, "true"));
+        let flag = match value {
+            "true" | "1" | "yes" => true,
+            "false" | "0" | "no" => false,
+            other => {
+                return Err(HttpError::bad_request(format!(
+                    "export: {key}={other} is not true or false"
+                )));
+            }
+        };
+        spec = match key {
+            "models" => spec.with_models(flag),
+            "materialize" => spec.with_materialize(flag),
+            other => {
+                return Err(HttpError::bad_request(format!(
+                    "export: unknown parameter {other:?} (models, materialize)"
+                )));
+            }
+        };
+    }
+    Ok(spec)
+}
+
+/// An export download: the `.gsnap` written into `tmp/`, removed when this is dropped.
+pub(crate) struct Download {
+    export: ExportFile,
+    file: File,
+    length: u64,
+}
+
+impl Download {
+    /// The answer's headers (module docs).
+    pub(crate) fn headers(&self) -> Vec<(String, String)> {
+        let exported = &self.export.exported;
+        vec![
+            ("Content-Type".into(), "application/octet-stream".into()),
+            (
+                "Content-Disposition".into(),
+                format!("attachment; filename=\"{}\"", exported.file_name),
+            ),
+            ("Cache-Control".into(), "no-store".into()),
+            ("X-Content-Type-Options".into(), "nosniff".into()),
+            (
+                "X-Graphersal-Snapshot".into(),
+                if exported.layer { "layer" } else { "full" }.into(),
+            ),
+            (
+                "X-Graphersal-Models".into(),
+                if exported.models {
+                    "included"
+                } else {
+                    "excluded"
+                }
+                .into(),
+            ),
+        ]
+    }
+
+    /// The file's length in bytes.
+    pub(crate) fn length(&self) -> u64 {
+        self.length
+    }
+
+    /// The open file to stream and the guard that removes it (drop the guard after the file).
+    pub(crate) fn into_parts(self) -> (File, ExportFile) {
+        (self.file, self.export)
+    }
+
+    /// The download as an in-memory answer (tests; a file that cannot be read answers `500`).
+    #[cfg(test)]
+    pub(crate) fn into_response(self) -> Response {
+        use std::io::Read;
+        let headers = self.headers();
+        let (mut file, _guard) = self.into_parts();
+        let mut bytes = Vec::new();
+        if let Err(err) = file.read_to_end(&mut bytes) {
+            return Response::json(
+                500,
+                &json!({ "error": format!("cannot read the export: {err}") }),
+            );
+        }
+        headers
+            .iter()
+            .fold(Response::new(200, bytes), |r, (name, value)| {
+                r.with_header(name, value)
+            })
+    }
+}
+
+/// `GET databases/<name>/export?...`: the export written into `tmp/`, as a download; an error
+/// as its JSON answer.
+pub(crate) fn export(admin: &Admin, name: &str, query: Option<&str>) -> Result<Download, Response> {
+    let spec = export_spec(query)
+        .map_err(|err| Response::json(err.status(), &json!({ "error": err.message() })))?;
+    let export = admin
+        .export_to_tmp(name, spec)
+        .map_err(|err| error_answer(&err, None))?;
+    let opened = File::open(export.path()).and_then(|file| {
+        let length = file.metadata()?.len();
+        Ok((file, length))
+    });
+    match opened {
+        Ok((file, length)) => Ok(Download {
+            export,
+            file,
+            length,
+        }),
+        Err(err) => Err(Response::json(
+            500,
+            &json!({ "error": format!("cannot read the export: {err}") }),
+        )),
+    }
 }
 
 /// `path` relative to the server directory `root`, with `/` separators.
