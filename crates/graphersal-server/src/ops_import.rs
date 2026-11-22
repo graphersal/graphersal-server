@@ -198,6 +198,11 @@ impl Admin {
             }
         }
         config.needs_model = built.models_missing.first().cloned();
+        // The model blobs it carries are shared through `models/`. A model it names but does
+        // not carry leaves it `needs-model` even when `models/` holds it (the V7 contract):
+        // `models add <repo>` resolves it from there.
+        let mut built = built;
+        built.notes.extend(self.adopt_build(name, &store_dir));
         #[cfg(test)]
         match self.fail {
             Some(FailPoint::AfterStore) => return Err(store_error(name, "injected failure")),

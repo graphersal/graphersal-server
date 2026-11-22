@@ -164,6 +164,12 @@ pub enum ServerError {
         /// The reason.
         message: String,
     },
+    /// The shared models (`models/`) hold no model of this repository (or blob hash).
+    #[non_exhaustive]
+    ModelNotFound {
+        /// The repository (or blob hash) asked for.
+        repo: String,
+    },
     /// The running server refused an admin request (the console's admin client): its answer.
     #[non_exhaustive]
     Remote {
@@ -262,6 +268,9 @@ impl fmt::Display for ServerError {
                 f,
                 "cannot reach the running graphersal-server at {address}: {message}"
             ),
+            ServerError::ModelNotFound { repo } => {
+                write!(f, "the server's shared models hold no model '{repo}'")
+            }
             ServerError::Remote { message, .. } => f.write_str(message),
         }
     }

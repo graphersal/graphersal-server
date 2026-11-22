@@ -41,7 +41,10 @@ from published files). When this file disagrees with the code, the code wins: sa
   `Databases` takes `loader.context(header)` and the request holds that `Arc` only for its
   duration; `DatabaseInfo` hooks add `database` (real name) and `admin: true` to the per-DB
   `/api/info`), `admin_api` (`GET /api/admin/databases` `{databases, aliases, problems}`, alias
-  rows carry `aliasOf`; `GET /api/admin/databases/<name|alias>`; field names = the playground's
+  rows carry `aliasOf`; listing rows (`Extras`) add `sizeBytes` (`layout::dir_bytes`),
+  `pooled`/`pooledBy` (`Admin::pooled_bases`), `linkWarning`; no `memoryBytes` (only the session
+  thread knows it); `GET|POST models`, `DELETE models/<repo...>`; 409 helps: name taken,
+  read-only base, base of layers (delete), base of loaded layers (unload); `GET /api/admin/databases/<name|alias>`; field names = the playground's
   landing view; the actions: `POST databases` create, `DELETE databases/<name>`, `POST
   .../<name>/clone|load|unload`, `PUT .../<name>/read-only|auto-load`, `GET aliases`, `PUT|DELETE
   aliases/<alias>`; JSON bodies `deny_unknown_fields`; core errors -> `{"error","help"?}` via
@@ -113,6 +116,30 @@ from published files). When this file disagrees with the code, the code wins: sa
   database)). Every admin change writes its file first
   (atomically), then memory, under the registry's write lock. `serve::start` scans after the
   bind and before `ready()` (`/readyz` 503 meanwhile); `Running::registry()`.
+- `models` (`ModelsDir` over `models/`, U9): one physical copy of every model blob in
+  `models/blobs/<2 hex>/<sha256>` (the Store blob layout), HARD-LINKED into each database's
+  `store/blobs/`; no engine change. `adopt(store_dir)` = the dedupe pass (same name + length in
+  `models/blobs` -> link to `blobs/tmp-srv-*` then rename over the file; a new blob is linked
+  into `models/` first; link failure -> COPY into `models/`, the database keeps its own copy,
+  warning logged and returned; `#[cfg(test)] fail_links`), under a process-wide mutex with
+  `remove_blob`. Adoption touches only Stores nothing serves: builds in `tmp/` before
+  `commit` (create, clone, import, restore: `Admin::adopt_build`), `needs-model` databases
+  during `models add`, and at server start a background thread (`Admin::adopt_all`, per
+  database under `Loader::while_idle`; loading/loaded ones skipped). `scan` = the derived index
+  `models/models.toml` (one row per blob: repo/identity/licence read from the blob's own ustar
+  manifest `graphersal-model.json`, users = databases holding the blob, `copied` = users whose
+  file is another inode (unix), `waiting` = `needs_model` markers), rebuilt at every listing
+  and model change, never read back. `resolve(store_dir, repos)`: `Store::restore_blobs_from(..,
+  BlobSource::store(models/))` when a definition's blob is missing; a repo without a definition
+  -> its blob unpacked into `tmp/` + `Store::import_model_dir`; then adopt. `copied_blobs` feeds
+  the listing's `linkWarning`. Admin side in `ops_models.rs` (`models_index`, `model_add`
+  (`ModelAddSpec`: a model dir via a scratch Store + `import_model_dir`, a `.gsnap` via
+  `create_from_packed_dir`, harvested by adoption; or a repo `models/` holds; then
+  `resolve_waiting`: plain `needs-model` databases, checked with `while_idle`, resolved, marker
+  cleared + state `unloaded` under `while_idle`), `model_remove` (refused while a database
+  holds a blob, waits for it or names it in `Store::models_dir`)). An import does NOT resolve
+  a missing model from `models/` (the V7 test contract): `models add <repo>` does. Tests in
+  `models_tests.rs`.
 - `loader` (`Loader`, beside the registry, `Running::loader()`): `load` (background thread,
   state `loading` -> `loaded` / `failed (reason)` / `needs-model (repo)` when a model blob is
   missing; a load of a loaded/loading DB answers `LoadStart::Already*`, no error), `wait`,
@@ -134,14 +161,16 @@ from published files). When this file disagrees with the code, the code wins: sa
 - `src/main.rs`: the hand-parsed command line (no parser crate, like graphersal's CLI): `init`,
   `serve`, `db list|create|delete|clone|load|unload|read-only|auto-load|alias|backup|backups|
   restore|export ... --dir DIR [--json]`, `import DIR SOURCE --name N [--base B] [--format F]
-  [--description D] [--json]` (`DbCommand::Import`: the JSON path form, SOURCE made absolute;
+  [--description D] [--json]`, `models list|add SOURCE [--repo R] [--license L]|remove REPO
+  --dir DIR [--json]` (`DbCommand::Models*`; SOURCE absolute when it exists, else a repo)
+  (`DbCommand::Import`: the JSON path form, SOURCE made absolute;
   offline the same route over the offline admin) (`db export` offline writes the file through
   `Admin::export_to_file`, through a server streams the download into `FILE.part`) (prints `note: ... sent to its admin API at ADDR` on stderr when it went through a
   server, `help:` lines for refusals), the tracing subscriber, the ctrlc handler. stdout =
   results, stderr = diagnostics/log; exit codes 0 ok, 1 failed, 2 usage.
 - Tests: unit tests beside the code (`test_support::TempDir`), end-to-end tests in
   `crates/graphersal-server/tests/server_tests.rs` (spawns the binary, port 0, SIGTERM; the
-  `db` console offline and through a running server).
+  `db`/`import`/`models` console offline and through a running server).
 
 ## Commands
 

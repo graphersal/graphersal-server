@@ -7,7 +7,7 @@
 //!   server.run       the address of the running server (crate::run_file), removed at stop
 //!   aliases.toml     alias -> database name (crate::registry)
 //!   databases/       one directory per database: database.toml + store/ (crate::registry)
-//!   models/blobs/    the shared model blobs (later)
+//!   models/          the shared embedding models: blobs/<2 hex>/<sha256>, models.toml (crate::models)
 //!   backups/  trash/  tmp/  logs/
 //! ```
 //!
@@ -211,6 +211,26 @@ impl ServerDir {
         let text = fs::read_to_string(&path).map_err(|err| ServerError::io("read", &path, err))?;
         ServerConfig::parse(&text, &path)
     }
+}
+
+/// The bytes of every file below `dir` (each directory entry once: a file hard-linked from
+/// `models/` counts in full here; links to the same file inside `dir` are not deduplicated
+/// either, a Store has none). Unreadable entries count `0`; symbolic links are not followed.
+pub(crate) fn dir_bytes(dir: &Path) -> u64 {
+    let Ok(listing) = fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut total = 0u64;
+    for item in listing.flatten() {
+        match item.file_type() {
+            Ok(kind) if kind.is_dir() => total = total.saturating_add(dir_bytes(&item.path())),
+            Ok(kind) if kind.is_file() => {
+                total = total.saturating_add(item.metadata().map(|m| m.len()).unwrap_or(0));
+            }
+            _ => {}
+        }
+    }
+    total
 }
 
 /// Writes `bytes` to `path` through a temporary file beside it and a rename, so a reader sees

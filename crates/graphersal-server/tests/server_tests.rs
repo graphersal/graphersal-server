@@ -951,3 +951,122 @@ fn import_offline_and_through_a_server() {
     assert!(out.contains("is loaded"), "{out}");
     stop_and_wait(&mut server);
 }
+
+/// Runs `graphersal-server models ARGS --dir DIR`: (exit code, stdout, stderr).
+fn models(dir: &Path, args: &[&str]) -> (i32, String, String) {
+    let out = Command::new(BIN)
+        .arg("models")
+        .args(args)
+        .arg("--dir")
+        .arg(dir)
+        .output()
+        .unwrap();
+    (
+        out.status.code().unwrap_or(-1),
+        text(&out.stdout),
+        text(&out.stderr),
+    )
+}
+
+/// A tiny synthetic Model2Vec model directory (4 tokens x 3 dimensions) in `dir`, as in the
+/// crate's `test_models.rs` (no network).
+fn tiny_model_dir(dir: &Path) {
+    std::fs::create_dir_all(dir).unwrap();
+    let vocab = ["[UNK]", "graph", "vector", "model"];
+    let entries: Vec<String> = vocab
+        .iter()
+        .enumerate()
+        .map(|(id, token)| format!("{token:?}: {id}"))
+        .collect();
+    let tokenizer = format!(
+        r#"{{"version": "1.0", "truncation": null, "padding": null, "added_tokens": [],
+            "normalizer": {{"type": "Lowercase"}}, "pre_tokenizer": {{"type": "Whitespace"}},
+            "post_processor": null, "decoder": null,
+            "model": {{"type": "WordLevel", "vocab": {{{}}}, "unk_token": "[UNK]"}}}}"#,
+        entries.join(", ")
+    );
+    let data: Vec<u8> = (0..12)
+        .flat_map(|i| (1.0f32 + i as f32).to_le_bytes())
+        .collect();
+    let mut header = format!(
+        r#"{{"embeddings": {{"dtype": "F32", "shape": [4, 3], "data_offsets": [0, {}]}}}}"#,
+        data.len()
+    );
+    while header.len() % 8 != 0 {
+        header.push(' ');
+    }
+    let mut weights = (header.len() as u64).to_le_bytes().to_vec();
+    weights.extend_from_slice(header.as_bytes());
+    weights.extend_from_slice(&data);
+    std::fs::write(dir.join("config.json"), r#"{"normalize": true}"#).unwrap();
+    std::fs::write(dir.join("tokenizer.json"), tokenizer).unwrap();
+    std::fs::write(dir.join("model.safetensors"), weights).unwrap();
+    std::fs::write(
+        dir.join("README.md"),
+        "---\nlicense: mit\n---\n# A tiny model\n",
+    )
+    .unwrap();
+}
+
+#[test]
+fn models_commands_offline_and_through_a_server() {
+    let temp = TempDir::new("console-models");
+    let dir = ServerDir::init(temp.path().join("srv")).unwrap().dir;
+    let root = dir.root().to_str().unwrap().to_string();
+    let model = temp.path().join("tiny");
+    tiny_model_dir(&model);
+
+    // Offline.
+    let (code, out, err) = models(
+        dir.root(),
+        &[
+            "add",
+            model.to_str().unwrap(),
+            "--repo",
+            "acme/e2e",
+            "--license",
+            "mit",
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("model acme/e2e"), "{out}");
+    assert!(!err.contains("sent to its admin API"), "{err}");
+    let (code, out, _) = models(dir.root(), &["list"]);
+    assert_eq!(code, 0);
+    assert!(
+        out.contains("acme/e2e") && out.contains("used by: nobody"),
+        "{out}"
+    );
+    assert!(dir.models().join("models.toml").is_file());
+    let (code, _, _) = models(dir.root(), &[]);
+    assert_eq!(code, 2, "no command");
+    let (code, _, err) = models(dir.root(), &["add", "nobody/none"]);
+    assert_eq!(code, 1);
+    assert!(err.contains("no model 'nobody/none'"), "{err}");
+    assert!(err.contains("help:"), "{err}");
+
+    // Through a running server.
+    let mut server = ServerProcess(
+        Command::new(BIN)
+            .args(["serve", "--dir", &root, "--listen", "127.0.0.1:0"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let info = wait_for_run_file(&dir);
+    let (code, out, err) = models(dir.root(), &["list", "--json"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        err.contains(&format!("sent to its admin API at {}", info.address)),
+        "{err}"
+    );
+    assert_eq!(json(&out)["models"][0]["repo"], "acme/e2e");
+    let (code, out, err) = models(dir.root(), &["remove", "acme/e2e"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("removed model 'acme/e2e'"), "{out}");
+    let (code, _, err) = models(dir.root(), &["remove", "acme/e2e"]);
+    assert_eq!(code, 1);
+    assert!(err.contains("no model 'acme/e2e'"), "{err}");
+    stop_and_wait(&mut server);
+}

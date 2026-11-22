@@ -5,7 +5,8 @@
 //! over `server.toml`'s `listen`; port `0` picks a free port), writes the bound address into
 //! `server.run`, scans the database registry ([`Registry::scan`]; `/readyz` answers
 //! `503 loading` until it is done), starts loading the `auto_load` databases in the background
-//! ([`Loader::auto_load`]), and serves on a `tiny_http` listener (adapted from the graphersal CLI's dev
+//! ([`Loader::auto_load`]), shares the model blobs of every idle database through `models/`
+//! on a background thread ([`crate::ops::Admin::adopt_all`]), and serves on a `tiny_http` listener (adapted from the graphersal CLI's dev
 //! server): one accept thread, one thread per request. [`Running::stop`] stops it: the
 //! lifecycle answers `503 stopping`, the accept loop ends, running requests get a moment to
 //! finish, every database is unloaded ([`Loader::shutdown`]: its Store closed cleanly),
@@ -180,6 +181,16 @@ pub fn start(
     }
     // The databases with `auto_load = true`, each on a background thread of its own.
     running.loader.auto_load();
+    // In the background: every idle database's model blobs shared through `models/`, and
+    // `models/models.toml` rebuilt (problems are logged, never fatal; a database that loads
+    // meanwhile is skipped).
+    let admin = crate::ops::Admin::online(running.loader.clone());
+    if let Err(err) = std::thread::Builder::new()
+        .name("graphersal-server-models".to_string())
+        .spawn(move || admin.adopt_all())
+    {
+        tracing::warn!(target: "graphersal_server", "models: cannot start the adoption: {err}");
+    }
     if exposure == Exposure::Network {
         tracing::warn!(
             target: "graphersal_server",

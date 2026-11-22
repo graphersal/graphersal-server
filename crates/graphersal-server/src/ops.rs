@@ -27,6 +27,9 @@
 //! - [`Admin::import`]: another database (a packed snapshot, full or layer; a Store directory
 //!   or `.gstore`; GraphSON; GraphML) as a new database, built in `tmp/` like a create, in
 //!   `ops_import.rs`.
+//! - [`Admin::models_index`], [`Admin::model_add`], [`Admin::model_remove`]: the shared
+//!   embedding models in `models/` (`ops_models.rs`, [`crate::models`]); every build (create,
+//!   clone, import, restore) shares its model blobs through `models/` before it is committed.
 //! - `load`, `unload`, `set_read_only`, `set_auto_load`, `alias_set`, `alias_remove`: delegated
 //!   to the [`Loader`] and the [`Registry`].
 //!
@@ -165,6 +168,9 @@ pub struct Admin {
     loader: Option<Arc<Loader>>,
     #[cfg(test)]
     pub(crate) fail: Option<FailPoint>,
+    /// Test hook: the shared models' hard links fail (the copy fallback).
+    #[cfg(test)]
+    pub(crate) no_links: bool,
 }
 
 impl Admin {
@@ -175,6 +181,8 @@ impl Admin {
             loader: Some(loader),
             #[cfg(test)]
             fail: None,
+            #[cfg(test)]
+            no_links: false,
         }
     }
 
@@ -186,6 +194,8 @@ impl Admin {
             loader: None,
             #[cfg(test)]
             fail: None,
+            #[cfg(test)]
+            no_links: false,
         }
     }
 
@@ -201,6 +211,19 @@ impl Admin {
     /// The registry.
     pub fn registry(&self) -> &Arc<Registry> {
         &self.registry
+    }
+
+    /// Every base in the loader's pool with the databases using it (empty offline).
+    pub fn pooled_bases(&self) -> std::collections::BTreeMap<String, Vec<String>> {
+        self.loader
+            .as_ref()
+            .map(|loader| loader.pooled_bases())
+            .unwrap_or_default()
+    }
+
+    /// The databases using the pooled base `base` (empty when it is not in the pool).
+    pub(crate) fn pooled_users(&self, base: &str) -> Vec<String> {
+        self.pooled_bases().remove(base).unwrap_or_default()
     }
 
     /// Whether this admin works inside a running server.
@@ -247,6 +270,7 @@ impl Admin {
             }
             None => {}
         }
+        self.adopt_build(name, &store_dir);
         let entry = self.registry.commit(build)?;
         tracing::info!(
             target: "graphersal_server",
@@ -339,6 +363,7 @@ impl Admin {
             },
         };
         forked?;
+        self.adopt_build(new_name, &target);
         let cloned = self.registry.commit(build)?;
         tracing::info!(
             target: "graphersal_server",
@@ -525,6 +550,10 @@ mod import;
 pub use import::{ImportFormat, ImportSource, Imported};
 pub(crate) use transfer::ExportFile;
 pub use transfer::{BackupInfo, ExportSpec, Exported, Restored};
+
+#[path = "ops_models.rs"]
+mod models;
+pub use models::{ModelAddSpec, ModelAdded, ModelRemoved};
 
 #[cfg(test)]
 #[path = "ops_tests.rs"]
