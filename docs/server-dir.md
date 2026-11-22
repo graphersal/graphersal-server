@@ -116,7 +116,7 @@ auto_load = false                # load at server start
 read_only = false                # serve read-only
 created = "2026-11-22T10:00:00Z" # UTC, set at creation
 description = "Acme's graph"
-needs_model = "org/model"        # set by an import that names a model it does not carry
+needs_model = "org/model"        # set by an import naming a model neither it nor models/ carries
 ```
 
 | Key | Default | Meaning |
@@ -128,7 +128,7 @@ needs_model = "org/model"        # set by an import that names a model it does n
 | `read_only` | `false` | writes through the database's API and MCP endpoint are refused; a base is always read-only |
 | `created` | none | the creation time (UTC, RFC 3339) |
 | `description` | `""` | free text |
-| `needs_model` | none | the repository of an embedding model the database's Store names but does not hold: the database is listed as `needs-model` and cannot load until `models add <repo>` (the marker is removed then, or by the first successful load) |
+| `needs_model` | none | the repository of an embedding model the database's Store names but does not hold, set by an import whose source names a model that `models/` lacks too (one `models/` holds is taken from there at the import): the database is listed as `needs-model` and cannot load until `models add <repo>` (the marker is removed then, or by the first successful load) |
 
 Unknown keys are an error (the database is listed `failed`). The server writes the file
 atomically (temporary file + rename); edit it by hand only while no server runs.
@@ -149,7 +149,8 @@ Store blob layout) and puts a HARD LINK of it into each database's `store/blobs/
 are content-addressed and immutable, so for the engine the link is an ordinary blob file: a
 database's delete or prune removes only its link, an export embeds the bytes. Every create,
 clone, import and restore links the new database's model blobs before the database appears; at
-start the server does it for every idle database.
+start the server does it for every idle database. An import whose source names a model without
+carrying it gets the model from `models/` (linked the same way) when `models/` holds it.
 
 Where the file system refuses hard links (another file system, FAT/exFAT, most SMB shares, FUSE
 mounts) the blob is COPIED instead: correct, but no disk saving. The server logs a warning and

@@ -7,14 +7,16 @@
 //! - a packed snapshot (`.gsnap`; the kind is read from its manifest with
 //!   [`read_snapshot_info`], never from the file name): a FULL snapshot becomes a plain database
 //!   ([`Store::create_from_packed_dir`]: its embedding models come along when it carries them;
-//!   a snapshot that names a model without carrying it becomes a database in the state
+//!   a model it names without carrying it is taken from the server's shared `models/` when
+//!   that holds it (hard-linked like any adopted blob), else the database gets the state
 //!   `needs-model (<repo>)`, persisted as `needs_model` in its `database.toml`); a LAYER
 //!   snapshot becomes a layer database over the base database with the snapshot's base
 //!   identity ([`BaseRef`]): the one named by `base`, or the only base database with that
 //!   identity; refused otherwise, naming the identity;
 //! - a Store (a directory, or a single-file `.gstore`): copied file by file into a directory
 //!   Store ([`Store::convert`], verified; its creation parameters come along); a layer Store is
-//!   matched with its base like a layer snapshot; a missing model blob marks `needs-model`;
+//!   matched with its base like a layer snapshot; a missing model blob is taken from
+//!   `models/` like a snapshot's, or marks `needs-model`;
 //! - GraphSON (`.json`, `.jsonl`, `.graphson`) or GraphML (`.xml`, `.graphml`): a new plain
 //!   database holding the file's graph (the Store gets `server.toml`'s `[defaults]`); data
 //!   GraphSON cannot hold is skipped and listed in the import's notes.
@@ -22,9 +24,10 @@
 //! With [`DatabaseRole::Base`] ([`Admin::import_as`]) a PLAIN source (a full snapshot, a plain
 //! Store, GraphSON, GraphML) becomes a base database (`role = "base"`, read-only, frozen for
 //! good: layers are made over it); a layer source is refused (`InvalidInput`), and so is a
-//! source naming an embedding model it does not carry (`Refused`: a base is never written, so
-//! the model could not be added later; import it as an ordinary database, add the model, then
-//! promote it: [`Admin::promote`]).
+//! source naming an embedding model it does not carry and `models/` lacks (`Refused`: a base
+//! is never written, so the model could not be added later; add the model to `models/` and
+//! import again, or import it as an ordinary database, add the model, then promote it:
+//! [`Admin::promote`]).
 //!
 //! Without a format hint, the kind is detected: a directory holding a Store; a file whose head
 //! reads as a packed snapshot; a single-file Store; then by the extension; then by the first
@@ -123,14 +126,19 @@ impl ImportSource {
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct Imported {
-    /// The new database (`unloaded`, or `needs-model` when a model is missing).
+    /// The new database (`unloaded`, or `needs-model` when a model is missing and `models/`
+    /// lacks it).
     pub entry: DatabaseEntry,
     /// The source's format.
     pub format: ImportFormat,
     /// A layer's base identity ([`BaseRef`] as text).
     pub layer_base: Option<String>,
-    /// The embedding models (repositories) the database needs but does not keep.
+    /// The embedding models (repositories) the database needs but does not keep (`models/`
+    /// lacks them too).
     pub models_missing: Vec<String>,
+    /// The embedding models (repositories) the source named without carrying them, taken
+    /// from the server's shared `models/` at the import.
+    pub models_resolved: Vec<String>,
     /// How many values, entries or elements the import skipped (GraphSON).
     pub skipped: usize,
     /// What the import noted (skipped or converted data, missing models), as sentences.
@@ -142,6 +150,7 @@ pub struct Imported {
 struct Built {
     layer: Option<(BaseRef, String)>,
     models_missing: Vec<String>,
+    models_resolved: Vec<String>,
     skipped: usize,
     notes: Vec<String>,
 }
@@ -173,7 +182,7 @@ impl Admin {
     ///
     /// `Err`: as [`Admin::import`]; with [`DatabaseRole::Base`] also
     /// [`ServerError::InvalidInput`] for a layer source and [`ServerError::Refused`] for a
-    /// source naming an embedding model it does not carry.
+    /// source naming an embedding model it does not carry and `models/` lacks.
     pub fn import_as(
         &self,
         source: &ImportSource,
@@ -228,20 +237,58 @@ impl Admin {
                 }
             }
         }
+        // A model it names but does not carry is taken from `models/` when that holds it
+        // (the build is not served yet); the blobs it carries are shared through `models/`.
+        let mut built = built;
+        let held: Vec<String> = {
+            let models = self.models();
+            built
+                .models_missing
+                .iter()
+                .filter(|repo| models.holds(repo))
+                .cloned()
+                .collect()
+        };
+        let mut resolution_notes = Vec::new();
+        if held.is_empty() {
+            resolution_notes.extend(self.adopt_build(name, &store_dir));
+        } else {
+            // `resolve` adopts every blob of the Store afterwards.
+            let resolution = self.models().resolve(&store_dir, &held);
+            resolution_notes.extend(
+                resolution
+                    .notes
+                    .iter()
+                    .map(|n| format!("database '{name}': {n}")),
+            );
+            resolution_notes.extend(resolution.adoption.warnings.iter().cloned());
+            built
+                .models_missing
+                .retain(|repo| !resolution.resolved.contains(repo));
+            for repo in &resolution.resolved {
+                tracing::info!(
+                    target: "graphersal_server",
+                    "database '{name}': the embedding model '{repo}' taken from models/"
+                );
+            }
+            built.models_resolved = resolution.resolved;
+        }
+        built
+            .notes
+            .extend(model_notes(&built.models_missing, &built.models_resolved));
+        built.notes.extend(resolution_notes);
         if as_base && let Some(repo) = built.models_missing.first() {
             return Err(ServerError::Refused {
                 name: name.to_string(),
                 message: format!(
-                    "the source names the embedding model '{repo}' without carrying it, and a                      base is frozen (no model can be added to it later)"
+                    "the source names the embedding model '{repo}' without carrying it, the \
+                     shared models lack it, and a base is frozen (no model can be added to it \
+                     later)"
                 ),
             });
         }
+        let config = build.config_mut();
         config.needs_model = built.models_missing.first().cloned();
-        // The model blobs it carries are shared through `models/`. A model it names but does
-        // not carry leaves it `needs-model` even when `models/` holds it (the V7 contract):
-        // `models add <repo>` resolves it from there.
-        let mut built = built;
-        built.notes.extend(self.adopt_build(name, &store_dir));
         #[cfg(test)]
         match self.fail {
             Some(FailPoint::AfterStore) => return Err(store_error(name, "injected failure")),
@@ -265,6 +312,7 @@ impl Admin {
             format,
             layer_base: built.layer.map(|(identity, _)| identity.to_string()),
             models_missing: built.models_missing,
+            models_resolved: built.models_resolved,
             skipped: built.skipped,
             notes: built.notes,
         })
@@ -323,7 +371,6 @@ impl Admin {
                 built.models_missing = dedup(missing);
             }
         }
-        built.notes = model_notes(&built.models_missing);
         Ok(built)
     }
 
@@ -352,7 +399,6 @@ impl Admin {
                 built.models_missing = dedup(missing_blobs(name, store_dir)?);
             }
         }
-        built.notes = model_notes(&built.models_missing);
         Ok(built)
     }
 
@@ -390,6 +436,7 @@ impl Admin {
         Ok(Built {
             layer: None,
             models_missing: Vec::new(),
+            models_resolved: Vec::new(),
             skipped: report.skipped(),
             notes,
         })
@@ -480,16 +527,20 @@ fn dedup(mut repos: Vec<String>) -> Vec<String> {
     repos
 }
 
-fn model_notes(missing: &[String]) -> Vec<String> {
-    missing
-        .iter()
-        .map(|repo| {
-            format!(
-                "the embedding model '{repo}' is named but not carried: the database is \
-                 needs-model until it is added"
-            )
-        })
-        .collect()
+fn model_notes(missing: &[String], resolved: &[String]) -> Vec<String> {
+    let missing = missing.iter().map(|repo| {
+        format!(
+            "the embedding model '{repo}' is named but not carried, and the shared models lack \
+             it: the database is needs-model until it is added"
+        )
+    });
+    let resolved = resolved.iter().map(|repo| {
+        format!(
+            "the embedding model '{repo}' is named but not carried: taken from the shared \
+             models"
+        )
+    });
+    missing.chain(resolved).collect()
 }
 
 /// `base` refused for a source that is not a layer.

@@ -74,11 +74,12 @@ Usage:
       snapshot needs a role=base database with its base identity, --base names it), a Store
       directory or .gstore file (copied into a directory Store), or a GraphSON (.json,
       .jsonl, .graphson) or GraphML (.xml, .graphml) file. FORMAT (snapshot, store,
-      graphson, graphml) overrides the detection. A snapshot naming an embedding model it
-      does not carry becomes a needs-model database. --role base makes a base (read-only,
-      frozen for good) of a plain source (not of a layer, nor of a source naming a model it
-      does not carry). Through a running server the server
-      reads SOURCE itself (same machine).
+      graphson, graphml) overrides the detection. An embedding model the source names but
+      does not carry is taken from the shared models when they hold it; otherwise the
+      database is needs-model until `models add`. --role base makes a base (read-only,
+      frozen for good) of a plain source (not of a layer, nor of a source naming a model
+      neither it nor the shared models carry). Through a running server the server reads
+      SOURCE itself (same machine).
   graphersal-server models COMMAND ... --dir DIR [--json]
       The shared embedding models of DIR (one copy in DIR/models/blobs/, hard-linked into
       every database holding it; copied with a warning where the file system has no hard

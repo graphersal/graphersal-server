@@ -245,7 +245,7 @@ Sources, detected from the content (a file name never decides a snapshot):
 
 | Source | Result |
 |---|---|
-| packed snapshot `.gsnap`, full | a plain database; its embedding models come along when it carries them; when it names a model without carrying it the database is created in the state `needs-model` (`model` names it; kept across restarts, cleared by the first successful load) |
+| packed snapshot `.gsnap`, full | a plain database; its embedding models come along when it carries them; when it names a model without carrying it, the model is taken from the server's shared `models/` when that holds it (hard-linked like any shared blob, listed in `modelsResolved`), else the database is created in the state `needs-model` (`model` names it; kept across restarts, cleared by `POST /api/admin/models` or the first successful load) |
 | packed snapshot, layer (`.layer.gsnap`) | a layer database over the `role = "base"` database with the snapshot's base identity: `base` names it, else the only base database with it; none (or the named one does not match): `409` naming the identity |
 | Store directory or single-file `.gstore` | copied file by file into a directory Store (verified; its creation parameters come along); a layer Store is matched with its base like a layer snapshot |
 | GraphSON (`.json`, `.jsonl`, `.graphson`) or GraphML (`.xml`, `.graphml`) | a plain database holding the file's graph (the Store gets `server.toml`'s `[defaults]`); data GraphSON cannot hold is skipped and noted |
@@ -257,8 +257,10 @@ source that is not a layer is `400`; a file that does not read as its format `40
 `role=base` makes the new database a base (`role: base`, `readOnly: true`, frozen forever, see
 Promote) holding the source's data. Only a plain source becomes a base: a full snapshot, a
 plain Store, GraphSON or GraphML. A layer source (layer snapshot or layer Store) is `400`; a
-source naming an embedding model it does not carry is `409` (a base cannot get a model later;
-help: import it as an ordinary database, add the model, then promote it).
+source naming an embedding model that neither it nor `models/` carries is `409` (a base cannot
+get a model later; help: add the model to `models/` and import again, or import it as an
+ordinary database, add the model, then promote it). A model `models/` holds is taken from
+there before the base is frozen.
 
 The answer is the new entry (state `unloaded`, or `needs-model`) with `"import"`:
 
@@ -266,7 +268,8 @@ The answer is the new entry (state `unloaded`, or `needs-model`) with `"import"`
 |---|---|---|---|
 | `format` | string | always | `snapshot`, `store`, `graphson`, `graphml` |
 | `layerBase` | string | layers | the base identity the layer was built over |
-| `modelsMissing` | [string] | always | the models (repositories) named but not carried |
+| `modelsMissing` | [string] | always | the models (repositories) named but not carried, and `models/` lacks them (the database is `needs-model`) |
+| `modelsResolved` | [string] | always | the models named but not carried, taken from `models/` at the import |
 | `skipped` | number | always | values, entries or elements the import skipped (GraphSON) |
 | `notes` | [string] | always | what was skipped or converted, missing models |
 
@@ -310,9 +313,10 @@ that holds no model `400`); `{"repo"}` alone names a model `models/` already hol
 help when it does not). Then every plain `needs-model` database whose repository `models/` now
 holds gets it (the blob its catalog references restored from `models/`, or, when its catalog
 has no definition of the model, the model imported from the blob's files) and becomes
-`unloaded` (`resolved`); the others stay (`stillMissing`). An import of a snapshot that names
-a model it does not carry stays `needs-model` even when `models/` holds the model: `POST
-/api/admin/models {"repo"}` resolves it.
+`unloaded` (`resolved`); the others stay (`stillMissing`). A base is never resolved (it is
+frozen; only a hand-edited `database.toml` could mark one). An import of a snapshot that names
+a model it does not carry takes it from `models/` right away when `models/` holds it (see
+Import), so only a model `models/` lacks leaves a database `needs-model`.
 
 `DELETE /api/admin/models/<repo>` (the repository's slash is part of the path) removes every
 blob of the repository from `models/` (a blob hash removes that blob); refused (`409`, the

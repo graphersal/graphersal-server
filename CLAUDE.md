@@ -57,7 +57,7 @@ from published files). When this file disagrees with the code, the code wins: sa
   with the raw file as the body (streamed by `copy_body_to` into `tmp/upload-*.bin` = `TmpFile`,
   quick 400/409 refusals before reading) or `POST import {"path", "name", "role"?, ...}` (JSON, absolute
   path read server-side; the console's form), both answered by `import_answer` (`201` entry +
-  `"import": {format, layerBase?, modelsMissing, skipped, notes}`, 415 for an unknown format);
+  `"import": {format, layerBase?, modelsMissing, modelsResolved, skipped, notes}`, 415 for an unknown format);
   the export is NOT answered by
   `route`: the router asks `export_target` first and answers `Answer::Download` (the `.gsnap`
   written into `tmp/` by `Admin::export_to_tmp`, streamed by `serve.rs` from the file with
@@ -99,7 +99,7 @@ from published files). When this file disagrees with the code, the code wins: sa
   GraphSON/GraphML = `GraphSONImport::load` / `GraphSource::from_graphml_reader` +
   `Store::create_with`; `import_as(.., DatabaseRole::Base)` (`import` = role normal) makes a
   base of a PLAIN source: a layer source -> `InvalidInput` (400) before its base is matched, a
-  source naming a model it does not carry -> `Refused` (409; a base cannot get a model later)); `#[cfg(test)] FailPoint` injects a failure/crash after
+  source naming a model neither it nor `models/` carries -> `Refused` (409; a base cannot get a model later)); a missing model `models/` holds (`ModelsDir::holds`) is resolved in the build before commit (`ModelsDir::resolve`, which also adopts; `Imported::models_resolved`, `"modelsResolved"`), only the rest becomes `needs_model`; `#[cfg(test)] FailPoint` injects a failure/crash after
   the Store is written (create, restore, import); tests in `ops_tests.rs`,
   `ops_transfer_tests.rs`, `ops_promote_tests.rs` (bases by import and promotion, core + HTTP)
   and `ops_import_tests.rs` (uploads over a real listener: a 72 MiB
@@ -144,10 +144,10 @@ from published files). When this file disagrees with the code, the code wins: sa
   the listing's `linkWarning`. Admin side in `ops_models.rs` (`models_index`, `model_add`
   (`ModelAddSpec`: a model dir via a scratch Store + `import_model_dir`, a `.gsnap` via
   `create_from_packed_dir`, harvested by adoption; or a repo `models/` holds; then
-  `resolve_waiting`: plain `needs-model` databases, checked with `while_idle`, resolved, marker
+  `resolve_waiting`: plain `needs-model` databases (bases skipped), checked with `while_idle`, resolved, marker
   cleared + state `unloaded` under `while_idle`), `model_remove` (refused while a database
-  holds a blob, waits for it or names it in `Store::models_dir`)). An import does NOT resolve
-  a missing model from `models/` (the V7 test contract): `models add <repo>` does. Tests in
+  holds a blob, waits for it or names it in `Store::models_dir`)). An import resolves
+  a missing model from `models/` when it holds it (V12); `models add <repo>` resolves the rest. Tests in
   `models_tests.rs`.
 - `mcp` (private): ONE `graphersal_mcp::Mcp` per process, built at start by `mcp::endpoint`
   from `server.toml` `[mcp]` (`enabled`, `token`, `max_sessions` default 256 =

@@ -18,6 +18,8 @@
 //!   Adoption only touches Stores that are not served: a build in `tmp/` before it is
 //!   committed (create, clone, import, restore), a `needs-model` database while its model is
 //!   added, and every database at server start before anything loads.
+//!   An import whose source names a model without carrying it resolves it from `models/` in
+//!   its build ([`ModelsDir::resolve`]) when `models/` holds it ([`ModelsDir::holds`]).
 //! - [`ModelsDir::scan`] rebuilds the index `models/models.toml` (derived: one row per model
 //!   blob with its repository, identity, licence and bytes from the model's own manifest inside
 //!   the blob, and the databases linking it or waiting for it); it is written at server start
@@ -463,17 +465,27 @@ impl ModelsDir {
         out
     }
 
-    /// `Store::import_model_dir` of the repository `repo`'s model from `models/` (its blob's
-    /// files unpacked into `tmp/`).
-    fn import_files(&self, store_dir: &Path, repo: &str) -> Result<(), String> {
-        let found = blob_files(&self.blobs())
+    /// Whether `models/blobs/` holds a model of the repository `repo` (read from the blobs'
+    /// manifests; a directory that cannot be read holds nothing).
+    pub fn holds(&self, repo: &str) -> bool {
+        matches!(self.blob_of(repo), Ok(Some(_)))
+    }
+
+    /// The first blob of `models/blobs/` whose manifest names the repository `repo`.
+    fn blob_of(&self, repo: &str) -> Result<Option<(PathBuf, Manifest)>, String> {
+        Ok(blob_files(&self.blobs())
             .map_err(|err| err.to_string())?
             .into_iter()
             .find_map(|(_, path, _)| match manifest_of(&path) {
                 Ok(Some(m)) if m.repo.as_deref() == Some(repo) => Some((path, m)),
                 _ => None,
-            });
-        let Some((blob, manifest)) = found else {
+            }))
+    }
+
+    /// `Store::import_model_dir` of the repository `repo`'s model from `models/` (its blob's
+    /// files unpacked into `tmp/`).
+    fn import_files(&self, store_dir: &Path, repo: &str) -> Result<(), String> {
+        let Some((blob, manifest)) = self.blob_of(repo)? else {
             return Err(format!("models/ has no model of '{repo}'"));
         };
         let unpacked = self.dir.tmp().join(format!(

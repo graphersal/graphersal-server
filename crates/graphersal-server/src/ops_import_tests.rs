@@ -135,16 +135,8 @@ fn snapshots_with_and_without_models() {
         .export_to_file("acme", ExportSpec::new().with_models(false), &without)
         .unwrap();
 
-    let imported = admin
-        .import(&ImportSource::new(&with), "with-model", None, None)
-        .expect("imported");
-    assert_eq!(imported.entry.state, DbState::Unloaded);
-    assert!(imported.models_missing.is_empty());
-    let models = Store::models_dir(imported.entry.store_dir()).unwrap();
-    assert_eq!(models.len(), 1);
-    assert_eq!(models[0].repo, "acme/tiny");
-    assert_ne!(models[0].state, ModelState::Missing);
-
+    // Without its model while models/ lacks it: needs-model (the import of `with` below
+    // shares the blob into models/, after which an import resolves it).
     let imported = admin
         .import(&ImportSource::new(&without), "no-model", None, None)
         .expect("imported");
@@ -165,6 +157,16 @@ fn snapshots_with_and_without_models() {
             .as_deref(),
         Some("acme/tiny")
     );
+
+    let imported = admin
+        .import(&ImportSource::new(&with), "with-model", None, None)
+        .expect("imported");
+    assert_eq!(imported.entry.state, DbState::Unloaded);
+    assert!(imported.models_missing.is_empty());
+    let models = Store::models_dir(imported.entry.store_dir()).unwrap();
+    assert_eq!(models.len(), 1);
+    assert_eq!(models[0].repo, "acme/tiny");
+    assert_ne!(models[0].state, ModelState::Missing);
     // A scan keeps the state (the marker in database.toml).
     let registry = Registry::scan(&dir).unwrap();
     assert_eq!(

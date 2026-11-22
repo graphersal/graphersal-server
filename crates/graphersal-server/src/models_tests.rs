@@ -458,3 +458,193 @@ fn the_models_routes_and_the_listing_fields() {
     );
     loader.shutdown().unwrap();
 }
+
+/// The hard-link count of the shared blob of `acme/tiny` (unix), and that every database in
+/// `names` holds that same file.
+#[cfg(unix)]
+fn shared_links(admin: &Admin, names: &[&str]) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    let index = admin.models_index().unwrap();
+    let model = index.of_repo("acme/tiny").next().expect("in models/");
+    let shared = fs::metadata(admin.models().blob_path(&model.blob)).unwrap();
+    for name in names {
+        let blobs = db_blobs(admin, name);
+        assert_eq!(blobs.len(), 1, "{name}");
+        assert_eq!(
+            fs::metadata(&blobs[0].1).unwrap().ino(),
+            shared.ino(),
+            "{name} links the shared blob"
+        );
+    }
+    shared.nlink()
+}
+
+/// An import of a source that names `acme/tiny` without carrying it, as `name`, resolved from
+/// `models/`: usable at once (unloaded, no marker, the model present).
+fn assert_resolved_at_import(admin: &Admin, imported: &crate::ops::Imported, name: &str) {
+    assert_eq!(imported.entry.state, DbState::Unloaded, "{name}");
+    assert!(imported.models_missing.is_empty(), "{name}: {imported:?}");
+    assert_eq!(imported.models_resolved, ["acme/tiny"], "{name}");
+    assert!(
+        imported
+            .notes
+            .iter()
+            .any(|n| n.contains("acme/tiny") && n.contains("taken from the shared models")),
+        "{name}: {:?}",
+        imported.notes
+    );
+    let entry = admin.registry().get(name).unwrap();
+    assert_eq!(entry.state, DbState::Unloaded);
+    assert_eq!(entry.config.as_ref().unwrap().needs_model, None);
+    assert!(matches!(
+        model_state(admin, name, "acme/tiny"),
+        Some(state) if state != ModelState::Missing
+    ));
+}
+
+#[test]
+fn an_import_takes_a_named_model_from_the_shared_models() {
+    let temp = TempDir::new("models-import-resolve");
+    let dir = server(&temp);
+    let admin = offline(&dir);
+    let (with, without) = snapshots(&temp, &admin);
+    // models/ lacks the model: needs-model as before, and a base is refused.
+    let imported = admin
+        .import(&ImportSource::new(&without), "early", None, None)
+        .unwrap();
+    assert_eq!(imported.entry.state, DbState::needs_model("acme/tiny"));
+    assert_eq!(imported.models_missing, ["acme/tiny"]);
+    assert!(imported.models_resolved.is_empty());
+    let err = admin
+        .import_as(
+            &ImportSource::new(&without),
+            "early-base",
+            None,
+            None,
+            DatabaseRole::Base,
+        )
+        .unwrap_err();
+    assert!(matches!(err, ServerError::Refused { .. }), "{err}");
+    assert!(!dir.databases().join("early-base").exists());
+
+    // The model enters models/ (and resolves the two waiting databases).
+    let added = admin.model_add(&ModelAddSpec::path(&with)).unwrap();
+    assert_eq!(added.resolved, ["early"]);
+
+    // Now an import resolves it right away, also for a base.
+    let imported = admin
+        .import(&ImportSource::new(&without), "snap", None, None)
+        .expect("imported");
+    assert_resolved_at_import(&admin, &imported, "snap");
+    let imported = admin
+        .import_as(
+            &ImportSource::new(&without),
+            "base",
+            None,
+            None,
+            DatabaseRole::Base,
+        )
+        .expect("a base whose model the shared models hold");
+    assert_resolved_at_import(&admin, &imported, "base");
+    assert_eq!(
+        imported.entry.config.as_ref().unwrap().role,
+        DatabaseRole::Base
+    );
+    assert!(
+        fs::read_dir(dir.tmp()).map(|d| d.count()).unwrap_or(0) == 0,
+        "no scratch left in tmp/"
+    );
+    let index = admin.models_index().unwrap();
+    assert!(index.missing.is_empty(), "{index:?}");
+    assert_eq!(index.models.len(), 1, "one blob, deduplicated");
+    #[cfg(unix)]
+    assert_eq!(
+        shared_links(&admin, &["early", "snap", "base"]),
+        4,
+        "models + 3 databases"
+    );
+
+    // The resolved databases load.
+    let loader = loader_of(&dir);
+    for name in ["snap", "base"] {
+        loader.load(name).unwrap();
+        assert_eq!(loader.wait(name, WAIT).unwrap(), DbState::Loaded, "{name}");
+    }
+    loader.shutdown().unwrap();
+}
+
+#[test]
+fn the_import_routes_take_a_named_model_from_the_shared_models() {
+    let temp = TempDir::new("models-import-routes");
+    let dir = server(&temp);
+    let admin = offline(&dir);
+    let (with, without) = snapshots(&temp, &admin);
+    let body = json!({"path": without.to_str().unwrap(), "name": "waits"});
+    let (status, answer) = route(&admin, Method::Post, "import", Some(body));
+    assert_eq!(status, 201, "{answer}");
+    assert_eq!(answer["state"], "needs-model");
+    assert_eq!(answer["import"]["modelsMissing"], json!(["acme/tiny"]));
+    assert_eq!(answer["import"]["modelsResolved"], json!([]));
+
+    admin.model_add(&ModelAddSpec::path(&with)).unwrap();
+    // The path form.
+    let body = json!({"path": without.to_str().unwrap(), "name": "by-path"});
+    let (status, answer) = route(&admin, Method::Post, "import", Some(body));
+    assert_eq!(status, 201, "{answer}");
+    assert_eq!(answer["state"], "unloaded");
+    assert_eq!(answer["import"]["modelsMissing"], json!([]));
+    assert_eq!(answer["import"]["modelsResolved"], json!(["acme/tiny"]));
+    // The upload form.
+    let bytes = fs::read(&without).unwrap();
+    let length = bytes.len();
+    let mut request = Request::new(
+        Method::Post,
+        "/api/admin/import?name=by-upload",
+        Cursor::new(bytes),
+    )
+    .with_header("Content-Type", "application/octet-stream")
+    .with_body_length(Some(length));
+    let response =
+        crate::admin_api::route(&admin, &Method::Post, "import", &mut request).expect("answer");
+    let answer: Value = serde_json::from_slice(response.body()).unwrap();
+    assert_eq!(response.status(), 201, "{answer}");
+    assert_eq!(answer["state"], "unloaded");
+    assert_eq!(answer["import"]["modelsResolved"], json!(["acme/tiny"]));
+    #[cfg(unix)]
+    assert_eq!(
+        shared_links(&admin, &["waits", "by-path", "by-upload"]),
+        4,
+        "models + 3 databases"
+    );
+}
+
+#[test]
+fn models_add_leaves_a_marked_base_alone() {
+    let temp = TempDir::new("models-skip-base");
+    let dir = server(&temp);
+    let admin = offline(&dir);
+    let (with, _) = snapshots(&temp, &admin);
+    admin
+        .create("frozen", &CreateSpec::plain().with_role(DatabaseRole::Base))
+        .unwrap();
+    // Only a hand-edited database.toml marks a base needs-model.
+    let file = dir
+        .databases()
+        .join("frozen")
+        .join(crate::database::DATABASE_FILE);
+    let text = fs::read_to_string(&file).unwrap();
+    fs::write(&file, format!("needs_model = \"acme/tiny\"\n{text}")).unwrap();
+    let admin = offline(&dir);
+    assert_eq!(
+        admin.registry().get("frozen").unwrap().state,
+        DbState::needs_model("acme/tiny")
+    );
+    let added = admin.model_add(&ModelAddSpec::path(&with)).unwrap();
+    assert!(added.resolved.is_empty(), "{added:?}");
+    assert_eq!(added.added[0].waiting, ["frozen"], "{added:?}");
+    assert_eq!(model_state(&admin, "frozen", "acme/tiny"), None);
+    assert_eq!(
+        admin.registry().get("frozen").unwrap().state,
+        DbState::needs_model("acme/tiny")
+    );
+}
