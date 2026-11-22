@@ -1,0 +1,7 @@
+graphersal-server
+Copyright 2026 Aleksandr Dederer
+
+Licensed under the Apache License, Version 2.0 (see LICENSE-APACHE).
+
+graphersal-server is a server for Graphersal (https://github.com/graphersal/graphersal) graph
+databases.
