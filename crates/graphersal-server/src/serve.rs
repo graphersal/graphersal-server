@@ -15,7 +15,7 @@
 //! other address logs a warning. The `Host`/`Origin` checks of `graphersal_serve` (DNS
 //! rebinding, cross-site pages) run on every request but the probes.
 
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -33,7 +33,10 @@ use crate::router::{Answer, Router};
 use crate::run_file::RunInfo;
 
 /// Largest declared body (`Content-Length`) a request may name (as the graphersal CLI's dev
-/// server). `tiny_http` 0.12 skips an unread body when the request is dropped by allocating ONE
+/// server), except an import upload (`POST /api/admin/import` with a body that is not JSON),
+/// which may declare up to `server.toml`'s `[limits] upload_bytes` (its route reads the whole
+/// body into `tmp/`); an upload declaring more is answered `413` without being read and its
+/// connection abandoned. `tiny_http` 0.12 skips an unread body when the request is dropped by allocating ONE
 /// zeroed buffer of the remaining declared length, so a request declaring, say, 2^62 bytes would
 /// abort the process. Such a request is never dropped: it gets no answer and its connection is
 /// leaked (logged). A smaller declared body that was not read is drained in small reads before
@@ -319,15 +322,6 @@ impl Drop for InFlight {
 /// Converts one `tiny_http` request, answers it through the router, and writes the answer.
 fn handle(shared: &Shared, mut request: tiny_http::Request) {
     let declared = request.body_length();
-    if declared.is_some_and(|len| len > MAX_DECLARED_BODY_BYTES) {
-        tracing::warn!(
-            target: "graphersal_server",
-            "a request declared a body of {} bytes; it is ignored (no answer)",
-            declared.unwrap_or_default()
-        );
-        std::mem::forget(request);
-        return;
-    }
     let headers: Vec<(String, String)> = request
         .headers()
         .iter()
@@ -335,6 +329,34 @@ fn handle(shared: &Shared, mut request: tiny_http::Request) {
         .collect();
     let method = Method::parse(request.method().as_str());
     let url = request.url().to_string();
+    let content_type = headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("Content-Type"))
+        .map(|(_, value)| value.as_str());
+    let path = url.split_once('?').map_or(url.as_str(), |(path, _)| path);
+    let upload = crate::admin_api::is_upload(&method, path, content_type);
+    // An import upload may declare up to the upload limit (its route reads the whole body);
+    // every other request up to MAX_DECLARED_BODY_BYTES.
+    let limit = if upload {
+        usize::try_from(shared.router.upload_limit())
+            .unwrap_or(usize::MAX)
+            .max(MAX_DECLARED_BODY_BYTES)
+    } else {
+        MAX_DECLARED_BODY_BYTES
+    };
+    if declared.is_some_and(|len| len > limit) {
+        let len = declared.unwrap_or_default();
+        if upload {
+            refuse_oversize_upload(shared, request, &url, &headers, len);
+        } else {
+            tracing::warn!(
+                target: "graphersal_server",
+                "a request declared a body of {len} bytes; it is ignored (no answer)"
+            );
+            std::mem::forget(request);
+        }
+        return;
+    }
     let response = {
         let mut converted = graphersal_serve::Request::new(method, &url, request.as_reader())
             .with_body_length(declared);
@@ -378,6 +400,63 @@ fn handle(shared: &Shared, mut request: tiny_http::Request) {
             drop(guard);
         }
     }
+}
+
+/// Answers an import upload that declares more than the upload limit with `413` (`403` when
+/// the `Host`/`Origin` checks refuse it) WITHOUT reading its body, then abandons the
+/// connection: `tiny_http` 0.12 would allocate the unread declared rest in one buffer when the
+/// request is dropped (see [`MAX_DECLARED_BODY_BYTES`]), so the answer is written through
+/// `Request::upgrade` (which adds `Connection: upgrade` and `Upgrade` headers, and leaves out
+/// `Content-Length`: the JSON body follows the head and the connection stays open) and the
+/// stream is leaked, never dropped (logged). A client checks the size against the limit first
+/// (`uploadBytes` of `GET /api/info`).
+fn refuse_oversize_upload(
+    shared: &Shared,
+    request: tiny_http::Request,
+    url: &str,
+    headers: &[(String, String)],
+    declared: usize,
+) {
+    let mut probe = graphersal_serve::Request::new(Method::Post, url, io::empty());
+    for (name, value) in headers {
+        probe = probe.with_header(name, value);
+    }
+    let answer = match shared.router.host_check.check(&probe) {
+        Err(refused) => graphersal_serve::Response::json(
+            refused.status(),
+            &serde_json::json!({ "error": refused.message() }),
+        ),
+        Ok(()) => graphersal_serve::Response::json(
+            413,
+            &serde_json::json!({
+                "error": format!(
+                    "the body is larger than {} bytes (it declares {declared})",
+                    shared.router.upload_limit()
+                ),
+                "help": "the server's upload limit is [limits] upload_bytes in server.toml",
+            }),
+        ),
+    };
+    tracing::warn!(
+        target: "graphersal_server",
+        "an import upload declared {declared} bytes, over the upload limit; refused with {} \
+         without reading it (its connection is abandoned)",
+        answer.status()
+    );
+    // `upgrade` writes the head only, and `tiny_http` keeps `Content-Length` out of it: the
+    // body follows without a length (the client reads it until it gives up or closes).
+    let (status, headers, body) = answer.into_parts();
+    let mut head = tiny_http::Response::empty(status);
+    for (name, value) in &headers {
+        if let Ok(header) = tiny_http::Header::from_bytes(name.as_bytes(), value.as_bytes()) {
+            head = head.with_header(header);
+        }
+    }
+    let mut stream = request.upgrade("graphersal-refused", head);
+    if let Err(err) = stream.write_all(&body).and_then(|()| stream.flush()) {
+        tracing::warn!(target: "graphersal_server", "the 413 answer broke off: {err}");
+    }
+    std::mem::forget(stream);
 }
 
 /// An answer as `tiny_http` writes it (a header `tiny_http` cannot carry is left out).

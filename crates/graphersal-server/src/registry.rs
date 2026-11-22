@@ -60,6 +60,16 @@ impl DbState {
         DbState::NeedsModel { repo: repo.into() }
     }
 
+    /// The state of a database that is not loaded, by its configuration:
+    /// [`DbState::NeedsModel`] when an import marked a missing model (`needs_model`), else
+    /// [`DbState::Unloaded`].
+    pub fn at_rest(config: Option<&DatabaseConfig>) -> Self {
+        match config.and_then(|c| c.needs_model.as_deref()) {
+            Some(repo) => DbState::needs_model(repo),
+            None => DbState::Unloaded,
+        }
+    }
+
     /// [`DbState::Failed`].
     pub fn failed(reason: impl Into<String>) -> Self {
         DbState::Failed {
@@ -338,7 +348,7 @@ fn scan_entry(name: String, dir: PathBuf) -> DatabaseEntry {
     } else if !dir.join(STORE_DIR).is_dir() {
         DbState::failed(format!("it has no Store ({STORE_DIR}/ is missing)"))
     } else {
-        DbState::Unloaded
+        DbState::at_rest(config.as_ref().ok())
     };
     DatabaseEntry {
         name,

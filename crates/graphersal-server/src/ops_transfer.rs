@@ -180,7 +180,7 @@ pub(crate) struct TmpFile {
 
 impl TmpFile {
     /// A new unique path `tmp/<prefix>-<n>.<ext>` (not created).
-    fn new(tmp: &Path, prefix: &str, ext: &str) -> Result<Self, ServerError> {
+    pub(crate) fn new(tmp: &Path, prefix: &str, ext: &str) -> Result<Self, ServerError> {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         fs::create_dir_all(tmp).map_err(|err| ServerError::io("create directory", tmp, err))?;
         let n = NEXT.fetch_add(1, Ordering::SeqCst);
@@ -422,6 +422,7 @@ impl Admin {
                 config.kind = DatabaseKind::Plain;
                 config.base = None;
                 config.role = role;
+                config.needs_model = None;
                 self.registry.prepare_replace(&target, config)?
             }
             None => {
@@ -443,7 +444,8 @@ impl Admin {
         })?;
         match info.layer_base {
             Some(identity) => {
-                let base = self.matching_base(&target, &identity, named_base.as_deref())?;
+                let base =
+                    self.matching_base(&target, &identity, named_base.as_deref(), "backup")?;
                 let config = build.config_mut();
                 config.kind = DatabaseKind::Layer;
                 config.role = DatabaseRole::Normal;
@@ -622,14 +624,16 @@ impl Admin {
         self.registry.dir().backups().join(name)
     }
 
-    /// The base database for a layer backup over `identity`: `named` (the sidecar's base) when
-    /// it is a base database with that identity; without a name, the one base database with
-    /// it. Refused otherwise, naming the identity.
-    fn matching_base(
+    /// The base database for a layer over `identity` (`what`: "backup", "snapshot", "store",
+    /// for the messages): `named` (a backup's sidecar base, an import's `base`) when it is a
+    /// base database with that identity; without a name, the one base database with it.
+    /// Refused otherwise, naming the identity.
+    pub(super) fn matching_base(
         &self,
         target: &str,
         identity: &BaseRef,
         named: Option<&str>,
+        what: &str,
     ) -> Result<String, ServerError> {
         let refuse = |message: String| ServerError::Refused {
             name: target.to_string(),
@@ -662,8 +666,8 @@ impl Admin {
                 let key = fold(name);
                 let Some(entry) = bases.iter().find(|e| e.name == key) else {
                     return Err(refuse(format!(
-                        "the backup is a layer over the base {identity}, which it names '{key}'; \
-                         '{key}' is not a base database of this server ({})",
+                        "the {what} is a layer over the base {identity}, which names '{key}' as \
+                         its base; '{key}' is not a base database of this server ({})",
                         hint(matching())
                     )));
                 };
@@ -672,7 +676,7 @@ impl Admin {
                     Ok(key)
                 } else {
                     Err(refuse(format!(
-                        "the backup is a layer over the base {identity}, but the base database \
+                        "the {what} is a layer over the base {identity}, but the base database \
                          '{key}' is {actual} ({})",
                         hint(matching())
                     )))
@@ -681,12 +685,12 @@ impl Admin {
             None => match matching().as_slice() {
                 [one] => Ok(one.clone()),
                 [] => Err(refuse(format!(
-                    "the backup is a layer over the base {identity}; {}",
+                    "the {what} is a layer over the base {identity}; {}",
                     hint(Vec::new())
                 ))),
                 several => Err(refuse(format!(
-                    "the backup is a layer over the base {identity}, which the base databases \
-                     {} all have; restore it into a database whose backup names its base",
+                    "the {what} is a layer over the base {identity}, which the base databases \
+                     {} all have; name the base to use",
                     several.join(", ")
                 ))),
             },

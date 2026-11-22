@@ -61,6 +61,17 @@ impl Router {
         self.lifecycle.ready_with(Arc::new(Databases { loader }))
     }
 
+    /// The largest import upload: `server.toml`'s `[limits] upload_bytes` (read per request;
+    /// the default while the server is not ready or the file does not read).
+    pub(crate) fn upload_limit(&self) -> u64 {
+        self.loader
+            .get()
+            .and_then(|loader| loader.registry().dir().load_config().ok())
+            .map_or(crate::config::DEFAULT_UPLOAD_BYTES, |config| {
+                config.limits.upload_bytes
+            })
+    }
+
     /// Answers one request, a download buffered into the answer (tests).
     #[cfg(test)]
     pub(crate) fn route(&self, request: Request<'_>) -> Response {
@@ -116,7 +127,7 @@ impl Router {
         let read = matches!(method, Method::Get | Method::Head);
         let answer = if path == "/api/info" {
             if read {
-                Ok(info())
+                Ok(info(self.upload_limit()))
             } else {
                 Err(not_allowed(&method, path))
             }
@@ -176,8 +187,9 @@ fn error_response(error: HttpError) -> Response {
 }
 
 /// `GET /api/info`: the server's identity; `admin: true` with no `mountPath` tells the
-/// playground served at `/` to show its landing view (the database list).
-fn info() -> Response {
+/// playground served at `/` to show its landing view (the database list); `uploadBytes` is the
+/// largest import upload (a client checks a file's size before it sends it).
+fn info(upload_bytes: u64) -> Response {
     Response::json(
         200,
         &json!({
@@ -185,6 +197,7 @@ fn info() -> Response {
             "version": env!("CARGO_PKG_VERSION"),
             "experimental": true,
             "admin": true,
+            "uploadBytes": upload_bytes,
         }),
     )
 }

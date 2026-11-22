@@ -531,6 +531,13 @@ impl Loader {
                     started.elapsed().as_millis()
                 );
                 self.sync_read_only(&key, config.read_only);
+                // An import's `needs_model` marker: the model is there now.
+                if let Err(err) = self.registry.clear_needs_model(&key) {
+                    tracing::warn!(
+                        target: "graphersal_server",
+                        "database '{key}': cannot clear its needs_model marker: {err}"
+                    );
+                }
             }
             other => tracing::warn!(
                 target: "graphersal_server",

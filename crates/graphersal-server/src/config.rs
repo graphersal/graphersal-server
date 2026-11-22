@@ -9,6 +9,9 @@
 //! [defaults]                  # the creation parameters of new databases
 //! chunk_bytes = 1048576
 //! damage_policy = "maintenance"
+//!
+//! [limits]
+//! upload_bytes = 4294967296   # the largest import upload (POST /api/admin/import), 4 GiB
 //! ```
 //!
 //! Every key is optional (its default applies); an unknown key is an error (a typo must not be
@@ -41,6 +44,38 @@ pub struct ServerConfig {
     /// The creation parameters of new databases.
     #[serde(default)]
     pub defaults: DatabaseDefaults,
+    /// The request limits.
+    #[serde(default)]
+    pub limits: Limits,
+}
+
+/// The default largest import upload: 4 GiB.
+pub const DEFAULT_UPLOAD_BYTES: u64 = 4 << 30;
+
+/// The request limits of `server.toml` (`[limits]`).
+///
+/// `#[non_exhaustive]`: further limits will be added.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct Limits {
+    /// The largest body of an import upload (`POST /api/admin/import` with the file as the
+    /// body), in bytes (default [`DEFAULT_UPLOAD_BYTES`], 4 GiB); at least 1. The body is
+    /// streamed into `tmp/`, never held in memory; a larger one is refused with `413`.
+    #[serde(default = "default_upload_bytes")]
+    pub upload_bytes: u64,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            upload_bytes: DEFAULT_UPLOAD_BYTES,
+        }
+    }
+}
+
+fn default_upload_bytes() -> u64 {
+    DEFAULT_UPLOAD_BYTES
 }
 
 /// The MCP options of `server.toml` (`[mcp]`; placeholder: no MCP endpoint is served yet).
@@ -93,6 +128,7 @@ impl Default for ServerConfig {
             listen: default_listen(),
             mcp: McpConfig::default(),
             defaults: DatabaseDefaults::default(),
+            limits: Limits::default(),
         }
     }
 }
@@ -131,6 +167,11 @@ impl ServerConfig {
         }
         DamagePolicy::parse(&config.defaults.damage_policy)
             .map_err(|err| invalid(format!("defaults.damage_policy: {err}")))?;
+        if config.limits.upload_bytes == 0 {
+            return Err(invalid(format!(
+                "limits.upload_bytes: must be at least 1 (default {DEFAULT_UPLOAD_BYTES})"
+            )));
+        }
         Ok(config)
     }
 
@@ -191,8 +232,13 @@ pub fn default_config_text() -> String {
          # Uncompressed snapshot chunk size in bytes.\n\
          chunk_bytes = {}\n\
          # What a Store does on damage: \"maintenance\" (read-only until repaired) or \"continue\".\n\
-         damage_policy = \"{}\"\n",
-        defaults.chunk_bytes, defaults.damage_policy
+         damage_policy = \"{}\"\n\
+         \n\
+         [limits]\n\
+         # The largest import upload (POST /api/admin/import, the file as the body) in bytes;\n\
+         # it is streamed into tmp/, never held in memory.\n\
+         upload_bytes = {}\n",
+        defaults.chunk_bytes, defaults.damage_policy, DEFAULT_UPLOAD_BYTES
     )
 }
 
@@ -212,6 +258,25 @@ mod tests {
         assert_eq!(config.damage_policy().unwrap(), DamagePolicy::Maintenance);
         assert_eq!(config.defaults.chunk_bytes, 1 << 20);
         assert!(config.mcp.enabled);
+    }
+
+    #[test]
+    fn the_upload_limit_defaults_to_4_gib_and_is_at_least_1() {
+        assert_eq!(parse("").unwrap().limits.upload_bytes, 4 << 30);
+        assert_eq!(
+            parse(&default_config_text()).unwrap().limits.upload_bytes,
+            DEFAULT_UPLOAD_BYTES
+        );
+        assert_eq!(
+            parse("[limits]\nupload_bytes = 10")
+                .unwrap()
+                .limits
+                .upload_bytes,
+            10
+        );
+        let err = parse("[limits]\nupload_bytes = 0").unwrap_err().to_string();
+        assert!(err.contains("upload_bytes"), "{err}");
+        assert!(parse("[limits]\nupload = 1").is_err());
     }
 
     #[test]
