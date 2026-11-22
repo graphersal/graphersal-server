@@ -1,0 +1,119 @@
+# MCP endpoints
+
+**EXPERIMENTAL.** graphersal-server serves its databases to AI agents over the Model Context
+Protocol (Streamable HTTP transport, JSON answers). There are two kinds of endpoint, served by
+ONE endpoint object (the same MCP sessions, token and statistics for both):
+
+| Endpoint | Serves | Tools |
+|---|---|---|
+| `/mcp` | every database of the server directory | `list_graphs`, `use_graph`, and the data tools, each with an optional `graph` argument |
+| `/db/<name>/mcp` | the loaded database `<name>` (or the database an alias names, resolved per request) | the data tools of one graph (as the graphersal dev server's `/mcp` offers them) |
+
+Configure an agent once with `/mcp`; use a per-database endpoint when an agent should only ever
+see one database.
+
+## Configuration
+
+`server.toml`, read when the server starts (restart it after a change):
+
+```toml
+[mcp]
+enabled = true          # default; false: /mcp and every /db/<name>/mcp answer 404
+# token = "<secret>"    # optional: every MCP request needs Authorization: Bearer <secret>
+max_sessions = 256      # MCP sessions remembered, the oldest forgotten first (at least 1)
+```
+
+`GET /api/info` at the root announces the endpoint: `"mcp": {"endpoint": "/mcp", "readOnly":
+false, "client": {...} | null}` (`client`: the last client that initialized), or `"mcp": null`
+when MCP is off. A database's `GET /db/<name>/api/info` announces its own endpoint
+(`"endpoint": "/db/<name>/mcp"`, `readOnly` of that database).
+
+### Adding the endpoint to an agent
+
+Claude Code (the server on its default address):
+
+```bash
+claude mcp add --transport http graphersal http://127.0.0.1:8484/mcp
+# with a token:
+claude mcp add --transport http graphersal http://127.0.0.1:8484/mcp \
+  --header "Authorization: Bearer <secret>"
+# one database only:
+claude mcp add --transport http acme http://127.0.0.1:8484/db/acme/mcp
+```
+
+Other clients: any MCP client with the Streamable HTTP transport; the URL is the endpoint's.
+Requests go through the same `Host`/`Origin` checks as the rest of the server: a browser page
+of another site is refused (`403`), and so is a `Host` header that does not name this server.
+
+## The flow on `/mcp`
+
+1. `initialize` starts an MCP session (`Mcp-Session-Id` in the answer); its instructions explain
+   the flow below.
+2. `list_graphs` lists the databases and aliases:
+
+   ```json
+   {"graphs": [
+     {"name": "acme", "kind": "layer", "state": "loaded", "readOnly": false, "description": "..."},
+     {"name": "product-2026.3", "kind": "base", "state": "loaded", "readOnly": true},
+     {"name": "archive", "kind": "plain", "state": "unloaded", "readOnly": false},
+     {"name": "prod", "aliasOf": "acme", "kind": "layer", "state": "loaded", "readOnly": false}
+   ], "selected": null}
+   ```
+
+   `kind` is `plain`, `layer` or `base`; `state` is `unloaded`, `loading`, `loaded`,
+   `needs-model` or `failed` (with a `reason`); `readOnly` is the database's `read_only` flag
+   (always `true` for a base). An alias row shows its database's kind, state and flag.
+3. `use_graph {"name": "acme"}` selects the database for this MCP session; every other tool
+   then works on it. An alias is resolved at that moment: the session keeps the real database
+   (`"selected": "acme", "requested": "prod"`), also when the alias is later moved to another
+   database. A new session started after the move gets the alias's new database.
+4. Every data tool (`gql`, `query`, `get_schema`, `statistics`, `run_saved_query`, ...) takes an
+   optional `"graph": "<name or alias>"`: it runs that one call on another database without
+   changing the selection (the alias resolved for that call).
+5. Without a selection and without `graph`, a tool call fails with an error naming
+   `list_graphs` and `use_graph`.
+
+Saved queries are not tools of their own (on neither kind of endpoint in this version); run them
+with `run_saved_query` (and `graph` on `/mcp` when needed).
+
+### Reconnecting
+
+The selection belongs to the MCP session. A client that reconnects (a new `initialize`) starts
+without a selection and calls `use_graph` again; the error of its first call says so. The
+server remembers at most `max_sessions` sessions: the oldest is forgotten first, its client gets
+`404` for its unknown session id, initializes again and selects its database again. `DELETE
+/mcp` with the session id ends a session. `GET /mcp` (a server-sent event stream) is not
+offered: `405`.
+
+### Databases that are not loaded
+
+A database that is not loaded is listed with its state. Selecting it (`use_graph`) or naming it
+(`graph`) is a tool error that names the state, and the selection stays as it was:
+
+- `database 'x' is not loaded; ask an operator to load it`
+- `database 'x' is not loaded: it is loading; retry in a moment`
+- `database 'x' is not loaded: it failed (<reason>); ask an operator to fix it and load it`
+- `database 'x' is not loaded: it needs the embedding model '<repo>'; ask an operator to add the model and load it`
+
+The MCP endpoint never loads or unloads a database: only an operator does, through the admin
+API, the console or the playground's admin panel. A database unloaded while a session has it
+selected answers the same error until it is loaded again (the session keeps its selection).
+
+A per-database endpoint of a database that is not loaded answers the mount's `409` (see
+`docs/admin-api.md`), an unknown name `404`.
+
+### Read-only
+
+- A base (`role = "base"`) is read-only for good: its agents see only the reading tools.
+- A database whose read-only flag an operator turned on (`PUT
+  /api/admin/databases/<name>/read-only`) keeps its tool list, but every write of an agent is
+  refused with a read-only error at once; turning it off allows writes again (no reload).
+
+## Limits of this version
+
+- No admin tools over MCP: an agent cannot create, delete, load, unload or change a database.
+- No access control beyond the optional token: whoever reaches the port (and knows the token,
+  if one is set) can read and change every loaded database that is not read-only. Keep the
+  server on a loopback address (the default `127.0.0.1:8484`).
+- One token for every endpoint; no per-database or per-agent policy.
+- MCP sessions live in memory: a server restart forgets them (clients initialize again).

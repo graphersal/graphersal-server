@@ -1070,3 +1070,363 @@ fn models_commands_offline_and_through_a_server() {
     assert!(err.contains("no model 'acme/e2e'"), "{err}");
     stop_and_wait(&mut server);
 }
+
+/// Posts one JSON-RPC message to the MCP endpoint `path` (in the MCP session `session`):
+/// (status, head, body).
+fn mcp_post(
+    address: SocketAddr,
+    path: &str,
+    session: Option<&str>,
+    extra: &[(&str, &str)],
+    message: serde_json::Value,
+) -> (u16, String, String) {
+    let mut headers = vec![
+        ("Content-Type", "application/json"),
+        ("Accept", "application/json, text/event-stream"),
+    ];
+    if let Some(session) = session {
+        headers.push(("Mcp-Session-Id", session));
+    }
+    headers.extend_from_slice(extra);
+    call(address, "POST", path, &headers, &message.to_string())
+}
+
+/// `initialize` on the MCP endpoint `path`: the new MCP session's id.
+fn mcp_initialize(address: SocketAddr, path: &str) -> String {
+    let (status, head, body) = mcp_post(
+        address,
+        path,
+        None,
+        &[],
+        serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "protocolVersion": "2025-06-18", "clientInfo": {"name": "it", "version": "1"}}}),
+    );
+    assert_eq!(status, 200, "{body}");
+    header_of(&head, "Mcp-Session-Id")
+        .unwrap_or_else(|| panic!("no session id: {head}"))
+        .to_string()
+}
+
+/// The names of the tools of the MCP endpoint `path`.
+fn mcp_tools(address: SocketAddr, path: &str, session: &str) -> Vec<String> {
+    let (status, _, body) = mcp_post(
+        address,
+        path,
+        Some(session),
+        &[],
+        serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}),
+    );
+    assert_eq!(status, 200, "{body}");
+    json(&body)["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap().to_string())
+        .collect()
+}
+
+/// Calls the tool `name` on the MCP endpoint `path`: (text, isError).
+fn mcp_tool(
+    address: SocketAddr,
+    path: &str,
+    session: &str,
+    name: &str,
+    args: serde_json::Value,
+) -> (String, bool) {
+    let (status, _, body) = mcp_post(
+        address,
+        path,
+        Some(session),
+        &[],
+        serde_json::json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+            "params": {"name": name, "arguments": args}}),
+    );
+    assert_eq!(status, 200, "{body}");
+    let result = json(&body)["result"].clone();
+    (
+        result["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string(),
+        result["isError"].as_bool().unwrap_or(false),
+    )
+}
+
+/// The number of persons over the MCP endpoint `path` (on `graph` when given).
+fn mcp_persons(address: SocketAddr, path: &str, session: &str, graph: Option<&str>) -> u64 {
+    let mut args = serde_json::json!({"query": "MATCH (p:person) RETURN count(p) AS n"});
+    if let Some(graph) = graph {
+        args["graph"] = serde_json::json!(graph);
+    }
+    let (text, is_error) = mcp_tool(address, path, session, "gql", args);
+    assert!(!is_error, "{text}");
+    let at = text
+        .find("\"n\":")
+        .unwrap_or_else(|| panic!("no count: {text}"))
+        + 4;
+    text[at..]
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect::<String>()
+        .parse()
+        .unwrap()
+}
+
+#[test]
+fn mcp_serves_every_database_through_one_endpoint() {
+    let temp = TempDir::new("mcp");
+    let dir = ServerDir::init(temp.path()).unwrap().dir;
+    for name in ["a", "b", "c"] {
+        modern_db(&dir, name);
+    }
+    let running = serve::start(
+        temp.path(),
+        ServeOptions::new().with_listen("127.0.0.1:0".parse().unwrap()),
+    )
+    .unwrap();
+    let address = running.address();
+    let loader = running.loader();
+    for name in ["a", "b"] {
+        loader.load(name).unwrap();
+        assert_eq!(
+            loader.wait(name, Duration::from_secs(120)).unwrap(),
+            DbState::Loaded
+        );
+    }
+    let root = json(&get(address, "/api/info").1);
+    assert_eq!(root["mcp"]["endpoint"], "/mcp");
+
+    // One endpoint: the directory tools beside the data tools.
+    let session = mcp_initialize(address, "/mcp");
+    let tools = mcp_tools(address, "/mcp", &session);
+    for tool in ["list_graphs", "use_graph", "gql", "query"] {
+        assert!(tools.iter().any(|t| t == tool), "{tool}: {tools:?}");
+    }
+    let (text, is_error) = mcp_tool(
+        address,
+        "/mcp",
+        &session,
+        "list_graphs",
+        serde_json::json!({}),
+    );
+    assert!(!is_error, "{text}");
+    let listed = json(&text);
+    let state_of = |name: &str| {
+        listed["graphs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|g| g["name"] == name)
+            .map(|g| g["state"].as_str().unwrap().to_string())
+    };
+    assert_eq!(state_of("a").as_deref(), Some("loaded"));
+    assert_eq!(state_of("b").as_deref(), Some("loaded"));
+    assert_eq!(state_of("c").as_deref(), Some("unloaded"));
+    assert_eq!(listed["selected"], serde_json::Value::Null);
+
+    // Nothing selected: the error names the flow.
+    let (text, is_error) = mcp_tool(
+        address,
+        "/mcp",
+        &session,
+        "gql",
+        serde_json::json!({"query": "MATCH (p) RETURN count(p) AS n"}),
+    );
+    assert!(is_error && text.contains("use_graph"), "{text}");
+
+    // use_graph a, a write and a read on a; `graph: "b"` for one call.
+    let (text, is_error) = mcp_tool(
+        address,
+        "/mcp",
+        &session,
+        "use_graph",
+        serde_json::json!({"name": "a"}),
+    );
+    assert!(!is_error && text.contains("\"selected\":\"a\""), "{text}");
+    let (text, is_error) = mcp_tool(
+        address,
+        "/mcp",
+        &session,
+        "gql",
+        serde_json::json!({"query": "INSERT (:person {name: 'zed'})"}),
+    );
+    assert!(!is_error, "{text}");
+    assert_eq!(mcp_persons(address, "/mcp", &session, None), 5);
+    assert_eq!(mcp_persons(address, "/mcp", &session, Some("b")), 4);
+    // The write reached the database page too.
+    assert_eq!(
+        execute(address, "a", "g.v().has_label(\"person\").count().next()"),
+        5
+    );
+
+    // An alias is resolved at use_graph: a flip keeps the open session, a new one follows it.
+    running.registry().alias_set("cur", "a").unwrap();
+    let pinned = mcp_initialize(address, "/mcp");
+    let (text, is_error) = mcp_tool(
+        address,
+        "/mcp",
+        &pinned,
+        "use_graph",
+        serde_json::json!({"name": "cur"}),
+    );
+    assert!(!is_error && text.contains("\"selected\":\"a\""), "{text}");
+    running.registry().alias_set("cur", "b").unwrap();
+    assert_eq!(mcp_persons(address, "/mcp", &pinned, None), 5);
+    let fresh = mcp_initialize(address, "/mcp");
+    let (text, is_error) = mcp_tool(
+        address,
+        "/mcp",
+        &fresh,
+        "use_graph",
+        serde_json::json!({"name": "cur"}),
+    );
+    assert!(!is_error && text.contains("\"selected\":\"b\""), "{text}");
+    assert_eq!(mcp_persons(address, "/mcp", &fresh, None), 4);
+    let (text, _) = mcp_tool(
+        address,
+        "/mcp",
+        &fresh,
+        "list_graphs",
+        serde_json::json!({}),
+    );
+    assert!(
+        text.contains("\"name\":\"cur\",\"aliasOf\":\"b\""),
+        "{text}"
+    );
+
+    // An unloaded database: the 409-style tool error, the selection unchanged; never a load.
+    let (text, is_error) = mcp_tool(
+        address,
+        "/mcp",
+        &session,
+        "use_graph",
+        serde_json::json!({"name": "c"}),
+    );
+    assert!(is_error, "{text}");
+    assert!(
+        text.contains("database 'c' is not loaded; ask an operator to load it"),
+        "{text}"
+    );
+    let (text, is_error) = mcp_tool(
+        address,
+        "/mcp",
+        &session,
+        "gql",
+        serde_json::json!({"query": "MATCH (p) RETURN count(p) AS n", "graph": "c"}),
+    );
+    assert!(is_error && text.contains("not loaded"), "{text}");
+    assert_eq!(
+        running.registry().get("c").unwrap().state,
+        DbState::Unloaded
+    );
+    assert_eq!(mcp_persons(address, "/mcp", &session, None), 5);
+    let (text, is_error) = mcp_tool(
+        address,
+        "/mcp",
+        &session,
+        "use_graph",
+        serde_json::json!({"name": "nope"}),
+    );
+    assert!(is_error && text.contains("'nope'"), "{text}");
+
+    // The runtime read-only toggle refuses an agent's write; b still takes one.
+    loader.set_read_only("a", true).unwrap();
+    let insert = serde_json::json!({"query": "INSERT (:person {name: 'yan'})"});
+    let (text, is_error) = mcp_tool(address, "/mcp", &session, "gql", insert.clone());
+    assert!(is_error, "{text}");
+    assert_eq!(mcp_persons(address, "/mcp", &session, None), 5);
+    let mut on_b = insert;
+    on_b["graph"] = serde_json::json!("b");
+    let (text, is_error) = mcp_tool(address, "/mcp", &session, "gql", on_b);
+    assert!(!is_error, "{text}");
+    assert_eq!(mcp_persons(address, "/mcp", &session, Some("b")), 5);
+    let (text, _) = mcp_tool(
+        address,
+        "/mcp",
+        &session,
+        "list_graphs",
+        serde_json::json!({}),
+    );
+    assert!(
+        text.contains("\"name\":\"a\",\"kind\":\"plain\",\"state\":\"loaded\",\"readOnly\":true"),
+        "{text}"
+    );
+    loader.set_read_only("a", false).unwrap();
+
+    // The single-graph endpoint of a loaded database: today's tools, its own graph.
+    let single = mcp_initialize(address, "/db/b/mcp");
+    let tools = mcp_tools(address, "/db/b/mcp", &single);
+    assert!(tools.iter().any(|t| t == "gql"), "{tools:?}");
+    assert!(
+        !tools.iter().any(|t| t == "list_graphs" || t == "use_graph"),
+        "{tools:?}"
+    );
+    assert_eq!(mcp_persons(address, "/db/b/mcp", &single, None), 5);
+    let info = json(&call(address, "GET", "/db/b/api/info", &[], "").2);
+    assert_eq!(info["mcp"]["endpoint"], "/db/b/mcp");
+    // Not loaded: the mount's 409.
+    let (status, _, body) = mcp_post(
+        address,
+        "/db/c/mcp",
+        None,
+        &[],
+        serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "ping"}),
+    );
+    assert_eq!(status, 409, "{body}");
+
+    // A foreign Origin is refused before the endpoint; only POST and DELETE are served.
+    let (status, _, body) = mcp_post(
+        address,
+        "/mcp",
+        Some(&session),
+        &[("Origin", "http://evil.example")],
+        serde_json::json!({"jsonrpc": "2.0", "id": 4, "method": "tools/list"}),
+    );
+    assert_eq!(status, 403, "{body}");
+    assert_eq!(call(address, "GET", "/mcp", &[], "").0, 405);
+    let (status, _, body) = call(address, "DELETE", "/mcp", &[("Mcp-Session-Id", &fresh)], "");
+    assert_eq!(status, 200, "{body}");
+    running.stop().unwrap();
+}
+
+#[test]
+fn mcp_token_and_off_switch_come_from_server_toml() {
+    let temp = TempDir::new("mcp-config");
+    let dir = ServerDir::init(temp.path()).unwrap().dir;
+    let config = dir.root().join("server.toml");
+    std::fs::write(&config, "[mcp]\ntoken = \"s3cret\"\nmax_sessions = 2\n").unwrap();
+    let listen: SocketAddr = "127.0.0.1:0".parse().unwrap();
+    let running = serve::start(temp.path(), ServeOptions::new().with_listen(listen)).unwrap();
+    let address = running.address();
+    let init = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+        "protocolVersion": "2025-06-18", "clientInfo": {"name": "it", "version": "1"}}});
+    let (status, _, body) = mcp_post(address, "/mcp", None, &[], init.clone());
+    assert_eq!(status, 401, "{body}");
+    let (status, head, body) = mcp_post(
+        address,
+        "/mcp",
+        None,
+        &[("Authorization", "Bearer s3cret")],
+        init,
+    );
+    assert_eq!(status, 200, "{body}");
+    assert!(header_of(&head, "Mcp-Session-Id").is_some(), "{head}");
+    running.stop().unwrap();
+
+    std::fs::write(&config, "[mcp]\nenabled = false\n").unwrap();
+    let running = serve::start(temp.path(), ServeOptions::new().with_listen(listen)).unwrap();
+    let address = running.address();
+    let (status, _, body) = mcp_post(
+        address,
+        "/mcp",
+        None,
+        &[],
+        serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "ping"}),
+    );
+    assert_eq!(status, 404, "{body}");
+    assert_eq!(
+        json(&get(address, "/api/info").1)["mcp"],
+        serde_json::Value::Null
+    );
+    running.stop().unwrap();
+}

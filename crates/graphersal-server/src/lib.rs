@@ -14,8 +14,9 @@
 //! auto-load, aliases, backup, backups, restore, export, import, models) over ONE admin core ([`ops::Admin`]) that the console's `db` and `models` commands
 //! ([`console`]) use too, on the directory itself or through the running server's API, and
 //! the shared embedding models ([`models`]: one copy of every model blob in `models/blobs/`,
-//! hard-linked into the databases' Stores). The server-wide MCP endpoint comes in a later
-//! version.
+//! hard-linked into the databases' Stores), and the MCP endpoints: `/mcp` over every database
+//! of the registry (`list_graphs`, `use_graph`, an optional `graph` per call) and
+//! `/db/<name>/mcp` per loaded database, one shared endpoint (`server.toml` `[mcp]`).
 //!
 //! The server has NO access control: it listens on the loopback by default and warns when it
 //! listens on any other address.
@@ -32,6 +33,7 @@ pub mod error;
 pub mod layout;
 pub mod loader;
 pub mod lock;
+mod mcp;
 pub mod models;
 mod mounts;
 pub mod names;
@@ -46,7 +48,9 @@ pub(crate) mod test_models;
 pub(crate) mod test_support;
 
 pub use admin::TmpBuild;
-pub use config::{DEFAULT_LISTEN, DatabaseDefaults, Limits, McpConfig, ServerConfig};
+pub use config::{
+    DEFAULT_LISTEN, DEFAULT_MCP_SESSIONS, DatabaseDefaults, Limits, McpConfig, ServerConfig,
+};
 pub use database::{DatabaseConfig, DatabaseKind, DatabaseRole};
 pub use error::ServerError;
 pub use layout::{InitReport, ServerDir};

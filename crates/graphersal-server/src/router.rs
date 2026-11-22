@@ -7,7 +7,9 @@
 //!   `409` for a database that is not loaded;
 //! - `GET /api/info`: the server's identity, announcing `admin`;
 //! - `/api/admin/...`: the admin API ([`crate::admin_api`]);
-//! - any other `/api/...` path and `/mcp` (the server-wide MCP endpoint comes later): `404`;
+//! - `/mcp`: the server-wide MCP endpoint over every database ([`crate::mcp`]; `404` when
+//!   `server.toml` turns MCP off);
+//! - any other `/api/...` path: `404`;
 //! - every other `GET`: a file of the embedded playground at the root (`/` = its `index.html`,
 //!   which shows the landing view: the database list), `404` when there is no such file.
 
@@ -125,9 +127,20 @@ impl Router {
             )));
         }
         let read = matches!(method, Method::Get | Method::Head);
-        let answer = if path == "/api/info" {
+        let answer = if path == crate::mcp::ENDPOINT {
+            match loader.mcp() {
+                Some(mcp) => return Answer::Response(crate::mcp::route(mcp, loader, &mut request)),
+                None => Err(HttpError::new(
+                    404,
+                    "the MCP endpoint is off: server.toml [mcp] enabled = false",
+                )),
+            }
+        } else if path == "/api/info" {
             if read {
-                Ok(info(self.upload_limit()))
+                Ok(info(
+                    self.upload_limit(),
+                    loader.mcp().map(|mcp| mcp.status()),
+                ))
             } else {
                 Err(not_allowed(&method, path))
             }
@@ -142,12 +155,6 @@ impl Router {
             crate::admin_api::route(&admin, &method, endpoint, &mut request)
         } else if path == "/api" || path.starts_with("/api/") {
             Err(HttpError::new(404, format!("unknown endpoint {path}")))
-        } else if path == "/mcp" {
-            Err(HttpError::new(
-                404,
-                "this server has no server-wide MCP endpoint yet; each database has its own: \
-                 /db/<name>/mcp",
-            ))
         } else if read {
             self.serve_ui(path)
         } else {
@@ -188,8 +195,9 @@ fn error_response(error: HttpError) -> Response {
 
 /// `GET /api/info`: the server's identity; `admin: true` with no `mountPath` tells the
 /// playground served at `/` to show its landing view (the database list); `uploadBytes` is the
-/// largest import upload (a client checks a file's size before it sends it).
-fn info(upload_bytes: u64) -> Response {
+/// largest import upload (a client checks a file's size before it sends it); `mcp` is the MCP
+/// endpoint's status (`{endpoint: "/mcp", readOnly, client}`), null when MCP is off.
+fn info(upload_bytes: u64, mcp: Option<serde_json::Value>) -> Response {
     Response::json(
         200,
         &json!({
@@ -198,6 +206,7 @@ fn info(upload_bytes: u64) -> Response {
             "experimental": true,
             "admin": true,
             "uploadBytes": upload_bytes,
+            "mcp": mcp,
         }),
     )
 }

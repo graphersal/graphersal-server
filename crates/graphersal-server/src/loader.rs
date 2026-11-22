@@ -9,6 +9,10 @@
 //! (reason)` or `needs-model (repo)` (an embedding model whose blob is missing: the database is
 //! not served until the model is added).
 //!
+//! With MCP on ([`crate::config::McpConfig`]), every context is a host of the server's ONE MCP
+//! endpoint (`shared_mcp`): `/db/<name>/mcp` and the graphs of the server-wide `/mcp`
+//! (module `mcp`); a base's context has a read-only MCP profile.
+//!
 //! The three kinds of database:
 //! - **plain**: its Store opened read-write ([`graphersal_serve::open_store`]), served as the
 //!   session's database (Store panel, history, checkpoints), with a scheduled-jobs ticker;
@@ -39,6 +43,7 @@ use std::time::{Duration, Instant};
 use graphersal::persist::{ModelInfo, ModelState, Store};
 use graphersal::prelude::Graph;
 use graphersal::storage::{LayerBase, LayeredGraph};
+use graphersal_mcp::{Mcp, Profile};
 use graphersal_serve::{
     Context, HostCheck, JobTicker, NoteLevel, OpenNote, OpenStore, ServeError, ServedSource,
 };
@@ -149,6 +154,8 @@ pub struct Loader {
     threads: Mutex<Vec<JoinHandle<()>>>,
     stopping: AtomicBool,
     unload_wait: Duration,
+    /// The server's MCP endpoint, shared by every context it builds (`None`: MCP is off).
+    mcp: Option<Arc<Mcp>>,
 }
 
 impl std::fmt::Debug for Loader {
@@ -166,6 +173,17 @@ impl Loader {
     /// The loader of `registry`'s databases; their contexts check requests with `host_check`
     /// (the listener's).
     pub fn new(registry: Arc<Registry>, host_check: HostCheck) -> Arc<Loader> {
+        Self::with_mcp(registry, host_check, None)
+    }
+
+    /// [`Loader::new`] whose contexts serve the MCP endpoint `mcp` (`/db/<name>/mcp`, and the
+    /// graphs of the server-wide `/mcp`): every context gets it with `shared_mcp`, a base
+    /// (`role = "base"`) also a read-only profile (only reading tools).
+    pub(crate) fn with_mcp(
+        registry: Arc<Registry>,
+        host_check: HostCheck,
+        mcp: Option<Arc<Mcp>>,
+    ) -> Arc<Loader> {
         Arc::new(Loader {
             registry,
             host_check,
@@ -176,7 +194,13 @@ impl Loader {
             threads: Mutex::new(Vec::new()),
             stopping: AtomicBool::new(false),
             unload_wait: UNLOAD_WAIT,
+            mcp,
         })
+    }
+
+    /// The server's MCP endpoint, `None` when MCP is off (`server.toml` `[mcp] enabled`).
+    pub(crate) fn mcp(&self) -> Option<&Arc<Mcp>> {
+        self.mcp.as_ref()
     }
 
     /// The registry.
@@ -656,6 +680,15 @@ impl Loader {
             .hooks(Arc::new(DatabaseInfo { name: key.clone() }))
             .read_only(read_only)
             .runtime_read_only(Some(help));
+        if let Some(mcp) = &self.mcp {
+            builder = builder.shared_mcp(mcp.clone());
+            // A base is read-only for good: its agents see only the reading tools. A plain or
+            // layer database keeps the endpoint's profile: its read-only flag is the runtime
+            // toggle, whose commit hook refuses an agent's writes too.
+            if kind == Kind::Base {
+                builder = builder.mcp_profile(Profile::new(true).with_config(mcp.config().clone()));
+            }
+        }
         if kind == Kind::Layer {
             builder = builder.save_refusal(Some(
                 "the database is a layer store: every commit is already durable in it, there is \

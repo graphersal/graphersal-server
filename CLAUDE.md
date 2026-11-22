@@ -12,10 +12,11 @@ from published files). When this file disagrees with the code, the code wins: sa
   a one-line justification); one crate `crates/graphersal-server` (lib + bin, `publish = false`).
 - graphersal with features `persist`, `persist-zip` (verified ZIP backups) and `io` (GraphSON
   and GraphML imports); graphersal-serve
-  with feature `ui-assets` (the embedded playground per mount and at `/`).
+  with features `ui-assets` (the embedded playground per mount and at `/`) and `mcp` (each
+  context a host of the shared MCP endpoint); graphersal-mcp (the endpoint, directory mode).
 - Path dependencies on the graphersal repository's MAIN checkout beside this one:
   `../graphersal/crates/graphersal`, `../graphersal/crates/graphersal-serve` and
-  `../graphersal/crates/graphersal-session` (later also `graphersal-mcp`). Never edit that
+  `../graphersal/crates/graphersal-session` and `../graphersal/crates/graphersal-mcp`. Never edit that
   repository from a task here. This repository keeps its own `target/` (never share
   graphersal's).
 - `src/lib.rs` modules: `config` (`server.toml`, `ServerConfig`, `parse_listen`, `[limits]
@@ -30,8 +31,9 @@ from published files). When this file disagrees with the code, the code wins: sa
   Content-Length); every unread declared rest is drained in small reads before the answer), `router` (probes and 503s
   through `graphersal_serve::Server`, then `HostCheck::check` on everything else, then the
   routes: `/db/<name>/...` via `mounts`, `GET /api/info` (root identity, `admin: true`, no
-  `mountPath` = the playground's landing view, `uploadBytes` = the upload limit), `/api/admin/...` via `admin_api`, other `/api/*`
-  and `/mcp` 404, every other GET a file of the embedded playground at the root (`/` =
+  `mountPath` = the playground's landing view, `uploadBytes` = the upload limit, `mcp` =
+  `Mcp::status()` or null), `/mcp` (every method) via `mcp::route` (404 when MCP is off),
+  `/api/admin/...` via `admin_api`, other `/api/*` 404, every other GET a file of the embedded playground at the root (`/` =
   `index.html`); `ready(loader)` installs the resolver), `mounts` (`/db/<name>/<rest>`:
   `registry.resolve` on EVERY request (alias flips at once), unknown -> 404 JSON, `/db/x` ->
   308 `/db/x/` (query kept), no context -> 409 `{"error": "database 'x' is not loaded", "help":
@@ -140,6 +142,20 @@ from published files). When this file disagrees with the code, the code wins: sa
   holds a blob, waits for it or names it in `Store::models_dir`)). An import does NOT resolve
   a missing model from `models/` (the V7 test contract): `models add <repo>` does. Tests in
   `models_tests.rs`.
+- `mcp` (private): ONE `graphersal_mcp::Mcp` per process, built at start by `mcp::endpoint`
+  from `server.toml` `[mcp]` (`enabled`, `token`, `max_sessions` default 256 =
+  `DEFAULT_MCP_SESSIONS`; read at start only), `with_endpoint("/mcp")`, never signed sessions
+  (directory mode keeps the selection in the session table); held by the loader
+  (`Loader::with_mcp`, `Loader::mcp()`; `Loader::new` = no MCP, the unit tests). `Directory`
+  implements `GraphDirectory` over the registry + loader, no session job: `list` (databases +
+  aliases; kind plain/layer/base from `database.toml`, state, readOnly = `read_only` or base,
+  description; an alias row carries its target's fields + `aliasOf`), `resolve` (alias -> real
+  name NOW; unknown -> `no database or alias 'x'`), `host` (loaded -> the context + its
+  `mcp_profile()`; else `McpError::Unavailable` with the state's text, `...; ask an operator to
+  load it`). `route` adapts the request (as graphersal-serve's `mcp.rs`) to
+  `Mcp::handle_directory` (POST/DELETE; GET 405). `/db/<name>/mcp` is graphersal-serve's own
+  route behind the mount, on the same `Mcp`. The endpoint never loads/unloads. Contract:
+  `docs/mcp.md`. E2E in `tests/server_tests.rs` (`mcp_*`).
 - `loader` (`Loader`, beside the registry, `Running::loader()`): `load` (background thread,
   state `loading` -> `loaded` / `failed (reason)` / `needs-model (repo)` when a model blob is
   missing; a load of a loaded/loading DB answers `LoadStart::Already*`, no error), `wait`,
@@ -150,7 +166,8 @@ from published files). When this file disagrees with the code, the code wins: sa
   `shutdown` (at server stop: joins the loads, unloads layers before bases), `context(name)`
   for the resolver (`mounts`). Contexts: `launch` + `context_builder(listener HostCheck clone)`,
   `mount_path("/db/<name>")`, `read_only(config)` + `runtime_read_only(help)`, a job ticker
-  (plain/layer). Plain = `open_store` + `ServedSource::Store`; layer = pooled base +
+  (plain/layer); with MCP on `shared_mcp(mcp)`, a base also `mcp_profile(Profile::new(true))`
+  (plain/layer keep the endpoint's profile: the runtime toggle refuses agents' writes). Plain = `open_store` + `ServedSource::Store`; layer = pooled base +
   `open_layer_store` + `ServedSource::layer_store`; base (`role = "base"`) = an EMPTY layer
   over the pooled base (`ServedSource::graph(base.new_layer())`) with the read-only gate on for
   good (C3), no ticker, no Store opened. Base pool: one `LayerBase` per base name

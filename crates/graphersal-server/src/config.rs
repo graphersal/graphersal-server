@@ -4,7 +4,9 @@
 //! listen = "127.0.0.1:8484"   # IP:PORT (or localhost:PORT); port 0 picks a free port
 //!
 //! [mcp]
-//! enabled = true              # placeholder: the MCP endpoint comes in a later version
+//! enabled = true              # /mcp over every database, /db/<name>/mcp per loaded database
+//! # token = "secret"          # optional: requests need `Authorization: Bearer secret`
+//! max_sessions = 256          # MCP sessions remembered (the oldest forgotten first)
 //!
 //! [defaults]                  # the creation parameters of new databases
 //! chunk_bytes = 1048576
@@ -38,7 +40,7 @@ pub struct ServerConfig {
     /// The address the server listens on (`IP:PORT`, or `localhost:PORT`).
     #[serde(default = "default_listen")]
     pub listen: String,
-    /// The MCP endpoint's options (placeholder in this version).
+    /// The MCP endpoint's options.
     #[serde(default)]
     pub mcp: McpConfig,
     /// The creation parameters of new databases.
@@ -78,16 +80,34 @@ fn default_upload_bytes() -> u64 {
     DEFAULT_UPLOAD_BYTES
 }
 
-/// The MCP options of `server.toml` (`[mcp]`; placeholder: no MCP endpoint is served yet).
+/// The default number of MCP sessions the server remembers ([`McpConfig::max_sessions`]).
+pub const DEFAULT_MCP_SESSIONS: usize = 256;
+
+/// The MCP options of `server.toml` (`[mcp]`), read when the server starts.
 ///
 /// `#[non_exhaustive]`: further options will be added.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct McpConfig {
-    /// Whether the server offers its MCP endpoint `/mcp` (default `true`; not served yet).
+    /// Whether the server offers its MCP endpoints: `/mcp` over every database and
+    /// `/db/<name>/mcp` per loaded database (default `true`).
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// The bearer token every MCP request must carry (`Authorization: Bearer <token>`), on
+    /// `/mcp` and on every `/db/<name>/mcp`; `None` (the default): no token. It is the only
+    /// check of an MCP request besides the `Host`/`Origin` checks: no access control.
+    #[serde(default)]
+    pub token: Option<String>,
+    /// How many MCP sessions the server remembers, the oldest forgotten first (its client
+    /// initializes again and selects its graph again); default [`DEFAULT_MCP_SESSIONS`], at
+    /// least 1. One table for `/mcp` and every `/db/<name>/mcp`.
+    #[serde(default = "default_mcp_sessions")]
+    pub max_sessions: usize,
+}
+
+fn default_mcp_sessions() -> usize {
+    DEFAULT_MCP_SESSIONS
 }
 
 /// The creation parameters of new databases (`[defaults]` of `server.toml`).
@@ -135,7 +155,11 @@ impl Default for ServerConfig {
 
 impl Default for McpConfig {
     fn default() -> Self {
-        Self { enabled: true }
+        Self {
+            enabled: true,
+            token: None,
+            max_sessions: DEFAULT_MCP_SESSIONS,
+        }
     }
 }
 
@@ -167,6 +191,21 @@ impl ServerConfig {
         }
         DamagePolicy::parse(&config.defaults.damage_policy)
             .map_err(|err| invalid(format!("defaults.damage_policy: {err}")))?;
+        if config.mcp.max_sessions == 0 {
+            return Err(invalid(format!(
+                "mcp.max_sessions: must be at least 1 (default {DEFAULT_MCP_SESSIONS})"
+            )));
+        }
+        if config
+            .mcp
+            .token
+            .as_deref()
+            .is_some_and(|t| t.trim().is_empty())
+        {
+            return Err(invalid(
+                "mcp.token: must not be empty (remove the key for no token)".to_string(),
+            ));
+        }
         if config.limits.upload_bytes == 0 {
             return Err(invalid(format!(
                 "limits.upload_bytes: must be at least 1 (default {DEFAULT_UPLOAD_BYTES})"
@@ -224,8 +263,13 @@ pub fn default_config_text() -> String {
          listen = \"{DEFAULT_LISTEN}\"\n\
          \n\
          [mcp]\n\
-         # The MCP endpoint /mcp (not served yet: it comes in a later version).\n\
+         # The MCP endpoints: /mcp over every database (list_graphs, use_graph) and\n\
+         # /db/<name>/mcp per loaded database. Read when the server starts.\n\
          enabled = true\n\
+         # A bearer token every MCP request must carry (no token by default):\n\
+         # token = \"<secret>\"\n\
+         # How many MCP sessions are remembered (the oldest forgotten first).\n\
+         max_sessions = {}\n\
          \n\
          [defaults]\n\
          # The creation parameters of new databases (fixed for each database's life).\n\
@@ -238,7 +282,7 @@ pub fn default_config_text() -> String {
          # The largest import upload (POST /api/admin/import, the file as the body) in bytes;\n\
          # it is streamed into tmp/, never held in memory.\n\
          upload_bytes = {}\n",
-        defaults.chunk_bytes, defaults.damage_policy, DEFAULT_UPLOAD_BYTES
+        DEFAULT_MCP_SESSIONS, defaults.chunk_bytes, defaults.damage_policy, DEFAULT_UPLOAD_BYTES
     )
 }
 
@@ -298,6 +342,24 @@ mod tests {
             ("[defaults]\ndamage_policy = \"panic\"", "damage_policy"),
             ("[mcp]\nenable = true", "enable"),
             ("listen = ", "server.toml"),
+        ] {
+            let err = parse(text).unwrap_err().to_string();
+            assert!(err.contains(needle), "{text:?}: {err}");
+        }
+    }
+
+    #[test]
+    fn mcp_options() {
+        let config = parse("").unwrap();
+        assert!(config.mcp.enabled);
+        assert_eq!(config.mcp.token, None);
+        assert_eq!(config.mcp.max_sessions, DEFAULT_MCP_SESSIONS);
+        let config = parse("[mcp]\ntoken = \"s3cret\"\nmax_sessions = 3").unwrap();
+        assert_eq!(config.mcp.token.as_deref(), Some("s3cret"));
+        assert_eq!(config.mcp.max_sessions, 3);
+        for (text, needle) in [
+            ("[mcp]\nmax_sessions = 0", "max_sessions"),
+            ("[mcp]\ntoken = \" \"", "token"),
         ] {
             let err = parse(text).unwrap_err().to_string();
             assert!(err.contains(needle), "{text:?}: {err}");
