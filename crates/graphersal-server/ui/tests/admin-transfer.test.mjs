@@ -347,9 +347,9 @@ test('import by upload: progress events, the answer, needs-model with its hint, 
 test('import: the size pre-check refuses before sending; a 413 and a closed connection are explained; cancel', async () => {
   const { server, options, log } = await mockServer({ limit: 64 * 1024 });
   try {
-    const limit = uploadLimit({ server: 'graphersal-server', admin: true, uploadBytes: 64 * 1024 });
+    const limit = uploadLimit({ server: 'graphersal-server', uploadBytes: 64 * 1024 });
     assert.equal(limit, 65536);
-    assert.equal(uploadLimit({ admin: true }), null);
+    assert.equal(uploadLimit({ server: 'graphersal-server' }), null);
     assert.equal(uploadLimit({ uploadBytes: -1 }), null);
     const built = importRequest({ source: 'upload', file: { size: 100 * 1024 }, name: 'big' }, limit);
     assert.deepEqual(built.problems, ['The file has 100 KB; the server takes uploads up to 64 KB ([limits] upload_bytes in server.toml). Import it from a path on the server instead.']);

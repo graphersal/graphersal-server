@@ -4,6 +4,7 @@
   "startTab": "databases",
   "can": { "theme": true },
   "files": "server-ui/",
+  "styles": ["server-ui.css"],
   "tabs": [
     { "id": "databases", "title": "Databases", "module": "databases-tab.js" },
     { "id": "backups", "title": "Backups", "module": "backups-tab.js" },

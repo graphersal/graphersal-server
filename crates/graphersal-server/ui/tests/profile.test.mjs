@@ -1,8 +1,9 @@
 // Node tests of the `server` UI profile (ui/profile.json): its shape, its tab modules on disk,
 // the rule that every module imports only `vue` and the profile's own files (the playground's
 // files are not part of the profile's contract), and the engine's own check of the profile:
-// the playground's `validateProfile` (js/ui-profiles.js) from GRAPHERSAL_PLAYGROUND, else from
-// the graphersal checkout beside this repository (`../graphersal/playground`, the path
+// the playground's `validateProfile` (js/ui-profiles.js) and its check of the root info
+// (`isEngineInfo`, js/engine/http-engine.js) from GRAPHERSAL_PLAYGROUND, else from the
+// graphersal checkout beside this repository (`../graphersal/playground`, the path
 // dependency's), skipped when neither exists.
 // Run: node --test crates/graphersal-server/ui/tests/*.test.mjs
 import { test } from 'node:test';
@@ -13,6 +14,17 @@ import { dirname, join, resolve } from 'node:path';
 
 const UI = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const profile = JSON.parse(readFileSync(join(UI, 'profile.json'), 'utf8'));
+const PLAYGROUND = process.env.GRAPHERSAL_PLAYGROUND || resolve(UI, '..', '..', '..', '..', 'graphersal', 'playground');
+
+/** The playground module `rel` (below PLAYGROUND), or null (the test skipped) when absent. */
+async function playgroundModule(t, rel) {
+  const file = join(PLAYGROUND, ...rel.split('/'));
+  if (!existsSync(file)) {
+    t.skip(`no playground at ${PLAYGROUND} (set GRAPHERSAL_PLAYGROUND)`);
+    return null;
+  }
+  return import(pathToFileURL(file).href);
+}
 
 test('the profile: name, files, tabs of its own, no workspace', () => {
   assert.equal(profile.name, 'server');
@@ -24,6 +36,14 @@ test('the profile: name, files, tabs of its own, no workspace', () => {
     assert.ok(existsSync(join(UI, tab.module)), `${tab.module} exists`);
   }
   assert.equal(profile.version, undefined, 'the binary adds its version');
+});
+
+test('every style sheet the profile names (styles) exists below its files', () => {
+  assert.deepEqual(profile.styles, ['server-ui.css']);
+  for (const style of profile.styles) {
+    assert.match(style, /^[a-z0-9-]+\.css$/, style);
+    assert.ok(existsSync(join(UI, style)), `${style} exists`);
+  }
 });
 
 test('every module imports only vue and the profile\'s own files', () => {
@@ -41,13 +61,9 @@ test('every module imports only vue and the profile\'s own files', () => {
 });
 
 test('the engine\'s playground accepts the profile (validateProfile), with a version', async (t) => {
-  const engine = process.env.GRAPHERSAL_PLAYGROUND || resolve(UI, '..', '..', '..', '..', 'graphersal', 'playground');
-  const file = join(engine, 'js', 'ui-profiles.js');
-  if (!existsSync(file)) {
-    t.skip(`no playground at ${engine} (set GRAPHERSAL_PLAYGROUND)`);
-    return;
-  }
-  const { validateProfile, createUi } = await import(pathToFileURL(file).href);
+  const mod = await playgroundModule(t, 'js/ui-profiles.js');
+  if (!mod) return;
+  const { validateProfile, createUi } = mod;
   const valid = validateProfile({ ...profile, version: '0.1.0' });
   assert.equal(valid.name, 'server');
   assert.equal(valid.version, '0.1.0');
@@ -55,4 +71,17 @@ test('the engine\'s playground accepts the profile (validateProfile), with a ver
   assert.equal(ui.hasWorkspace, false, 'the root has no graph: never the workspace');
   assert.equal(ui.can('theme'), true);
   for (const key of ['mcp', 'devBadge', 'settings', 'help']) assert.equal(ui.can(key), false, key);
+  assert.deepEqual(valid.styles, ['server-ui.css']);
+  assert.deepEqual(ui.styleUrls('http://h/'), ['http://h/server-ui/server-ui.css'], 'loaded from files, relative to the root');
+});
+
+test('the engine\'s playground takes the root info as its engine\'s (isEngineInfo)', async (t) => {
+  const mod = await playgroundModule(t, 'js/engine/http-engine.js');
+  if (!mod) return;
+  const { isEngineInfo } = mod;
+  // The root /api/info as src/router.rs `info` answers it (without the fields the check ignores).
+  const uiProfile = { ...profile, version: '0.1.0' };
+  assert.equal(isEngineInfo({ server: 'graphersal-server', uiProfile }), true);
+  assert.equal(isEngineInfo({ server: 'graphersal-server', experimental: true, uploadBytes: 1024, mcp: null, uiProfile }), true);
+  assert.equal(isEngineInfo({ server: 'graphersal-server' }), false, 'a named host needs its profile');
 });

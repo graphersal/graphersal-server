@@ -1,12 +1,13 @@
 // Node tests of the database list model (ui/databases.js): the rows of `GET api/admin/databases`
 // (moved with the list from the engine's playground, same assertions), its fetch with the host's
-// headers against a mock server (node:http on port 0), and the host headers.
+// headers against a mock server (node:http on port 0), the host headers, and the root info a
+// profile module gets from the playground (`hostInfo`).
 // Run: node --test crates/graphersal-server/ui/tests/*.test.mjs
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import {
-  databaseHref, databaseRows, fetchDatabases, fetchRootInfo, anyLoading, hostHeaders, DATABASE_STATES,
+  databaseHref, databaseRows, fetchDatabases, hostInfo, anyLoading, hostHeaders, DATABASE_STATES,
 } from '../databases.js';
 
 const DATABASES = {
@@ -54,14 +55,13 @@ test('hostHeaders: the host page\'s text headers, none without the global', () =
   assert.deepEqual(hostHeaders(null), {});
 });
 
-/** A mock server: the root info and the admin list, which requires the host's header. */
+/** A mock server: the admin list, which requires the host's header. */
 async function mockServer() {
   const server = http.createServer((req, res) => {
     const send = (status, body) => {
       res.writeHead(status, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(body));
     };
-    if (req.url === '/api/info') return send(200, { server: 'graphersal-dev', product: 'graphersal-server', uploadBytes: 1024 });
     if (req.url === '/api/admin/databases') {
       if (req.headers.authorization !== 'Bearer t') return send(401, { error: 'a token is required', help: 'send it' });
       return send(200, DATABASES);
@@ -72,16 +72,22 @@ async function mockServer() {
   return { server, base: `http://127.0.0.1:${server.address().port}/` };
 }
 
-test('fetchDatabases and fetchRootInfo against a mock server, with the host headers', async () => {
+test('fetchDatabases against a mock server, with the host headers', async () => {
   const { server, base } = await mockServer();
   try {
     const { rows } = await fetchDatabases({ base, fetch: globalThis.fetch, headers: { Authorization: 'Bearer t' } });
     assert.equal(rows.length, 7);
     assert.equal(new URL(rows[0].href, base).href, `${base}db/acme/`);
     await assert.rejects(fetchDatabases({ base, fetch: globalThis.fetch }), (e) => /a token is required/.test(e.message) && e.help === 'send it');
-    assert.equal((await fetchRootInfo({ base, fetch: globalThis.fetch })).uploadBytes, 1024);
-    assert.deepEqual(await fetchRootInfo({ base: `${base}nothing/`, fetch: globalThis.fetch }), {});
   } finally {
     server.close();
   }
+});
+
+test('hostInfo: the root info from api.info.host, {} when the playground passes none', () => {
+  const host = { server: 'graphersal-server', uploadBytes: 1024, mcp: null };
+  assert.equal(hostInfo({ info: { host } }).uploadBytes, 1024);
+  assert.deepEqual(hostInfo({ info: { host: null } }), {});
+  assert.deepEqual(hostInfo({ info: {} }), {});
+  assert.deepEqual(hostInfo(undefined), {});
 });

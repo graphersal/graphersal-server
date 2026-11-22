@@ -149,14 +149,12 @@ export function downloadBlob(blob, fileName) {
   setTimeout(() => URL.revokeObjectURL(url), 10000);
 }
 
-/** The root `GET api/info` answer (its `uploadBytes`), or `{}` when it cannot be read. */
-export async function fetchRootInfo({ base, fetch, headers = {} }) {
-  try {
-    const r = await fetch(new URL('api/info', base), { cache: 'no-store', headers: { ...headers, Accept: 'application/json' } });
-    if (!r.ok) return {};
-    const info = JSON.parse(await r.text());
-    return info && typeof info === 'object' ? info : {};
-  } catch (e) {
-    return {};
-  }
+/**
+ * The root `GET /api/info` answer as the server sent it (its `uploadBytes`, `mcp`), from a
+ * profile module's `api` (`api.info.host`, delivered by the playground); `{}` when the
+ * playground passes none.
+ */
+export function hostInfo(api) {
+  const host = api && api.info && api.info.host;
+  return host && typeof host === 'object' ? host : {};
 }

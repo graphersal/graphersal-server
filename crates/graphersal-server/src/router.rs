@@ -12,9 +12,9 @@
 //!   `server.toml` turns MCP off);
 //! - any other `/api/...` path: `404`;
 //! - `GET /server-ui/<file>`: a file of the `server` UI profile ([`crate::ui_assets`]);
-//! - every other `GET`: a file of the embedded playground at the root (`/` = its `index.html`
-//!   with the profile's style sheet added; the page shows the `server` profile: the database
-//!   list and the admin tabs, no graph), `404` when there is no such file.
+//! - every other `GET`: a file of the embedded playground at the root (`/` = its `index.html`,
+//!   unchanged; the page shows the `server` profile: the database list and the admin tabs, no
+//!   graph), `404` when there is no such file.
 
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
@@ -169,8 +169,7 @@ impl Router {
         Answer::Response(answer.unwrap_or_else(error_response))
     }
 
-    /// A file of the playground at the root (`/` and a directory: its `index.html`; the root
-    /// `index.html` gets the `server` profile's style sheet, [`crate::ui_assets::BOOT_TAGS`]).
+    /// A file of the playground at the root (`/` and a directory: its `index.html`).
     fn serve_ui(&self, path: &str) -> Result<Response, HttpError> {
         let not_found = || HttpError::new(404, format!("not found: {path}"));
         let decoded = percent_decode(path).ok_or_else(not_found)?;
@@ -178,11 +177,6 @@ impl Router {
             .ui
             .read(decoded.trim_start_matches('/'))
             .ok_or_else(not_found)?;
-        let bytes = if name == "index.html" {
-            crate::ui_assets::with_boot_tags(bytes)
-        } else {
-            bytes
-        };
         Ok(Response::new(200, bytes)
             .with_header("Content-Type", content_type(Path::new(&name)))
             .with_header("Cache-Control", "no-store")
@@ -216,15 +210,13 @@ fn error_response(error: HttpError) -> Response {
     }
 }
 
-/// `GET /api/info` at the root: the server's identity and its UI. The playground served at `/`
-/// takes an answer as its engine's only when `server` is `graphersal-dev` (the dev server's
-/// identity; the playground knows no other), so the root answers that, with `product` naming
-/// graphersal-server; `uiProfile` is the `server` profile ([`crate::ui_assets::profile`]: the
-/// database list and the admin tabs, no workspace, so the page never asks the root for a graph);
-/// no `admin` (the playground would show its own landing view instead of the profile; a
-/// database's info keeps it). `uploadBytes` is the largest import upload (a client checks a
-/// file's size before it sends it); `mcp` is the MCP endpoint's status (`{endpoint: "/mcp",
-/// readOnly, client}`), null when MCP is off.
+/// `GET /api/info` at the root: the server's identity (`server: "graphersal-server"`) and its
+/// UI. The playground served at `/` takes the answer as its engine's because it names its host
+/// and carries `uiProfile`, the `server` profile ([`crate::ui_assets::profile`]: the database
+/// list and the admin tabs, no workspace, so the page never asks the root for a graph).
+/// `uploadBytes` is the largest import upload (a client checks a file's size before it sends
+/// it; the profile's modules read it from `api.info.host`); `mcp` is the MCP endpoint's status
+/// (`{endpoint: "/mcp", readOnly, client}`), null when MCP is off.
 fn info(upload_bytes: u64, mcp: Option<serde_json::Value>) -> Result<Response, HttpError> {
     let profile = crate::ui_assets::profile().map_err(|err| {
         tracing::error!("{err}");
@@ -233,8 +225,7 @@ fn info(upload_bytes: u64, mcp: Option<serde_json::Value>) -> Result<Response, H
     Ok(Response::json(
         200,
         &json!({
-            "server": "graphersal-dev",
-            "product": "graphersal-server",
+            "server": "graphersal-server",
             "version": env!("CARGO_PKG_VERSION"),
             "experimental": true,
             "uploadBytes": upload_bytes,
@@ -349,8 +340,8 @@ mod tests {
             info.get("admin").is_none(),
             "the root shows the profile, not a landing"
         );
-        assert_eq!(info["server"], "graphersal-dev");
-        assert_eq!(info["product"], "graphersal-server");
+        assert_eq!(info["server"], "graphersal-server");
+        assert!(info.get("product").is_none());
         assert_eq!(info["experimental"], true);
         assert_eq!(info["uiProfile"]["name"], "server");
         assert_eq!(info["uiProfile"]["version"], env!("CARGO_PKG_VERSION"));
@@ -358,7 +349,10 @@ mod tests {
         assert_eq!(landing.status(), 200);
         let page = String::from_utf8_lossy(landing.body()).into_owned();
         assert!(page.contains("<html"));
-        assert!(page.contains(crate::ui_assets::BOOT_TAGS), "{page}");
+        assert!(
+            !page.contains("server-ui/"),
+            "index.html is served unchanged: {page}"
+        );
         let module = get(
             &router,
             "/server-ui/databases-tab.js",

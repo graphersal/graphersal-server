@@ -32,16 +32,17 @@ from published files). When this file disagrees with the code, the code wins: sa
   Content-Length); every unread declared rest is drained in small reads before the answer), `router` (probes and 503s
   through `graphersal_serve::Server`, then `HostCheck::check` on everything else, then the
   routes: `/db/<name>/...` via `mounts`, `GET /api/info` (root identity: `server:
-  "graphersal-dev"` because the playground takes a `uiProfile` only from that identity,
-  `product: "graphersal-server"`, NO `admin` (the playground would show its old landing view),
-  `uiProfile` = `ui_assets::profile()`, `uploadBytes` = the upload limit, `mcp` =
+  "graphersal-server"` (the playground takes a named host's info that carries `uiProfile`,
+  `isEngineInfo`), no `product`, no `admin`, `uiProfile` = `ui_assets::profile()`, `uploadBytes` = the upload limit, `mcp` =
   `Mcp::status()` or null), `/mcp` (every method) via `mcp::route` (404 when MCP is off),
   `/api/admin/...` via `admin_api`, other `/api/*` 404, `GET /server-ui/<file>` the profile's
   files (`ui_assets::file`), every other GET a file of the embedded playground at the root (`/` =
-  `index.html` with `ui_assets::BOOT_TAGS`, the profile's style sheet); `ready(loader)` installs
+  its `index.html` unchanged: the profile names its style sheet in `styles`); `ready(loader)` installs
   the resolver), `ui_assets` (the `server` UI profile built into the binary: `include_bytes!`
   table of `crates/graphersal-server/ui/` (the tests excluded), `FILES_PREFIX` `/server-ui/`,
-  `profile()` adds the binary's version; a unit test checks every file in `ui/` is built in),
+  `profile()` adds the binary's version; a unit test checks every file in `ui/` and every
+  `styles` entry is built in; the modules read the root info (`uploadBytes`) from
+  `api.info.host`, `databases.js` `hostInfo`, never fetch it themselves),
   `mounts` (`/db/<name>/<rest>`:
   `registry.resolve` on EVERY request (alias flips at once), unknown -> 404 JSON, `/db/x` ->
   308 `/db/x/` (query kept), no context -> 409 `{"error": "database 'x' is not loaded", "help":
@@ -49,8 +50,8 @@ from published files). When this file disagrees with the code, the code wins: sa
   (reason) / needs-model; loading adds `Retry-After: 1`), else `forward`: prefix stripped,
   client `X-Graphersal-Graph` dropped and set to the REAL name, `Server::handle`; the resolver
   `Databases` takes `loader.context(header)` and the request holds that `Arc` only for its
-  duration; `DatabaseInfo` hooks add `database` (real name), `home: "/"` (the link back to the server UI)
-  and `admin: true` (today's playground links home through it) to the per-DB `/api/info`), `admin_api` (`GET /api/admin/databases` `{databases, aliases, problems}`, alias
+  duration; `DatabaseInfo` hooks add `database` (real name), `home: "/"` (the playground's link back to the server UI;
+  no `admin`) to the per-DB `/api/info`), `admin_api` (`GET /api/admin/databases` `{databases, aliases, problems}`, alias
   rows carry `aliasOf`; listing rows (`Extras`) add `sizeBytes` (`layout::dir_bytes`),
   `pooled`/`pooledBy` (`Admin::pooled_bases`), `linkWarning`; no `memoryBytes` (only the session
   thread knows it); `GET|POST models`, `DELETE models/<repo...>`; 409 helps: name taken,

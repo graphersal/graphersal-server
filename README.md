@@ -83,7 +83,7 @@ With a server running on `DIR` the command goes to its admin API (address from
 | Path | What |
 |---|---|
 | `GET /healthz`, `GET /readyz` | liveness `200`; readiness `200` or `503` while starting or stopping |
-| `GET /api/info` | the server's identity (`product: "graphersal-server"`), its UI profile `uiProfile`, `uploadBytes`, the MCP endpoint |
+| `GET /api/info` | the server's identity (`server: "graphersal-server"`), its UI profile `uiProfile`, `uploadBytes`, the MCP endpoint |
 | `GET /` | the server's web UI (the playground showing the `server` UI profile) |
 | `GET /server-ui/<file>` | the `server` UI profile's files (its modules and style sheet) |
 | `/db/<name>/...` | the playground and its HTTP API (`POST /db/<name>/api/execute {"script"}`, ...) on the database or alias `<name>`, resolved per request; `409` with help when it is not loaded (never loaded implicitly), `404` when unknown |
@@ -100,15 +100,17 @@ unload, clone, promote, delete, read-only and auto-load, create, aliases), `back
 (back up, list, restore), `import-tab.js` (upload with progress, or a path on the server),
 `export-tab.js` (`.gsnap` download) and `models-tab.js` (the shared models), the pure model
 `admin-api.js` and `databases.js`, the tabs' shared state `shared.js` and the style sheet
-`server-ui.css` (on the playground's theme tokens). Every module imports only `vue` and the
+`server-ui.css` (on the playground's theme tokens; the profile names it in `styles`, so the
+playground links it itself and `/` serves the playground's `index.html` unchanged). Every module imports only `vue` and the
 profile's own files and calls the admin API itself, sending the host's request headers
 (`window.GRAPHERSAL_ENGINE.headers`) when a page sets them. The root has no graph: the profile
-has no workspace tab, so the page only reads `GET /api/info` and the admin API. Each loaded
+has no workspace tab, so the page only reads `GET /api/info` and the admin API (the modules get
+the root info, e.g. `uploadBytes`, from the playground as `api.info.host`). Each loaded
 database keeps the ordinary playground under `/db/<name>/`; its `/api/info` carries `home: "/"`
 (the link back to the server's UI) and `database`.
 
-The root `GET /api/info` answers `"server": "graphersal-dev"` (the identity the playground
-requires before it takes a server's `uiProfile`) and names the product in `product`.
+The root `GET /api/info` answers `"server": "graphersal-server"` with `uiProfile`; the
+playground takes such an answer (a named host delivering a UI profile) as its engine's.
 
 Tests of the UI's modules (Node only, no browser):
 
@@ -116,8 +118,9 @@ Tests of the UI's modules (Node only, no browser):
 node --test crates/graphersal-server/ui/tests/*.test.mjs
 ```
 
-`profile.test.mjs` also checks the profile with the engine playground's own `validateProfile`
-from `GRAPHERSAL_PLAYGROUND` (a playground directory), else `../graphersal/playground`.
+`profile.test.mjs` also checks the profile with the engine playground's own `validateProfile`,
+and that its `isEngineInfo` accepts the root info, from `GRAPHERSAL_PLAYGROUND` (a playground
+directory), else `../graphersal/playground`.
 
 ## Server directory
 
