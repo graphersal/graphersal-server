@@ -6,7 +6,7 @@ use std::path::Path;
 
 use serde_json::Value;
 
-use super::DbCommand;
+use super::{DbCommand, Outcome};
 use crate::config::DEFAULT_LISTEN;
 use crate::database::DatabaseKind;
 use crate::error::ServerError;
@@ -14,7 +14,7 @@ use crate::layout::InitReport;
 use crate::text::{self, Note, Section, table};
 
 /// The binary's name in the commands the text shows.
-const BIN: &str = "graphersal-server";
+pub(crate) const BIN: &str = "graphersal-server";
 
 /// `path` as one shell word: as it is when it needs no quoting, else in single quotes.
 pub(crate) fn shell_word(path: &Path) -> String {
@@ -40,6 +40,13 @@ fn below(dir: &Path, rel: &str) -> String {
     path.display().to_string()
 }
 
+/// The URL of database `name` on the server at `server` (`http://HOST:PORT/`): its mount
+/// `/db/<name>/` (the entry's real name; `fallback`, the name asked for, when it has none).
+fn database_url(server: &str, name: &str, fallback: &str) -> String {
+    let name = if name.is_empty() { fallback } else { name };
+    format!("{}/db/{name}/", server.trim_end_matches('/'))
+}
+
 /// Whether the answer of `command` reports a failure although the request succeeded (a load
 /// that ended `failed` or `needs-model`).
 pub fn failed(command: &DbCommand, answer: &Value) -> bool {
@@ -47,9 +54,20 @@ pub fn failed(command: &DbCommand, answer: &Value) -> bool {
         && matches!(answer["state"].as_str(), Some("failed" | "needs-model"))
 }
 
+/// The human text of `outcome` of `command` on the server directory `dir`: [`render`], and a
+/// database loaded through a running server shows its URL (`<server>/db/<name>/`).
+pub fn render_outcome(command: &DbCommand, outcome: &Outcome, dir: &Path) -> String {
+    render_with(command, &outcome.body, dir, outcome.server_url.as_deref())
+}
+
 /// The human text of the answer of `command` on the server directory `dir` (the commands it
 /// shows name `--dir` with it).
 pub fn render(command: &DbCommand, answer: &Value, dir: &Path) -> String {
+    render_with(command, answer, dir, None)
+}
+
+/// [`render`] with the URL of the server the command went through, if any.
+fn render_with(command: &DbCommand, answer: &Value, dir: &Path, server: Option<&str>) -> String {
     let s = |key: &str| answer[key].as_str().unwrap_or_default().to_string();
     let on_off = |on: bool| if on { "on" } else { "off" };
     let dir_arg = shell_word(dir);
@@ -76,10 +94,18 @@ pub fn render(command: &DbCommand, answer: &Value, dir: &Path) -> String {
         )
         .text(),
         DbCommand::Load { name, .. } => match answer["state"].as_str() {
-            Some("loaded") if s("load") == "already-loaded" => {
-                Note::new(format!("Database '{name}' is loaded already")).text()
+            Some("loaded") => {
+                let headline = if s("load") == "already-loaded" {
+                    format!("Database '{name}' is loaded already")
+                } else {
+                    format!("Database '{name}' is loaded")
+                };
+                let mut note = Note::new(headline);
+                if let Some(server) = server {
+                    note = note.detail("served at", database_url(server, &s("name"), name));
+                }
+                note.text()
             }
-            Some("loaded") => Note::new(format!("Database '{name}' is loaded")).text(),
             Some("loading") => Note::new(format!("Database '{name}' is loading"))
                 .command("see its state", format!("{BIN} db list --dir {dir_arg}"))
                 .text(),
@@ -678,6 +704,21 @@ pub fn error_text(err: &ServerError) -> String {
             help: Some(help), ..
         } => format!("Error: {err}\nHelp: {help}"),
         _ => format!("Error: {err}"),
+    }
+}
+
+/// The text of a failed command on the server directory `dir` ([`error_text`]): a help naming
+/// admin API routes shows the console commands doing the same instead (`db list --dir DIR`
+/// for `GET /api/admin/databases`; the mapping is in `console/help.rs`).
+pub fn command_error_text(err: &ServerError, dir: &Path) -> String {
+    match err {
+        ServerError::Remote {
+            help: Some(help), ..
+        } => format!(
+            "Error: {err}\nHelp: {}",
+            super::help::console_help(help, &shell_word(dir))
+        ),
+        _ => error_text(err),
     }
 }
 

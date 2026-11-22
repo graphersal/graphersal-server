@@ -129,7 +129,12 @@ from published files). When this file disagrees with the code, the code wins: sa
   locked = `client` to `RunInfo.address` (503 retried 10 s; `load` polls until not loading);
   refusals = `ServerError::Remote {status, message, help}`; the text in `console/render.rs`
   (`render(command, answer, dir)`, `init_text`, `error_text` (`Error:` + `Help:`),
-  `usage_error_text` (`Error:` + `# show the usage` + `graphersal-server --help`)) and
+  `usage_error_text` (`Error:` + `# show the usage` + `graphersal-server --help`),
+  `command_error_text` (`error_text` with the help's admin routes mapped to console commands by
+  `console/help.rs` `console_help`; the HTTP API keeps its texts), `render_outcome` (a load
+  through a server shows `served at: <server.run url>db/<name>/`, from `Outcome::server_url`);
+  `console::source_path` = the import source absolute and lexically normalised (kept as given
+  when a `..` after a symlink would name another file)) and
   `console/start.rs` (the `serve` start block: banner (+ the network warning), sections
   Server / Databases / Problems / Embedding models / MCP; `address_line` = the one stdout line;
   stop lines)), `text` (crate-private: the graphersal CLI's layout, copied from its
@@ -278,4 +283,5 @@ WD_TIMEOUT=600 ../graphersal/ai/bench/watchdog.sh scripts/smoke.sh   # end to en
 - Do not change or delete an existing test without listing it (file, name, reason) in the
   task report.
 - No access control in this version: default listen `127.0.0.1:8484`, a warning for any
-  non-loopback address, `graphersal_serve::HostCheck` on every request but the probes.
+  non-loopback address (once, in the console's start block; `serve::start` itself only logs a
+  debug line), `graphersal_serve::HostCheck` on every request but the probes.

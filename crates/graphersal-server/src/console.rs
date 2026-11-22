@@ -13,8 +13,9 @@
 //! in the graphersal CLI's layout (the crate-private `text` module); the `serve` start block
 //! is [`start_block`].
 //!
-//! `import` sends the source's absolute path (`POST /api/admin/import {"path", ...}`): a
-//! running server reads the file itself, on this machine; no upload.
+//! `import` sends the source's absolute path (`POST /api/admin/import {"path", ...}`, made by
+//! [`source_path`]: no `.`/`..` segments): a running server reads the file itself, on this
+//! machine; no upload.
 //!
 //! `models add` sends an absolute path too (`POST /api/admin/models {"path"}`).
 //!
@@ -37,10 +38,13 @@ use crate::layout::ServerDir;
 use crate::ops::{Admin, CreateSpec, ExportSpec};
 use crate::run_file::RunInfo;
 
+mod help;
 mod render;
 mod start;
 
-pub use render::{error_text, failed, init_text, render, usage_error_text};
+pub use render::{
+    command_error_text, error_text, failed, init_text, render, render_outcome, usage_error_text,
+};
 pub use start::{address_line, start_block, stopped_text, stopping_text};
 
 /// How long the console waits for a load to end (`db load` without `--no-wait`).
@@ -327,6 +331,9 @@ pub struct Outcome {
     pub body: Value,
     /// Where it ran.
     pub via: Via,
+    /// The URL of the server it went through (`server.run`'s, e.g. `http://127.0.0.1:8484/`),
+    /// `None` on the directory itself.
+    pub server_url: Option<String>,
 }
 
 /// Runs `command` on the server directory `dir` (module docs).
@@ -340,12 +347,14 @@ pub fn run(dir: &ServerDir, command: &DbCommand) -> Result<Outcome, ServerError>
         Ok((admin, _lock)) if matches!(command, DbCommand::Export { .. }) => Ok(Outcome {
             body: export_offline(&admin, command)?,
             via: Via::Directory,
+            server_url: None,
         }),
         Err(ServerError::Locked { .. }) if matches!(command, DbCommand::Export { .. }) => {
-            let address = server_address(dir)?;
+            let server = server_info(dir)?;
             Ok(Outcome {
-                body: export_remote(address, &path, command)?,
-                via: Via::Server(address),
+                body: export_remote(server.address, &path, command)?,
+                via: Via::Server(server.address),
+                server_url: Some(server.url),
             })
         }
         Ok((admin, _lock)) => {
@@ -353,10 +362,12 @@ pub fn run(dir: &ServerDir, command: &DbCommand) -> Result<Outcome, ServerError>
             Ok(Outcome {
                 body,
                 via: Via::Directory,
+                server_url: None,
             })
         }
         Err(ServerError::Locked { .. }) => {
-            let address = server_address(dir)?;
+            let server = server_info(dir)?;
+            let address = server.address;
             let mut answer = remote(address, &method, &path, body.as_ref())?;
             if let DbCommand::Load { name, wait: true } = command {
                 answer = wait_for_load(address, name, answer)?;
@@ -364,6 +375,7 @@ pub fn run(dir: &ServerDir, command: &DbCommand) -> Result<Outcome, ServerError>
             Ok(Outcome {
                 body: answer,
                 via: Via::Server(address),
+                server_url: Some(server.url),
             })
         }
         Err(err) => Err(err),
@@ -492,13 +504,13 @@ fn part_path(path: &Path) -> PathBuf {
     path.with_file_name(name)
 }
 
-/// The address of the server holding `dir`, from its run file (waits a moment for a starting
+/// The run file of the server holding `dir` (address, URL) (waits a moment for a starting
 /// server).
-fn server_address(dir: &ServerDir) -> Result<SocketAddr, ServerError> {
+fn server_info(dir: &ServerDir) -> Result<RunInfo, ServerError> {
     let deadline = Instant::now() + START_WAIT;
     loop {
         if let Some(info) = RunInfo::read(dir)? {
-            return Ok(info.address);
+            return Ok(info);
         }
         if Instant::now() >= deadline {
             return Err(ServerError::Connect {
@@ -557,4 +569,118 @@ fn answer_of(status: u16, json: Value) -> Result<Value, ServerError> {
         message: text("error").unwrap_or_else(|| format!("the server answered {status}")),
         help: text("help"),
     })
+}
+
+/// The absolute path of the import source `source` as given on the command line, without `.`
+/// and `..` segments (lexically, like `std::path::absolute` does on Windows; symlinks are not
+/// resolved). When `..` follows a symlink the lexical path could name another file than the
+/// operating system would: then (both exist but differ once resolved) the plain absolute path
+/// is kept.
+///
+/// `Err`: the current directory cannot be read.
+pub fn source_path(source: &Path) -> std::io::Result<PathBuf> {
+    let absolute = std::path::absolute(source)?;
+    let clean = normalize_lexically(&absolute);
+    if clean == absolute {
+        return Ok(absolute);
+    }
+    match (
+        std::fs::canonicalize(&absolute),
+        std::fs::canonicalize(&clean),
+    ) {
+        (Ok(real), Ok(real_clean)) if real != real_clean => Ok(absolute),
+        (Ok(_), Err(_)) => Ok(absolute),
+        _ => Ok(clean),
+    }
+}
+
+/// `path` without `.` segments and with each `..` folded into the segment before it (a `..`
+/// right below the root is dropped, as the operating system does); one component at a time
+/// (Windows).
+fn normalize_lexically(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    let mut normals = 0usize;
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir if normals > 0 => {
+                out.pop();
+                normals -= 1;
+            }
+            Component::ParentDir if out.has_root() => {}
+            Component::ParentDir => out.push(".."),
+            Component::Normal(part) => {
+                out.push(part);
+                normals += 1;
+            }
+            Component::Prefix(_) | Component::RootDir => out.push(component.as_os_str()),
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_lexically_drops_dot_segments() {
+        let root = std::path::absolute("/").unwrap();
+        let p = |parts: &[&str]| {
+            let mut path = root.clone();
+            for part in parts {
+                path.push(part);
+            }
+            path
+        };
+        assert_eq!(normalize_lexically(&p(&["a", ".", "b"])), p(&["a", "b"]));
+        assert_eq!(
+            normalize_lexically(&p(&["a", "b", "..", "c"])),
+            p(&["a", "c"])
+        );
+        assert_eq!(normalize_lexically(&p(&["a", "..", "..", "c"])), p(&["c"]));
+        assert_eq!(normalize_lexically(&p(&["..", "x.json"])), p(&["x.json"]));
+        assert_eq!(normalize_lexically(&p(&["a", "b"])), p(&["a", "b"]));
+        assert_eq!(
+            normalize_lexically(Path::new("../a/./b")),
+            PathBuf::from("../a/b")
+        );
+    }
+
+    #[test]
+    fn source_path_is_absolute_and_clean() {
+        let base = std::env::temp_dir().join(format!("gs-source-path-{}", std::process::id()));
+        let sub = base.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        let file = base.join("tiny.json");
+        std::fs::write(&file, b"{}").unwrap();
+        let given = sub.join("..").join(".").join("tiny.json");
+        let clean = source_path(&given).unwrap();
+        assert_eq!(clean, std::path::absolute(&file).unwrap());
+        // A source that does not exist is normalised too (the import names the error).
+        let missing = source_path(&sub.join("..").join("nope.json")).unwrap();
+        assert_eq!(
+            missing,
+            std::path::absolute(base.join("nope.json")).unwrap()
+        );
+        #[cfg(unix)]
+        {
+            // `link/..` is the link target's parent for the OS: the lexical path would name
+            // another file, so the plain absolute path is kept.
+            let other = base.join("other");
+            let deep = other.join("deep");
+            std::fs::create_dir_all(&deep).unwrap();
+            std::fs::write(other.join("tiny.json"), b"[]").unwrap();
+            let link = sub.join("link");
+            let _ = std::fs::remove_file(&link);
+            std::os::unix::fs::symlink(&deep, &link).unwrap();
+            let through = link.join("..").join("tiny.json");
+            assert_eq!(source_path(&through).unwrap(), through);
+            // Also when the lexical path exists: it is another file.
+            std::fs::write(sub.join("tiny.json"), b"[1]").unwrap();
+            assert_eq!(source_path(&through).unwrap(), through);
+        }
+        let _ = std::fs::remove_dir_all(&base);
+    }
 }

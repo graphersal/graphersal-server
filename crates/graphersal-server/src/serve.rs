@@ -31,7 +31,8 @@
 //! shut down, `server.run` is removed and the lock released.
 //!
 //! Safety: the server has no access control. The default listen address is the loopback; any
-//! other address logs a warning. The `Host`/`Origin` checks of `graphersal_serve` (DNS
+//! other address gets a warning in `serve`'s start block (the console; [`Running::exposure`]
+//! tells a library caller). The `Host`/`Origin` checks of `graphersal_serve` (DNS
 //! rebinding, cross-site pages) run on every request but the probes.
 
 use std::convert::Infallible;
@@ -239,19 +240,18 @@ pub fn start(
     {
         tracing::warn!(target: "graphersal_server", "models: cannot start the adoption: {err}");
     }
-    if exposure == Exposure::Network {
-        tracing::warn!(
-            target: "graphersal_server",
-            "graphersal-server listens on {address} and is reachable from the network: it has \
-             NO access control, anyone who reaches this port can read and change every \
-             database; listen on 127.0.0.1 for this machine only"
-        );
-    }
-    tracing::info!(
+    // The console prints the start block (and, on a network bind, the warning) right after
+    // this returns, so a library caller only gets a debug line here: the warning must appear
+    // exactly once.
+    tracing::debug!(
         target: "graphersal_server",
-        "serving {} on {}",
+        "serving {} on {} ({})",
         running.dir.root().display(),
-        running.url
+        running.url,
+        match exposure {
+            Exposure::Loopback => "loopback",
+            Exposure::Network => "reachable from the network, no access control",
+        }
     );
     Ok(running)
 }

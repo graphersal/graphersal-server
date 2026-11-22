@@ -205,6 +205,8 @@ done
 [ "$(cat "$WORK/server.out")" = "Graphersal server: $URL/" ] ||
   fail "serve's stdout is not the address line: $(cat "$WORK/server.out")"
 grep -q "^── Databases (0) ─" "$LOG" || fail "no start block on stderr: $(head -c 600 "$LOG")"
+# No log line repeats the start block's address before it.
+if grep -q " on $URL/" "$LOG"; then fail "a log line repeats the start block: $(head -c 600 "$LOG")"; fi
 if grep -q "$(printf '\033')" "$LOG"; then fail "ANSI codes in the log"; fi
 req GET /api/info
 expect_status 200
@@ -284,6 +286,17 @@ STEP="console through the running server"
   fail "db list: $(cat "$WORK/list.err")"
 [ "$(jget databases.0.name "$WORK/list.json")" = acme ] || fail "db list: $(head -c 300 "$WORK/list.json")"
 grep -q "admin API" "$WORK/list.err" || fail "db list did not note the server: $(cat "$WORK/list.err")"
+# A load through the server shows where the database is served.
+"$BIN" db load acme --dir "$DIR" >"$WORK/load.out" 2>"$WORK/load.err" ||
+  fail "db load: $(cat "$WORK/load.err")"
+grep -q "^  served at: $URL/db/acme/\$" "$WORK/load.out" ||
+  fail "db load does not show the database's URL: $(cat "$WORK/load.out")"
+# A refusal's help names the console command, not the admin route.
+"$BIN" db delete acme --dir "$DIR" >"$WORK/delete.out" 2>"$WORK/delete.err" &&
+  fail "db delete of a loaded database succeeded"
+grep -q "^Help: unload it first: graphersal-server db unload acme --dir " "$WORK/delete.err" ||
+  fail "the help is not the console command: $(cat "$WORK/delete.err")"
+if grep -q "/api/admin" "$WORK/delete.err"; then fail "the console help names a route"; fi
 ok
 
 STEP="alias flip"

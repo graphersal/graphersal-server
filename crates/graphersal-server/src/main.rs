@@ -334,7 +334,7 @@ fn print_outcome(dir: &ServerDir, command: &DbCommand, json: bool) -> ExitCode {
             if json {
                 out(&serde_json::to_string_pretty(&outcome.body).unwrap_or_default());
             } else {
-                out(&console::render(command, &outcome.body, dir.root()));
+                out(&console::render_outcome(command, &outcome, dir.root()));
             }
             if console::failed(command, &outcome.body) {
                 ExitCode::from(EXIT_FAILED)
@@ -342,7 +342,10 @@ fn print_outcome(dir: &ServerDir, command: &DbCommand, json: bool) -> ExitCode {
                 exit(0)
             }
         }
-        Err(error) => failure(&error),
+        Err(error) => {
+            err(&console::command_error_text(&error, dir.root()));
+            ExitCode::from(EXIT_FAILED)
+        }
     }
 }
 
@@ -387,7 +390,7 @@ fn import_command(args: &[String]) -> ExitCode {
     let Some(name) = value("--name") else {
         return usage_error("import needs --name NAME (the new database's name)");
     };
-    let source = match std::path::absolute(source) {
+    let source = match console::source_path(std::path::Path::new(source)) {
         Ok(source) => source,
         Err(err) => return failure_text(&format!("cannot resolve {source}: {err}")),
     };
