@@ -12,7 +12,7 @@ database gets the Graphersal playground and its HTTP API under `/db/<name>/`; on
 an HTTP API, a console (`graphersal-server db ...`) and the server's own web UI at `/`.
 
 > **No access control.** Anyone who reaches the port can read, change and delete every
-> database. The server listens on the loopback (`127.0.0.1:8484`) by default and logs a warning
+> database. The server listens on the loopback (`127.0.0.1:8484`) by default and prints a warning
 > when told to listen on any other address. Keep it on the loopback. Every request but the
 > health probes is checked by `Host` and `Origin` (against DNS rebinding and cross-site pages);
 > that is not authentication. The optional MCP token (`docs/mcp.md`) guards only the MCP
@@ -63,7 +63,8 @@ With a server running on `DIR` the command goes to its admin API (address from
 `DIR/server.run`, noted on stderr); otherwise it works on the directory itself (then `load` and
 `unload` are refused: nothing would serve the database). Both paths call the same admin core.
 The text output follows the graphersal CLI's layout: a result is a headline with its details in
-one column and every command on its own line under a `# comment`; listings (`db list`, `db
+one column and every command on its own line under a `# comment` (an import's `source:` is the
+absolute path without `.`/`..` segments); listings (`db list`, `db
 backups`, `models list`) are sections of aligned columns, with a Problems section for failed
 databases and missing models. Paths and commands are never wrapped.
 
@@ -73,7 +74,7 @@ databases and missing models. Paths and commands are never wrapped.
 | `db create NAME [--base BASE] [--kind plain\|layer] [--role normal\|base] [--schema FILE.json] [--description TEXT] [--auto-load] [--read-only]` | a new empty database; `--base` makes a layer over a `role = base` database |
 | `db delete NAME` | an unloaded database, moved to `DIR/trash/` |
 | `db clone SOURCE NAME` | a fork of SOURCE's latest state (it may be loaded) |
-| `db load NAME [--no-wait]`, `db unload NAME` | running server only |
+| `db load NAME [--no-wait]`, `db unload NAME` | running server only; a loaded database's note shows its URL (`served at: http://.../db/NAME/`) |
 | `db promote NAME` | an unloaded plain database becomes a base (read-only, frozen for good) |
 | `db read-only NAME on\|off`, `db auto-load NAME on\|off` | flags, persisted; read-only applies at once |
 | `db alias set ALIAS DATABASE`, `db alias remove ALIAS` | aliases (a flip takes effect at once) |
@@ -84,7 +85,8 @@ databases and missing models. Paths and commands are never wrapped.
 | `models list`, `models add SOURCE [--repo R] [--license L]`, `models remove REPO` | the shared embedding models |
 
 `graphersal-server --help` has the details. Exit codes: `0` ok, `1` failed (`Error: ...` and a
-`Help: ...` line on stderr), `2` invalid invocation (`Error: ...` and the command that shows
+`Help: ...` line on stderr; where the admin API's help names a route, the console names the
+console command instead: `graphersal-server db list --dir DIR lists ...`), `2` invalid invocation (`Error: ...` and the command that shows
 the usage), `141` stdout closed before the result was written (`| head`).
 
 ## HTTP

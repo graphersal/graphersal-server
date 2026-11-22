@@ -258,7 +258,7 @@ pub fn default_config_text() -> String {
          \n\
          # The address the server listens on: IP:PORT (or localhost:PORT); port 0 picks a free\n\
          # port. The server has NO access control: keep it on a loopback address (127.0.0.1,\n\
-         # [::1]); any other address is reachable from the network and logs a warning.\n\
+         # [::1]); any other address is reachable from the network (serve warns about it).\n\
          # `graphersal-server serve --listen ADDR` overrides it.\n\
          listen = \"{DEFAULT_LISTEN}\"\n\
          \n\

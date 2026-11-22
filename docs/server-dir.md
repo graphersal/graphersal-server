@@ -53,7 +53,7 @@ upload_bytes = 4294967296   # the largest import upload (POST /api/admin/import)
 
 | Key | Default | Read | Meaning |
 |---|---|---|---|
-| `listen` (top level) | `127.0.0.1:8484` | at start | the listen address; `serve --listen ADDR` overrides it. Any address that is not a loopback address logs a warning: there is no access control |
+| `listen` (top level) | `127.0.0.1:8484` | at start | the listen address; `serve --listen ADDR` overrides it. Any address that is not a loopback address gets a warning in the `serve` start block: there is no access control |
 | `[mcp] enabled` | `true` | at start | serve the MCP endpoints (`docs/mcp.md`) |
 | `[mcp] token` | none | at start | the bearer token of every MCP request (the admin API and the database pages take no token) |
 | `[mcp] max_sessions` | `256` | at start | MCP sessions remembered (at least 1) |

@@ -255,6 +255,8 @@ fn serve_answers_refuses_a_second_server_and_stops_cleanly() {
         !stderr.contains('\u{1b}'),
         "ANSI codes in a piped log: {stderr}"
     );
+    // The start block says where it serves; no log line repeats it before the block.
+    assert!(!stderr.contains(" on http://"), "{stderr}");
     let lines: Vec<&str> = stderr.lines().collect();
     let banner = lines
         .iter()
@@ -318,6 +320,44 @@ fn serve_answers_refuses_a_second_server_and_stops_cleanly() {
         assert!(stderr.contains("\nStopping: "), "{stderr}");
         assert!(stderr.trim_end().ends_with("lock released)."), "{stderr}");
     }
+}
+
+#[test]
+fn a_network_bind_warns_exactly_once_in_the_start_block() {
+    let temp = TempDir::new("network");
+    let dir = ServerDir::init(temp.path()).unwrap().dir;
+    let root = temp.path().to_str().unwrap();
+    let mut server = ServerProcess(
+        Command::new(BIN)
+            .args(["serve", "--dir", root, "--listen", "0.0.0.0:0"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let info = wait_for_run_file(&dir);
+    let (_, stderr) = stop_and_wait(&mut server);
+    assert_eq!(
+        stderr.matches("reachable from").count(),
+        1,
+        "the warning once, no log line repeating it: {stderr}"
+    );
+    let lines: Vec<&str> = stderr.lines().collect();
+    let banner = lines
+        .iter()
+        .rposition(|l| l.starts_with("====="))
+        .unwrap_or_else(|| panic!("no banner: {stderr}"));
+    assert!(
+        lines[banner + 1].starts_with(&format!(
+            "warning: graphersal-server listens on 0.0.0.0:{}",
+            info.address.port()
+        )),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("REACHABLE FROM THE NETWORK"),
+        "the banner and the Server section say so: {stderr}"
+    );
 }
 
 /// Sends SIGTERM (Unix) and checks a clean exit (`0`) within 30 s; elsewhere kills it.
@@ -1115,9 +1155,25 @@ fn db_commands_go_through_a_running_server() {
     // Load waits for the end of the load; the database is served at once.
     let (code, out, err) = db(root, &["load", "acme"]);
     assert_eq!(code, 0, "{err}");
-    assert_eq!(out.trim(), "Database 'acme' is loaded");
+    // The note shows where the database is served now.
+    assert_eq!(
+        out,
+        format!(
+            "Database 'acme' is loaded\n  served at: {}db/acme/\n",
+            info.url
+        )
+    );
     let (status, _) = get(info.address, "/db/acme/api/info");
     assert_eq!(status, 200);
+    let (code, out, err) = db(root, &["load", "acme"]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(
+        out,
+        format!(
+            "Database 'acme' is loaded already\n  served at: {}db/acme/\n",
+            info.url
+        )
+    );
     // Delete of a loaded database: refused with the API's help.
     let (code, _, err) = db(root, &["delete", "acme"]);
     assert_eq!(code, 1);
@@ -1341,6 +1397,25 @@ fn import_offline_and_through_a_server() {
     let (code, _, err) = import(&[&root, graphson_arg, "--name", "gs"]);
     assert_eq!(code, 1);
     assert!(err.contains("taken"), "{err}");
+    // A refusal's help names the console command, not the admin route.
+    let (code, _, err) = db(dir.root(), &["create", "gs"]);
+    assert_eq!(code, 1);
+    assert!(
+        err.contains(&format!(
+            "\nHelp: choose another name: graphersal-server db list --dir {root} lists the \
+             taken names"
+        )),
+        "{err}"
+    );
+    assert!(!err.contains("/api/admin"), "{err}");
+    // The source is shown (and sent) absolute, without `.`/`..` segments.
+    let dotted = dir.root().join("..").join(".").join("modern.json");
+    let (code, out, err) = import(&[&root, dotted.to_str().unwrap(), "--name", "gs-dots"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        out.contains(&format!("\n  source: {graphson_arg}\n")),
+        "{out}"
+    );
     let (code, _, err) = import(&[&root, "missing.json", "--name", "x"]);
     assert_eq!(code, 1);
     assert!(err.contains("does not exist"), "{err}");
