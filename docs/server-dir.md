@@ -122,7 +122,7 @@ needs_model = "org/model"        # set by an import that names a model it does n
 | Key | Default | Meaning |
 |---|---|---|
 | `kind` | `"plain"` | `plain`: an ordinary Store. `layer`: a layer Store over a base database (it stores only its own changes) |
-| `role` | `"normal"` | `base`: a frozen database layers may be built over. It is always served read-only; loaded for reading it is an empty layer over the shared base in memory |
+| `role` | `"normal"` | `base`: a frozen database layers may be built over. It is always served read-only; loaded for reading it is an empty layer over the shared base in memory. Set by `db create --role base` (empty), `import --role base` (with the source's data) or `db promote` (an unloaded plain database); never turned back (a base is frozen forever) |
 | `base` | none | a layer's base database (a `role = "base"` database) |
 | `auto_load` | `false` | loaded in the background at server start |
 | `read_only` | `false` | writes through the database's API and MCP endpoint are refused; a base is always read-only |

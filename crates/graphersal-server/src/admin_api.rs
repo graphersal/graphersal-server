@@ -10,14 +10,15 @@
 //! | POST | `databases/<name>/clone` | `{"name"}` | `201` entry of the clone |
 //! | POST | `databases/<name>/load` | | `202` entry + `"load": "started" \| "already-loading"`, `200` + `"already-loaded"` |
 //! | POST | `databases/<name>/unload` | | `200` entry + `"unloaded": bool` |
+//! | POST | `databases/<name>/promote` | | `200` entry (now `role: base`, read-only; one way) |
 //! | PUT | `databases/<name>/read-only` | `{"readOnly": bool}` | `200` entry |
 //! | PUT | `databases/<name>/auto-load` | `{"autoLoad": bool}` | `200` entry |
 //! | POST | `databases/<name>/backup` | | `201` backup |
 //! | GET | `databases/<name>/backups` | | `200 {"database", "backups": [backup...]}` (also for a deleted database's name) |
 //! | POST | `databases/<name>/restore` | `{"backup", "name"?}` | `201` entry + `"restoredFrom": {"database", "backup"}`, `"replaced"`, `"trash"?` |
 //! | GET | `databases/<name>/export?models=true\|false&materialize=true\|false` | | `200` the `.gsnap` file (download) |
-//! | POST | `import?name=<n>&base=<b>&format=<f>&description=<d>` | the file itself (any content type but JSON) | `201` entry + `"import"` |
-//! | POST | `import` | JSON `{"path", "name", "base"?, "format"?, "description"?}` (a file or directory on the server's machine, absolute) | `201` entry + `"import"` |
+//! | POST | `import?name=<n>&base=<b>&format=<f>&description=<d>&role=<normal\|base>` | the file itself (any content type but JSON) | `201` entry + `"import"` |
+//! | POST | `import` | JSON `{"path", "name", "base"?, "format"?, "description"?, "role"?}` (a file or directory on the server's machine, absolute) | `201` entry + `"import"` |
 //! | GET | `models` | | `200 {"models": [model...], "missing": [{"database", "model"}...]}` (rebuilds `models/models.toml`) |
 //! | POST | `models` | `{"path"?, "repo"?, "license"?}` (`path`: a Model2Vec directory or a `.gsnap`, absolute, on the server's machine; `repo` alone: a model `models/` holds) | `201` (from a path) / `200` `{"added": [model...], "resolved": [database...], "stillMissing": [{"database", "model"}...], "notes": [text...]}` |
 //! | DELETE | `models/<repo or blob hash>` | | `200 {"model", "removed": [blob...], "bytes"}`; `409` while a database uses it |
@@ -44,7 +45,14 @@
 //! `server.toml`'s `[limits] upload_bytes`, default 4 GiB, else `413`), imported, and removed.
 //! `"import"` of the answer: `{"format": "snapshot" | "store" | "graphson" | "graphml",
 //! "layerBase"?, "modelsMissing": [repo...], "skipped": n, "notes": [text...]}`; a database
-//! whose snapshot names a model it does not carry has the state `needs-model`.
+//! whose snapshot names a model it does not carry has the state `needs-model`. `role=base`
+//! makes a base database (read-only, frozen) of a plain source; a layer source is `400`, a
+//! source naming a model it does not carry `409`.
+//!
+//! A promotion (`POST databases/<name>/promote`) turns an UNLOADED plain database into a base
+//! (`role: base`, read-only) for good: a base is frozen forever and no route turns it back.
+//! `409` while it is loaded (help: unload it), for a layer, a base, a `needs-model` or failed
+//! database.
 //!
 //! A model (one blob of `models/blobs/`): `repo`, `identity`, `license` (from the model's own
 //! manifest; `null` for a blob that is not a model archive), `blob` (SHA-256 hex), `bytes`,
@@ -172,6 +180,13 @@ pub(crate) fn route(
                 let help = unload_help(admin, name, &err);
                 (err, help)
             }),
+        (Method::Post, ["databases", name, "promote"]) => admin
+            .promote(name)
+            .map(|entry| Response::json(200, &entry_json(&entry, None)))
+            .map_err(|err| {
+                let help = promote_help(registry, name, &err);
+                (err, help)
+            }),
         (Method::Put, ["databases", name, "read-only"]) => {
             let body: ReadOnlyBody = body_of(request)?;
             admin
@@ -294,8 +309,8 @@ pub(crate) fn route(
             [
                 "databases",
                 _,
-                "clone" | "load" | "unload" | "read-only" | "auto-load" | "backup" | "backups"
-                | "restore" | "export",
+                "clone" | "load" | "unload" | "promote" | "read-only" | "auto-load" | "backup"
+                | "backups" | "restore" | "export",
             ],
         )
         | (_, ["aliases"])
@@ -339,6 +354,7 @@ fn import_path(admin: &Admin, request: &mut Request<'_>) -> Result<Response, Htt
         )));
     }
     let format = parse_format(body.format.as_deref())?;
+    let role = parse_role(body.role.as_deref())?;
     let source = ImportSource::new(path).with_format(format);
     Ok(import_answer(
         admin,
@@ -346,6 +362,7 @@ fn import_path(admin: &Admin, request: &mut Request<'_>) -> Result<Response, Htt
         &body.name,
         body.base.as_deref(),
         body.description.as_deref(),
+        role,
     ))
 }
 
@@ -360,6 +377,7 @@ fn import_upload(admin: &Admin, request: &mut Request<'_>) -> Result<Response, H
     let mut base = None;
     let mut format = None;
     let mut description = None;
+    let mut role = None;
     for pair in query.split('&').filter(|p| !p.is_empty()) {
         let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
         let value = query_decode(value)
@@ -369,9 +387,10 @@ fn import_upload(admin: &Admin, request: &mut Request<'_>) -> Result<Response, H
             "base" => &mut base,
             "format" => &mut format,
             "description" => &mut description,
+            "role" => &mut role,
             other => {
                 return Err(HttpError::bad_request(format!(
-                    "import: unknown parameter {other:?} (name, base, format, description)"
+                    "import: unknown parameter {other:?} (name, base, format, description, role)"
                 )));
             }
         };
@@ -386,6 +405,7 @@ fn import_upload(admin: &Admin, request: &mut Request<'_>) -> Result<Response, H
         ));
     };
     let format = parse_format(format.as_deref())?;
+    let role = parse_role(role.as_deref())?;
     // The quick refusals before the body is read (the listener drains it).
     let key = fold(&name);
     if let Err(err) = crate::names::validate_name(&key) {
@@ -448,6 +468,7 @@ fn import_upload(admin: &Admin, request: &mut Request<'_>) -> Result<Response, H
         &name,
         base.as_deref(),
         description.as_deref(),
+        role,
     );
     // The upload is removed now (the import copied what it needs).
     drop(upload);
@@ -466,6 +487,16 @@ fn parse_format(hint: Option<&str>) -> Result<Option<ImportFormat>, HttpError> {
     }
 }
 
+/// The role of an import (`400` for an unknown one; default `normal`).
+fn parse_role(role: Option<&str>) -> Result<DatabaseRole, HttpError> {
+    match role.filter(|r| !r.is_empty()) {
+        None => Ok(DatabaseRole::Normal),
+        Some(role) => DatabaseRole::parse(role).ok_or_else(|| {
+            HttpError::bad_request(format!("import: unknown role {role:?} (normal, base)"))
+        }),
+    }
+}
+
 /// The answer of an import: `201` entry + `"import"`, or the error.
 fn import_answer(
     admin: &Admin,
@@ -473,8 +504,9 @@ fn import_answer(
     name: &str,
     base: Option<&str>,
     description: Option<&str>,
+    role: DatabaseRole,
 ) -> Response {
-    match admin.import(source, name, base, description) {
+    match admin.import_as(source, name, base, description, role) {
         Ok(imported) => {
             let mut entry = entry_json(&imported.entry, None);
             let mut details = json!({
@@ -491,6 +523,12 @@ fn import_answer(
         }
         Err(err) => {
             let help = match &err {
+                ServerError::Refused { .. } if role == DatabaseRole::Base => Some(
+                    "import it as an ordinary database (without role=base), add its model \
+                     (POST /api/admin/models), then promote it: POST \
+                     /api/admin/databases/<name>/promote"
+                        .to_string(),
+                ),
                 ServerError::Refused { .. } => Some(
                     "a layer is imported over a base database with its base identity: import \
                      or restore that base first (role = base), or name it with base=<name>"
@@ -541,6 +579,8 @@ struct ImportBody {
     format: Option<String>,
     #[serde(default)]
     description: Option<String>,
+    #[serde(default)]
+    role: Option<String>,
 }
 
 /// The JSON body of `request` as `T` (`400` for a body that does not parse or fit).
@@ -749,6 +789,34 @@ fn unload_help(admin: &Admin, name: &str, err: &ServerError) -> Option<String> {
             steps.join(", ")
         )
     })
+}
+
+/// The help of a refused promotion: unload it first, or what a layer can do instead.
+fn promote_help(registry: &Registry, name: &str, err: &ServerError) -> Option<String> {
+    if !matches!(err, ServerError::Refused { .. }) {
+        return None;
+    }
+    let key = fold(name);
+    let entry = registry.get(&key).ok()?;
+    if matches!(entry.state, DbState::Loaded | DbState::Loading) {
+        return Some(format!(
+            "unload it first: POST /api/admin/databases/{key}/unload, then promote it again"
+        ));
+    }
+    let config = entry.config.as_ref()?;
+    if config.kind == DatabaseKind::Layer {
+        return Some(format!(
+            "export it materialized (GET /api/admin/databases/{key}/export?materialize=true) and \
+             import the file as a base (POST /api/admin/import?name=<new>&role=base)"
+        ));
+    }
+    if let DbState::NeedsModel { repo } = &entry.state {
+        return Some(format!(
+            "add the model first: POST /api/admin/models {{\"repo\": \"{repo}\"}} (or a \
+             \"path\")"
+        ));
+    }
+    None
 }
 
 /// The help of a refused read-only change: a base is always read-only.

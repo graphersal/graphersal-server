@@ -30,6 +30,9 @@
 //! - [`Admin::models_index`], [`Admin::model_add`], [`Admin::model_remove`]: the shared
 //!   embedding models in `models/` (`ops_models.rs`, [`crate::models`]); every build (create,
 //!   clone, import, restore) shares its model blobs through `models/` before it is committed.
+//! - [`Admin::promote`]: an UNLOADED plain database becomes a base (`role = "base"`,
+//!   read-only), one way (a base is frozen forever, user decision U11); an import with
+//!   [`DatabaseRole::Base`] ([`Admin::import_as`]) makes a base holding the imported data.
 //! - `load`, `unload`, `set_read_only`, `set_auto_load`, `alias_set`, `alias_remove`: delegated
 //!   to the [`Loader`] and the [`Registry`].
 //!
@@ -415,6 +418,54 @@ impl Admin {
         self.registry.set_read_only(name, read_only)
     }
 
+    /// Promotes the UNLOADED plain database `name` to a base (`role = "base"`, read-only): the
+    /// frozen graph that layers are made over. One way (user decision U11: a base is frozen
+    /// forever; no demotion is offered): from now on nothing writes its Store, so the identity
+    /// a layer binds to ([`graphersal::storage::BaseRef`] of its latest commit) stays stable.
+    ///
+    /// `Err`: [`ServerError::NotFound`]; [`ServerError::DatabaseFailed`] (no configuration);
+    /// [`ServerError::Refused`] while it is loaded, being loaded or unloaded, for a layer, a
+    /// base, a `needs-model` or failed database, or a Store that holds a layer;
+    /// [`ServerError::Store`] (its Store cannot be inspected); [`ServerError::Io`].
+    pub fn promote(&self, name: &str) -> Result<DatabaseEntry, ServerError> {
+        let entry = self.registry.get(name)?;
+        let Some(config) = entry.config.clone() else {
+            return Err(ServerError::DatabaseFailed {
+                name: entry.name.clone(),
+                reason: entry.state.to_string(),
+            });
+        };
+        if let Some(message) = crate::admin::promote_refusal(&config, &entry.state) {
+            return Err(ServerError::Refused {
+                name: entry.name,
+                message,
+            });
+        }
+        let promote = || {
+            // The Store must be a plain one (a hand-edited `database.toml` could say otherwise).
+            let info = Store::inspect(entry.store_dir().as_path()).map_err(|err| {
+                store_error(&entry.name, &format!("cannot inspect its Store: {err}"))
+            })?;
+            if info.layer_base.is_some() {
+                return Err(ServerError::Refused {
+                    name: entry.name.clone(),
+                    message: "its Store is a layer store, not a whole graph".to_string(),
+                });
+            }
+            self.registry.promote_to_base(&entry.name)
+        };
+        let promoted = match &self.loader {
+            Some(loader) => loader.while_idle(&entry.name, promote)?,
+            None => promote()?,
+        };
+        tracing::info!(
+            target: "graphersal_server",
+            "database '{}' promoted to a base (read-only, frozen)",
+            promoted.name
+        );
+        Ok(promoted)
+    }
+
     /// Sets whether the database `name` is loaded at server start ([`Registry::set_auto_load`]).
     pub fn set_auto_load(&self, name: &str, auto_load: bool) -> Result<DatabaseEntry, ServerError> {
         self.registry.set_auto_load(name, auto_load)
@@ -566,3 +617,7 @@ mod transfer_tests;
 #[cfg(test)]
 #[path = "ops_import_tests.rs"]
 mod import_tests;
+
+#[cfg(test)]
+#[path = "ops_promote_tests.rs"]
+mod promote_tests;

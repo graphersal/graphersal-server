@@ -48,14 +48,14 @@ from published files). When this file disagrees with the code, the code wins: sa
   thread knows it); `GET|POST models`, `DELETE models/<repo...>`; 409 helps: name taken,
   read-only base, base of layers (delete), base of loaded layers (unload); `GET /api/admin/databases/<name|alias>`; field names = the playground's
   landing view; the actions: `POST databases` create, `DELETE databases/<name>`, `POST
-  .../<name>/clone|load|unload`, `PUT .../<name>/read-only|auto-load`, `GET aliases`, `PUT|DELETE
+  .../<name>/clone|load|unload|promote`, `PUT .../<name>/read-only|auto-load`, `GET aliases`, `PUT|DELETE
   aliases/<alias>`; JSON bodies `deny_unknown_fields`; core errors -> `{"error","help"?}` via
   `status_of` (400 invalid name/input, 404, 409 rule refusals, 500); the route table is in its
   module docs and `docs/admin-api.md` (the playground panel's contract: keep them in sync);
   `POST .../<name>/backup`, `GET .../<name>/backups`, `POST .../<name>/restore {"backup",
-  "name"?}`, `GET .../<name>/export?models=&materialize=`; `POST import?name=&base=&format=&description=`
+  "name"?}`, `GET .../<name>/export?models=&materialize=`; `POST import?name=&base=&format=&description=&role=`
   with the raw file as the body (streamed by `copy_body_to` into `tmp/upload-*.bin` = `TmpFile`,
-  quick 400/409 refusals before reading) or `POST import {"path", "name", ...}` (JSON, absolute
+  quick 400/409 refusals before reading) or `POST import {"path", "name", "role"?, ...}` (JSON, absolute
   path read server-side; the console's form), both answered by `import_answer` (`201` entry +
   `"import": {format, layerBase?, modelsMissing, skipped, notes}`, 415 for an unknown format);
   the export is NOT answered by
@@ -71,7 +71,11 @@ from published files). When this file disagrees with the code, the code wins: sa
   `clone_database` (loaded: the open Store's `fork` with the context held so an unload waits;
   unloaded: `Store::fork_dir` / `fork_layer_dir`; config copied, `auto_load` off), load/unload
   (offline: refused naming `serve`), read-only (offline: base refuses `false`), auto-load,
-  aliases; backup/backups/restore/export in `ops_transfer.rs` (a child module of `ops`:
+  aliases; `promote` (an UNLOADED plain normal database -> `role = "base"` + `read_only`, one
+  way (U11: a base is frozen forever, no demotion), under `Loader::while_idle`, `Store::inspect`
+  refuses a layer store, `Registry::promote_to_base` / `admin::promote_refusal` hold the rules;
+  a base's Store is never opened for writing afterwards, so its `BaseRef` stays fixed);
+  backup/backups/restore/export in `ops_transfer.rs` (a child module of `ops`:
   backups = `Store::backup_zip` of the open Store (context held) or `Store::backup_zip_dir`,
   built in `tmp/`, renamed to `backups/<name>/<UTC time with ->.zip` + sidecar `<stamp>.toml`
   (kind, role, base, description, layer base identity); restore = `Store::restore_zip` into a
@@ -93,9 +97,12 @@ from published files). When this file disagrees with the code, the code wins: sa
   `matching_base` (shared with restore, refusal names the identity) + `read_layer_snapshot` +
   `create_layer_with`; Store dir / `.gstore` = `Store::convert` then `inspect` for a layer;
   GraphSON/GraphML = `GraphSONImport::load` / `GraphSource::from_graphml_reader` +
-  `Store::create_with`); `#[cfg(test)] FailPoint` injects a failure/crash after
+  `Store::create_with`; `import_as(.., DatabaseRole::Base)` (`import` = role normal) makes a
+  base of a PLAIN source: a layer source -> `InvalidInput` (400) before its base is matched, a
+  source naming a model it does not carry -> `Refused` (409; a base cannot get a model later)); `#[cfg(test)] FailPoint` injects a failure/crash after
   the Store is written (create, restore, import); tests in `ops_tests.rs`,
-  `ops_transfer_tests.rs` and `ops_import_tests.rs` (uploads over a real listener: a 72 MiB
+  `ops_transfer_tests.rs`, `ops_promote_tests.rs` (bases by import and promotion, core + HTTP)
+  and `ops_import_tests.rs` (uploads over a real listener: a 72 MiB
   generated GraphSON body, the 413 paths) (tiny synthetic model in `test_models.rs`, copied from graphersal's
   `model_fixture.rs`), also over a real listener), `console` (`DbCommand` -> one admin API request;
   `run`: offline = the SAME `admin_api::route` over an offline `Admin` with a built `Request`,
@@ -176,9 +183,9 @@ from published files). When this file disagrees with the code, the code wins: sa
   state, then registry. Tests in `loader_tests.rs` (synthetic stores from the `modern` and
   `large` samples; `test_support::skip_on_ci`).
 - `src/main.rs`: the hand-parsed command line (no parser crate, like graphersal's CLI): `init`,
-  `serve`, `db list|create|delete|clone|load|unload|read-only|auto-load|alias|backup|backups|
-  restore|export ... --dir DIR [--json]`, `import DIR SOURCE --name N [--base B] [--format F]
-  [--description D] [--json]`, `models list|add SOURCE [--repo R] [--license L]|remove REPO
+  `serve`, `db list|create|delete|clone|load|unload|promote|read-only|auto-load|alias|backup|
+  backups|restore|export ... --dir DIR [--json]`, `import DIR SOURCE --name N [--base B] [--format F]
+  [--description D] [--role normal|base] [--json]`, `models list|add SOURCE [--repo R] [--license L]|remove REPO
   --dir DIR [--json]` (`DbCommand::Models*`; SOURCE absolute when it exists, else a repo)
   (`DbCommand::Import`: the JSON path form, SOURCE made absolute;
   offline the same route over the offline admin) (`db export` offline writes the file through
@@ -191,7 +198,7 @@ from published files). When this file disagrees with the code, the code wins: sa
   against `admin_api.rs`), `docs/mcp.md` (endpoints, request headers, flow).
 - `scripts/smoke.sh`: the end-to-end smoke test (bash + curl + python3 only): builds, inits a
   temp server dir, serves on `127.0.0.1:0` (URL from `server.run`), walks create/load/execute/
-  alias/read-only/backup/restore/export/upload import/models/MCP/unload/delete, SIGTERM stop;
+  alias/read-only/backup/restore/export/upload import/promote + layer/models/MCP/unload/delete, SIGTERM stop;
   `ok <step>` / `FAIL <step>: why` lines, exit 1 on failure, the server killed in a trap
   (`SMOKE_BIN` skips the build, `SMOKE_KEEP=1` keeps the temp dir). Extend it with a new
   user-visible feature.

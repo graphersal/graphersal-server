@@ -19,6 +19,13 @@
 //!   database holding the file's graph (the Store gets `server.toml`'s `[defaults]`); data
 //!   GraphSON cannot hold is skipped and listed in the import's notes.
 //!
+//! With [`DatabaseRole::Base`] ([`Admin::import_as`]) a PLAIN source (a full snapshot, a plain
+//! Store, GraphSON, GraphML) becomes a base database (`role = "base"`, read-only, frozen for
+//! good: layers are made over it); a layer source is refused (`InvalidInput`), and so is a
+//! source naming an embedding model it does not carry (`Refused`: a base is never written, so
+//! the model could not be added later; import it as an ordinary database, add the model, then
+//! promote it: [`Admin::promote`]).
+//!
 //! Without a format hint, the kind is detected: a directory holding a Store; a file whose head
 //! reads as a packed snapshot; a single-file Store; then by the extension; then by the first
 //! character that is not white space (`{` / `[` GraphSON, `<` GraphML), which an upload in
@@ -158,6 +165,24 @@ impl Admin {
         base: Option<&str>,
         description: Option<&str>,
     ) -> Result<Imported, ServerError> {
+        self.import_as(source, name, base, description, DatabaseRole::Normal)
+    }
+
+    /// [`Admin::import`] with the new database's role: [`DatabaseRole::Base`] makes a base
+    /// database (read-only, frozen) of a plain source (module docs).
+    ///
+    /// `Err`: as [`Admin::import`]; with [`DatabaseRole::Base`] also
+    /// [`ServerError::InvalidInput`] for a layer source and [`ServerError::Refused`] for a
+    /// source naming an embedding model it does not carry.
+    pub fn import_as(
+        &self,
+        source: &ImportSource,
+        name: &str,
+        base: Option<&str>,
+        description: Option<&str>,
+        role: DatabaseRole,
+    ) -> Result<Imported, ServerError> {
+        let as_base = role == DatabaseRole::Base;
         let path = source.path.as_path();
         if !path.exists() {
             return Err(ServerError::SourceNotFound {
@@ -169,8 +194,10 @@ impl Admin {
         let mut build = self.registry.prepare_tmp(name, config)?;
         let store_dir = build.store_dir();
         let built = match format {
-            ImportFormat::Snapshot => self.import_snapshot(name, path, &store_dir, base)?,
-            ImportFormat::Store => self.import_store(name, path, &store_dir, base)?,
+            ImportFormat::Snapshot => {
+                self.import_snapshot(name, path, &store_dir, base, as_base)?
+            }
+            ImportFormat::Store => self.import_store(name, path, &store_dir, base, as_base)?,
             ImportFormat::GraphSon | ImportFormat::GraphMl => {
                 if let Some(base) = base {
                     return Err(input(
@@ -195,7 +222,19 @@ impl Admin {
             None => {
                 config.kind = DatabaseKind::Plain;
                 config.base = None;
+                if as_base {
+                    config.role = DatabaseRole::Base;
+                    config.read_only = true;
+                }
             }
+        }
+        if as_base && let Some(repo) = built.models_missing.first() {
+            return Err(ServerError::Refused {
+                name: name.to_string(),
+                message: format!(
+                    "the source names the embedding model '{repo}' without carrying it, and a                      base is frozen (no model can be added to it later)"
+                ),
+            });
         }
         config.needs_model = built.models_missing.first().cloned();
         // The model blobs it carries are shared through `models/`. A model it names but does
@@ -239,12 +278,14 @@ impl Admin {
         path: &Path,
         store_dir: &Path,
         base: Option<&str>,
+        as_base: bool,
     ) -> Result<Built, ServerError> {
         let info = read_snapshot_info(BufReader::new(open(path)?))
             .map_err(|err| input(name, format!("not a packed snapshot: {err}")))?;
         let mut built = Built::default();
         match info.layer_base {
             Some(identity) => {
+                refuse_layer_as_base(name, as_base, "a layer snapshot")?;
                 let base_name = self.matching_base(name, &identity, base, "snapshot")?;
                 let layer_base = self.base_of(&base_name)?;
                 let graph = read_layer_snapshot(
@@ -293,6 +334,7 @@ impl Admin {
         path: &Path,
         store_dir: &Path,
         base: Option<&str>,
+        as_base: bool,
     ) -> Result<Built, ServerError> {
         Store::convert(path, store_dir)
             .map_err(|err| store_error(name, &format!("cannot copy the Store: {err}")))?;
@@ -301,6 +343,7 @@ impl Admin {
         let mut built = Built::default();
         match info.layer_base {
             Some(identity) => {
+                refuse_layer_as_base(name, as_base, "a layer Store")?;
                 let base_name = self.matching_base(name, &identity, base, "store")?;
                 built.layer = Some((identity, base_name));
             }
@@ -461,6 +504,21 @@ fn refuse_base(name: &str, base: Option<&str>, what: &str) -> Result<(), ServerE
         )),
         None => Ok(()),
     }
+}
+
+/// A layer source refused as a base (a base is a whole graph).
+fn refuse_layer_as_base(name: &str, as_base: bool, what: &str) -> Result<(), ServerError> {
+    if as_base {
+        return Err(input(
+            name,
+            format!(
+                "role base: the source is {what}, not a whole graph; a base holds a whole \
+                 graph (import a full snapshot, a plain Store, GraphSON or GraphML, or export \
+                 the layer materialized first)"
+            ),
+        ));
+    }
+    Ok(())
 }
 
 /// A snapshot that does not create a Store: a broken file is the input's fault, anything else

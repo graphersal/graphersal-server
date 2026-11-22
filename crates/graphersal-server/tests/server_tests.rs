@@ -1430,3 +1430,89 @@ fn mcp_token_and_off_switch_come_from_server_toml() {
     );
     running.stop().unwrap();
 }
+
+#[test]
+fn bases_with_data_by_import_and_promote_offline_and_through_a_server() {
+    use graphersal::prelude::{Graph, GraphExport, TraversalGraph};
+    let temp = TempDir::new("console-promote");
+    let dir = ServerDir::init(temp.path().join("srv")).unwrap().dir;
+    let root = dir.root().to_str().unwrap().to_string();
+    let graphson = temp.path().join("modern.json");
+    Graph::new(TraversalGraph::tinkerpop_modern())
+        .export_graphson_writer(std::fs::File::create(&graphson).unwrap())
+        .unwrap();
+    let graphson_arg = graphson.to_str().unwrap();
+
+    // Offline: import --role base, import plain + promote, refusals.
+    let (code, out, err) = import(&[&root, graphson_arg, "--name", "prod", "--role", "base"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        out.contains("as database 'prod' (base, read-only)"),
+        "{out}"
+    );
+    let (code, _, err) = import(&[&root, graphson_arg, "--name", "x", "--role", "boss"]);
+    assert_eq!(code, 2, "{err}");
+    let (code, _, err) = import(&[&root, graphson_arg, "--name", "acme"]);
+    assert_eq!(code, 0, "{err}");
+    let (code, out, err) = db(dir.root(), &["promote", "acme"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        out.contains("database 'acme' is a base now") && out.contains("frozen"),
+        "{out}"
+    );
+    let (code, _, err) = db(dir.root(), &["promote", "acme"]);
+    assert_eq!(code, 1);
+    assert!(err.contains("a base already"), "{err}");
+    let (code, _, err) = db(dir.root(), &["create", "l1", "--base", "acme"]);
+    assert_eq!(code, 0, "{err}");
+    let (code, _, err) = db(dir.root(), &["promote", "l1"]);
+    assert_eq!(code, 1);
+    assert!(
+        err.contains("help:") && err.contains("materialize"),
+        "{err}"
+    );
+    assert_eq!(db(dir.root(), &["promote"]).0, 2);
+    let (code, _, err) = import(&[&root, graphson_arg, "--name", "other"]);
+    assert_eq!(code, 0, "{err}");
+
+    // Through a running server: promote refuses a loaded database, then promotes it; a
+    // layer over it sees its data.
+    let mut server = ServerProcess(
+        Command::new(BIN)
+            .args(["serve", "--dir", &root, "--listen", "127.0.0.1:0"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let info = wait_for_run_file(&dir);
+    let (code, _, err) = db(dir.root(), &["load", "other"]);
+    assert_eq!(code, 0, "{err}");
+    let (code, _, err) = db(dir.root(), &["promote", "other"]);
+    assert_eq!(code, 1);
+    assert!(
+        err.contains("unload it first") && err.contains("help:"),
+        "{err}"
+    );
+    let (code, _, err) = db(dir.root(), &["unload", "other"]);
+    assert_eq!(code, 0, "{err}");
+    let (code, out, err) = db(dir.root(), &["promote", "other", "--json"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        err.contains(&format!("sent to its admin API at {}", info.address)),
+        "{err}"
+    );
+    assert_eq!(json(&out)["role"], "base");
+    let (code, _, err) = db(dir.root(), &["create", "l2", "--base", "other"]);
+    assert_eq!(code, 0, "{err}");
+    for layer in ["l1", "l2"] {
+        let (code, _, err) = db(dir.root(), &["load", layer]);
+        assert_eq!(code, 0, "{err}");
+        assert_eq!(execute(info.address, layer, "g.v().count().next()"), 6);
+        execute(info.address, layer, "g.add_v(\"own\").iterate()");
+        assert_eq!(execute(info.address, layer, "g.v().count().next()"), 7);
+    }
+    let (code, _, err) = import(&[&root, graphson_arg, "--name", "srv-base", "--role", "base"]);
+    assert_eq!(code, 0, "{err}");
+    stop_and_wait(&mut server);
+}

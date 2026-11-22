@@ -29,7 +29,7 @@ use std::time::{Duration, Instant};
 use graphersal_serve::{Method, Request};
 use serde_json::{Map, Value, json};
 
-use crate::database::DatabaseKind;
+use crate::database::{DatabaseKind, DatabaseRole};
 use crate::error::ServerError;
 use crate::layout::ServerDir;
 use crate::ops::{Admin, CreateSpec, ExportSpec};
@@ -79,6 +79,11 @@ pub enum DbCommand {
         /// The database.
         name: String,
     },
+    /// `db promote NAME`: the unloaded plain database becomes a base (read-only, for good).
+    Promote {
+        /// The database.
+        name: String,
+    },
     /// `db read-only NAME on|off`.
     ReadOnly {
         /// The database.
@@ -124,9 +129,9 @@ pub enum DbCommand {
         /// The database restored into (default: `name`, which must be unloaded).
         target: Option<String>,
     },
-    /// `import DIR SOURCE --name NAME [--base BASE] [--format F] [--description TEXT]`: the
-    /// file or directory `source` (absolute: a running server reads it on this machine) as
-    /// the new database `name`.
+    /// `import DIR SOURCE --name NAME [--base BASE] [--format F] [--description TEXT] [--role
+    /// normal|base]`: the file or directory `source` (absolute: a running server reads it on
+    /// this machine) as the new database `name`.
     Import {
         /// The file or directory imported (absolute).
         source: PathBuf,
@@ -138,6 +143,8 @@ pub enum DbCommand {
         format: Option<String>,
         /// The new database's description.
         description: Option<String>,
+        /// The new database's role ([`DatabaseRole::Base`]: a base of a plain source).
+        role: DatabaseRole,
     },
     /// `models list`.
     ModelsList,
@@ -197,6 +204,9 @@ impl DbCommand {
             ),
             DbCommand::Load { name, .. } => (Method::Post, format!("databases/{name}/load"), None),
             DbCommand::Unload { name } => (Method::Post, format!("databases/{name}/unload"), None),
+            DbCommand::Promote { name } => {
+                (Method::Post, format!("databases/{name}/promote"), None)
+            }
             DbCommand::ReadOnly { name, on } => (
                 Method::Put,
                 format!("databases/{name}/read-only"),
@@ -237,9 +247,13 @@ impl DbCommand {
                 base,
                 format,
                 description,
+                role,
             } => {
                 let mut body = Map::new();
                 body.insert("path".into(), json!(source.to_string_lossy()));
+                if *role != DatabaseRole::Normal {
+                    body.insert("role".into(), json!(role.as_str()));
+                }
                 body.insert("name".into(), json!(name));
                 if let Some(base) = base {
                     body.insert("base".into(), json!(base));
@@ -578,6 +592,12 @@ pub fn render(command: &DbCommand, answer: &Value) -> String {
                 format!("database '{name}' was not loaded")
             }
         }
+        DbCommand::Promote { .. } => format!(
+            "database '{}' is a base now: read-only and frozen for good (no way back); make \
+             layers over it: graphersal-server db create NAME --base {}",
+            s("name"),
+            s("name")
+        ),
         DbCommand::ReadOnly { name, .. } => format!(
             "read-only is {} for database '{name}'",
             on_off(answer["readOnly"] == Value::Bool(true))
