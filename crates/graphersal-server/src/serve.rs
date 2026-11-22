@@ -6,46 +6,90 @@
 //! `server.run`, scans the database registry ([`Registry::scan`]; `/readyz` answers
 //! `503 loading` until it is done), starts loading the `auto_load` databases in the background
 //! ([`Loader::auto_load`]), shares the model blobs of every idle database through `models/`
-//! on a background thread ([`crate::ops::Admin::adopt_all`]), and serves on a `tiny_http` listener (adapted from the graphersal CLI's dev
-//! server): one accept thread, one thread per request. [`Running::stop`] stops it: the
-//! lifecycle answers `503 stopping`, the accept loop ends, running requests get a moment to
-//! finish, every database is unloaded ([`Loader::shutdown`]: its Store closed cleanly),
-//! `server.run` is removed and the lock released.
+//! on a background thread ([`crate::ops::Admin::adopt_all`]), and serves HTTP/1.1 with
+//! `hyper` server connections on a `tokio` multi-thread runtime that [`Running`] owns.
+//!
+//! The router, the session jobs and every file I/O are blocking: each request is answered on
+//! the runtime's blocking pool (`spawn_blocking`), never on an async worker. The request body
+//! reaches the router as an `std::io::Read` that pulls hyper's body stream one frame at a time
+//! (backpressure: nothing is read before the route reads, and `Expect: 100-continue` is
+//! answered only then); an export download is pumped from its file through a small bounded
+//! channel. Neither is ever held whole in memory.
+//!
+//! A declared body (`Content-Length`) over the limit ([`MAX_DECLARED_BODY_BYTES`], or the
+//! upload limit for an import upload) is answered `413` with the JSON error at once, without
+//! reading the body (a client waiting on `Expect: 100-continue` never gets its `100`), with
+//! `Connection: close`. A body the route did not read to its end closes the connection after
+//! the answer (a short declared rest is drained instead, keeping the connection). A connection
+//! ends with a lingering close: the server shuts its sending side (the client sees the answer,
+//! then EOF) and discards what the client still sends for at most two seconds before the socket
+//! is closed, so the answer is never lost to a reset.
+//!
+//! [`Running::stop`] stops it: the lifecycle answers `503 stopping`, the listening socket is
+//! closed, idle connections are closed and running requests get five seconds to finish,
+//! every database is unloaded ([`Loader::shutdown`]: its Store closed cleanly), the runtime is
+//! shut down, `server.run` is removed and the lock released.
 //!
 //! Safety: the server has no access control. The default listen address is the loopback; any
 //! other address logs a warning. The `Host`/`Origin` checks of `graphersal_serve` (DNS
 //! rebinding, cross-site pages) run on every request but the probes.
 
-use std::io::{self, Read, Write};
+use std::convert::Infallible;
+use std::fs::File;
+use std::future::Future;
+use std::io::{self, ErrorKind, Read};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::thread::JoinHandle;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use graphersal_serve::{Exposure, HostCheck, Method};
+use hyper::body::{Body, Bytes, Frame, Incoming, SizeHint};
+use hyper::header::{CONNECTION, CONTENT_LENGTH, EXPECT, HeaderName, HeaderValue};
+use hyper::server::conn::http1;
+use hyper::service::service_fn;
+use hyper::{HeaderMap, StatusCode};
+use hyper_util::rt::{TokioIo, TokioTimer};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::runtime::{Handle, Runtime};
+use tokio::sync::{mpsc, watch};
+use tokio::task::JoinHandle;
 
 use crate::error::ServerError;
 use crate::layout::ServerDir;
 use crate::loader::Loader;
 use crate::lock::ServerLock;
+use crate::ops::ExportFile;
 use crate::registry::Registry;
 use crate::router::{Answer, Router};
 use crate::run_file::RunInfo;
 
 /// Largest declared body (`Content-Length`) a request may name (as the graphersal CLI's dev
 /// server), except an import upload (`POST /api/admin/import` with a body that is not JSON),
-/// which may declare up to `server.toml`'s `[limits] upload_bytes` (its route reads the whole
-/// body into `tmp/`); an upload declaring more is answered `413` without being read and its
-/// connection abandoned. `tiny_http` 0.12 skips an unread body when the request is dropped by allocating ONE
-/// zeroed buffer of the remaining declared length, so a request declaring, say, 2^62 bytes would
-/// abort the process. Such a request is never dropped: it gets no answer and its connection is
-/// leaked (logged). A smaller declared body that was not read is drained in small reads before
-/// the answer.
+/// which may declare up to `server.toml`'s `[limits] upload_bytes` (its route streams the body
+/// into `tmp/`). A request declaring more is answered `413` without its body being read, and
+/// its connection is closed (module docs).
 pub const MAX_DECLARED_BODY_BYTES: usize = 4 * graphersal_serve::MAX_BODY_BYTES;
 
 /// How long [`Running::stop`] waits for running requests.
 const STOP_GRACE: Duration = Duration::from_secs(5);
+
+/// How long a closing connection discards what its client still sends (module docs).
+const LINGER: Duration = Duration::from_secs(2);
+
+/// The largest unread rest of a declared body that is drained after the answer to keep the
+/// connection; a larger rest closes it.
+const DRAIN_BYTES: u64 = 256 * 1024;
+
+/// How long a route reading the body waits for the client's next bytes before the read fails.
+const BODY_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// The chunk size of a download.
+const DOWNLOAD_CHUNK: usize = 64 * 1024;
+/// How many chunks of a download wait for the client.
+const DOWNLOAD_QUEUE: usize = 8;
 
 /// The options of [`start`].
 ///
@@ -70,21 +114,25 @@ impl ServeOptions {
     }
 }
 
-/// What the listener threads share.
+/// What the connections share.
 struct Shared {
     router: Router,
-    /// Set by [`Running::stop`] before the accept loop is unblocked.
-    stopping: AtomicBool,
-    /// The requests being handled.
+    /// The requests being answered (a download until its last byte is handed over).
     in_flight: AtomicUsize,
+}
+
+/// The listener: its runtime, the accept task and the stop signal.
+struct Listener {
+    runtime: Runtime,
+    accept: JoinHandle<()>,
+    stop: watch::Sender<bool>,
 }
 
 /// A running server; [`Running::stop`] (or dropping it) stops it.
 pub struct Running {
     dir: ServerDir,
     shared: Arc<Shared>,
-    http: Option<Arc<tiny_http::Server>>,
-    accept: Option<JoinHandle<()>>,
+    listener: Option<Listener>,
     lock: Option<ServerLock>,
     registry: Arc<Registry>,
     loader: Arc<Loader>,
@@ -106,17 +154,29 @@ pub fn start(
     };
     // The lock before the bind: a second server is refused for what it is, not for its port.
     let lock = ServerLock::acquire(&dir)?;
-    let http = tiny_http::Server::http(listen).map_err(|err| ServerError::Bind {
+    let bind_error = |message: String| ServerError::Bind {
         address: listen.to_string(),
-        message: err.to_string(),
-    })?;
-    let address = http
-        .server_addr()
-        .to_ip()
-        .ok_or_else(|| ServerError::Bind {
-            address: listen.to_string(),
-            message: "the listener has no IP address".to_string(),
+        message,
+    };
+    let socket = std::net::TcpListener::bind(listen).map_err(|err| bind_error(err.to_string()))?;
+    let address = socket
+        .local_addr()
+        .map_err(|err| bind_error(err.to_string()))?;
+    socket
+        .set_nonblocking(true)
+        .map_err(|err| bind_error(err.to_string()))?;
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .thread_name("graphersal-server-http")
+        .enable_io()
+        .enable_time()
+        .build()
+        .map_err(|err| ServerError::Thread {
+            message: err.to_string(),
         })?;
+    let socket = {
+        let _entered = runtime.enter();
+        tokio::net::TcpListener::from_std(socket).map_err(|err| bind_error(err.to_string()))?
+    };
     let exposure = if address.ip().is_loopback() {
         Exposure::Loopback
     } else {
@@ -127,35 +187,22 @@ pub fn start(
         .with_hint(format!("open this server at {url}"));
     let shared = Arc::new(Shared {
         router: Router::new(host_check.clone()),
-        stopping: AtomicBool::new(false),
         in_flight: AtomicUsize::new(0),
     });
-    let http = Arc::new(http);
     RunInfo::new(address, url.clone()).write(&dir)?;
-    let accept = {
-        let shared = shared.clone();
-        let http = http.clone();
-        std::thread::Builder::new()
-            .name("graphersal-server-accept".to_string())
-            .spawn(move || accept(&http, &shared))
-    };
-    let accept = match accept {
-        Ok(handle) => handle,
-        Err(err) => {
-            let _ = RunInfo::remove(&dir);
-            return Err(ServerError::Thread {
-                message: err.to_string(),
-            });
-        }
-    };
+    let (stop, stop_rx) = watch::channel(false);
+    let accept = runtime.spawn(accept(socket, shared.clone(), stop_rx));
     let mcp = crate::mcp::endpoint(&config.mcp);
     let registry = Registry::empty(&dir);
     let loader = Loader::with_mcp(registry.clone(), host_check.clone(), mcp.clone());
     let mut running = Running {
         dir,
         shared,
-        http: Some(http),
-        accept: Some(accept),
+        listener: Some(Listener {
+            runtime,
+            accept,
+            stop,
+        }),
         lock: Some(lock),
         registry,
         loader,
@@ -248,15 +295,17 @@ impl Running {
     }
 
     fn shutdown(&mut self) -> Result<(), ServerError> {
-        let Some(http) = self.http.take() else {
+        let Some(listener) = self.listener.take() else {
             return Ok(());
         };
         self.shared.router.lifecycle.stop();
-        self.shared.stopping.store(true, Ordering::SeqCst);
-        http.unblock();
-        if let Some(accept) = self.accept.take() {
-            let _ = accept.join();
-        }
+        // The accept task ends (the listening socket is closed with it); every connection
+        // stops taking requests after the one it answers.
+        let _ = listener.stop.send(true);
+        let accept = listener.accept;
+        let _ = listener
+            .runtime
+            .block_on(async { tokio::time::timeout(STOP_GRACE, accept).await });
         let deadline = Instant::now() + STOP_GRACE;
         while self.shared.in_flight.load(Ordering::SeqCst) > 0 && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(10));
@@ -269,8 +318,8 @@ impl Running {
         if let Err(err) = self.loader.shutdown() {
             tracing::warn!(target: "graphersal_server", "stopping: {err}");
         }
-        // Closes the listening socket (the last reference: the accept thread has ended).
-        drop(http);
+        // The connections left (idle ones, lingering closes) end with the runtime.
+        listener.runtime.shutdown_timeout(Duration::from_secs(1));
         let removed = RunInfo::remove(&self.dir);
         // The lock last: the run file is gone before another server may start.
         self.lock.take();
@@ -296,34 +345,94 @@ fn url_of(address: SocketAddr) -> String {
     format!("http://{host}:{}/", address.port())
 }
 
-/// The accept loop: every request on a thread of its own, until [`Running::stop`].
-fn accept(http: &tiny_http::Server, shared: &Arc<Shared>) {
+/// The accept loop: every connection a task of its own, until [`Running::stop`].
+async fn accept(
+    socket: tokio::net::TcpListener,
+    shared: Arc<Shared>,
+    mut stop: watch::Receiver<bool>,
+) {
     loop {
-        let request = match http.recv() {
-            Ok(request) => request,
-            Err(_) if shared.stopping.load(Ordering::SeqCst) => break,
-            Err(err) => {
-                tracing::warn!(target: "graphersal_server", "accepting a request failed: {err}");
-                continue;
-            }
-        };
-        shared.in_flight.fetch_add(1, Ordering::SeqCst);
-        let worker = shared.clone();
-        let spawned = std::thread::Builder::new()
-            .name("graphersal-server-http".to_string())
-            .spawn(move || {
-                let _done = InFlight(worker.clone());
-                handle(&worker, request);
-            });
-        if let Err(err) = spawned {
-            // The closure (and with it the request and its counter guard) is gone.
-            tracing::warn!(target: "graphersal_server", "cannot start a request thread: {err}");
+        tokio::select! {
+            accepted = socket.accept() => match accepted {
+                Ok((stream, _peer)) => {
+                    let _ = stream.set_nodelay(true);
+                    tokio::spawn(connection(stream, shared.clone(), stop.clone()));
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        target: "graphersal_server",
+                        "accepting a connection failed: {err}"
+                    );
+                    // Out of file descriptors, for example: no busy loop.
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            },
+            _ = stop.changed() => break,
         }
     }
 }
 
-/// A request being handled: counted down however its handler ends.
+/// The boxed future of one answer (hyper wants an `Unpin` service future).
+type Answering =
+    Pin<Box<dyn Future<Output = Result<hyper::Response<Outgoing>, Infallible>> + Send>>;
+
+/// Serves one connection until it ends, then closes it with a lingering close.
+async fn connection(
+    stream: tokio::net::TcpStream,
+    shared: Arc<Shared>,
+    mut stop: watch::Receiver<bool>,
+) {
+    let service = service_fn(move |request: hyper::Request<Incoming>| -> Answering {
+        Box::pin(respond(shared.clone(), request))
+    });
+    let mut conn = http1::Builder::new()
+        .timer(TokioTimer::new())
+        .title_case_headers(true)
+        .serve_connection(TokioIo::new(stream), service);
+    let mut stopping = *stop.borrow();
+    let mut shut = false;
+    let result = loop {
+        if stopping && !shut {
+            shut = true;
+            Pin::new(&mut conn).graceful_shutdown();
+        }
+        tokio::select! {
+            result = std::future::poll_fn(|cx| conn.poll_without_shutdown(cx)) => break result,
+            _ = stop.changed(), if !stopping => stopping = true,
+        }
+    };
+    if let Err(err) = result {
+        tracing::debug!(target: "graphersal_server", "a connection ended: {err}");
+    }
+    linger(conn.into_parts().io.into_inner()).await;
+}
+
+/// Shuts the sending side (the client reads the answer, then EOF), then discards what the
+/// client still sends for at most two seconds before the socket is closed.
+async fn linger(mut stream: tokio::net::TcpStream) {
+    if stream.shutdown().await.is_err() {
+        return;
+    }
+    let _ = tokio::time::timeout(LINGER, async {
+        let mut sink = vec![0u8; 16 * 1024];
+        while let Ok(read) = stream.read(&mut sink).await {
+            if read == 0 {
+                break;
+            }
+        }
+    })
+    .await;
+}
+
+/// A request being answered: counted down however its answer ends.
 struct InFlight(Arc<Shared>);
+
+impl InFlight {
+    fn new(shared: &Arc<Shared>) -> Self {
+        shared.in_flight.fetch_add(1, Ordering::SeqCst);
+        Self(shared.clone())
+    }
+}
 
 impl Drop for InFlight {
     fn drop(&mut self) {
@@ -331,156 +440,345 @@ impl Drop for InFlight {
     }
 }
 
-/// Converts one `tiny_http` request, answers it through the router, and writes the answer.
-fn handle(shared: &Shared, mut request: tiny_http::Request) {
-    let declared = request.body_length();
-    let headers: Vec<(String, String)> = request
-        .headers()
-        .iter()
-        .map(|h| (h.field.as_str().to_string(), h.value.as_str().to_string()))
-        .collect();
-    let method = Method::parse(request.method().as_str());
-    let url = request.url().to_string();
+/// What the blocking part of a request produced.
+struct Reply {
+    answer: Answer,
+    /// The connection closes after the answer (the body was not read to its end).
+    close: bool,
+}
+
+/// Answers one request: the router on the blocking pool, then the answer as hyper writes it.
+async fn respond(
+    shared: Arc<Shared>,
+    request: hyper::Request<Incoming>,
+) -> Result<hyper::Response<Outgoing>, Infallible> {
+    let in_flight = InFlight::new(&shared);
+    let handle = Handle::current();
+    let blocking = handle.clone();
+    let reply = tokio::task::spawn_blocking(move || answer(&shared, request, blocking)).await;
+    let reply = match reply {
+        Ok(reply) => reply,
+        Err(err) => {
+            tracing::warn!(target: "graphersal_server", "a request handler failed: {err}");
+            Reply {
+                answer: Answer::Response(graphersal_serve::Response::json(
+                    500,
+                    &serde_json::json!({ "error": "the request handler failed" }),
+                )),
+                close: true,
+            }
+        }
+    };
+    let mut response = match reply.answer {
+        Answer::Response(answer) => {
+            drop(in_flight);
+            let (status, headers, body) = answer.into_parts();
+            build(status, &headers, Outgoing::full(body))
+        }
+        Answer::Download(download) => {
+            let headers = download.headers();
+            let length = download.length();
+            let (file, guard) = download.into_parts();
+            let (tx, rx) = mpsc::channel(DOWNLOAD_QUEUE);
+            handle.spawn_blocking(move || pump(file, guard, &tx, in_flight));
+            build(200, &headers, Outgoing::stream(rx, length))
+        }
+    };
+    if reply.close {
+        response
+            .headers_mut()
+            .insert(CONNECTION, HeaderValue::from_static("close"));
+    }
+    Ok(response)
+}
+
+/// The blocking part of a request: the limits, the router, the unread body.
+fn answer(shared: &Shared, request: hyper::Request<Incoming>, handle: Handle) -> Reply {
+    let (parts, body) = request.into_parts();
+    let headers = header_list(&parts.headers);
+    let declared = parts
+        .headers
+        .get(CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<u64>().ok());
+    let expects_continue = parts
+        .headers
+        .get(EXPECT)
+        .is_some_and(|value| value.as_bytes().eq_ignore_ascii_case(b"100-continue"));
+    let method = Method::parse(parts.method.as_str());
+    let url = parts
+        .uri
+        .path_and_query()
+        .map_or_else(|| parts.uri.to_string(), |p| p.as_str().to_string());
     let content_type = headers
         .iter()
         .find(|(name, _)| name.eq_ignore_ascii_case("Content-Type"))
         .map(|(_, value)| value.as_str());
     let path = url.split_once('?').map_or(url.as_str(), |(path, _)| path);
     let upload = crate::admin_api::is_upload(&method, path, content_type);
-    // An import upload may declare up to the upload limit (its route reads the whole body);
-    // every other request up to MAX_DECLARED_BODY_BYTES.
+    // An import upload may declare up to the upload limit (its route streams the body into a
+    // file); every other request up to MAX_DECLARED_BODY_BYTES.
     let limit = if upload {
-        usize::try_from(shared.router.upload_limit())
-            .unwrap_or(usize::MAX)
-            .max(MAX_DECLARED_BODY_BYTES)
+        shared.router.upload_limit()
     } else {
-        MAX_DECLARED_BODY_BYTES
+        MAX_DECLARED_BODY_BYTES as u64
     };
-    if declared.is_some_and(|len| len > limit) {
-        let len = declared.unwrap_or_default();
-        if upload {
-            refuse_oversize_upload(shared, request, &url, &headers, len);
-        } else {
-            tracing::warn!(
-                target: "graphersal_server",
-                "a request declared a body of {len} bytes; it is ignored (no answer)"
-            );
-            std::mem::forget(request);
-        }
-        return;
+    if let Some(len) = declared.filter(|len| *len > limit) {
+        return Reply {
+            answer: Answer::Response(refuse_oversize(shared, &url, &headers, upload, limit, len)),
+            close: true,
+        };
     }
-    let response = {
-        let mut converted = graphersal_serve::Request::new(method, &url, request.as_reader())
-            .with_body_length(declared);
+    let mut reader = BodyReader::new(body, handle);
+    let answer = {
+        let mut converted = graphersal_serve::Request::new(method, &url, &mut reader)
+            .with_body_length(declared.and_then(|len| usize::try_from(len).ok()));
         for (name, value) in &headers {
             converted = converted.with_header(name, value);
         }
         shared.router.answer(converted)
     };
-    // The unread rest of a declared body, in small reads (see MAX_DECLARED_BODY_BYTES).
-    if let Some(len) = declared {
-        let limit = u64::try_from(len).unwrap_or(u64::MAX);
-        let _ = io::copy(&mut request.as_reader().take(limit), &mut io::sink());
+    // A short unread rest is drained (the connection stays); a client waiting on
+    // `Expect: 100-continue` is not asked for a body nobody reads.
+    if !reader.done && !expects_continue {
+        let rest = declared.map(|len| len.saturating_sub(reader.read));
+        if rest.is_some_and(|rest| rest <= DRAIN_BYTES) {
+            let _ = io::copy(&mut (&mut reader).take(DRAIN_BYTES + 1), &mut io::sink());
+        }
     }
-    match response {
-        Answer::Response(response) => {
-            let _ = request.respond(tiny_answer(response));
-        }
-        Answer::Download(download) => {
-            let headers = download.headers();
-            let length = usize::try_from(download.length()).unwrap_or(usize::MAX);
-            let (file, guard) = download.into_parts();
-            let mut response = tiny_http::Response::new(
-                tiny_http::StatusCode(200),
-                Vec::new(),
-                file,
-                Some(length),
-                None,
-            )
-            // `Content-Length` (a progress bar), never chunked.
-            .with_chunked_threshold(usize::MAX);
-            for (name, value) in &headers {
-                if let Ok(header) = tiny_http::Header::from_bytes(name.as_bytes(), value.as_bytes())
-                {
-                    response = response.with_header(header);
-                }
-            }
-            if let Err(err) = request.respond(response) {
-                tracing::warn!(target: "graphersal_server", "an export download broke off: {err}");
-            }
-            // The file is closed (the response is gone): now the export is removed.
-            drop(guard);
-        }
+    Reply {
+        answer,
+        close: !reader.done,
     }
 }
 
-/// Answers an import upload that declares more than the upload limit with `413` (`403` when
-/// the `Host`/`Origin` checks refuse it) WITHOUT reading its body, then abandons the
-/// connection: `tiny_http` 0.12 would allocate the unread declared rest in one buffer when the
-/// request is dropped (see [`MAX_DECLARED_BODY_BYTES`]), so the answer is written through
-/// `Request::upgrade` (which adds `Connection: upgrade` and `Upgrade` headers, and leaves out
-/// `Content-Length`: the JSON body follows the head and the connection stays open) and the
-/// stream is leaked, never dropped (logged). A client checks the size against the limit first
-/// (`uploadBytes` of `GET /api/info`).
-fn refuse_oversize_upload(
+/// The request headers as the serve boundary takes them (a value that is not UTF-8 lossy).
+fn header_list(headers: &HeaderMap) -> Vec<(String, String)> {
+    headers
+        .iter()
+        .map(|(name, value)| {
+            (
+                name.as_str().to_string(),
+                String::from_utf8_lossy(value.as_bytes()).into_owned(),
+            )
+        })
+        .collect()
+}
+
+/// The answer to a request declaring a body over its limit: `413` with the JSON error (`403`
+/// when the `Host`/`Origin` checks refuse it), its body never read.
+fn refuse_oversize(
     shared: &Shared,
-    request: tiny_http::Request,
     url: &str,
     headers: &[(String, String)],
-    declared: usize,
-) {
+    upload: bool,
+    limit: u64,
+    declared: u64,
+) -> graphersal_serve::Response {
     let mut probe = graphersal_serve::Request::new(Method::Post, url, io::empty());
     for (name, value) in headers {
         probe = probe.with_header(name, value);
     }
+    let error = format!("the body is larger than {limit} bytes (it declares {declared})");
     let answer = match shared.router.host_check.check(&probe) {
         Err(refused) => graphersal_serve::Response::json(
             refused.status(),
             &serde_json::json!({ "error": refused.message() }),
         ),
-        Ok(()) => graphersal_serve::Response::json(
+        Ok(()) if upload => graphersal_serve::Response::json(
             413,
             &serde_json::json!({
-                "error": format!(
-                    "the body is larger than {} bytes (it declares {declared})",
-                    shared.router.upload_limit()
-                ),
+                "error": error,
                 "help": "the server's upload limit is [limits] upload_bytes in server.toml",
             }),
         ),
+        Ok(()) => graphersal_serve::Response::json(413, &serde_json::json!({ "error": error })),
     };
     tracing::warn!(
         target: "graphersal_server",
-        "an import upload declared {declared} bytes, over the upload limit; refused with {} \
-         without reading it (its connection is abandoned)",
+        "a request declared a body of {declared} bytes, over its limit of {limit}; refused \
+         with {} without reading it",
         answer.status()
     );
-    // `upgrade` writes the head only, and `tiny_http` keeps `Content-Length` out of it: the
-    // body follows without a length (the client reads it until it gives up or closes).
-    let (status, headers, body) = answer.into_parts();
-    let mut head = tiny_http::Response::empty(status);
-    for (name, value) in &headers {
-        if let Ok(header) = tiny_http::Header::from_bytes(name.as_bytes(), value.as_bytes()) {
-            head = head.with_header(header);
-        }
-    }
-    let mut stream = request.upgrade("graphersal-refused", head);
-    if let Err(err) = stream.write_all(&body).and_then(|()| stream.flush()) {
-        tracing::warn!(target: "graphersal_server", "the 413 answer broke off: {err}");
-    }
-    std::mem::forget(stream);
+    answer
 }
 
-/// An answer as `tiny_http` writes it (a header `tiny_http` cannot carry is left out).
-fn tiny_answer(answer: graphersal_serve::Response) -> tiny_http::Response<io::Cursor<Vec<u8>>> {
-    let (status, headers, body) = answer.into_parts();
-    let mut response = tiny_http::Response::from_data(body).with_status_code(status);
-    for (name, value) in &headers {
-        if let Ok(header) = tiny_http::Header::from_bytes(name.as_bytes(), value.as_bytes()) {
-            response = response.with_header(header);
+/// A hyper response of `status` with `headers` (a header hyper cannot carry is left out; the
+/// length comes from the body).
+fn build(status: u16, headers: &[(String, String)], body: Outgoing) -> hyper::Response<Outgoing> {
+    let mut response = hyper::Response::new(body);
+    *response.status_mut() =
+        StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    let map = response.headers_mut();
+    for (name, value) in headers {
+        if name.eq_ignore_ascii_case("Content-Length") {
+            continue;
+        }
+        if let (Ok(name), Ok(value)) = (
+            HeaderName::from_bytes(name.as_bytes()),
+            HeaderValue::from_str(value),
+        ) {
+            map.append(name, value);
         }
     }
     response
+}
+
+/// Streams an export file into the download's channel; the export is removed once the file
+/// is closed (the client got it, or went away).
+fn pump(
+    mut file: File,
+    guard: ExportFile,
+    tx: &mpsc::Sender<io::Result<Bytes>>,
+    in_flight: InFlight,
+) {
+    let mut buffer = vec![0u8; DOWNLOAD_CHUNK];
+    loop {
+        let chunk = match file.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(read) => Ok(Bytes::copy_from_slice(&buffer[..read])),
+            Err(err) if err.kind() == ErrorKind::Interrupted => continue,
+            Err(err) => Err(err),
+        };
+        if let Err(err) = &chunk {
+            tracing::warn!(target: "graphersal_server", "an export download broke off: {err}");
+        }
+        let failed = chunk.is_err();
+        if tx.blocking_send(chunk).is_err() {
+            tracing::warn!(
+                target: "graphersal_server",
+                "an export download broke off: the client went away"
+            );
+            break;
+        }
+        if failed {
+            break;
+        }
+    }
+    drop(file);
+    drop(guard);
+    drop(in_flight);
+}
+
+/// The request body as the `std::io::Read` the serve boundary takes: each read pulls hyper's
+/// body stream for its next frame (on a blocking-pool thread), so the body is read only as
+/// fast as the route consumes it.
+struct BodyReader {
+    body: Incoming,
+    handle: Handle,
+    chunk: Bytes,
+    /// The body was read to its end.
+    done: bool,
+    /// The bytes handed to the route.
+    read: u64,
+}
+
+impl BodyReader {
+    fn new(body: Incoming, handle: Handle) -> Self {
+        let done = body.is_end_stream();
+        Self {
+            body,
+            handle,
+            chunk: Bytes::new(),
+            done,
+            read: 0,
+        }
+    }
+}
+
+impl Read for BodyReader {
+    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        loop {
+            if !self.chunk.is_empty() {
+                let n = out.len().min(self.chunk.len());
+                out[..n].copy_from_slice(&self.chunk.split_to(n));
+                self.read += n as u64;
+                return Ok(n);
+            }
+            if self.done || out.is_empty() {
+                return Ok(0);
+            }
+            let body = &mut self.body;
+            let next = self.handle.block_on(tokio::time::timeout(
+                BODY_IDLE_TIMEOUT,
+                std::future::poll_fn(|cx| Pin::new(&mut *body).poll_frame(cx)),
+            ));
+            match next {
+                Err(_) => {
+                    return Err(io::Error::new(
+                        ErrorKind::TimedOut,
+                        "the client sent nothing for too long",
+                    ));
+                }
+                Ok(None) => self.done = true,
+                Ok(Some(Ok(frame))) => {
+                    if let Ok(data) = frame.into_data() {
+                        self.chunk = data;
+                    }
+                }
+                Ok(Some(Err(err))) => return Err(io::Error::other(err)),
+            }
+        }
+    }
+}
+
+/// An answer's body: in memory, or the chunks of a download with its known length.
+enum Outgoing {
+    Full(Option<Bytes>),
+    Stream {
+        rx: mpsc::Receiver<io::Result<Bytes>>,
+        remaining: u64,
+    },
+}
+
+impl Outgoing {
+    fn full(body: Vec<u8>) -> Self {
+        Self::Full(Some(Bytes::from(body)).filter(|b| !b.is_empty()))
+    }
+
+    fn stream(rx: mpsc::Receiver<io::Result<Bytes>>, length: u64) -> Self {
+        Self::Stream {
+            rx,
+            remaining: length,
+        }
+    }
+}
+
+impl Body for Outgoing {
+    type Data = Bytes;
+    type Error = io::Error;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Bytes>, io::Error>>> {
+        match self.get_mut() {
+            Self::Full(body) => Poll::Ready(body.take().map(|b| Ok(Frame::data(b)))),
+            Self::Stream { rx, remaining } => match rx.poll_recv(cx) {
+                Poll::Ready(Some(Ok(chunk))) => {
+                    *remaining = remaining.saturating_sub(chunk.len() as u64);
+                    Poll::Ready(Some(Ok(Frame::data(chunk))))
+                }
+                Poll::Ready(Some(Err(err))) => Poll::Ready(Some(Err(err))),
+                Poll::Ready(None) => Poll::Ready(None),
+                Poll::Pending => Poll::Pending,
+            },
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        match self {
+            Self::Full(body) => body.is_none(),
+            Self::Stream { remaining, .. } => *remaining == 0,
+        }
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        match self {
+            Self::Full(body) => SizeHint::with_exact(body.as_ref().map_or(0, |b| b.len() as u64)),
+            Self::Stream { remaining, .. } => SizeHint::with_exact(*remaining),
+        }
+    }
 }
 
 #[cfg(test)]

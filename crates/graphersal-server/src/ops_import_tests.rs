@@ -479,8 +479,8 @@ fn read_answer(stream: TcpStream) -> (u16, Value) {
             reader.read_exact(&mut body).unwrap();
             body
         }
-        // No length (the 413 of an upload declaring more than the limit): the JSON body
-        // follows on an open connection; read until it parses.
+        // No length: the JSON body is read until it parses (every answer of the listener
+        // carries its length; kept for a close-delimited answer).
         None => {
             reader
                 .get_ref()
@@ -689,7 +689,7 @@ fn uploads_over_the_limit_are_refused_with_413() {
     .unwrap();
     let running = start(&dir);
     let address = running.address();
-    // Declared over the limit (and under 64 MiB): refused before reading, the body drained.
+    // Declared over the limit: refused before reading; the client sends its body anyway.
     let body = vec![b' '; 2 << 20];
     let (status, answer) = upload(
         address,

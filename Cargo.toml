@@ -35,9 +35,16 @@ serde_json = "1.0"
 # `LockFileEx`), released by the OS when the process ends, also on a crash; the same crate and
 # version as the Store's lock in graphersal.
 fd-lock = "4"
-# The HTTP/1.1 listener: small, synchronous, pure Rust, no async runtime; the same crate and
-# version as the graphersal CLI's dev server.
-tiny_http = "0.12"
+# The HTTP/1.1 listener (coordinator decision C7: hyper 1.x on tokio, no framework; the server
+# keeps its own router): hyper's server connections answer an over-limit upload at once and
+# close it cleanly, never read or allocate a body nobody asked for (`Expect: 100-continue` only
+# when the body is read), and give the IO back for a lingering close.
+hyper = { version = "1", default-features = false, features = ["server", "http1"] }
+# `TokioIo` (tokio sockets as hyper IO) and `TokioTimer` (hyper's header read timeout).
+hyper-util = { version = "0.1", default-features = false, features = ["tokio"] }
+# The runtime under hyper, owned by `serve`: the multi-thread scheduler and its blocking pool
+# (the router and the file I/O run there), TCP sockets, the stop signal, timeouts.
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "net", "sync", "time", "macros", "io-util"] }
 # Library logging (as in graphersal) and the binary's stderr log subscriber.
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std", "env-filter", "ansi"] }

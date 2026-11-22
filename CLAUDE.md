@@ -24,12 +24,20 @@ from published files). When this file disagrees with the code, the code wins: sa
   upload_bytes` = `Limits`, default 4 GiB), `layout`
   (`ServerDir`, `init`, file names, `write_atomic`), `lock` (`ServerLock`, fd-lock on
   `server.lock`), `run_file` (`RunInfo`, `server.run`), `serve` (`start` -> `Running`, the
-  `tiny_http` listener adapted from graphersal-cli's dev server; a declared body over
-  `MAX_DECLARED_BODY_BYTES` (64 MiB) gets no answer, EXCEPT an import upload (`is_upload`: `POST
-  /api/admin/import` not JSON), allowed up to the upload limit (`Router::upload_limit`, read per
-  request); an upload declaring more is answered 413 through `Request::upgrade` without reading
-  and its stream leaked (tiny_http allocates the declared rest on drop; the answer has no
-  Content-Length); every unread declared rest is drained in small reads before the answer), `router` (probes and 503s
+  HTTP/1.1 listener: hyper 1.x `http1` server connections on a tokio multi-thread runtime owned
+  by `Running` (coordinator decision C7: no axum, the router is ours; graphersal-serve stays
+  HTTP-library-free); every request answered on the blocking pool (`spawn_blocking`: router,
+  session jobs, file I/O never on an async worker); the body is `BodyReader` (an `io::Read`
+  pulling hyper's body one frame per read via `Handle::block_on`, idle timeout 120 s), a download
+  is `pump`ed from its file through a bounded channel (`Outgoing::Stream`, `Content-Length`); a
+  declared body over `MAX_DECLARED_BODY_BYTES` (64 MiB), or over the upload limit for an import
+  upload (`is_upload`: `POST /api/admin/import` not JSON; `Router::upload_limit`, read per
+  request), is answered 413 JSON at once without reading (`refuse_oversize`, Host check first;
+  `Expect: 100-continue` never gets its 100) with `Connection: close`; a body the route left
+  unread closes the connection after the answer (a declared rest up to 256 KiB is drained);
+  every connection ends with `linger` (shutdown write, discard input for up to 2 s, close: no
+  reset eats the answer); stop: `watch` signal -> accept task ends, `graceful_shutdown` on each
+  connection, wait for `in_flight` up to 5 s, unload, `shutdown_timeout`), `router` (probes and 503s
   through `graphersal_serve::Server`, then `HostCheck::check` on everything else, then the
   routes: `/db/<name>/...` via `mounts`, `GET /api/info` (root identity: `server:
   router::SERVER_NAME` ("graphersal-server"; each mount's context sets the same via

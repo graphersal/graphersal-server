@@ -336,7 +336,8 @@ fn request_bodies_are_drained_or_ignored_without_harm() {
         &body,
     );
     assert_eq!(status, 405);
-    // A huge declared body gets no answer (never allocated); the server keeps serving.
+    // A huge declared body is answered 413 at once (never read nor allocated) and its
+    // connection closed; the server keeps serving.
     let mut huge = TcpStream::connect(address).unwrap();
     huge.write_all(
         format!(
@@ -346,10 +347,230 @@ fn request_bodies_are_drained_or_ignored_without_harm() {
         .as_bytes(),
     )
     .unwrap();
-    std::thread::sleep(Duration::from_millis(100));
+    let (status, head, body) = answer_then_eof(huge);
+    assert_eq!(status, 413, "{head}");
+    assert!(
+        head.to_ascii_lowercase().contains("connection: close"),
+        "{head}"
+    );
+    assert!(
+        body["error"].as_str().unwrap().contains("67108864"),
+        "{body}"
+    );
     assert_eq!(get(address, "/healthz").0, 200);
-    drop(huge);
     running.stop().unwrap();
+}
+
+/// Reads one answer and then EOF from `stream` (every read bounded by 10 s: a hanging server
+/// fails the test): (status, head, JSON body or `Null`).
+fn answer_then_eof(mut stream: TcpStream) -> (u16, String, serde_json::Value) {
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    let mut answer = Vec::new();
+    stream
+        .read_to_end(&mut answer)
+        .expect("the server answers and closes the connection");
+    let answer = text(&answer);
+    let (head, body) = answer
+        .split_once("\r\n\r\n")
+        .unwrap_or_else(|| panic!("no head in {answer:?}"));
+    let status = head
+        .split(' ')
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(|| panic!("no status in {head:?}"));
+    let json = serde_json::from_str(body).unwrap_or(serde_json::Value::Null);
+    (status, head.to_string(), json)
+}
+
+/// A server directory whose upload limit is 1 MiB, served in this process.
+fn small_upload_server(temp: &TempDir) -> serve::Running {
+    let dir = ServerDir::init(temp.path()).unwrap().dir;
+    let config = std::fs::read_to_string(dir.config_path()).unwrap();
+    assert!(config.contains("upload_bytes = 4294967296"), "{config}");
+    std::fs::write(
+        dir.config_path(),
+        config.replace("upload_bytes = 4294967296", "upload_bytes = 1048576"),
+    )
+    .unwrap();
+    serve::start(
+        temp.path(),
+        ServeOptions::new().with_listen("127.0.0.1:0".parse().unwrap()),
+    )
+    .unwrap()
+}
+
+fn upload_head(address: SocketAddr, extra: &str) -> String {
+    format!(
+        "POST /api/admin/import?name=big HTTP/1.1\r\nHost: {address}\r\nContent-Type: \
+         application/octet-stream\r\n{extra}\r\n"
+    )
+}
+
+fn assert_upload_refused(status: u16, head: &str, body: &serde_json::Value) {
+    assert_eq!(status, 413, "{head}");
+    assert!(
+        head.to_ascii_lowercase().contains("connection: close"),
+        "{head}"
+    );
+    assert!(
+        body["error"].as_str().unwrap().contains("1048576"),
+        "{body}"
+    );
+    assert!(
+        body["help"]
+            .as_str()
+            .is_some_and(|h| h.contains("upload_bytes")),
+        "{body}"
+    );
+}
+
+#[test]
+fn an_upload_declaring_more_than_the_limit_gets_413_and_eof_at_once() {
+    let temp = TempDir::new("over-limit-declared");
+    let running = small_upload_server(&temp);
+    let address = running.address();
+    // Only the head: the answer comes without the body being sent.
+    let mut stream = TcpStream::connect(address).unwrap();
+    let head = upload_head(address, &format!("Content-Length: {}\r\n", 1u64 << 50));
+    stream.write_all(head.as_bytes()).unwrap();
+    let (status, head, body) = answer_then_eof(stream);
+    assert_upload_refused(status, &head, &body);
+
+    // The client sends its whole body regardless: it still reads its 413 and EOF, no reset.
+    let mut stream = TcpStream::connect(address).unwrap();
+    let length = 8usize << 20;
+    let head = upload_head(address, &format!("Content-Length: {length}\r\n"));
+    stream.write_all(head.as_bytes()).unwrap();
+    let writer = {
+        let mut stream = stream.try_clone().unwrap();
+        std::thread::spawn(move || {
+            let chunk = vec![b' '; 64 * 1024];
+            for _ in 0..length / chunk.len() {
+                if stream.write_all(&chunk).is_err() {
+                    break;
+                }
+            }
+        })
+    };
+    let (status, head, body) = answer_then_eof(stream);
+    assert_upload_refused(status, &head, &body);
+    writer.join().unwrap();
+    assert!(!running.dir().databases().join("big").exists());
+    assert_eq!(get(address, "/healthz").0, 200);
+    running.stop().unwrap();
+}
+
+#[test]
+fn an_upload_expecting_100_continue_over_the_limit_gets_413_not_100() {
+    let temp = TempDir::new("over-limit-continue");
+    let running = small_upload_server(&temp);
+    let address = running.address();
+    let mut stream = TcpStream::connect(address).unwrap();
+    let head = upload_head(
+        address,
+        &format!("Content-Length: {}\r\nExpect: 100-continue\r\n", 2u64 << 20),
+    );
+    stream.write_all(head.as_bytes()).unwrap();
+    let (status, head, body) = answer_then_eof(stream);
+    assert!(!head.starts_with("HTTP/1.1 100"), "{head}");
+    assert_upload_refused(status, &head, &body);
+    running.stop().unwrap();
+}
+
+#[test]
+fn a_chunked_upload_growing_over_the_limit_gets_413_and_eof() {
+    let temp = TempDir::new("over-limit-chunked");
+    let running = small_upload_server(&temp);
+    let address = running.address();
+    let mut stream = TcpStream::connect(address).unwrap();
+    let head = upload_head(address, "Transfer-Encoding: chunked\r\n");
+    stream.write_all(head.as_bytes()).unwrap();
+    // 8 MiB in 64 KiB chunks (the limit is 1 MiB), sent while the answer is read.
+    let writer = {
+        let mut stream = stream.try_clone().unwrap();
+        std::thread::spawn(move || {
+            let mut chunk = format!("{:x}\r\n", 64 * 1024).into_bytes();
+            chunk.extend(std::iter::repeat_n(b' ', 64 * 1024));
+            chunk.extend_from_slice(b"\r\n");
+            for _ in 0..128 {
+                if stream.write_all(&chunk).is_err() {
+                    return;
+                }
+            }
+            let _ = stream.write_all(b"0\r\n\r\n");
+        })
+    };
+    let (status, head, body) = answer_then_eof(stream);
+    assert_eq!(status, 413, "{head}");
+    assert!(
+        head.to_ascii_lowercase().contains("connection: close"),
+        "{head}"
+    );
+    assert!(
+        body["error"].as_str().unwrap().contains("1048576"),
+        "{body}"
+    );
+    writer.join().unwrap();
+    assert!(!running.dir().databases().join("big").exists());
+    assert_eq!(get(address, "/healthz").0, 200);
+    running.stop().unwrap();
+    assert_eq!(
+        std::fs::read_dir(temp.path().join("tmp")).unwrap().count(),
+        0
+    );
+}
+
+#[test]
+fn keep_alive_connections_serve_several_requests_and_close_on_stop() {
+    let temp = TempDir::new("keep-alive");
+    ServerDir::init(temp.path()).unwrap();
+    let running = serve::start(
+        temp.path(),
+        ServeOptions::new().with_listen("127.0.0.1:0".parse().unwrap()),
+    )
+    .unwrap();
+    let address = running.address();
+    let mut stream = TcpStream::connect(address).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    for _ in 0..2 {
+        stream
+            .write_all(format!("GET /healthz HTTP/1.1\r\nHost: {address}\r\n\r\n").as_bytes())
+            .unwrap();
+        let mut answer = Vec::new();
+        let mut byte = [0u8; 1];
+        while !answer.ends_with(b"\r\n\r\n") {
+            stream.read_exact(&mut byte).unwrap();
+            answer.push(byte[0]);
+        }
+        let head = text(&answer);
+        assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+        let length: usize = head
+            .lines()
+            .find_map(|l| {
+                l.to_ascii_lowercase()
+                    .strip_prefix("content-length: ")
+                    .map(str::to_string)
+            })
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap();
+        let mut body = vec![0u8; length];
+        stream.read_exact(&mut body).unwrap();
+    }
+    // The idle connection does not hold up the stop, and sees EOF.
+    let started = Instant::now();
+    running.stop().unwrap();
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+    let mut rest = Vec::new();
+    let _ = stream.read_to_end(&mut rest);
+    assert!(rest.is_empty(), "{}", text(&rest));
 }
 
 /// Sends one request (`headers` beside `Host` and `Connection: close`) and reads the answer:
