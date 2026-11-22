@@ -10,6 +10,7 @@ from published files). When this file disagrees with the code, the code wins: sa
 
 - Workspace root `Cargo.toml` (all dependency versions in `[workspace.dependencies]`, each with
   a one-line justification); one crate `crates/graphersal-server` (lib + bin, `publish = false`).
+- graphersal-serve with feature `ui-assets` (the embedded playground per mount and at `/`).
 - Path dependencies on the graphersal repository's MAIN checkout beside this one:
   `../graphersal/crates/graphersal`, `../graphersal/crates/graphersal-serve` and
   `../graphersal/crates/graphersal-session` (later also `graphersal-mcp`). Never edit that
@@ -19,8 +20,21 @@ from published files). When this file disagrees with the code, the code wins: sa
   (`ServerDir`, `init`, file names, `write_atomic`), `lock` (`ServerLock`, fd-lock on
   `server.lock`), `run_file` (`RunInfo`, `server.run`), `serve` (`start` -> `Running`, the
   `tiny_http` listener adapted from graphersal-cli's dev server), `router` (probes and 503s
-  through `graphersal_serve::Server`, `HostCheck`, own routes `/`, `/api/info`; the graph
-  resolver `NoDatabases` answers 404 until the HTTP routes of the registry exist, V4), `error`
+  through `graphersal_serve::Server`, then `HostCheck::check` on everything else, then the
+  routes: `/db/<name>/...` via `mounts`, `GET /api/info` (root identity, `admin: true`, no
+  `mountPath` = the playground's landing view), `/api/admin/...` via `admin_api`, other `/api/*`
+  and `/mcp` 404, every other GET a file of the embedded playground at the root (`/` =
+  `index.html`); `ready(loader)` installs the resolver), `mounts` (`/db/<name>/<rest>`:
+  `registry.resolve` on EVERY request (alias flips at once), unknown -> 404 JSON, `/db/x` ->
+  308 `/db/x/` (query kept), no context -> 409 `{"error": "database 'x' is not loaded", "help":
+  "load it: POST /api/admin/databases/x/load", "state"}` (the text names loading / failed
+  (reason) / needs-model; loading adds `Retry-After: 1`), else `forward`: prefix stripped,
+  client `X-Graphersal-Graph` dropped and set to the REAL name, `Server::handle`; the resolver
+  `Databases` takes `loader.context(header)` and the request holds that `Arc` only for its
+  duration; `DatabaseInfo` hooks add `database` (real name) and `admin: true` to the per-DB
+  `/api/info`), `admin_api` (`GET /api/admin/databases` `{databases, aliases, problems}`, alias
+  rows carry `aliasOf`; `GET /api/admin/databases/<name|alias>`; field names = the playground's
+  landing view; V5 adds the actions here), `error`
   (`ServerError`), `names` (name rule `[a-z0-9][a-z0-9._-]{0,62}`, Windows device names refused,
   `fold` = lower case for case-insensitive lookups), `database` (`database.toml`:
   `DatabaseConfig`, `DatabaseKind`, `DatabaseRole`, `deny_unknown_fields`, `utc_now`),
@@ -41,7 +55,7 @@ from published files). When this file disagrees with the code, the code wins: sa
   context dropped, `Store::shutdown`), `set_read_only` (persist via the admin core, then
   `Context::set_read_only`; a base refuses `false`), `auto_load` (after `router.ready()`),
   `shutdown` (at server stop: joins the loads, unloads layers before bases), `context(name)`
-  for V4's resolver. Contexts: `launch` + `context_builder(listener HostCheck clone)`,
+  for the resolver (`mounts`). Contexts: `launch` + `context_builder(listener HostCheck clone)`,
   `mount_path("/db/<name>")`, `read_only(config)` + `runtime_read_only(help)`, a job ticker
   (plain/layer). Plain = `open_store` + `ServedSource::Store`; layer = pooled base +
   `open_layer_store` + `ServedSource::layer_store`; base (`role = "base"`) = an EMPTY layer

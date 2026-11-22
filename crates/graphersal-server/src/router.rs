@@ -1,16 +1,26 @@
 //! Which answer a request gets: the probes and the lifecycle 503s (`graphersal_serve::Server`),
-//! the `Host`/`Origin` checks, then the server's own routes.
+//! the `Host`/`Origin` checks (every request but the probes), then the routes:
 //!
-//! Routes of this version: `GET /healthz`, `GET /readyz`, `GET /` (a placeholder text),
-//! `GET /api/info` (the server's identity, announcing `admin`). Everything else is a `404`
-//! answered by the graph resolver [`NoDatabases`] (databases come in a later version).
+//! - `/db/<name>/...`: the database `<name>` (or the database an alias names, resolved per
+//!   request), its playground, API and MCP endpoint, with the prefix stripped
+//!   ([`crate::mounts`]); `/db/<name>` redirects to `/db/<name>/`; `404` for an unknown name,
+//!   `409` for a database that is not loaded;
+//! - `GET /api/info`: the server's identity, announcing `admin`;
+//! - `/api/admin/...`: the admin API ([`crate::admin_api`]);
+//! - any other `/api/...` path and `/mcp` (the server-wide MCP endpoint comes later): `404`;
+//! - every other `GET`: a file of the embedded playground at the root (`/` = its `index.html`,
+//!   which shows the landing view: the database list), `404` when there is no such file.
 
-use std::sync::Arc;
+use std::path::Path;
+use std::sync::{Arc, OnceLock};
 
 use graphersal_serve::{
-    Context, GraphResolver, HostCheck, HttpError, Lifecycle, Method, Request, Response,
+    HostCheck, HttpError, Lifecycle, Method, Request, Response, ServeError, Ui,
 };
 use serde_json::json;
+
+use crate::loader::Loader;
+use crate::mounts::{self, Databases};
 
 /// The state the router answers from.
 pub(crate) struct Router {
@@ -18,28 +28,10 @@ pub(crate) struct Router {
     pub(crate) lifecycle: graphersal_serve::Server,
     /// The `Host`/`Origin` checks of the listener.
     pub(crate) host_check: HostCheck,
-}
-
-/// The graph resolver of a server without databases: every request it is asked about is a
-/// `404`.
-pub(crate) struct NoDatabases;
-
-impl GraphResolver for NoDatabases {
-    fn resolve(&self, request: &Request<'_>) -> Result<Arc<Context>, HttpError> {
-        Err(HttpError::new(
-            404,
-            format!(
-                "not found: {} {} (this graphersal-server version serves no databases yet)",
-                request.method(),
-                path_of(request.url())
-            ),
-        ))
-    }
-}
-
-/// The path of a request target (the query string cut off).
-fn path_of(url: &str) -> &str {
-    url.split('?').next().unwrap_or_default()
+    /// The loader (and through it the registry), set by [`Self::ready`].
+    loader: OnceLock<Arc<Loader>>,
+    /// The playground served at the root.
+    ui: Ui,
 }
 
 impl Router {
@@ -48,41 +40,103 @@ impl Router {
         Self {
             lifecycle: graphersal_serve::Server::new(),
             host_check,
+            loader: OnceLock::new(),
+            ui: Ui::embedded(),
         }
     }
 
-    /// The server serves its routes.
-    pub(crate) fn ready(&self) -> Result<(), graphersal_serve::ServeError> {
-        self.lifecycle.ready_with(Arc::new(NoDatabases))
+    /// The server serves its routes and the databases of `loader`.
+    pub(crate) fn ready(&self, loader: Arc<Loader>) -> Result<(), ServeError> {
+        self.loader
+            .set(loader.clone())
+            .map_err(|_| ServeError::Lifecycle("the router was made ready before".to_string()))?;
+        self.lifecycle.ready_with(Arc::new(Databases { loader }))
     }
 
     /// Answers one request.
-    pub(crate) fn route(&self, request: Request<'_>) -> Response {
+    pub(crate) fn route(&self, mut request: Request<'_>) -> Response {
         // Probes first: no Host check (a Kubernetes probe names the pod IP), no lock.
         if let Some(answer) = self.lifecycle.probe(request.method(), request.url()) {
             return answer;
         }
         // Loading or stopping: the lifecycle's 503.
+        let Some(loader) = self.loader.get() else {
+            return self.lifecycle.handle(request);
+        };
         if self.lifecycle.state() != Lifecycle::Ready {
             return self.lifecycle.handle(request);
         }
         if let Err(refused) = self.host_check.check(&request) {
             return error_response(refused);
         }
-        let path = path_of(request.url());
-        match path {
-            "/" | "/api/info" => {
-                if !matches!(request.method(), Method::Get | Method::Head) {
-                    return error_response(HttpError::new(
-                        405,
-                        format!("method {} is not allowed on {path}", request.method()),
-                    ));
-                }
-                if path == "/" { landing() } else { info() }
+        let url = request.url().to_string();
+        let (path, query) = match url.split_once('?') {
+            Some((path, query)) => (path, Some(query)),
+            None => (url.as_str(), None),
+        };
+        let method = request.method().clone();
+        if let Some((name, rest)) = mounts::split_db_path(path) {
+            let Ok(entry) = loader.registry().resolve(name) else {
+                return mounts::unknown_database(name);
+            };
+            let Some(rest) = rest else {
+                return mounts::redirect_to_slash(path, query);
+            };
+            // Only a check: the resolver takes the context again and holds it for the request.
+            if loader.context(&entry.name).is_none() {
+                return mounts::not_loaded(&entry);
             }
-            _ => self.lifecycle.handle(request),
+            let target = match query {
+                Some(query) => format!("/{rest}?{query}"),
+                None => format!("/{rest}"),
+            };
+            return self
+                .lifecycle
+                .handle(mounts::forward(&mut request, &target, &entry.name));
         }
+        let read = matches!(method, Method::Get | Method::Head);
+        let answer = if path == "/api/info" {
+            if read {
+                Ok(info())
+            } else {
+                Err(not_allowed(&method, path))
+            }
+        } else if let Some(endpoint) = path.strip_prefix("/api/admin/") {
+            crate::admin_api::route(loader.registry(), &method, endpoint)
+        } else if path == "/api" || path.starts_with("/api/") {
+            Err(HttpError::new(404, format!("unknown endpoint {path}")))
+        } else if path == "/mcp" {
+            Err(HttpError::new(
+                404,
+                "this server has no server-wide MCP endpoint yet; each database has its own: \
+                 /db/<name>/mcp",
+            ))
+        } else if read {
+            self.serve_ui(path)
+        } else {
+            Err(not_allowed(&method, path))
+        };
+        answer.unwrap_or_else(error_response)
     }
+
+    /// A file of the playground at the root (`/` and a directory: its `index.html`).
+    fn serve_ui(&self, path: &str) -> Result<Response, HttpError> {
+        let not_found = || HttpError::new(404, format!("not found: {path}"));
+        let decoded = percent_decode(path).ok_or_else(not_found)?;
+        let (bytes, name) = self
+            .ui
+            .read(decoded.trim_start_matches('/'))
+            .ok_or_else(not_found)?;
+        Ok(Response::new(200, bytes)
+            .with_header("Content-Type", content_type(Path::new(&name)))
+            .with_header("Cache-Control", "no-store")
+            .with_header("X-Content-Type-Options", "nosniff"))
+    }
+}
+
+/// `405` for `method` on `path`.
+fn not_allowed(method: &Method, path: &str) -> HttpError {
+    HttpError::new(405, format!("method {method} is not allowed on {path}"))
 }
 
 /// The `{"error": message}` answer of a refused request (as `graphersal_serve` answers it).
@@ -95,22 +149,8 @@ fn error_response(error: HttpError) -> Response {
     }
 }
 
-/// `GET /`: a placeholder until the playground's server mode is served here.
-fn landing() -> Response {
-    let text = format!(
-        "graphersal-server {} (EXPERIMENTAL)\n\nThis server serves no databases yet; the \
-         playground with the database list and the admin panel comes in a later version.\n\
-         Probes: /healthz, /readyz. Server information: /api/info.\n",
-        env!("CARGO_PKG_VERSION")
-    );
-    Response::new(200, text.into_bytes())
-        .with_header("Content-Type", "text/plain; charset=utf-8")
-        .with_header("Cache-Control", "no-store")
-        .with_header("X-Content-Type-Options", "nosniff")
-}
-
-/// `GET /api/info`: the server's identity; `admin: true` tells the playground that this server
-/// has the admin API (the playground's server mode checks it).
+/// `GET /api/info`: the server's identity; `admin: true` with no `mountPath` tells the
+/// playground served at `/` to show its landing view (the database list).
 fn info() -> Response {
     Response::json(
         200,
@@ -123,9 +163,52 @@ fn info() -> Response {
     )
 }
 
+/// `%XX` decoded (as `graphersal_serve` decodes static paths); `None` for a broken escape or
+/// a result that is not UTF-8.
+fn percent_decode(path: &str) -> Option<String> {
+    let bytes = path.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = path.get(i + 1..i + 3)?;
+            out.push(u8::from_str_radix(hex, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+/// The content type of a playground file (the types `graphersal_serve` serves).
+fn content_type(path: &Path) -> &'static str {
+    match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("html") | Some("htm") => "text/html; charset=utf-8",
+        Some("js") | Some("mjs") => "text/javascript; charset=utf-8",
+        Some("css") => "text/css; charset=utf-8",
+        Some("json") => "application/json; charset=utf-8",
+        Some("svg") => "image/svg+xml",
+        Some("wasm") => "application/wasm",
+        Some("png") => "image/png",
+        Some("ico") => "image/x-icon",
+        Some("md") | Some("txt") => "text/plain; charset=utf-8",
+        _ => "application/octet-stream",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::registry::Registry;
+    use crate::registry::tests::server;
+    use crate::test_support::TempDir;
     use graphersal_serve::Exposure;
     use serde_json::Value;
 
@@ -137,6 +220,15 @@ mod tests {
             PORT,
             "http://127.0.0.1:8484/",
         ))
+    }
+
+    /// Makes `router` ready over an empty server directory (kept alive by the answer).
+    fn make_ready(router: &Router) -> TempDir {
+        let temp = TempDir::new("router");
+        let dir = server(&temp);
+        let loader = Loader::new(Registry::scan(&dir).unwrap(), router.host_check.clone());
+        router.ready(loader).unwrap();
+        temp
     }
 
     fn get(router: &Router, url: &str, host: Option<&str>) -> Response {
@@ -167,7 +259,7 @@ mod tests {
     #[test]
     fn ready_routes() {
         let router = router();
-        router.ready().unwrap();
+        let _temp = make_ready(&router);
         assert_eq!(json_of(&get(&router, "/readyz", None))["status"], "ready");
         let info = get(&router, "/api/info?x=1", Some("localhost:8484"));
         assert_eq!(info.status(), 200);
@@ -177,15 +269,10 @@ mod tests {
         assert_eq!(info["experimental"], true);
         let landing = get(&router, "/", Some("127.0.0.1:8484"));
         assert_eq!(landing.status(), 200);
-        assert!(String::from_utf8_lossy(landing.body()).contains("EXPERIMENTAL"));
+        assert!(String::from_utf8_lossy(landing.body()).contains("<html"));
         let missing = get(&router, "/db/x/api/info", Some("127.0.0.1:8484"));
         assert_eq!(missing.status(), 404);
-        assert!(
-            json_of(&missing)["error"]
-                .as_str()
-                .unwrap()
-                .contains("/db/x/api/info")
-        );
+        assert!(json_of(&missing)["error"].as_str().unwrap().contains("'x'"));
         let post = router.route(
             Request::new(Method::Post, "/api/info", std::io::empty())
                 .with_header("Host", "127.0.0.1:8484"),
@@ -196,7 +283,7 @@ mod tests {
     #[test]
     fn foreign_hosts_and_origins_are_refused_but_probes_are_not() {
         let router = router();
-        router.ready().unwrap();
+        let _temp = make_ready(&router);
         assert_eq!(get(&router, "/api/info", None).status(), 403);
         assert_eq!(
             get(&router, "/api/info", Some("evil.example:8484")).status(),
@@ -217,7 +304,7 @@ mod tests {
     #[test]
     fn stopping_answers_503() {
         let router = router();
-        router.ready().unwrap();
+        let _temp = make_ready(&router);
         router.lifecycle.stop();
         assert_eq!(
             json_of(&get(&router, "/readyz", None))["status"],

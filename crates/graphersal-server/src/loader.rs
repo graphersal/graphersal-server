@@ -46,6 +46,7 @@ use graphersal_session::{Session, SessionPresets};
 
 use crate::database::{DatabaseConfig, DatabaseKind, DatabaseRole};
 use crate::error::ServerError;
+use crate::mounts::DatabaseInfo;
 use crate::names::fold;
 use crate::registry::{DatabaseEntry, DbState, Registry};
 
@@ -582,6 +583,7 @@ impl Loader {
         let mut builder = launched
             .context_builder(self.host_check.clone())
             .mount_path(Some(format!("/db/{key}")))
+            .hooks(Arc::new(DatabaseInfo { name: key.clone() }))
             .read_only(read_only)
             .runtime_read_only(Some(help));
         if kind == Kind::Layer {

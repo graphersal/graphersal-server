@@ -7,8 +7,11 @@
 //! `aliases.toml`, names, states, the scan at start, the admin core in [`admin`]), the loader
 //! ([`Loader`]: background loads into served contexts, the shared pool of layer bases,
 //! unload, the runtime read-only toggle, `auto_load` at start) and the HTTP listener
-//! ([`serve::start`]) with the health probes, a placeholder `/` and `/api/info`. The HTTP
-//! routes of the databases, the admin API and MCP come in later versions.
+//! ([`serve::start`]) with the health probes, the loaded databases under `/db/<name>/` (aliases
+//! resolved per request, `409` for a database that is not loaded), the embedded playground at
+//! `/` (its landing view lists the databases), `/api/info` and the admin listing
+//! `GET /api/admin/databases`. The admin actions over HTTP and the server-wide MCP endpoint come
+//! in later versions.
 //!
 //! The server has NO access control: it listens on the loopback by default and warns when it
 //! listens on any other address.
@@ -16,12 +19,14 @@
 #![warn(missing_docs)]
 
 pub mod admin;
+mod admin_api;
 pub mod config;
 pub mod database;
 pub mod error;
 pub mod layout;
 pub mod loader;
 pub mod lock;
+mod mounts;
 pub mod names;
 pub mod registry;
 mod router;

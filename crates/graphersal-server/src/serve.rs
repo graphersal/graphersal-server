@@ -169,7 +169,7 @@ pub fn start(
             return Err(err);
         }
     }
-    if let Err(err) = running.shared.router.ready() {
+    if let Err(err) = running.shared.router.ready(running.loader.clone()) {
         let _ = running.shutdown();
         return Err(ServerError::Thread {
             message: err.to_string(),

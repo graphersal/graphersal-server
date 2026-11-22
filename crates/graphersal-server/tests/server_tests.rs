@@ -350,3 +350,221 @@ fn request_bodies_are_drained_or_ignored_without_harm() {
     drop(huge);
     running.stop().unwrap();
 }
+
+/// Sends one request (`headers` beside `Host` and `Connection: close`) and reads the answer:
+/// (status, head, body).
+fn call(
+    address: SocketAddr,
+    method: &str,
+    path: &str,
+    headers: &[(&str, &str)],
+    body: &str,
+) -> (u16, String, String) {
+    let mut head = format!("{method} {path} HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n");
+    for (name, value) in headers {
+        head.push_str(&format!("{name}: {value}\r\n"));
+    }
+    head.push_str(&format!("Content-Length: {}\r\n\r\n", body.len()));
+    let mut stream = TcpStream::connect(address).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(30)))
+        .unwrap();
+    stream.write_all(head.as_bytes()).unwrap();
+    stream.write_all(body.as_bytes()).unwrap();
+    let mut answer = Vec::new();
+    stream.read_to_end(&mut answer).unwrap();
+    let answer = text(&answer);
+    let (head, body) = answer.split_once("\r\n\r\n").unwrap_or((&answer, ""));
+    let status = head
+        .split(' ')
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(|| panic!("no status in {answer:?}"));
+    (status, head.to_string(), body.to_string())
+}
+
+fn json(body: &str) -> serde_json::Value {
+    serde_json::from_str(body).unwrap_or_else(|err| panic!("{err}: {body}"))
+}
+
+/// The value of the header `name` in an answer's head.
+fn header_of<'h>(head: &'h str, name: &str) -> Option<&'h str> {
+    head.lines().find_map(|line| {
+        let (field, value) = line.split_once(':')?;
+        field
+            .trim()
+            .eq_ignore_ascii_case(name)
+            .then(|| value.trim())
+    })
+}
+
+/// Runs `script` on the database page `db` (`/db/<db>/api/execute`): its first result.
+fn execute(address: SocketAddr, db: &str, script: &str) -> serde_json::Value {
+    let body = serde_json::json!({ "script": script }).to_string();
+    let (status, _, answer) = call(
+        address,
+        "POST",
+        &format!("/db/{db}/api/execute"),
+        &[("Content-Type", "application/json")],
+        &body,
+    );
+    assert_eq!(status, 200, "{answer}");
+    json(&answer)["execution"]["results"][0].clone()
+}
+
+/// A plain database `name` (a closed Store holding the modern sample).
+fn modern_db(dir: &ServerDir, name: &str) {
+    use graphersal::persist::{Store, StoreOptions};
+    use graphersal::prelude::TraversalGraph;
+    let db = dir.databases().join(name);
+    std::fs::create_dir_all(&db).unwrap();
+    std::fs::write(db.join("database.toml"), "description = \"modern\"\n").unwrap();
+    Store::create_with(
+        db.join("store"),
+        TraversalGraph::tinkerpop_modern(),
+        StoreOptions::new(),
+    )
+    .unwrap()
+    .close()
+    .unwrap();
+}
+
+#[test]
+fn databases_are_served_under_their_names_and_aliases() {
+    let temp = TempDir::new("routing");
+    let dir = ServerDir::init(temp.path()).unwrap().dir;
+    for name in ["a", "b", "c"] {
+        modern_db(&dir, name);
+    }
+    let running = serve::start(
+        temp.path(),
+        ServeOptions::new().with_listen("127.0.0.1:0".parse().unwrap()),
+    )
+    .unwrap();
+    let address = running.address();
+    let loader = running.loader();
+    for name in ["a", "b"] {
+        loader.load(name).unwrap();
+        assert_eq!(
+            loader.wait(name, Duration::from_secs(120)).unwrap(),
+            DbState::Loaded
+        );
+    }
+
+    // Each page reaches its own graph: a write in a is not seen in b.
+    assert_eq!(execute(address, "a", "g.v().count().next()"), 6);
+    execute(address, "a", "g.add_v(\"x\").iterate()");
+    assert_eq!(execute(address, "a", "g.v().count().next()"), 7);
+    assert_eq!(execute(address, "b", "g.v().count().next()"), 6);
+    // Names are case-insensitive; a client's own graph header is dropped.
+    assert_eq!(execute(address, "A", "g.v().count().next()"), 7);
+    let (_, _, steered) = call(
+        address,
+        "POST",
+        "/db/b/api/execute",
+        &[
+            ("Content-Type", "application/json"),
+            ("X-Graphersal-Graph", "a"),
+        ],
+        r#"{"script": "g.v().count().next()"}"#,
+    );
+    assert_eq!(json(&steered)["execution"]["results"][0], 6);
+
+    // An alias is resolved on every request: a flip takes effect at once.
+    running.registry().alias_set("current", "a").unwrap();
+    assert_eq!(execute(address, "current", "g.v().count().next()"), 7);
+    running.registry().alias_set("current", "b").unwrap();
+    assert_eq!(execute(address, "current", "g.v().count().next()"), 6);
+
+    // Per-database info: the mount, the real name, the admin API.
+    let (status, _, body) = call(address, "GET", "/db/a/api/info", &[], "");
+    assert_eq!(status, 200, "{body}");
+    let info = json(&body);
+    assert_eq!(info["mountPath"], "/db/a");
+    assert_eq!(info["database"], "a");
+    assert_eq!(info["admin"], true);
+    let info = json(&call(address, "GET", "/db/current/api/info", &[], "").2);
+    assert_eq!(info["database"], "b", "an alias shows the real database");
+    assert_eq!(info["mountPath"], "/db/b");
+    // The root info announces the admin API (the playground shows its landing view).
+    let root = json(&get(address, "/api/info").1);
+    assert_eq!(root["admin"], true);
+    assert_eq!(root["server"], "graphersal-server");
+    assert!(root.get("mountPath").is_none());
+
+    // Not loaded: 409 with the exact text; unknown: 404.
+    let (status, _, body) = call(address, "GET", "/db/c/api/info", &[], "");
+    assert_eq!(status, 409, "{body}");
+    let refused = json(&body);
+    assert_eq!(refused["error"], "database 'c' is not loaded");
+    assert_eq!(refused["help"], "load it: POST /api/admin/databases/c/load");
+    assert_eq!(refused["state"], "unloaded");
+    let (status, _, body) = call(address, "GET", "/db/none/api/info", &[], "");
+    assert_eq!(status, 404, "{body}");
+    assert_eq!(json(&body)["error"], "no database or alias 'none'");
+
+    // `/db/a` redirects to `/db/a/`.
+    let (status, head, _) = call(address, "GET", "/db/a?x=1", &[], "");
+    assert_eq!(status, 308);
+    assert_eq!(header_of(&head, "Location"), Some("/db/a/?x=1"));
+
+    // The playground under each mount and at the root (its landing view).
+    for prefix in ["/db/a/", "/"] {
+        let (status, head, body) = call(address, "GET", prefix, &[], "");
+        assert_eq!(status, 200, "{prefix}");
+        assert_eq!(
+            header_of(&head, "Content-Type"),
+            Some("text/html; charset=utf-8")
+        );
+        assert!(body.contains("<html"), "{prefix}");
+        let asset = format!("{prefix}js/engine/http-engine.js");
+        let (status, head, _) = call(address, "GET", &asset, &[], "");
+        assert_eq!(status, 200, "{asset}");
+        assert_eq!(
+            header_of(&head, "Content-Type"),
+            Some("text/javascript; charset=utf-8")
+        );
+    }
+    assert_eq!(call(address, "GET", "/no-such-file.js", &[], "").0, 404);
+    assert_eq!(call(address, "GET", "/api/nothing", &[], "").0, 404);
+
+    // The admin listing follows the registry.
+    let (status, _, body) = call(address, "GET", "/api/admin/databases", &[], "");
+    assert_eq!(status, 200, "{body}");
+    let listing = json(&body);
+    let state_of = |name: &str| {
+        listing["databases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["name"] == name)
+            .map(|e| e["state"].clone())
+    };
+    for entry in running.registry().list() {
+        assert_eq!(
+            state_of(&entry.name),
+            Some(serde_json::Value::from(entry.state.as_str())),
+            "{}",
+            entry.name
+        );
+    }
+    assert_eq!(state_of("a"), Some("loaded".into()));
+    assert_eq!(state_of("c"), Some("unloaded".into()));
+    assert_eq!(listing["aliases"]["current"], "b");
+    let one = json(&call(address, "GET", "/api/admin/databases/current", &[], "").2);
+    assert_eq!(one["aliasOf"], "b");
+    assert_eq!(one["state"], "loaded");
+
+    // A foreign Origin is refused on a database page and on the admin API.
+    let evil = [("Origin", "http://evil.example")];
+    for path in ["/db/a/api/info", "/api/admin/databases", "/db/c/api/info"] {
+        let (status, _, body) = call(address, "GET", path, &evil, "");
+        assert_eq!(status, 403, "{path}: {body}");
+    }
+
+    // An unloaded database answers 409 from then on.
+    assert!(loader.unload("a").unwrap());
+    let (status, _, body) = call(address, "GET", "/db/a/api/info", &[], "");
+    assert_eq!(status, 409, "{body}");
+    running.stop().unwrap();
+}
