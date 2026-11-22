@@ -1,61 +1,93 @@
 # graphersal-server
 
-**EXPERIMENTAL. Private until its first public version.**
+**EXPERIMENTAL. Private until its first public version.** Everything here (commands, files,
+routes, answers) may change without notice.
 
-A server for [Graphersal](https://github.com/graphersal/graphersal) graph databases: one process
-serving many databases (plain and layered over a shared frozen base) from one server directory,
-over HTTP, with one MCP endpoint where a session picks its graph, and an admin panel in the
-Graphersal playground.
+A server for [Graphersal](https://github.com/graphersal/graphersal) graph databases: ONE process
+serving MANY databases from one server directory, over HTTP. A database is either a plain Store
+or a layer over a shared, frozen base database (many layers, one base in memory). Each loaded
+database gets the Graphersal playground and its HTTP API under `/db/<name>/`; one MCP endpoint
+(`/mcp`) lets an AI agent list the databases and pick one per session; the admin operations
+(create, load, clone, back up, restore, export, import, aliases, shared embedding models) are
+an HTTP API, a console (`graphersal-server db ...`) and an admin panel in the playground's
+landing view at `/`.
 
-> **No access control.** Anyone who reaches the port can read and change every database. The
-> server listens on the loopback (`127.0.0.1:8484`) by default and logs a warning when it is
-> told to listen on any other address.
+> **No access control.** Anyone who reaches the port can read, change and delete every
+> database. The server listens on the loopback (`127.0.0.1:8484`) by default and logs a warning
+> when told to listen on any other address. Keep it on the loopback. Every request but the
+> health probes is checked by `Host` and `Origin` (against DNS rebinding and cross-site pages);
+> that is not authentication. The optional MCP token (`docs/mcp.md`) guards only the MCP
+> endpoints.
 
-## Status
+## Build
 
-This version holds `init`, `serve`, the server lock, the run file, the health probes,
-`/api/info`, the database registry (read at start) and the loader (databases with
-`auto_load = true` are loaded in the background at start and unloaded cleanly at stop), the
-loaded databases under `/db/<name>/` (playground, API, aliases resolved per request), the
-playground's landing view at `/`, and the admin operations (create, delete, clone, load,
-unload, read-only, auto-load, aliases, backup into `backups/`, restore, `.gsnap` export, import
-of a `.gsnap`, a Store, GraphSON or GraphML, also by upload) over HTTP and from the console
-(`db ...`, `import`), the shared embedding models (`models/`), and the MCP endpoints: `/mcp`
-over every database (an agent lists the databases and picks one per MCP session) and
-`/db/<name>/mcp` per loaded database (`docs/mcp.md`).
-
-## Use
+The crate depends on Graphersal's crates by path: a checkout of the `graphersal` repository
+must sit beside this one (`../graphersal`).
 
 ```bash
-cargo build --release
-target/release/graphersal-server init ./srv              # create a server directory
-target/release/graphersal-server serve --dir ./srv       # serve it (Ctrl+C stops it)
-target/release/graphersal-server serve --dir ./srv --listen 127.0.0.1:0   # a free port
+cargo build --release          # target/release/graphersal-server
 ```
 
-`serve` writes the address it actually bound into `<dir>/server.run` while it runs (removed at
-stop); a second `serve` on the same directory is refused (`server.lock`).
+## Run
 
 ```bash
-graphersal-server db create acme --dir ./srv                 # a new empty plain database
-graphersal-server db create product --role base --dir ./srv  # a frozen base (read-only)
-graphersal-server db create acme-l --base product --dir ./srv  # a layer over it
-graphersal-server db list --dir ./srv
-graphersal-server db load acme --dir ./srv                   # running server only
-graphersal-server db clone acme acme-copy --dir ./srv
-graphersal-server db read-only acme on --dir ./srv
-graphersal-server db alias set current acme --dir ./srv
-graphersal-server db backup acme --dir ./srv                 # backups/acme/<UTC time>.zip
-graphersal-server db backups acme --dir ./srv
-graphersal-server db restore acme <backup> --name acme-old --dir ./srv
-graphersal-server db export acme --out acme.gsnap --dir ./srv  # --no-models, --materialize
-graphersal-server db unload acme --dir ./srv && graphersal-server db delete acme --dir ./srv
-graphersal-server import ./srv acme.gsnap --name acme-2   # also a Store, .gstore, GraphSON, GraphML
+graphersal-server init ./srv                          # create a server directory
+graphersal-server serve --dir ./srv                   # serve it on 127.0.0.1:8484
+graphersal-server serve --dir ./srv --listen 127.0.0.1:0   # on a free port
 ```
 
-With a server running on the directory the `db` commands go through its admin API (address
-from `server.run`); otherwise they act on the directory directly. Both call the same admin
-core. `docs/admin-api.md` documents the admin API.
+Open `http://127.0.0.1:8484/`: the landing view lists the databases with their states and holds
+the admin panel. `serve` writes the address it bound into `./srv/server.run` while it runs;
+Ctrl+C or SIGTERM stops it cleanly (databases are unloaded, the run file is removed). A second
+`serve` on the same directory is refused (`server.lock`).
+
+A first session from the console (in a second terminal while the server runs):
+
+```bash
+graphersal-server db create acme --description "Acme" --dir ./srv
+graphersal-server db load acme --dir ./srv
+curl -s -X POST http://127.0.0.1:8484/db/acme/api/execute \
+  -H 'Content-Type: application/json' \
+  -d '{"script": "g.add_v(\"person\").property(\"name\", \"ada\").iterate()"}'
+curl -s -X POST http://127.0.0.1:8484/db/acme/api/execute \
+  -H 'Content-Type: application/json' -d '{"script": "g.v().count().next()"}'
+```
+
+## Console
+
+Every command takes `--dir DIR`; `--json` prints the admin API's JSON answer instead of text.
+With a server running on `DIR` the command goes to its admin API (address from
+`DIR/server.run`, noted on stderr); otherwise it works on the directory itself (then `load` and
+`unload` are refused: nothing would serve the database). Both paths call the same admin core.
+
+| Command | What |
+|---|---|
+| `db list` | the databases and aliases with their states |
+| `db create NAME [--base BASE] [--kind plain\|layer] [--role normal\|base] [--schema FILE.json] [--description TEXT] [--auto-load] [--read-only]` | a new empty database; `--base` makes a layer over a `role = base` database |
+| `db delete NAME` | an unloaded database, moved to `DIR/trash/` |
+| `db clone SOURCE NAME` | a fork of SOURCE's latest state (it may be loaded) |
+| `db load NAME [--no-wait]`, `db unload NAME` | running server only |
+| `db read-only NAME on\|off`, `db auto-load NAME on\|off` | flags, persisted; read-only applies at once |
+| `db alias set ALIAS DATABASE`, `db alias remove ALIAS` | aliases (a flip takes effect at once) |
+| `db backup NAME`, `db backups NAME` | verified ZIP backups in `DIR/backups/NAME/` |
+| `db restore NAME BACKUP [--name NEW]` | over NAME (unloaded) or into the new database NEW |
+| `db export NAME --out FILE [--no-models] [--materialize]` | a packed snapshot (`.gsnap`) |
+| `import DIR SOURCE --name NAME [--base BASE] [--format F] [--description TEXT]` | a new database from a `.gsnap`, a Store (directory or `.gstore`), GraphSON or GraphML |
+| `models list`, `models add SOURCE [--repo R] [--license L]`, `models remove REPO` | the shared embedding models |
+
+`graphersal-server --help` has the details. Exit codes: `0` ok, `1` failed (the error and a
+`help:` line on stderr), `2` invalid invocation.
+
+## HTTP
+
+| Path | What |
+|---|---|
+| `GET /healthz`, `GET /readyz` | liveness `200`; readiness `200` or `503` while starting or stopping |
+| `GET /api/info` | the server's identity: `admin: true`, `uploadBytes`, the MCP endpoint |
+| `GET /` | the playground's landing view and admin panel |
+| `/db/<name>/...` | the playground and its HTTP API (`POST /db/<name>/api/execute {"script"}`, ...) on the database or alias `<name>`, resolved per request; `409` with help when it is not loaded (never loaded implicitly), `404` when unknown |
+| `/api/admin/...` | the admin API: [`docs/admin-api.md`](docs/admin-api.md) |
+| `/mcp`, `/db/<name>/mcp` | the MCP endpoints: [`docs/mcp.md`](docs/mcp.md) |
 
 ## Server directory
 
@@ -64,39 +96,45 @@ core. `docs/admin-api.md` documents the admin API.
   server.toml     listen address, MCP options, defaults for new databases, limits
   server.lock     one running server per directory
   server.run      the running server's address (only while it runs)
-  aliases.toml    acme = "acme-2026.3"   (an alias names a database)
-  databases/<name>/
-    database.toml kind, role, base, auto_load, read_only, created, description
-    store/        the Store
-  models/blobs/  backups/  trash/  tmp/  logs/
+  aliases.toml    current = "acme-2026.3"
+  databases/<name>/database.toml + store/
+  models/         one copy of every embedding model, hard-linked into the databases
+  backups/  trash/  tmp/  logs/
 ```
 
-There is no registry file: the databases are the directories under `databases/`. Names are
-`[a-z0-9][a-z0-9._-]{0,62}`, unique case-insensitively across databases and aliases. A broken
-database directory is listed as `failed` with the reason; it never stops the server. New
-databases are built in `tmp/` and renamed into `databases/`; what a crash leaves in `tmp/` is
-removed at the next start. A `role = "base"` database is created read-only and stays read-only
-while a layer names it.
+There is no registry file: the databases are the directories under `databases/`. Details of
+every file and key: [`docs/server-dir.md`](docs/server-dir.md).
 
-## HTTP
+## Documentation
 
-| Path | What |
-|---|---|
-| `GET /healthz` | liveness: `200 {"status":"ok"}` |
-| `GET /readyz` | readiness: `200 ready`, `503 loading` / `503 stopping` |
-| `GET /api/info` | `{"server":"graphersal-server","version":...,"experimental":true,"admin":true}` |
-| `GET /` | the playground's landing view: the list of databases with their states |
-| `/db/<name>/...` | the playground and its API on the database `<name>` (or the database the alias `<name>` names, resolved per request); `/db/<name>` redirects to `/db/<name>/`; `404` for an unknown name; `409 {"error": "database 'x' is not loaded", "help": "load it: POST /api/admin/databases/x/load"}` for a database that is not loaded (never an implicit load) |
-| `GET /api/admin/databases` | `{"databases": [{"name", "state", "kind", "role", "readOnly", "autoLoad", "description", "base"?, "reason"?, "aliasOf"?}], "aliases": {...}, "problems": [...]}` |
-| `GET /api/admin/databases/<name>` | one entry (`<name>` may be an alias) |
-| `/api/admin/...` | create, delete (into `trash/`), clone, load, unload, read-only, auto-load, aliases, backup, backups, restore, export (download): `docs/admin-api.md` |
+- [`docs/server-dir.md`](docs/server-dir.md): the server directory, `server.toml`,
+  `database.toml`, models, backups, external backups.
+- [`docs/admin-api.md`](docs/admin-api.md): every admin route, its body and answer.
+- [`docs/mcp.md`](docs/mcp.md): the MCP endpoints, configuring an agent, the request headers.
+- `scripts/smoke.sh`: an end-to-end smoke test (build, init, serve, the admin API, the
+  database pages, MCP, a clean stop); needs only bash, curl and python3.
 
-Every path but the probes is checked by Host and Origin (DNS rebinding, cross-site pages).
+## Known limitations
 
-## Building
-
-The crate depends on Graphersal's hosting crates by path: a checkout of the `graphersal`
-repository must sit beside this one (`../graphersal`).
+- **No access control** (see above): loopback only. The MCP token is the only secret, and it
+  guards only the MCP endpoints.
+- A **base cannot be edited** (by design: layers depend on its exact state). The API and the
+  console create a base EMPTY (`db create NAME --role base`), and an import always makes a plain
+  database or a layer. A base with data is made by hand: build a plain database (create and
+  write, or import), stop the server, set `role = "base"` and `read_only = true` in its
+  `databases/<name>/database.toml`, start the server again.
+- A **layer `.gsnap` export carries no models** (an engine rule); export the layer with
+  `materialize=true` (`--materialize`) for a standalone snapshot with the models.
+- An **upload declaring more than the upload limit** gets its `413`, but the server abandons
+  the connection without reading the body (tiny_http 0.12); clients should check the size
+  against `uploadBytes` of `GET /api/info` before sending.
+- An **import of a snapshot naming an embedding model it does not carry** stays `needs-model`
+  even when `models/` holds the model, until `models add <repo>` (or `POST /api/admin/models
+  {"repo"}`) resolves it.
+- **No memory figures** in the database listing (only `sizeBytes` on disk): a loaded database's
+  memory is known only inside its session thread.
+- No admin tools over MCP; MCP sessions live in memory (a restart forgets them).
+- `logs/` is created but not written: the server logs to stderr.
 
 ## Licence
 

@@ -45,6 +45,38 @@ Other clients: any MCP client with the Streamable HTTP transport; the URL is the
 Requests go through the same `Host`/`Origin` checks as the rest of the server: a browser page
 of another site is refused (`403`), and so is a `Host` header that does not name this server.
 
+### Requests
+
+Every JSON-RPC message is one `POST` to the endpoint, answered with one JSON object (no
+server-sent event stream):
+
+| Header | When | Value |
+|---|---|---|
+| `Content-Type` | always | `application/json` |
+| `Accept` | optional | must allow `application/json` when sent (`application/json, text/event-stream`; else `406`) |
+| `Mcp-Session-Id` | after `initialize` | the id from the `initialize` answer's `Mcp-Session-Id` header; an unknown id is `404` (initialize again). A request without one is served, but on `/mcp` it has no selection: `use_graph` is refused and every data tool needs `graph` |
+| `MCP-Protocol-Version` | optional | a revision the server speaks: `2025-11-25`, `2025-06-18`, `2025-03-26` (else `400`) |
+| `Authorization` | with a `token` | `Bearer <token>` (else `401`) |
+
+A notification (such as `notifications/initialized`) is answered `202` without a body. With
+curl (`scripts/smoke.sh` walks through the whole flow):
+
+```bash
+curl -si http://127.0.0.1:8484/mcp -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion":
+       "2025-06-18", "capabilities": {}, "clientInfo": {"name": "curl", "version": "1"}}}'
+# then, with the Mcp-Session-Id of that answer:
+curl -s http://127.0.0.1:8484/mcp -H 'Content-Type: application/json' \
+  -H 'Mcp-Session-Id: <id>' \
+  -d '{"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+       "params": {"name": "use_graph", "arguments": {"name": "acme"}}}'
+```
+
+A tool's answer is the JSON-RPC `result` with `content[0].text` (the tool's answer as text;
+`list_graphs` and `use_graph` answer JSON text) and `isError` (`true` for a tool error, such as
+a database that is not loaded).
+
 ## The flow on `/mcp`
 
 1. `initialize` starts an MCP session (`Mcp-Session-Id` in the answer); its instructions explain

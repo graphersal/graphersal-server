@@ -5,6 +5,10 @@ and the console (`graphersal-server db ...`, when a server runs on the directory
 clients. Both the API and the console's offline mode call the same admin core, so the answers
 below are also what `graphersal-server db ... --json` prints.
 
+The MCP endpoints (`/mcp`, `/db/<name>/mcp`) are documented in [`mcp.md`](mcp.md), the server
+directory and its files (`server.toml`, `database.toml`, `models/`, `backups/`) in
+[`server-dir.md`](server-dir.md).
+
 There is NO access control in this version: the server listens on the loopback by default.
 Every request is checked by `Host` and `Origin` (DNS rebinding, cross-site pages): send
 `Host: <the server's address>`; a browser page of another origin is refused with `403`.
@@ -15,6 +19,7 @@ Every request is checked by `Host` and `Origin` (DNS rebinding, cross-site pages
   16 MiB (else `413`); the one exception is an import upload (the file itself as the body, see
   Import). Unknown fields are refused (`400`), so a typo is never ignored.
 - Answers are JSON. An error is `{"error": "<sentence>", "help": "<what to do>"?}`.
+- Every `GET` route but the export also answers `HEAD`.
 - The actions take **real database names**; an alias is not followed (`404`). Only
   `GET /api/admin/databases/<name>` also answers an alias. Names are case-insensitive and
   answered in lower case; the name rule is `[a-z0-9][a-z0-9._-]{0,62}` (no Windows device
@@ -298,7 +303,10 @@ layers use names each layer's `unload`.
 ## Console
 
 ```
-graphersal-server db list|create|delete|clone|load|unload|read-only|auto-load|alias ... --dir DIR [--json]
+graphersal-server db list | create NAME [...] | delete NAME | clone SOURCE NAME --dir DIR [--json]
+graphersal-server db load NAME [--no-wait] | unload NAME --dir DIR [--json]
+graphersal-server db read-only NAME on|off | auto-load NAME on|off --dir DIR [--json]
+graphersal-server db alias set ALIAS DATABASE | alias remove ALIAS --dir DIR [--json]
 graphersal-server db backup NAME | backups NAME | restore NAME BACKUP [--name NEW] --dir DIR [--json]
 graphersal-server db export NAME --out FILE [--no-models] [--materialize] --dir DIR [--json]
 graphersal-server import DIR SOURCE --name NAME [--base BASE] [--format F] [--description TEXT] [--json]
