@@ -197,15 +197,22 @@ done
 [ "$STATUS" = 200 ] || fail "/readyz answers $STATUS"
 req GET /api/info
 expect_status 200
-expect_json product graphersal-server
+expect_json server graphersal-server
+expect_json protocol graphersal/1
 expect_json uiProfile.name server
+expect_json uiProfile.styles.0 server-ui.css
 expect_json admin null
+expect_json product null
 ok
 
 STEP="the server UI at /"
 req GET /
 expect_status 200
-expect_body_contains 'server-ui/server-ui.css'
+expect_body_contains '<html'
+grep -q 'server-ui/' "$BODY" && fail "/ is not the playground's index.html unchanged"
+req GET /server-ui/server-ui.css
+expect_status 200
+[ "$(header Content-Type)" = "text/css; charset=utf-8" ] || fail "server-ui.css: $(header Content-Type)"
 req GET /server-ui/profile.json
 expect_status 200
 expect_json name server
@@ -245,6 +252,7 @@ req GET /db/acme/api/info
 expect_status 200
 expect_json database acme
 expect_json home /
+expect_json admin null
 ok
 
 STEP="write and read through /db/<name>/api/execute"

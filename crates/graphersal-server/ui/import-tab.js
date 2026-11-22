@@ -1,7 +1,7 @@
 // The Import tab of the `server` profile: a new database from a file uploaded from this browser
 // (`POST api/admin/import?name=...` with the file as the raw body, through XMLHttpRequest for the
-// progress bar; the size is checked against the root `/api/info` `uploadBytes` before anything
-// is sent) or from a path on the server's machine (the JSON form). Sources: a packed snapshot
+// progress bar; the size is checked against the root `/api/info` `uploadBytes`, which the
+// playground passes as `api.info.host`, before anything is sent) or from a path on the server's machine (the JSON form). Sources: a packed snapshot
 // (full or layer), a Store, GraphSON or GraphML; the format is detected unless chosen. Request
 // and rules: ./admin-api.js `importRequest`, `uploadImport`. The server's `error`/`help` (a `413`
 // included) stay shown; Cancel aborts a running upload. "Import as a base" sends `role=base`
@@ -13,7 +13,8 @@ import {
   importRequest, uploadImport, uploadLimit, uploadSizeProblem, progressText, suggestName,
   outcomeText, needsModelHint, bytesText, baseNames, IMPORT_FORMATS, BASE_IS_FROZEN,
 } from './admin-api.js';
-import { admin, ROOT, headers, list, root, ensureLoaded, ensureRootInfo, reload, noticeClass } from './shared.js';
+import { admin, ROOT, headers, list, ensureLoaded, reload, noticeClass } from './shared.js';
+import { hostInfo } from './databases.js';
 
 const freshForm = () => ({ source: 'upload', file: null, path: '', name: '', base: '', format: '', description: '', role: 'normal' });
 
@@ -28,7 +29,7 @@ export default {
     let nameTouched = false;
 
     const bases = computed(() => baseNames(list.rows));
-    const limit = computed(() => uploadLimit(root.info));
+    const limit = computed(() => uploadLimit(hostInfo(props.api)));
     const fileProblem = computed(() => (form.source === 'upload' && form.file ? uploadSizeProblem(form.file.size, limit.value) : null));
     const percent = computed(() => (s.total > 0 ? Math.min(100, (s.loaded / s.total) * 100) : 0));
 
@@ -98,7 +99,7 @@ export default {
       reset();
     }
 
-    onMounted(() => Promise.all([ensureLoaded(), ensureRootInfo()]));
+    onMounted(ensureLoaded);
 
     return {
       form, s, notice, fileInput, bases, limit, fileProblem, percent, cancel, submit, pickFile, pathChanged, noticeClass,

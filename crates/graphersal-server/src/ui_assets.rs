@@ -1,8 +1,9 @@
 //! The server's own browser UI, built into the binary: the `server` UI profile
 //! (`crates/graphersal-server/ui/profile.json`, delivered as `uiProfile` of the root `GET
 //! /api/info`) and its modules (the Databases, Backups, Import, Export and Models tabs over the
-//! admin API), served by the router under [`FILES_PREFIX`] before the embedded playground; the
-//! root `index.html` gets [`BOOT_TAGS`] (the profile's style sheet). `ui/tests/` stays out: the
+//! admin API), served by the router under [`FILES_PREFIX`] before the embedded playground. The
+//! profile names its style sheet in `styles` (the playground links it once the profile is
+//! resolved), so the root serves the embedded `index.html` unchanged. `ui/tests/` stays out: the
 //! `node --test` tests of the pure modules.
 
 use serde_json::Value;
@@ -10,10 +11,6 @@ use serde_json::Value;
 /// The path the profile's files are served under (the profile's `files` is the same path
 /// relative to the page at `/`).
 pub(crate) const FILES_PREFIX: &str = "/server-ui/";
-
-/// What the root `index.html` gets after `<head>`: the profile's style sheet (relative, so a
-/// proxy prefix in front of the server keeps working).
-pub(crate) const BOOT_TAGS: &str = "\n  <link rel=\"stylesheet\" href=\"server-ui/server-ui.css\">";
 
 /// The profile object.
 const PROFILE: &str = include_str!("../ui/profile.json");
@@ -64,19 +61,6 @@ fn content_type(name: &str) -> &'static str {
     }
 }
 
-/// `html` (the playground's `index.html`) with [`BOOT_TAGS`] after its `<head>`; unchanged
-/// when it has none.
-pub(crate) fn with_boot_tags(html: Vec<u8>) -> Vec<u8> {
-    let text = String::from_utf8_lossy(&html);
-    match text.find("<head>") {
-        Some(at) => {
-            let at = at + "<head>".len();
-            format!("{}{BOOT_TAGS}{}", &text[..at], &text[at..]).into_bytes()
-        }
-        None => html,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -90,6 +74,12 @@ mod tests {
             format!("/{}", profile["files"].as_str().unwrap()),
             FILES_PREFIX
         );
+        let styles = profile["styles"].as_array().unwrap();
+        assert_eq!(styles.len(), 1);
+        for style in styles {
+            let style = style.as_str().unwrap();
+            assert_eq!(file(style).map(|f| f.1), Some("text/css; charset=utf-8"));
+        }
         let tabs = profile["tabs"].as_array().unwrap();
         assert_eq!(tabs.len(), 5);
         for tab in tabs {
@@ -113,15 +103,5 @@ mod tests {
         assert_eq!(file("server-ui.css").unwrap().1, "text/css; charset=utf-8");
         assert!(file("../x.js").is_none());
         assert!(file("tests/profile.test.mjs").is_none());
-    }
-
-    #[test]
-    fn boot_tags_go_after_head() {
-        let html = with_boot_tags(b"<html><head><title>x</title></head></html>".to_vec());
-        let text = String::from_utf8(html).unwrap();
-        assert!(text.starts_with(
-            "<html><head>\n  <link rel=\"stylesheet\" href=\"server-ui/server-ui.css\"><title>"
-        ));
-        assert_eq!(with_boot_tags(b"no head".to_vec()), b"no head".to_vec());
     }
 }

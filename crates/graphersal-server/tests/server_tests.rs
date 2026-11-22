@@ -191,6 +191,7 @@ fn serve_answers_refuses_a_second_server_and_stops_cleanly() {
     let (status, body) = get(info.address, "/api/info");
     assert_eq!(status, 200, "{body}");
     let info_json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(info_json["server"], "graphersal-server");
     assert_eq!(info_json["uiProfile"]["name"], "server");
     assert_eq!(info_json["experimental"], true);
     let (status, _) = get(info.address, "/");
@@ -476,13 +477,13 @@ fn databases_are_served_under_their_names_and_aliases() {
     running.registry().alias_set("current", "b").unwrap();
     assert_eq!(execute(address, "current", "g.v().count().next()"), 6);
 
-    // Per-database info: the mount, the real name, the admin API.
+    // Per-database info: the mount, the real name, the link home.
     let (status, _, body) = call(address, "GET", "/db/a/api/info", &[], "");
     assert_eq!(status, 200, "{body}");
     let info = json(&body);
     assert_eq!(info["mountPath"], "/db/a");
     assert_eq!(info["database"], "a");
-    assert_eq!(info["admin"], true);
+    assert!(info.get("admin").is_none());
     assert_eq!(info["home"], "/");
     let info = json(&call(address, "GET", "/db/current/api/info", &[], "").2);
     assert_eq!(info["database"], "b", "an alias shows the real database");
@@ -490,8 +491,9 @@ fn databases_are_served_under_their_names_and_aliases() {
     // The root info delivers the server's own UI profile (no graph, no landing view).
     let root = json(&get(address, "/api/info").1);
     assert!(root.get("admin").is_none());
-    assert_eq!(root["server"], "graphersal-dev");
-    assert_eq!(root["product"], "graphersal-server");
+    assert_eq!(root["server"], "graphersal-server");
+    assert_eq!(root["protocol"], "graphersal/1");
+    assert!(root.get("product").is_none());
     assert_eq!(root["uiProfile"]["name"], "server");
     assert_eq!(root["uiProfile"]["version"], env!("CARGO_PKG_VERSION"));
     assert!(root.get("mountPath").is_none());
@@ -512,7 +514,7 @@ fn databases_are_served_under_their_names_and_aliases() {
     assert_eq!(status, 308);
     assert_eq!(header_of(&head, "Location"), Some("/db/a/?x=1"));
 
-    // The playground under each mount and at the root (its landing view).
+    // The playground under each mount and at the root (the `server` profile).
     for prefix in ["/db/a/", "/"] {
         let (status, head, body) = call(address, "GET", prefix, &[], "");
         assert_eq!(status, 200, "{prefix}");
@@ -529,18 +531,12 @@ fn databases_are_served_under_their_names_and_aliases() {
             Some("text/javascript; charset=utf-8")
         );
     }
-    // The root page carries the profile's style sheet, a mount's page does not; the profile's
-    // files are served under /server-ui/.
-    assert!(
-        call(address, "GET", "/", &[], "")
-            .2
-            .contains("server-ui/server-ui.css")
-    );
-    assert!(
-        !call(address, "GET", "/db/a/", &[], "")
-            .2
-            .contains("server-ui/server-ui.css")
-    );
+    // The root page is the embedded index.html unchanged (the profile names its style sheet
+    // in `styles`), the same page as a mount's; the profile's files are served under
+    // /server-ui/.
+    let root_page = call(address, "GET", "/", &[], "").2;
+    assert!(!root_page.contains("server-ui/"), "{root_page}");
+    assert_eq!(root_page, call(address, "GET", "/db/a/", &[], "").2);
     let (status, head, body) = call(address, "GET", "/server-ui/profile.json", &[], "");
     assert_eq!(status, 200);
     assert_eq!(
@@ -548,6 +544,13 @@ fn databases_are_served_under_their_names_and_aliases() {
         Some("application/json; charset=utf-8")
     );
     assert_eq!(json(&body)["name"], "server");
+    assert_eq!(json(&body)["styles"][0], "server-ui.css");
+    let (status, head, _) = call(address, "GET", "/server-ui/server-ui.css", &[], "");
+    assert_eq!(status, 200);
+    assert_eq!(
+        header_of(&head, "Content-Type"),
+        Some("text/css; charset=utf-8")
+    );
     assert_eq!(call(address, "GET", "/server-ui/none.js", &[], "").0, 404);
     assert_eq!(
         call(address, "POST", "/server-ui/shared.js", &[], "").0,

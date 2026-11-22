@@ -6,7 +6,7 @@
 import { reactive } from 'vue';
 import { createAdmin } from './admin-api.js';
 import {
-  fetchDatabases, fetchRootInfo, anyLoading, databaseRows, hostHeaders, LANDING_POLL_MS,
+  fetchDatabases, anyLoading, databaseRows, hostHeaders, LANDING_POLL_MS,
 } from './databases.js';
 
 /** The server root: the profile's files are served under `<root>/server-ui/`. Relative, so a
@@ -39,9 +39,6 @@ export const noticeClass = (n) => (n.tone === 'ok' ? 'info' : n.tone === 'warn' 
 export const list = reactive({
   rows: [], aliases: [], problems: [], skipped: 0, error: null, loading: false, loaded: false, version: 0,
 });
-
-/** The root `GET /api/info` (its `uploadBytes`), read once. */
-export const root = reactive({ info: {}, read: false });
 
 let timer = null;
 let pending = null;
@@ -84,14 +81,6 @@ export function patchRow(entry) {
   const [row] = databaseRows({ databases: [entry] }).rows;
   if (!row) return;
   list.rows = list.rows.map((r) => (r.name === row.name && !r.aliasOf ? row : r));
-}
-
-/** Reads the root info once. */
-export async function ensureRootInfo() {
-  if (root.read) return root.info;
-  root.info = await fetchRootInfo({ base: ROOT, fetch: fetchFn, headers });
-  root.read = true;
-  return root.info;
 }
 
 /** The link to the playground of a list row (`db/<name>/` on the server root). */
