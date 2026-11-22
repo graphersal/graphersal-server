@@ -67,12 +67,13 @@ With a server running on `DIR` the command goes to its admin API (address from
 | `db delete NAME` | an unloaded database, moved to `DIR/trash/` |
 | `db clone SOURCE NAME` | a fork of SOURCE's latest state (it may be loaded) |
 | `db load NAME [--no-wait]`, `db unload NAME` | running server only |
+| `db promote NAME` | an unloaded plain database becomes a base (read-only, frozen for good) |
 | `db read-only NAME on\|off`, `db auto-load NAME on\|off` | flags, persisted; read-only applies at once |
 | `db alias set ALIAS DATABASE`, `db alias remove ALIAS` | aliases (a flip takes effect at once) |
 | `db backup NAME`, `db backups NAME` | verified ZIP backups in `DIR/backups/NAME/` |
 | `db restore NAME BACKUP [--name NEW]` | over NAME (unloaded) or into the new database NEW |
 | `db export NAME --out FILE [--no-models] [--materialize]` | a packed snapshot (`.gsnap`) |
-| `import DIR SOURCE --name NAME [--base BASE] [--format F] [--description TEXT]` | a new database from a `.gsnap`, a Store (directory or `.gstore`), GraphSON or GraphML |
+| `import DIR SOURCE --name NAME [--base BASE] [--format F] [--description TEXT] [--role normal\|base]` | a new database from a `.gsnap`, a Store (directory or `.gstore`), GraphSON or GraphML; `--role base` makes a base of a plain source |
 | `models list`, `models add SOURCE [--repo R] [--license L]`, `models remove REPO` | the shared embedding models |
 
 `graphersal-server --help` has the details. Exit codes: `0` ok, `1` failed (the error and a
@@ -118,11 +119,14 @@ every file and key: [`docs/server-dir.md`](docs/server-dir.md).
 
 - **No access control** (see above): loopback only. The MCP token is the only secret, and it
   guards only the MCP endpoints.
-- A **base cannot be edited** (by design: layers depend on its exact state). The API and the
-  console create a base EMPTY (`db create NAME --role base`), and an import always makes a plain
-  database or a layer. A base with data is made by hand: build a plain database (create and
-  write, or import), stop the server, set `role = "base"` and `read_only = true` in its
-  `databases/<name>/database.toml`, start the server again.
+- A **base is frozen forever** (by design: layers depend on its exact state). A base with data
+  comes from an import with role base (`import ... --role base`, `POST /api/admin/import?...
+  &role=base`) or from promoting an unloaded plain database (`db promote NAME`, `POST
+  /api/admin/databases/<name>/promote`). Promotion is one way: no command turns a base back
+  into an ordinary database. To change a base's data, build a new base (clone it before
+  promoting, or import again) and rebuild the layers over it. A base cannot get an embedding
+  model later, so a source naming a model it does not carry is refused as a base: import it
+  as an ordinary database, add the model, then promote it.
 - A **layer `.gsnap` export carries no models** (an engine rule); export the layer with
   `materialize=true` (`--materialize`) for a standalone snapshot with the models.
 - An **upload declaring more than the upload limit** gets its `413`, but the server abandons

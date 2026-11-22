@@ -3,8 +3,9 @@
 #
 # Builds the binary, makes a server directory in a temporary directory, serves it on
 # 127.0.0.1:0 (the URL read from server.run) and walks through the admin API, the database
-# pages, the MCP endpoint and a clean stop. Prints one `ok <step>` line per step, or
-# `FAIL <step>: <why>` and exits 1 at the first failure. The server is killed on any exit.
+# pages (with a promotion to a base and a layer over it), the MCP endpoint and a clean stop.
+# Prints one `ok <step>` line per step, or `FAIL <step>: <why>` and exits 1 at the first
+# failure. The server is killed on any exit.
 #
 # Needs only bash, curl, python3 (JSON parsing) and the standard tools.
 #
@@ -299,6 +300,31 @@ expect_json state unloaded
 load acme-imported
 execute acme-imported 'g.v().has_label("person").count().next()'
 [ "$RESULT" = 1 ] || fail "acme-imported counts $RESULT"
+ok
+
+STEP="promote + layer sees base data"
+req POST /api/admin/databases/acme-restored/promote
+expect_status 409
+expect_body_contains "unload"
+req POST /api/admin/databases/acme-restored/unload
+expect_status 200
+req POST /api/admin/databases/acme-restored/promote
+expect_status 200
+expect_json role base
+expect_json readOnly true
+jreq POST /api/admin/databases '{"name": "restored-l", "base": "acme-restored"}'
+expect_status 201
+load restored-l
+execute restored-l 'g.v().has_label("person").count().next()'
+[ "$RESULT" = 1 ] || fail "restored-l sees $RESULT persons of its base, expected 1"
+execute restored-l 'g.add_v("person").property("name", "dan").iterate()'
+execute restored-l 'g.v().has_label("person").count().next()'
+[ "$RESULT" = 2 ] || fail "restored-l counts $RESULT after its own write, expected 2"
+req POST "/api/admin/import?name=acme-base&role=base" \
+  -H 'Content-Type: application/octet-stream' --data-binary "@$WORK/acme.gsnap"
+expect_status 201
+expect_json role base
+expect_json readOnly true
 ok
 
 STEP="models list"

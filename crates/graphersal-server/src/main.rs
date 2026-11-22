@@ -3,8 +3,8 @@
 //! ```text
 //! graphersal-server init DIR
 //! graphersal-server serve --dir DIR [--listen ADDR]
-//! graphersal-server db list|create|delete|clone|load|unload|read-only|auto-load|alias|backup|backups|restore|export ... --dir DIR [--json]
-//! graphersal-server import DIR SOURCE --name NAME [--base BASE] [--format F] [--description TEXT] [--json]
+//! graphersal-server db list|create|delete|clone|load|unload|promote|read-only|auto-load|alias|backup|backups|restore|export ... --dir DIR [--json]
+//! graphersal-server import DIR SOURCE --name NAME [--base BASE] [--format F] [--description TEXT] [--role normal|base] [--json]
 //! graphersal-server models list|add|remove ... --dir DIR [--json]
 //! ```
 //!
@@ -48,6 +48,10 @@ Usage:
         db clone SOURCE NAME     a fork of SOURCE's latest state (it may be loaded)
         db load NAME [--no-wait] (running server only)
         db unload NAME           (running server only)
+        db promote NAME
+            The unloaded plain database NAME becomes a base (role=base, read-only): the
+            frozen graph layers are made over (db create L --base NAME). One way: a base
+            is frozen forever; nothing turns it back into an ordinary database.
         db read-only NAME on|off
         db auto-load NAME on|off
         db alias set ALIAS DATABASE
@@ -65,13 +69,15 @@ Usage:
             models) unless --materialize (a standalone full snapshot).
       --json prints the admin API's JSON answer instead of text.
   graphersal-server import DIR SOURCE --name NAME [--base BASE] [--format FORMAT]
-                    [--description TEXT] [--json]
+                    [--description TEXT] [--role normal|base] [--json]
       Import SOURCE into DIR as the new database NAME: a packed snapshot (.gsnap; a layer
       snapshot needs a role=base database with its base identity, --base names it), a Store
       directory or .gstore file (copied into a directory Store), or a GraphSON (.json,
       .jsonl, .graphson) or GraphML (.xml, .graphml) file. FORMAT (snapshot, store,
       graphson, graphml) overrides the detection. A snapshot naming an embedding model it
-      does not carry becomes a needs-model database. Through a running server the server
+      does not carry becomes a needs-model database. --role base makes a base (read-only,
+      frozen for good) of a plain source (not of a layer, nor of a source naming a model it
+      does not carry). Through a running server the server
       reads SOURCE itself (same machine).
   graphersal-server models COMMAND ... --dir DIR [--json]
       The shared embedding models of DIR (one copy in DIR/models/blobs/, hard-linked into
@@ -356,7 +362,7 @@ fn import_command(args: &[String]) -> ExitCode {
             None => (arg.clone(), None),
         };
         match flag.as_str() {
-            "--name" | "--base" | "--format" | "--description" => {
+            "--name" | "--base" | "--format" | "--description" | "--role" => {
                 let Some(value) = inline.or_else(|| rest.next().cloned()) else {
                     return usage_error(&format!("import: {flag} needs a value"));
                 };
@@ -388,9 +394,17 @@ fn import_command(args: &[String]) -> ExitCode {
             return ExitCode::from(EXIT_FAILED);
         }
     };
+    let role = match value("--role").as_deref() {
+        None => DatabaseRole::Normal,
+        Some(word) => match DatabaseRole::parse(word) {
+            Some(role) => role,
+            None => return usage_error(&format!("import: --role is normal or base, not {word:?}")),
+        },
+    };
     let command = DbCommand::Import {
         source,
         name,
+        role,
         base: value("--base"),
         format: value("--format"),
         description: value("--description"),
@@ -546,6 +560,9 @@ fn parse_db(
             wait: !switch("--no-wait"),
         },
         ["unload", name] => DbCommand::Unload {
+            name: name.to_string(),
+        },
+        ["promote", name] => DbCommand::Promote {
             name: name.to_string(),
         },
         ["read-only", name, word] => DbCommand::ReadOnly {

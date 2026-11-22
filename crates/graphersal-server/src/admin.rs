@@ -131,6 +131,25 @@ impl Registry {
         })
     }
 
+    /// The registry half of a promotion ([`crate::ops::Admin::promote`]): the plain, ordinary
+    /// database `name` becomes `role = "base"` with `read_only = true`, written to its
+    /// `database.toml`. Refused for a layer, a base, and a database that is not `unloaded`
+    /// (the caller holds the loader idle meanwhile). One way: nothing turns a base back.
+    pub fn promote_to_base(&self, name: &str) -> Result<DatabaseEntry, ServerError> {
+        let state = self.get(name)?.state;
+        self.update_config(name, |_, config| {
+            if let Some(message) = promote_refusal(config, &state) {
+                return Err(ServerError::Refused {
+                    name: fold(name),
+                    message,
+                });
+            }
+            config.role = DatabaseRole::Base;
+            config.read_only = true;
+            Ok(())
+        })
+    }
+
     /// Clears the `needs_model` marker of the database `name` (a load found every model it
     /// needs); nothing is written when it has none.
     pub fn clear_needs_model(&self, name: &str) -> Result<(), ServerError> {
@@ -509,6 +528,29 @@ fn refuse_broken_aliases(inner: &Inner) -> Result<(), ServerError> {
             message: format!("{reason}; fix the file and restart the server"),
         }),
         None => Ok(()),
+    }
+}
+
+/// Why the database with `config` in `state` cannot become a base, or `None` when it can.
+pub(crate) fn promote_refusal(config: &DatabaseConfig, state: &DbState) -> Option<String> {
+    if config.kind == DatabaseKind::Layer {
+        return Some(
+            "a layer cannot become a base (its data lives over another base); export it \
+             materialized and import the file with role = base"
+                .to_string(),
+        );
+    }
+    if config.role == DatabaseRole::Base {
+        return Some("it is a base already".to_string());
+    }
+    match state {
+        DbState::Unloaded => None,
+        DbState::Loading | DbState::Loaded => Some("it is loaded; unload it first".to_string()),
+        DbState::NeedsModel { repo } => Some(format!(
+            "it needs the embedding model '{repo}'; add it first (a base is frozen, so no model \
+             can be added to it later)"
+        )),
+        DbState::Failed { reason } => Some(format!("it is failed ({reason})")),
     }
 }
 

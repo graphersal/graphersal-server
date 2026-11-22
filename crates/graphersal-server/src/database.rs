@@ -77,6 +77,16 @@ impl DatabaseRole {
             DatabaseRole::Base => "base",
         }
     }
+
+    /// The role a name gives (`"normal"`, `"base"`, case-insensitive); `None` for anything
+    /// else.
+    pub fn parse(name: &str) -> Option<Self> {
+        match name.trim().to_ascii_lowercase().as_str() {
+            "normal" => Some(DatabaseRole::Normal),
+            "base" => Some(DatabaseRole::Base),
+            _ => None,
+        }
+    }
 }
 
 /// The contents of `database.toml` (module docs).

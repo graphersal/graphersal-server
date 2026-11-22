@@ -72,14 +72,15 @@ A `failed` database whose `database.toml` cannot be read has only `name`, `state
 | POST | `/api/admin/databases/<name>/clone` | `{"name"}` | `201` entry of the new database |
 | POST | `/api/admin/databases/<name>/load` | | `202` entry + `"load": "started"` or `"already-loading"`; `200` entry + `"load": "already-loaded"` |
 | POST | `/api/admin/databases/<name>/unload` | | `200` entry + `"unloaded": true` (was loaded) or `false` (was not) |
+| POST | `/api/admin/databases/<name>/promote` | | `200` entry (`role: base`, `readOnly: true`; one way) |
 | PUT | `/api/admin/databases/<name>/read-only` | `{"readOnly": bool}` | `200` entry |
 | PUT | `/api/admin/databases/<name>/auto-load` | `{"autoLoad": bool}` | `200` entry |
 | POST | `/api/admin/databases/<name>/backup` | | `201` backup |
 | GET | `/api/admin/databases/<name>/backups` | | `200 {"database", "backups": [backup...]}` (oldest first; also for the name of a deleted database) |
 | POST | `/api/admin/databases/<name>/restore` | `{"backup", "name"?}` | `201` entry + `"restoredFrom": {"database", "backup"}`, `"replaced": bool`, `"trash"` (when replaced) |
 | GET | `/api/admin/databases/<name>/export?models=true\|false&materialize=true\|false` | | `200` the `.gsnap` file as a download |
-| POST | `/api/admin/import?name=<n>&base=<b>&format=<f>&description=<d>` | the file itself (`Content-Type: application/octet-stream`, or anything but JSON) | `201` entry + `"import"` |
-| POST | `/api/admin/import` | JSON `{"path", "name", "base"?, "format"?, "description"?}` | `201` entry + `"import"` |
+| POST | `/api/admin/import?name=<n>&base=<b>&format=<f>&description=<d>&role=<normal\|base>` | the file itself (`Content-Type: application/octet-stream`, or anything but JSON) | `201` entry + `"import"` |
+| POST | `/api/admin/import` | JSON `{"path", "name", "base"?, "format"?, "description"?, "role"?}` | `201` entry + `"import"` |
 | GET | `/api/admin/models` | | `200 {"models": [model...], "missing": [{"database", "model"}...]}` |
 | POST | `/api/admin/models` | `{"path"?, "repo"?, "license"?}` | `201` (from a path) or `200` (a repository) `{"added": [model...], "resolved": [database...], "stillMissing": [{"database", "model"}...], "notes": [string...]}` |
 | DELETE | `/api/admin/models/<repo or blob hash>` | | `200 {"model", "removed": [blob...], "bytes"}` |
@@ -127,6 +128,24 @@ is not loaded answer `409 {"error", "help": "load it: POST /api/admin/databases/
 
 `unload` answers once the database is unloaded: running requests and scheduled jobs get up to
 30 s, then its Store is closed. Unloading a base that loaded layers use is refused (`409`).
+
+### Promote
+
+`POST /api/admin/databases/<name>/promote` (no body) turns an UNLOADED plain database into a
+base: `role` becomes `base` and `readOnly` `true` in its `database.toml`; its data stays as it
+is, and layers can be created over it at once (`POST /api/admin/databases {"name", "base":
+"<name>"}`). A layer binds to the base's identity (its graph id and last commit), and nothing
+writes a base's Store after this (a base is never opened for writing: it is served as an
+empty, read-only layer over the shared base), so that identity stays fixed.
+
+**A base is frozen forever** (a design decision): promotion is one way, and no route turns a
+base back into an ordinary database. To change a base's data, build a new base (clone the
+database before promoting it, or import again) and rebuild the layers over the new one.
+
+Refused with `409`: a database that is loaded, being loaded or unloaded (help: `POST
+.../unload`, then promote again); a layer (help: export it with `materialize=true` and import
+the file with `role=base`); a base; a `needs-model` database (help: add the model first; a
+base cannot get a model later); a failed one. An unknown name is `404`.
 
 ### Read-only and auto-load
 
@@ -206,7 +225,8 @@ A new database from another one, in two forms:
   request body (`Content-Type: application/octet-stream`; not multipart) and a
   `Content-Length`. Query parameters (URL-encoded): `name` (required), `base` (a layer's base
   database), `format` (`snapshot`, `store`, `graphson`, `graphml`; default: detected),
-  `description`; any other parameter `400`. The body is streamed into `tmp/upload-*.bin`, never
+  `description`, `role` (`normal`, the default, or `base`; anything else `400` before the body
+  is read); any other parameter `400`. The body is streamed into `tmp/upload-*.bin`, never
   held in memory, imported, then removed. Its size limit is `server.toml`'s
   `[limits] upload_bytes` (default 4 GiB), announced as `uploadBytes` by the root
   `GET /api/info`: check the file's size against it before sending. A body over the limit is
@@ -218,7 +238,7 @@ A new database from another one, in two forms:
   itself runs within the request (the answer comes when the database is written).
 - **Path** (the console while a server runs): `POST /api/admin/import` with
   `Content-Type: application/json` and `{"path": "/absolute/path", "name", "base"?, "format"?,
-  "description"?}`: the server reads the file or directory on its own machine. A relative path
+  "description"?, "role"?}`: the server reads the file or directory on its own machine. A relative path
   is `400`, a missing one `404`.
 
 Sources, detected from the content (a file name never decides a snapshot):
@@ -233,6 +253,12 @@ Sources, detected from the content (a file name never decides a snapshot):
 Without an extension (an upload) a file that is neither a snapshot nor a Store is GraphSON when
 its first character is `{` or `[`, GraphML when it is `<`; anything else is `415`. `base` for a
 source that is not a layer is `400`; a file that does not read as its format `400`.
+
+`role=base` makes the new database a base (`role: base`, `readOnly: true`, frozen forever, see
+Promote) holding the source's data. Only a plain source becomes a base: a full snapshot, a
+plain Store, GraphSON or GraphML. A layer source (layer snapshot or layer Store) is `400`; a
+source naming an embedding model it does not carry is `409` (a base cannot get a model later;
+help: import it as an ordinary database, add the model, then promote it).
 
 The answer is the new entry (state `unloaded`, or `needs-model`) with `"import"`:
 
@@ -297,19 +323,20 @@ names it in its Store's catalog.
 
 Besides the cases above, a taken name (create, clone, restore, alias) answers help naming the
 listing; `PUT .../read-only {"readOnly": false}` on a base names the layer to create instead;
-deleting a base that layers name names each layer's `DELETE`; unloading a base that loaded
+deleting a base that layers name names each layer's `DELETE`; a refused promotion names the
+unload, the materialized export or the model to add (see Promote); unloading a base that loaded
 layers use names each layer's `unload`.
 
 ## Console
 
 ```
 graphersal-server db list | create NAME [...] | delete NAME | clone SOURCE NAME --dir DIR [--json]
-graphersal-server db load NAME [--no-wait] | unload NAME --dir DIR [--json]
+graphersal-server db load NAME [--no-wait] | unload NAME | promote NAME --dir DIR [--json]
 graphersal-server db read-only NAME on|off | auto-load NAME on|off --dir DIR [--json]
 graphersal-server db alias set ALIAS DATABASE | alias remove ALIAS --dir DIR [--json]
 graphersal-server db backup NAME | backups NAME | restore NAME BACKUP [--name NEW] --dir DIR [--json]
 graphersal-server db export NAME --out FILE [--no-models] [--materialize] --dir DIR [--json]
-graphersal-server import DIR SOURCE --name NAME [--base BASE] [--format F] [--description TEXT] [--json]
+graphersal-server import DIR SOURCE --name NAME [--base BASE] [--format F] [--description TEXT] [--role normal|base] [--json]
 graphersal-server models list | add SOURCE [--repo R] [--license L] | remove REPO --dir DIR [--json]
 ```
 
