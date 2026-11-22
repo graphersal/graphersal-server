@@ -5,6 +5,7 @@
 //! graphersal-server serve --dir DIR [--listen ADDR]
 //! graphersal-server db list|create|delete|clone|load|unload|read-only|auto-load|alias|backup|backups|restore|export ... --dir DIR [--json]
 //! graphersal-server import DIR SOURCE --name NAME [--base BASE] [--format F] [--description TEXT] [--json]
+//! graphersal-server models list|add|remove ... --dir DIR [--json]
 //! ```
 //!
 //! stdout carries only results, stderr diagnostics and the log. Exit codes: `0` ok, `1` the
@@ -72,6 +73,17 @@ Usage:
       graphson, graphml) overrides the detection. A snapshot naming an embedding model it
       does not carry becomes a needs-model database. Through a running server the server
       reads SOURCE itself (same machine).
+  graphersal-server models COMMAND ... --dir DIR [--json]
+      The shared embedding models of DIR (one copy in DIR/models/blobs/, hard-linked into
+      every database holding it; copied with a warning where the file system has no hard
+      links). Through a running server like db.
+        models list              every model, its size and the databases using it
+        models add SOURCE [--repo REPO] [--license SPDX]
+            SOURCE: a Model2Vec model directory or a .gsnap carrying models (--repo and
+            --license for a directory that does not name them), or the repository of a model
+            the shared models hold. Every needs-model database whose model is then there
+            gets it and can be loaded.
+        models remove REPO       refused while a database uses it
   graphersal-server --help | --version
 
 Log level: RUST_LOG (default info).";
@@ -92,6 +104,7 @@ fn main() -> ExitCode {
         Some("serve") => serve_command(&args[1..]),
         Some("db") => db_command(&args[1..]),
         Some("import") => import_command(&args[1..]),
+        Some("models") => models_command(&args[1..]),
         Some(other) => usage_error(&format!("unknown command {other:?}")),
     }
 }
@@ -383,6 +396,96 @@ fn import_command(args: &[String]) -> ExitCode {
         description: value("--description"),
     };
     let dir = match ServerDir::open(dir) {
+        Ok(dir) => dir,
+        Err(err) => {
+            eprintln!("Error: {err}");
+            return ExitCode::from(EXIT_FAILED);
+        }
+    };
+    print_outcome(&dir, &command, json)
+}
+
+/// `models list|add|remove ... --dir DIR`.
+fn models_command(args: &[String]) -> ExitCode {
+    let mut positional: Vec<&String> = Vec::new();
+    let mut values: Vec<(String, String)> = Vec::new();
+    let mut json = false;
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        if !arg.starts_with("--") {
+            positional.push(arg);
+            continue;
+        }
+        let (flag, inline) = match arg.split_once('=') {
+            Some((flag, value)) => (flag.to_string(), Some(value.to_string())),
+            None => (arg.clone(), None),
+        };
+        match flag.as_str() {
+            "--dir" | "--repo" | "--license" => {
+                let Some(value) = inline.or_else(|| rest.next().cloned()) else {
+                    return usage_error(&format!("models: {flag} needs a value"));
+                };
+                if values.iter().any(|(f, _)| *f == flag) {
+                    return usage_error(&format!("models: {flag} given twice"));
+                }
+                values.push((flag, value));
+            }
+            "--json" if inline.is_none() => json = true,
+            _ => return usage_error(&format!("models: unknown argument {arg:?}")),
+        }
+    }
+    let value = |flag: &str| {
+        values
+            .iter()
+            .find(|(f, _)| f == flag)
+            .map(|(_, v)| v.clone())
+    };
+    let Some(dir) = value("--dir") else {
+        return usage_error("models needs --dir DIR");
+    };
+    let words: Vec<&str> = positional.iter().map(|s| s.as_str()).collect();
+    let add_flags = value("--repo").is_some() || value("--license").is_some();
+    let command = match words.as_slice() {
+        ["list"] if !add_flags => DbCommand::ModelsList,
+        ["add", source] => {
+            let path = std::path::Path::new(source);
+            if path.exists() {
+                match std::path::absolute(path) {
+                    Ok(path) => DbCommand::ModelsAdd {
+                        path: Some(path),
+                        repo: value("--repo"),
+                        license: value("--license"),
+                    },
+                    Err(err) => {
+                        eprintln!("Error: cannot resolve {source}: {err}");
+                        return ExitCode::from(EXIT_FAILED);
+                    }
+                }
+            } else if add_flags {
+                eprintln!("Error: {source} does not exist");
+                return ExitCode::from(EXIT_FAILED);
+            } else {
+                // Not a path: the repository of a model the shared models hold.
+                DbCommand::ModelsAdd {
+                    path: None,
+                    repo: Some(source.to_string()),
+                    license: None,
+                }
+            }
+        }
+        ["remove", model] if !add_flags => DbCommand::ModelsRemove {
+            model: model.to_string(),
+        },
+        [] => return usage_error("no models command given"),
+        _ => {
+            return usage_error(&format!(
+                "unknown command or wrong arguments: models {} (list, add SOURCE [--repo R] \
+                 [--license L], remove REPO)",
+                words.join(" ")
+            ));
+        }
+    };
+    let dir = match ServerDir::open(&dir) {
         Ok(dir) => dir,
         Err(err) => {
             eprintln!("Error: {err}");

@@ -18,6 +18,9 @@
 //! | GET | `databases/<name>/export?models=true\|false&materialize=true\|false` | | `200` the `.gsnap` file (download) |
 //! | POST | `import?name=<n>&base=<b>&format=<f>&description=<d>` | the file itself (any content type but JSON) | `201` entry + `"import"` |
 //! | POST | `import` | JSON `{"path", "name", "base"?, "format"?, "description"?}` (a file or directory on the server's machine, absolute) | `201` entry + `"import"` |
+//! | GET | `models` | | `200 {"models": [model...], "missing": [{"database", "model"}...]}` (rebuilds `models/models.toml`) |
+//! | POST | `models` | `{"path"?, "repo"?, "license"?}` (`path`: a Model2Vec directory or a `.gsnap`, absolute, on the server's machine; `repo` alone: a model `models/` holds) | `201` (from a path) / `200` `{"added": [model...], "resolved": [database...], "stillMissing": [{"database", "model"}...], "notes": [text...]}` |
+//! | DELETE | `models/<repo or blob hash>` | | `200 {"model", "removed": [blob...], "bytes"}`; `409` while a database uses it |
 //! | GET | `aliases` | | `200 {"aliases": {alias: database}}` |
 //! | PUT | `aliases/<alias>` | `{"target"}` | `200 {"alias", "target"}` |
 //! | DELETE | `aliases/<alias>` | | `200 {"alias", "removed": true}` |
@@ -43,6 +46,21 @@
 //! "layerBase"?, "modelsMissing": [repo...], "skipped": n, "notes": [text...]}`; a database
 //! whose snapshot names a model it does not carry has the state `needs-model`.
 //!
+//! A model (one blob of `models/blobs/`): `repo`, `identity`, `license` (from the model's own
+//! manifest; `null` for a blob that is not a model archive), `blob` (SHA-256 hex), `bytes`,
+//! `users` (databases whose Store holds it), `waiting` (`needs-model` databases waiting for its
+//! repository), `copied` (bool) + `copiedIn` (users holding a COPY because the file system
+//! refused the hard link) + `linkWarning` (text, when copied), `links` (unix: its hard links).
+//! Adding a model resolves the `needs-model` databases whose model it is (state `unloaded`).
+//!
+//! The listing rows (`GET databases`, `GET databases/<name>`) add `sizeBytes` (the database's
+//! directory on disk; a model blob linked from `models/` counts in full in every database
+//! holding it, so the sum over databases is more than the disk use), `pooled: true` +
+//! `pooledBy: [layer...]` (a base held in the loader's pool by its loaded layers or itself) and
+//! `linkWarning` (some of its model blobs are copies, not links). `memoryBytes` is not given:
+//! a loaded database's memory is known only inside its session thread, which a listing does
+//! not wait for.
+//!
 //! An entry: `name`, `state` (`unloaded` | `loading` | `loaded` | `needs-model` | `failed`),
 //! `kind` (`plain` | `layer`), `role` (`normal` | `base`), `readOnly` (a base is always
 //! read-only), `autoLoad`, `description`, and when they apply `base` (a layer's base), `created`,
@@ -51,6 +69,7 @@
 //! that database's). A database whose `database.toml` cannot be read has no `kind`, `role`,
 //! `autoLoad` or `description`. The field names are those of the playground's landing view.
 
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
@@ -63,7 +82,8 @@ use crate::error::ServerError;
 use crate::loader::LoadStart;
 use crate::names::fold;
 use crate::ops::{
-    Admin, BackupInfo, CreateSpec, ExportFile, ExportSpec, ImportFormat, ImportSource, TmpFile,
+    Admin, BackupInfo, CreateSpec, ExportFile, ExportSpec, ImportFormat, ImportSource,
+    ModelAddSpec, TmpFile,
 };
 use crate::registry::{DatabaseEntry, DbState, Registry};
 
@@ -85,7 +105,7 @@ pub(crate) fn route(
     let read = matches!(method, Method::Get | Method::Head);
     let segments: Vec<&str> = endpoint.split('/').collect();
     let answer = match (method, segments.as_slice()) {
-        (_, ["databases"]) if read => Ok(Response::json(200, &list(registry))),
+        (_, ["databases"]) if read => Ok(Response::json(200, &list(admin))),
         (Method::Post, ["databases"]) => {
             let body: CreateBody = body_of(request)?;
             let name = body.name.clone();
@@ -93,10 +113,13 @@ pub(crate) fn route(
             admin
                 .create(&name, &spec)
                 .map(|entry| Response::json(201, &entry_json(&entry, None)))
-                .map_err(|err| (err, None))
+                .map_err(|err| {
+                    let help = name_taken_help(&err);
+                    (err, help)
+                })
         }
         (_, ["databases", name]) if read && !name.is_empty() => {
-            return one(registry, name)
+            return one(admin, name)
                 .map(|entry| Response::json(200, &entry))
                 .ok_or_else(|| HttpError::new(404, format!("no database or alias '{name}'")));
         }
@@ -120,7 +143,10 @@ pub(crate) fn route(
             admin
                 .clone_database(name, &body.name)
                 .map(|entry| Response::json(201, &entry_json(&entry, None)))
-                .map_err(|err| (err, None))
+                .map_err(|err| {
+                    let help = name_taken_help(&err);
+                    (err, help)
+                })
         }
         (Method::Post, ["databases", name, "load"]) => admin
             .load(name)
@@ -142,13 +168,19 @@ pub(crate) fn route(
                 entry["unloaded"] = Value::Bool(unloaded);
                 Ok(Response::json(200, &entry))
             })
-            .map_err(|err| (err, None)),
+            .map_err(|err| {
+                let help = unload_help(admin, name, &err);
+                (err, help)
+            }),
         (Method::Put, ["databases", name, "read-only"]) => {
             let body: ReadOnlyBody = body_of(request)?;
             admin
                 .set_read_only(name, body.read_only)
                 .map(|entry| Response::json(200, &entry_json(&entry, None)))
-                .map_err(|err| (err, None))
+                .map_err(|err| {
+                    let help = read_only_help(registry, name, body.read_only, &err);
+                    (err, help)
+                })
         }
         (Method::Put, ["databases", name, "auto-load"]) => {
             let body: AutoLoadBody = body_of(request)?;
@@ -186,7 +218,8 @@ pub(crate) fn route(
                 })
                 .map_err(|err| {
                     let target = body.name.as_deref().unwrap_or(name);
-                    let help = restore_help(registry, target, &err);
+                    let help =
+                        restore_help(registry, target, &err).or_else(|| name_taken_help(&err));
                     (err, help)
                 })
         }
@@ -196,6 +229,40 @@ pub(crate) fn route(
             } else {
                 import_upload(admin, request)
             };
+        }
+        (_, ["models"]) if read => admin
+            .models_index()
+            .map(|index| Response::json(200, &models_json(&index)))
+            .map_err(|err| (err, None)),
+        (Method::Post, ["models"]) => return model_add(admin, request),
+        (Method::Delete, ["models", rest @ ..])
+            if rest.iter().all(|s| !s.is_empty()) && !rest.is_empty() =>
+        {
+            let model = rest.join("/");
+            admin
+                .model_remove(&model)
+                .map(|removed| {
+                    Response::json(
+                        200,
+                        &json!({
+                            "model": removed.model,
+                            "removed": removed.blobs,
+                            "bytes": removed.bytes,
+                        }),
+                    )
+                })
+                .map_err(|err| {
+                    let help = match &err {
+                        ServerError::Refused { .. } => Some(
+                            "a database keeps the models it uses: delete those databases first \
+                             (DELETE /api/admin/databases/<name>), or remove the model from their \
+                             Stores"
+                                .to_string(),
+                        ),
+                        _ => None,
+                    };
+                    (err, help)
+                })
         }
         (_, ["aliases"]) if read => Ok(Response::json(
             200,
@@ -211,7 +278,10 @@ pub(crate) fn route(
                         &json!({ "alias": fold(alias), "target": fold(&body.target) }),
                     )
                 })
-                .map_err(|err| (err, None))
+                .map_err(|err| {
+                    let help = name_taken_help(&err);
+                    (err, help)
+                })
         }
         (Method::Delete, ["aliases", alias]) if !alias.is_empty() => admin
             .alias_remove(alias)
@@ -230,6 +300,7 @@ pub(crate) fn route(
         )
         | (_, ["aliases"])
         | (_, ["aliases", _])
+        | (_, ["models", ..])
         | (_, ["import"]) => return Err(not_allowed()),
         _ => {
             return Err(HttpError::new(
@@ -563,6 +634,7 @@ pub(crate) fn status_of(err: &ServerError) -> u16 {
     match err {
         ServerError::InvalidName { .. } | ServerError::InvalidInput { .. } => 400,
         ServerError::NotFound { .. }
+        | ServerError::ModelNotFound { .. }
         | ServerError::BackupNotFound { .. }
         | ServerError::SourceNotFound { .. } => 404,
         ServerError::UnsupportedSource { .. } => 415,
@@ -581,6 +653,11 @@ fn error_answer(err: &ServerError, help: Option<String>) -> Response {
         ServerError::NotFound { .. } => {
             Some("GET /api/admin/databases lists the databases and aliases".to_string())
         }
+        ServerError::ModelNotFound { .. } => Some(
+            "GET /api/admin/models lists the shared models; add one: POST /api/admin/models \
+             {\"path\": \"<model directory or .gsnap>\"}"
+                .to_string(),
+        ),
         ServerError::BackupNotFound { database, .. } => Some(format!(
             "GET /api/admin/databases/{database}/backups lists its backups"
         )),
@@ -602,14 +679,97 @@ fn delete_help(registry: &Registry, name: &str) -> Option<String> {
             "unload it first: POST /api/admin/databases/{key}/unload"
         ));
     }
-    let alias = registry
+    if let Some(alias) = registry
         .aliases()
         .into_iter()
-        .find(|(_, target)| *target == key)?;
-    Some(format!(
-        "remove the alias first: DELETE /api/admin/aliases/{}, or point it at another          database: PUT /api/admin/aliases/{} {{\"target\": \"<database>\"}}",
-        alias.0, alias.0
-    ))
+        .find(|(_, target)| *target == key)
+    {
+        return Some(format!(
+            "remove the alias first: DELETE /api/admin/aliases/{}, or point it at another \
+             database: PUT /api/admin/aliases/{} {{\"target\": \"<database>\"}}",
+            alias.0, alias.0
+        ));
+    }
+    let layers = layers_of(registry, &key);
+    (!layers.is_empty()).then(|| {
+        let steps: Vec<String> = layers
+            .iter()
+            .map(|l| format!("DELETE /api/admin/databases/{l}"))
+            .collect();
+        format!(
+            "it is the base of the layers {}: delete them first ({})",
+            layers.join(", "),
+            steps.join(", ")
+        )
+    })
+}
+
+/// The layers whose base is the database `key`.
+fn layers_of(registry: &Registry, key: &str) -> Vec<String> {
+    registry
+        .list()
+        .into_iter()
+        .filter(|e| {
+            e.config
+                .as_ref()
+                .is_some_and(|c| c.kind == DatabaseKind::Layer && c.base.as_deref() == Some(key))
+        })
+        .map(|e| e.name)
+        .collect()
+}
+
+/// The help of a name already taken (create, clone, restore, alias).
+fn name_taken_help(err: &ServerError) -> Option<String> {
+    matches!(err, ServerError::NameInUse { .. }).then(|| {
+        "choose another name: GET /api/admin/databases lists the taken names (databases and \
+         aliases share one namespace, case-insensitive)"
+            .to_string()
+    })
+}
+
+/// The help of a refused unload: a base that loaded layers use.
+fn unload_help(admin: &Admin, name: &str, err: &ServerError) -> Option<String> {
+    if !matches!(err, ServerError::Refused { .. }) {
+        return None;
+    }
+    let key = fold(name);
+    let layers: Vec<String> = admin
+        .pooled_users(&key)
+        .into_iter()
+        .filter(|user| *user != key)
+        .collect();
+    (!layers.is_empty()).then(|| {
+        let steps: Vec<String> = layers
+            .iter()
+            .map(|l| format!("POST /api/admin/databases/{l}/unload"))
+            .collect();
+        format!(
+            "the loaded layers {} use it as their base: unload them first ({})",
+            layers.join(", "),
+            steps.join(", ")
+        )
+    })
+}
+
+/// The help of a refused read-only change: a base is always read-only.
+fn read_only_help(
+    registry: &Registry,
+    name: &str,
+    read_only: bool,
+    err: &ServerError,
+) -> Option<String> {
+    let entry = registry.get(name).ok()?;
+    let base = entry
+        .config
+        .as_ref()
+        .is_some_and(|c| c.role == DatabaseRole::Base);
+    (!read_only && base && matches!(err, ServerError::Refused { .. })).then(|| {
+        format!(
+            "write into a layer over it instead: POST /api/admin/databases {{\"name\": \
+             \"<new>\", \"base\": \"{}\"}}",
+            entry.name
+        )
+    })
 }
 
 /// The help of a refused restore: unload the target first.
@@ -790,13 +950,15 @@ fn relative(root: &Path, path: &Path) -> String {
 }
 
 /// `GET /api/admin/databases`.
-fn list(registry: &Registry) -> Value {
+fn list(admin: &Admin) -> Value {
+    let registry = admin.registry();
     let entries = registry.list();
     let aliases = registry.aliases();
-    let mut databases: Vec<Value> = entries.iter().map(|e| entry_json(e, None)).collect();
+    let extras = Extras::of(admin);
+    let mut databases: Vec<Value> = entries.iter().map(|e| extras.row(e, None)).collect();
     for (alias, target) in &aliases {
         if let Some(entry) = entries.iter().find(|e| &e.name == target) {
-            databases.push(entry_json(entry, Some(alias)));
+            databases.push(extras.row(entry, Some(alias)));
         }
     }
     databases.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
@@ -808,14 +970,140 @@ fn list(registry: &Registry) -> Value {
 }
 
 /// `GET /api/admin/databases/<name>`: the database or alias `name`, `None` when unknown.
-fn one(registry: &Registry, name: &str) -> Option<Value> {
+fn one(admin: &Admin, name: &str) -> Option<Value> {
+    let registry = admin.registry();
+    let extras = Extras::of(admin);
     if let Ok(entry) = registry.get(name) {
-        return Some(entry_json(&entry, None));
+        return Some(extras.row(&entry, None));
     }
     let alias = fold(name);
     registry.aliases().get(&alias)?;
     let entry = registry.resolve(&alias).ok()?;
-    Some(entry_json(&entry, Some(&alias)))
+    Some(extras.row(&entry, Some(&alias)))
+}
+
+/// The listing's fields beyond the entry (module docs): disk size, pool membership, model
+/// copies.
+struct Extras {
+    pooled: BTreeMap<String, Vec<String>>,
+    models: crate::models::ModelsDir,
+}
+
+impl Extras {
+    fn of(admin: &Admin) -> Self {
+        Self {
+            pooled: admin.pooled_bases(),
+            models: admin.models(),
+        }
+    }
+
+    /// A listing row: [`entry_json`] + `sizeBytes`, `pooled`/`pooledBy`, `linkWarning`.
+    fn row(&self, entry: &DatabaseEntry, alias: Option<&str>) -> Value {
+        let mut row = entry_json(entry, alias);
+        row["sizeBytes"] = json!(crate::layout::dir_bytes(&entry.dir));
+        if let Some(users) = self.pooled.get(&entry.name) {
+            row["pooled"] = Value::Bool(true);
+            let layers: Vec<&String> = users.iter().filter(|u| **u != entry.name).collect();
+            row["pooledBy"] = json!(layers);
+        }
+        let copied = self.models.copied_blobs(&entry.store_dir());
+        if !copied.is_empty() {
+            row["linkWarning"] = Value::String(format!(
+                "{} model blob(s) are copied, not linked to models/ (the file system has no \
+                 hard links here, no disk saving)",
+                copied.len()
+            ));
+        }
+        row
+    }
+}
+
+/// `GET /api/admin/models` (module docs).
+fn models_json(index: &crate::models::ModelsIndex) -> Value {
+    let rows: Vec<Value> = index.models.iter().map(model_json).collect();
+    let missing: Vec<Value> = index
+        .missing
+        .iter()
+        .map(|(database, model)| json!({ "database": database, "model": model }))
+        .collect();
+    json!({ "models": rows, "missing": missing })
+}
+
+/// One model blob as JSON (module docs).
+fn model_json(model: &crate::models::ModelBlob) -> Value {
+    let mut row = json!({
+        "repo": model.repo,
+        "identity": model.identity,
+        "blob": model.blob,
+        "bytes": model.bytes,
+        "license": model.license,
+        "users": model.users,
+        "waiting": model.waiting,
+        "copied": !model.copied.is_empty(),
+        "copiedIn": model.copied,
+    });
+    if let Some(links) = model.links {
+        row["links"] = json!(links);
+    }
+    if !model.copied.is_empty() {
+        row["linkWarning"] = Value::String(format!(
+            "copied, not linked, in {}: the file system has no hard links there, no disk saving",
+            model.copied.join(", ")
+        ));
+    }
+    row
+}
+
+/// `POST models {"path"?, "repo"?, "license"?}`.
+fn model_add(admin: &Admin, request: &mut Request<'_>) -> Result<Response, HttpError> {
+    let body: ModelAddBody = body_of(request)?;
+    let path = body.path.as_ref().map(PathBuf::from);
+    if let Some(path) = &path
+        && !path.is_absolute()
+    {
+        return Err(HttpError::bad_request(format!(
+            "models: the path {:?} is not absolute (the server resolves it on its own machine)",
+            path
+        )));
+    }
+    let from_path = path.is_some();
+    let spec = match path {
+        Some(path) => ModelAddSpec::path(path),
+        None => ModelAddSpec::default(),
+    }
+    .with_repo(body.repo)
+    .with_license(body.license);
+    Ok(match admin.model_add(&spec) {
+        Ok(added) => {
+            let missing: Vec<Value> = added
+                .missing
+                .iter()
+                .map(|(database, model)| json!({ "database": database, "model": model }))
+                .collect();
+            Response::json(
+                if from_path { 201 } else { 200 },
+                &json!({
+                    "added": added.added.iter().map(model_json).collect::<Vec<_>>(),
+                    "resolved": added.resolved,
+                    "stillMissing": missing,
+                    "notes": added.notes,
+                }),
+            )
+        }
+        Err(err) => error_answer(&err, None),
+    })
+}
+
+/// `POST /api/admin/models`.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ModelAddBody {
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    repo: Option<String>,
+    #[serde(default)]
+    license: Option<String>,
 }
 
 /// One entry of the listing (module docs); `alias`: the row of that alias of `entry`.

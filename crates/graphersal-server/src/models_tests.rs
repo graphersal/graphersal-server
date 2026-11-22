@@ -1,0 +1,460 @@
+//! Tests of the shared models: adoption by hard link (one inode for every database), the copy
+//! fallback, exports, `needs-model` resolution by `models add`, adding from a model directory
+//! and by repository, the removal refusal, the admin routes and the listing fields. Synthetic
+//! data only (a tiny synthetic model).
+
+use std::io::Cursor;
+use std::sync::Arc;
+use std::time::Duration;
+
+use graphersal::persist::{ImportModelOptions, StoreOptions};
+use graphersal_serve::{Exposure, HostCheck, Method, Request, Response};
+use serde_json::{Value, json};
+
+use super::*;
+use crate::ops::{Admin, CreateSpec, ExportSpec, ImportSource, ModelAddSpec};
+use crate::registry::tests::server;
+use crate::registry::{DbState, Registry};
+use crate::test_support::TempDir;
+use crate::{DatabaseRole, Loader, ServerError};
+
+const WAIT: Duration = Duration::from_secs(120);
+
+fn offline(dir: &ServerDir) -> Admin {
+    Admin::offline(Registry::scan(dir).expect("scan"))
+}
+
+fn loader_of(dir: &ServerDir) -> Arc<Loader> {
+    Loader::new(
+        Registry::scan(dir).expect("scan"),
+        HostCheck::new(Exposure::Loopback, 8484, "http://127.0.0.1:8484/"),
+    )
+}
+
+/// Two packed snapshots of a database holding the tiny model `acme/tiny`: with and without the
+/// model's blob. The source database is deleted again (into the trash).
+fn snapshots(temp: &TempDir, admin: &Admin) -> (PathBuf, PathBuf) {
+    let entry = admin.create("source", &CreateSpec::plain()).unwrap();
+    let store = Store::open(entry.store_dir(), StoreOptions::new()).unwrap();
+    store
+        .import_model(
+            ModelSource::Files(crate::test_models::tiny_model(1, "acme/tiny")),
+            ImportModelOptions::new(),
+        )
+        .expect("the model");
+    store.close().unwrap();
+    let with = temp.path().join("with.gsnap");
+    admin
+        .export_to_file("source", ExportSpec::new(), &with)
+        .unwrap();
+    let without = temp.path().join("without.gsnap");
+    admin
+        .export_to_file("source", ExportSpec::new().with_models(false), &without)
+        .unwrap();
+    admin.delete("source").unwrap();
+    (with, without)
+}
+
+/// The model state of the database `name`'s Store for `repo` (`None`: not listed).
+fn model_state(admin: &Admin, name: &str, repo: &str) -> Option<ModelState> {
+    let entry = admin.registry().get(name).unwrap();
+    Store::models_dir(entry.store_dir())
+        .unwrap()
+        .into_iter()
+        .find(|m| m.repo == repo)
+        .map(|m| m.state)
+}
+
+/// The blob files of the database `name`.
+fn db_blobs(admin: &Admin, name: &str) -> Vec<(String, PathBuf, u64)> {
+    blob_files(
+        &admin
+            .registry()
+            .get(name)
+            .unwrap()
+            .store_dir()
+            .join("blobs"),
+    )
+    .unwrap()
+}
+
+/// The admin route over `admin` with an optional JSON body.
+fn route(admin: &Admin, method: Method, endpoint: &str, body: Option<Value>) -> (u16, Value) {
+    let bytes = body.map(|b| b.to_string()).unwrap_or_default().into_bytes();
+    let length = bytes.len();
+    let url = format!("/api/admin/{endpoint}");
+    let mut request = Request::new(method.clone(), &url, Cursor::new(bytes))
+        .with_header("Content-Type", "application/json")
+        .with_body_length(Some(length));
+    let response: Response = match crate::admin_api::route(admin, &method, endpoint, &mut request) {
+        Ok(response) => response,
+        Err(err) => return (err.status(), json!({ "error": err.message() })),
+    };
+    let json = serde_json::from_slice(response.body()).unwrap_or(Value::Null);
+    (response.status(), json)
+}
+
+#[test]
+fn two_databases_share_one_copy_of_a_model_and_exports_carry_it() {
+    let temp = TempDir::new("models-share");
+    let dir = server(&temp);
+    let admin = offline(&dir);
+    let (with, _) = snapshots(&temp, &admin);
+    for name in ["a", "b"] {
+        let imported = admin
+            .import(&ImportSource::new(&with), name, None, None)
+            .expect("imported");
+        assert_eq!(imported.entry.state, DbState::Unloaded);
+        assert!(imported.notes.is_empty(), "{:?}", imported.notes);
+    }
+    let index = admin.models_index().unwrap();
+    assert_eq!(index.models.len(), 1, "{index:?}");
+    let model = &index.models[0];
+    assert_eq!(model.repo.as_deref(), Some("acme/tiny"));
+    assert!(
+        model
+            .identity
+            .as_deref()
+            .unwrap()
+            .starts_with("model2vec/acme/tiny@")
+    );
+    assert_eq!(model.license.as_deref(), Some("mit"));
+    assert_eq!(model.users, ["a", "b"]);
+    assert!(model.copied.is_empty(), "{model:?}");
+    let shared = admin.models().blob_path(&model.blob);
+    assert_eq!(fs::metadata(&shared).unwrap().len(), model.bytes);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!(
+            fs::metadata(&shared).unwrap().nlink(),
+            3,
+            "models + 2 databases"
+        );
+        assert_eq!(model.links, Some(3));
+        for name in ["a", "b"] {
+            let blobs = db_blobs(&admin, name);
+            assert_eq!(blobs.len(), 1);
+            assert_eq!(
+                fs::metadata(&blobs[0].1).unwrap().ino(),
+                fs::metadata(&shared).unwrap().ino()
+            );
+        }
+    }
+    let toml = fs::read_to_string(dir.models().join(MODELS_FILE)).unwrap();
+    assert!(
+        toml.contains("acme/tiny") && toml.contains(&model.blob),
+        "{toml}"
+    );
+
+    // The export of a database whose blob is a link carries the model's bytes.
+    let again = temp.path().join("again.gsnap");
+    let exported = admin
+        .export_to_file("a", ExportSpec::new(), &again)
+        .unwrap();
+    assert!(exported.models);
+    admin
+        .import(&ImportSource::new(&again), "c", None, None)
+        .expect("re-imported");
+    assert!(matches!(
+        model_state(&admin, "c", "acme/tiny"),
+        Some(state) if state != ModelState::Missing
+    ));
+    let index = admin.models_index().unwrap();
+    assert_eq!(index.models[0].users, ["a", "b", "c"]);
+    #[cfg(unix)]
+    assert_eq!(index.models[0].links, Some(4));
+
+    // A used model is not removed; once no database uses it, it is.
+    let err = admin.model_remove("acme/tiny").unwrap_err();
+    assert!(
+        matches!(&err, ServerError::Refused { message, .. } if message.contains("a, b, c")),
+        "{err}"
+    );
+    assert!(shared.is_file());
+    for name in ["a", "b", "c"] {
+        admin.delete(name).unwrap();
+    }
+    let removed = admin.model_remove("acme/tiny").unwrap();
+    assert_eq!(removed.blobs, std::slice::from_ref(&model.blob));
+    assert_eq!(removed.bytes, model.bytes);
+    assert!(!shared.exists());
+    assert!(admin.models_index().unwrap().models.is_empty());
+    assert!(matches!(
+        admin.model_remove("acme/tiny"),
+        Err(ServerError::ModelNotFound { .. })
+    ));
+}
+
+#[test]
+fn the_copy_fallback_keeps_the_data_and_warns() {
+    let temp = TempDir::new("models-copy");
+    let dir = server(&temp);
+    let mut admin = offline(&dir);
+    let (with, _) = snapshots(&temp, &admin);
+    admin.no_links = true;
+    let imported = admin
+        .import(&ImportSource::new(&with), "a", None, None)
+        .expect("imported");
+    assert!(
+        imported
+            .notes
+            .iter()
+            .any(|n| n.contains("copied, not linked")),
+        "{:?}",
+        imported.notes
+    );
+    assert!(matches!(
+        model_state(&admin, "a", "acme/tiny"),
+        Some(state) if state != ModelState::Missing
+    ));
+    let index = admin.models_index().unwrap();
+    assert_eq!(index.models.len(), 1);
+    let model = &index.models[0];
+    assert_eq!(model.users, ["a"]);
+    let shared = admin.models().blob_path(&model.blob);
+    let own = &db_blobs(&admin, "a")[0].1;
+    assert_eq!(fs::read(&shared).unwrap(), fs::read(own).unwrap());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!(model.copied, ["a"]);
+        assert_ne!(
+            fs::metadata(&shared).unwrap().ino(),
+            fs::metadata(own).unwrap().ino()
+        );
+        // Surfaced in the API: the model row and the database row.
+        let (status, models) = route(&admin, Method::Get, "models", None);
+        assert_eq!(status, 200);
+        assert_eq!(models["models"][0]["copied"], true);
+        assert_eq!(models["models"][0]["copiedIn"], json!(["a"]));
+        assert!(models["models"][0]["linkWarning"].is_string());
+        let (_, row) = route(&admin, Method::Get, "databases/a", None);
+        assert!(
+            row["linkWarning"].as_str().unwrap().contains("copied"),
+            "{row}"
+        );
+    }
+    // The copy loads and exports like a link.
+    let out = temp.path().join("a.gsnap");
+    assert!(
+        admin
+            .export_to_file("a", ExportSpec::new(), &out)
+            .unwrap()
+            .models
+    );
+    let loader = loader_of(&dir);
+    loader.load("a").unwrap();
+    assert_eq!(loader.wait("a", WAIT).unwrap(), DbState::Loaded);
+    loader.shutdown().unwrap();
+}
+
+#[test]
+fn models_add_makes_a_needs_model_database_loadable() {
+    let temp = TempDir::new("models-resolve");
+    let dir = server(&temp);
+    let admin = offline(&dir);
+    let (with, without) = snapshots(&temp, &admin);
+    let imported = admin
+        .import(&ImportSource::new(&without), "w", None, None)
+        .unwrap();
+    assert_eq!(imported.entry.state, DbState::needs_model("acme/tiny"));
+    let index = admin.models_index().unwrap();
+    assert!(index.models.is_empty());
+    assert_eq!(index.missing, [("w".to_string(), "acme/tiny".to_string())]);
+
+    let added = admin.model_add(&ModelAddSpec::path(&with)).expect("added");
+    assert_eq!(added.added.len(), 1, "{added:?}");
+    assert_eq!(added.added[0].repo.as_deref(), Some("acme/tiny"));
+    assert_eq!(added.resolved, ["w"]);
+    assert!(added.missing.is_empty(), "{added:?}");
+    let entry = admin.registry().get("w").unwrap();
+    assert_eq!(entry.state, DbState::Unloaded);
+    assert_eq!(entry.config.as_ref().unwrap().needs_model, None);
+    assert!(matches!(
+        model_state(&admin, "w", "acme/tiny"),
+        Some(state) if state != ModelState::Missing
+    ));
+    assert_eq!(added.added[0].users, ["w"]);
+    #[cfg(unix)]
+    assert!(
+        added.added[0].copied.is_empty(),
+        "the restored blob is a link"
+    );
+
+    // The marker is gone for good (a new scan) and the database loads.
+    let loader = loader_of(&dir);
+    assert_eq!(loader.registry().get("w").unwrap().state, DbState::Unloaded);
+    loader.load("w").unwrap();
+    assert_eq!(loader.wait("w", WAIT).unwrap(), DbState::Loaded);
+    loader.shutdown().unwrap();
+}
+
+#[test]
+fn models_from_a_directory_by_repository_and_without_a_definition() {
+    let temp = TempDir::new("models-dir");
+    let dir = server(&temp);
+    let admin = offline(&dir);
+    let source = temp.path().join("tiny-model");
+    crate::test_models::tiny_model_dir(2, &source);
+    let added = admin
+        .model_add(
+            &ModelAddSpec::path(&source)
+                .with_repo(Some("acme/dir".to_string()))
+                .with_license(Some("mit".to_string())),
+        )
+        .expect("added from a directory");
+    assert_eq!(added.added.len(), 1);
+    let model = added.added[0].clone();
+    assert_eq!(model.repo.as_deref(), Some("acme/dir"));
+    assert!(model.users.is_empty());
+    #[cfg(unix)]
+    assert_eq!(model.links, Some(1), "the scratch Store is gone");
+    assert!(
+        fs::read_dir(dir.tmp()).unwrap().next().is_none(),
+        "no scratch left in tmp/"
+    );
+    // By repository: a model the shared models hold; an unknown one is refused.
+    let again = admin.model_add(&ModelAddSpec::repo("acme/dir")).unwrap();
+    assert_eq!(again.added[0].blob, model.blob);
+    assert!(matches!(
+        admin.model_add(&ModelAddSpec::repo("nobody/none")),
+        Err(ServerError::ModelNotFound { .. })
+    ));
+
+    // A Store without the model's definition gets it from the blob's files.
+    let entry = admin.create("e", &CreateSpec::plain()).unwrap();
+    let resolution = admin
+        .models()
+        .resolve(&entry.store_dir(), &["acme/dir".to_string()]);
+    assert_eq!(resolution.resolved, ["acme/dir"], "{resolution:?}");
+    let listed = Store::models_dir(entry.store_dir()).unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(Some(listed[0].identity.as_str()), model.identity.as_deref());
+    let err = admin.model_remove("acme/dir").unwrap_err();
+    assert!(matches!(err, ServerError::Refused { .. }), "{err}");
+}
+
+#[test]
+fn the_models_routes_and_the_listing_fields() {
+    let temp = TempDir::new("models-routes");
+    let dir = server(&temp);
+    let admin = offline(&dir);
+    let (with, _) = snapshots(&temp, &admin);
+    let (status, body) = route(
+        &admin,
+        Method::Post,
+        "models",
+        Some(json!({ "path": with.to_string_lossy() })),
+    );
+    assert_eq!(status, 201, "{body}");
+    assert_eq!(body["added"][0]["repo"], "acme/tiny");
+    let (status, body) = route(
+        &admin,
+        Method::Post,
+        "models",
+        Some(json!({ "path": "relative.gsnap" })),
+    );
+    assert_eq!(status, 400, "{body}");
+    let (status, body) = route(
+        &admin,
+        Method::Post,
+        "models",
+        Some(json!({ "repo": "nobody/none" })),
+    );
+    assert_eq!(status, 404, "{body}");
+    assert!(
+        body["help"]
+            .as_str()
+            .unwrap()
+            .contains("GET /api/admin/models")
+    );
+    admin
+        .import(&ImportSource::new(&with), "a", None, None)
+        .unwrap();
+    let (status, body) = route(&admin, Method::Delete, "models/acme/tiny", None);
+    assert_eq!(status, 409, "{body}");
+    assert!(
+        body["error"].as_str().unwrap().contains("databases a use"),
+        "{body}"
+    );
+    assert!(
+        body["help"]
+            .as_str()
+            .unwrap()
+            .contains("delete those databases")
+    );
+    let (status, body) = route(&admin, Method::Get, "models", None);
+    assert_eq!(status, 200);
+    assert_eq!(body["models"][0]["users"], json!(["a"]));
+    assert_eq!(body["models"][0]["copied"], false);
+    assert_eq!(route(&admin, Method::Put, "models", None).0, 405);
+
+    // The listing: sizeBytes; the 409s with their help.
+    let (_, listing) = route(&admin, Method::Get, "databases", None);
+    let row = &listing["databases"][0];
+    assert_eq!(row["name"], "a");
+    assert!(row["sizeBytes"].as_u64().unwrap() > 0, "{row}");
+    assert!(row.get("linkWarning").is_none(), "{row}");
+    let (status, body) = route(
+        &admin,
+        Method::Post,
+        "databases",
+        Some(json!({"name": "a"})),
+    );
+    assert_eq!(status, 409);
+    assert!(
+        body["help"].as_str().unwrap().contains("another name"),
+        "{body}"
+    );
+    admin
+        .create("prod", &CreateSpec::plain().with_role(DatabaseRole::Base))
+        .unwrap();
+    admin.create("l1", &CreateSpec::layer("prod")).unwrap();
+    let (status, body) = route(
+        &admin,
+        Method::Put,
+        "databases/prod/read-only",
+        Some(json!({"readOnly": false})),
+    );
+    assert_eq!(status, 409);
+    assert!(
+        body["help"]
+            .as_str()
+            .unwrap()
+            .contains("\"base\": \"prod\""),
+        "{body}"
+    );
+    let (status, body) = route(&admin, Method::Delete, "databases/prod", None);
+    assert_eq!(status, 409);
+    assert!(
+        body["help"]
+            .as_str()
+            .unwrap()
+            .contains("DELETE /api/admin/databases/l1"),
+        "{body}"
+    );
+
+    // Online: a base held in the pool by its loaded layer; its unload refused with help.
+    let loader = loader_of(&dir);
+    let online = Admin::online(loader.clone());
+    for name in ["prod", "l1"] {
+        loader.load(name).unwrap();
+        assert_eq!(loader.wait(name, WAIT).unwrap(), DbState::Loaded);
+    }
+    let (_, row) = route(&online, Method::Get, "databases/prod", None);
+    assert_eq!(row["pooled"], true, "{row}");
+    assert_eq!(row["pooledBy"], json!(["l1"]));
+    let (_, row) = route(&online, Method::Get, "databases/l1", None);
+    assert!(row.get("pooled").is_none());
+    let (status, body) = route(&online, Method::Post, "databases/prod/unload", None);
+    assert_eq!(status, 409, "{body}");
+    assert!(
+        body["help"]
+            .as_str()
+            .unwrap()
+            .contains("POST /api/admin/databases/l1/unload"),
+        "{body}"
+    );
+    loader.shutdown().unwrap();
+}

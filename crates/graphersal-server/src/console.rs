@@ -1,4 +1,4 @@
-//! The console's admin commands (`graphersal-server db ...`).
+//! The console's admin commands (`graphersal-server db ...`, `import`, `models ...`).
 //!
 //! Every command is one request of the admin HTTP API ([`DbCommand::request`]). [`run`] sends it
 //! where the directory is:
@@ -13,6 +13,8 @@
 //!
 //! `import` sends the source's absolute path (`POST /api/admin/import {"path", ...}`): a
 //! running server reads the file itself, on this machine; no upload.
+//!
+//! `models add` sends an absolute path too (`POST /api/admin/models {"path"}`).
 //!
 //! `db export` is a download: offline the admin core writes the file itself
 //! ([`Admin::export_to_file`]); through a server the client streams the API's answer into
@@ -137,6 +139,24 @@ pub enum DbCommand {
         /// The new database's description.
         description: Option<String>,
     },
+    /// `models list`.
+    ModelsList,
+    /// `models add SOURCE [--repo R] [--license L]`: a Model2Vec directory or `.gsnap`
+    /// (`path`, absolute: a running server reads it on this machine) or a repository already
+    /// in `models/` (`repo` alone).
+    ModelsAdd {
+        /// The directory or file added (absolute).
+        path: Option<PathBuf>,
+        /// The repository (of a directory that does not name it, or alone).
+        repo: Option<String>,
+        /// The licence of a directory that does not state it.
+        license: Option<String>,
+    },
+    /// `models remove REPO`.
+    ModelsRemove {
+        /// The repository (or blob hash).
+        model: String,
+    },
     /// `db export NAME --out FILE [--no-models] [--materialize]`.
     Export {
         /// The database.
@@ -232,6 +252,25 @@ impl DbCommand {
                 }
                 (Method::Post, "import".into(), Some(Value::Object(body)))
             }
+            DbCommand::ModelsList => (Method::Get, "models".into(), None),
+            DbCommand::ModelsAdd {
+                path,
+                repo,
+                license,
+            } => {
+                let mut body = Map::new();
+                if let Some(path) = path {
+                    body.insert("path".into(), json!(path.to_string_lossy()));
+                }
+                if let Some(repo) = repo {
+                    body.insert("repo".into(), json!(repo));
+                }
+                if let Some(license) = license {
+                    body.insert("license".into(), json!(license));
+                }
+                (Method::Post, "models".into(), Some(Value::Object(body)))
+            }
+            DbCommand::ModelsRemove { model } => (Method::Delete, format!("models/{model}"), None),
             DbCommand::Export { name, spec, .. } => (
                 Method::Get,
                 format!(
@@ -589,6 +628,47 @@ pub fn render(command: &DbCommand, answer: &Value) -> String {
             }
             text
         }
+        DbCommand::ModelsList => render_models(answer),
+        DbCommand::ModelsAdd { .. } => {
+            let mut lines = Vec::new();
+            for model in answer["added"].as_array().cloned().unwrap_or_default() {
+                lines.push(format!(
+                    "model {} ({} bytes) is in the shared models",
+                    model["repo"].as_str().unwrap_or("?"),
+                    model["bytes"].as_u64().unwrap_or_default()
+                ));
+            }
+            for name in answer["resolved"].as_array().cloned().unwrap_or_default() {
+                lines.push(format!(
+                    "database '{}' has its model now (unloaded; load it)",
+                    name.as_str().unwrap_or_default()
+                ));
+            }
+            for row in answer["stillMissing"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+            {
+                lines.push(format!(
+                    "database '{}' still needs the model '{}'",
+                    row["database"].as_str().unwrap_or_default(),
+                    row["model"].as_str().unwrap_or_default()
+                ));
+            }
+            for note in answer["notes"].as_array().cloned().unwrap_or_default() {
+                lines.push(format!("note: {}", note.as_str().unwrap_or_default()));
+            }
+            lines.join("\n")
+        }
+        DbCommand::ModelsRemove { .. } => format!(
+            "removed model '{}' from the shared models ({} blob(s), {} bytes)",
+            s("model"),
+            answer["removed"]
+                .as_array()
+                .map(Vec::len)
+                .unwrap_or_default(),
+            answer["bytes"].as_u64().unwrap_or_default()
+        ),
         DbCommand::Export { .. } => format!(
             "exported database '{}' into {} ({} bytes, {} snapshot, models {})",
             s("database"),
@@ -598,6 +678,51 @@ pub fn render(command: &DbCommand, answer: &Value) -> String {
             s("models")
         ),
     }
+}
+
+/// The shared models as lines.
+fn render_models(answer: &Value) -> String {
+    let rows = answer["models"].as_array().cloned().unwrap_or_default();
+    let mut out = String::new();
+    if rows.is_empty() {
+        out.push_str("no shared models\n");
+    }
+    for row in rows {
+        let users: Vec<&str> = row["users"]
+            .as_array()
+            .map(|u| u.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
+        let mut line = format!(
+            "{}  {} bytes  {}  used by: {}",
+            row["repo"].as_str().unwrap_or("(not a model archive)"),
+            row["bytes"].as_u64().unwrap_or_default(),
+            row["blob"]
+                .as_str()
+                .unwrap_or_default()
+                .chars()
+                .take(12)
+                .collect::<String>(),
+            if users.is_empty() {
+                "nobody".to_string()
+            } else {
+                users.join(", ")
+            }
+        );
+        if let Some(warning) = row["linkWarning"].as_str() {
+            line.push_str(&format!("  (warning: {warning})"));
+        }
+        out.push_str(&line);
+        out.push('\n');
+    }
+    for row in answer["missing"].as_array().cloned().unwrap_or_default() {
+        out.push_str(&format!(
+            "missing: database '{}' needs the model '{}' (add it: graphersal-server models add \
+             <model directory or .gsnap> --dir DIR)\n",
+            row["database"].as_str().unwrap_or_default(),
+            row["model"].as_str().unwrap_or_default()
+        ));
+    }
+    out.trim_end().to_string()
 }
 
 /// The backups of `name` as lines.

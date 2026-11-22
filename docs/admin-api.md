@@ -20,7 +20,7 @@ Every request is checked by `Host` and `Origin` (DNS rebinding, cross-site pages
   answered in lower case; the name rule is `[a-z0-9][a-z0-9._-]{0,62}` (no Windows device
   names); databases and aliases share one namespace.
 - Status codes: `200`/`201`/`202` success; `400` invalid name, body or schema; `404` no such
-  database, alias or endpoint; `405` method not allowed on an existing endpoint; `409` a rule
+  database, alias, model or endpoint; `405` method not allowed on an existing endpoint; `409` a rule
   refuses it (name taken, database loaded, named by an alias, base of layers, a base's
   read-only, a failed database, a layer without its base); `413`/`415` body (`415` also: an
   import source of no known format); `500` a Store or file operation failed;
@@ -45,6 +45,14 @@ The object describing one database (listing rows, and the answer of most actions
 | `model` | string | `needs-model` | the missing model's repository |
 | `aliasOf` | string | alias rows | the database the alias names (other fields are that database's) |
 | `import` | object | import answers | see Import |
+| `sizeBytes` | number | listing rows | the database's directory on disk (every file once; a model blob linked from `models/` counts in full in each database holding it, so the sum over databases exceeds the disk use) |
+| `pooled` | bool | listing rows of a pooled base | `true`: the base is held in memory in the shared pool (by its loaded layers or itself) |
+| `pooledBy` | [string] | with `pooled` | the loaded layers holding it (empty: only the base itself, loaded for reading) |
+| `linkWarning` | string | listing rows | some of its model blobs are copies, not hard links to `models/` (the file system has no links there: correct, no disk saving; unix only) |
+
+Listing rows are the answers of `GET /api/admin/databases` and `GET /api/admin/databases/<name>`.
+There is no `memoryBytes`: a loaded database's memory is known only inside its session thread,
+which a listing does not wait for.
 
 A `failed` database whose `database.toml` cannot be read has only `name`, `state`, `reason`.
 
@@ -67,6 +75,9 @@ A `failed` database whose `database.toml` cannot be read has only `name`, `state
 | GET | `/api/admin/databases/<name>/export?models=true\|false&materialize=true\|false` | | `200` the `.gsnap` file as a download |
 | POST | `/api/admin/import?name=<n>&base=<b>&format=<f>&description=<d>` | the file itself (`Content-Type: application/octet-stream`, or anything but JSON) | `201` entry + `"import"` |
 | POST | `/api/admin/import` | JSON `{"path", "name", "base"?, "format"?, "description"?}` | `201` entry + `"import"` |
+| GET | `/api/admin/models` | | `200 {"models": [model...], "missing": [{"database", "model"}...]}` |
+| POST | `/api/admin/models` | `{"path"?, "repo"?, "license"?}` | `201` (from a path) or `200` (a repository) `{"added": [model...], "resolved": [database...], "stillMissing": [{"database", "model"}...], "notes": [string...]}` |
+| DELETE | `/api/admin/models/<repo or blob hash>` | | `200 {"model", "removed": [blob...], "bytes"}` |
 | GET | `/api/admin/aliases` | | `200 {"aliases": {alias: database}}` |
 | PUT | `/api/admin/aliases/<alias>` | `{"target"}` | `200 {"alias", "target"}` (new alias or flip) |
 | DELETE | `/api/admin/aliases/<alias>` | | `200 {"alias", "removed": true}` |
@@ -231,6 +242,59 @@ The answer is the new entry (state `unloaded`, or `needs-model`) with `"import"`
 The database is built in `tmp/` and renamed into `databases/` in one step: a failed import
 leaves nothing behind.
 
+### Models
+
+The server keeps ONE copy of every embedding model blob in `models/blobs/<2 hex>/<sha256>`
+and puts a hard link of it into each database's `store/blobs/` (Store blobs are
+content-addressed and immutable: for the engine it is an ordinary blob file; a database's
+prune or delete removes only its link; an export embeds the bytes). Every create, clone,
+import and restore shares the new database's model blobs this way before the database
+appears, and the server does it at start for every idle database. Where the file system
+refuses hard links (another file system, FAT/exFAT, most SMB shares, FUSE mounts) the blob is
+copied instead, with a warning in the log, in an import's `notes`, in the model row and the
+database row (`linkWarning`). `models/models.toml` is a derived index (rebuilt at every
+listing and model change; edits are lost). Back up a server directory with `rsync -H` to keep
+the links (`cp -r` or a zip duplicates them: bigger, still correct).
+
+A model (one blob):
+
+| Field | Type | When | Meaning |
+|---|---|---|---|
+| `repo` | string or null | always | the repository (`owner/name`) from the model's own manifest; `null` for a blob that is not a model archive |
+| `identity` | string or null | always | `model2vec/<repo>@<12 hex>` |
+| `license` | string or null | always | the licence (SPDX id) |
+| `blob` | string | always | the blob's SHA-256 (hex) |
+| `bytes` | number | always | its size |
+| `users` | [string] | always | the databases whose Store holds it |
+| `waiting` | [string] | always | the `needs-model` databases waiting for its repository |
+| `copied` | bool | always | some user holds a copy, not a link |
+| `copiedIn` | [string] | always | those users |
+| `linkWarning` | string | when copied | the warning text |
+| `links` | number | unix | the hard links of the file in `models/blobs/` (`1`: no database links it) |
+
+`POST /api/admin/models` adds models: `{"path": "/absolute/path"}` names a Model2Vec model
+directory (`repo` and `license` for a directory that does not name them) or a `.gsnap` carrying
+model blobs, read on the server's machine (a relative path `400`, a missing one `404`, one
+that holds no model `400`); `{"repo"}` alone names a model `models/` already holds (`404` with
+help when it does not). Then every plain `needs-model` database whose repository `models/` now
+holds gets it (the blob its catalog references restored from `models/`, or, when its catalog
+has no definition of the model, the model imported from the blob's files) and becomes
+`unloaded` (`resolved`); the others stay (`stillMissing`). An import of a snapshot that names
+a model it does not carry stays `needs-model` even when `models/` holds the model: `POST
+/api/admin/models {"repo"}` resolves it.
+
+`DELETE /api/admin/models/<repo>` (the repository's slash is part of the path) removes every
+blob of the repository from `models/` (a blob hash removes that blob); refused (`409`, the
+message names them, with help) while any database holds one of its blobs, waits for it, or
+names it in its Store's catalog.
+
+### Help on refusals
+
+Besides the cases above, a taken name (create, clone, restore, alias) answers help naming the
+listing; `PUT .../read-only {"readOnly": false}` on a base names the layer to create instead;
+deleting a base that layers name names each layer's `DELETE`; unloading a base that loaded
+layers use names each layer's `unload`.
+
 ## Console
 
 ```
@@ -238,6 +302,7 @@ graphersal-server db list|create|delete|clone|load|unload|read-only|auto-load|al
 graphersal-server db backup NAME | backups NAME | restore NAME BACKUP [--name NEW] --dir DIR [--json]
 graphersal-server db export NAME --out FILE [--no-models] [--materialize] --dir DIR [--json]
 graphersal-server import DIR SOURCE --name NAME [--base BASE] [--format F] [--description TEXT] [--json]
+graphersal-server models list | add SOURCE [--repo R] [--license L] | remove REPO --dir DIR [--json]
 ```
 
 With a server running on `DIR` (its `server.lock` is held) the console sends these requests to
@@ -253,3 +318,8 @@ writes it, through a server the console streams the download. Its `--json` answe
 admin core imports `SOURCE` itself; through a running server the console sends the path form
 with `SOURCE` made absolute (the server reads it; no upload). Its answer is the import answer
 above; the text names the format, the kind and the state, and lists the notes.
+
+`models add SOURCE` sends the path form with `SOURCE` made absolute when it exists, else
+`SOURCE` as a repository (`{"repo"}`). `models list` prints one line per model blob (repository,
+bytes, short hash, the databases using it, a link warning) and the `needs-model` databases
+whose model is missing.

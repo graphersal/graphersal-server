@@ -457,6 +457,7 @@ impl Admin {
                 config.base = None;
             }
         }
+        self.adopt_build(&target, &build.store_dir());
         #[cfg(test)]
         match self.fail {
             Some(FailPoint::AfterStore) => return Err(store_error(&target, "injected failure")),

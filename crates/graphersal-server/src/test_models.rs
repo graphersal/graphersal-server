@@ -78,3 +78,17 @@ pub(crate) fn tiny_model(seed: u8, repo: &str) -> NewModel {
         .with_repo(repo)
         .with_license("mit")
 }
+
+/// The tiny model `seed` as the files of a Model2Vec directory in `dir` (created): `config.json`,
+/// `tokenizer.json`, `model.safetensors` and a card naming the licence MIT.
+pub(crate) fn tiny_model_dir(seed: u8, dir: &std::path::Path) {
+    std::fs::create_dir_all(dir).expect("the model directory");
+    std::fs::write(dir.join("config.json"), CONFIG).expect("config.json");
+    std::fs::write(dir.join("tokenizer.json"), tokenizer_json()).expect("tokenizer.json");
+    std::fs::write(dir.join("model.safetensors"), safetensors(seed)).expect("weights");
+    std::fs::write(
+        dir.join("README.md"),
+        "---\nlicense: mit\n---\n# A tiny model\n",
+    )
+    .expect("README.md");
+}
