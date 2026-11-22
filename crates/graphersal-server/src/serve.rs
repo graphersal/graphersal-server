@@ -17,7 +17,7 @@
 //! channel. Neither is ever held whole in memory.
 //!
 //! A declared body (`Content-Length`) over the limit ([`MAX_DECLARED_BODY_BYTES`], or the
-//! upload limit for an import upload) is answered `413` with the JSON error at once, without
+//! upload limit for an import or model upload) is answered `413` with the JSON error at once, without
 //! reading the body (a client waiting on `Expect: 100-continue` never gets its `100`), with
 //! `Connection: close`. A body the route did not read to its end closes the connection after
 //! the answer (a short declared rest is drained instead, keeping the connection). A connection
@@ -68,7 +68,8 @@ use crate::router::{Answer, Router};
 use crate::run_file::RunInfo;
 
 /// Largest declared body (`Content-Length`) a request may name (as the graphersal CLI's dev
-/// server), except an import upload (`POST /api/admin/import` with a body that is not JSON),
+/// server), except an upload (`POST /api/admin/import` or `POST /api/admin/models` with a body
+/// that is not JSON),
 /// which may declare up to `server.toml`'s `[limits] upload_bytes` (its route streams the body
 /// into `tmp/`). A request declaring more is answered `413` without its body being read, and
 /// its connection is closed (module docs).
@@ -516,8 +517,8 @@ fn answer(shared: &Shared, request: hyper::Request<Incoming>, handle: Handle) ->
         .map(|(_, value)| value.as_str());
     let path = url.split_once('?').map_or(url.as_str(), |(path, _)| path);
     let upload = crate::admin_api::is_upload(&method, path, content_type);
-    // An import upload may declare up to the upload limit (its route streams the body into a
-    // file); every other request up to MAX_DECLARED_BODY_BYTES.
+    // An upload (an import or a model) may declare up to the upload limit (its route streams
+    // the body into a file); every other request up to MAX_DECLARED_BODY_BYTES.
     let limit = if upload {
         shared.router.upload_limit()
     } else {

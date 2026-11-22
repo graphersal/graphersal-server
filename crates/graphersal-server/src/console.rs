@@ -160,7 +160,8 @@ pub enum DbCommand {
     },
     /// `models list`.
     ModelsList,
-    /// `models add SOURCE [--repo R] [--license L]`: a Model2Vec directory or `.gsnap`
+    /// `models add SOURCE [--repo R] [--license L]`: a Model2Vec directory, a `.tar` of one or
+    /// a `.gsnap`
     /// (`path`, absolute: a running server reads it on this machine) or a repository already
     /// in `models/` (`repo` alone).
     ModelsAdd {

@@ -83,6 +83,7 @@ A `failed` database whose `database.toml` cannot be read has only `name`, `state
 | POST | `/api/admin/import` | JSON `{"path", "name", "base"?, "format"?, "description"?, "role"?}` | `201` entry + `"import"` |
 | GET | `/api/admin/models` | | `200 {"models": [model...], "missing": [{"database", "model"}...]}` |
 | POST | `/api/admin/models` | `{"path"?, "repo"?, "license"?}` | `201` (from a path) or `200` (a repository) `{"added": [model...], "resolved": [database...], "stillMissing": [{"database", "model"}...], "notes": [string...]}` |
+| POST | `/api/admin/models?repo=<r>&license=<l>&format=<gsnap\|tar>` | the file itself (anything but JSON): a `.gsnap` carrying model blobs or an uncompressed `.tar` of a Model2Vec model directory | `201`, the same answer |
 | DELETE | `/api/admin/models/<repo or blob hash>` | | `200 {"model", "removed": [blob...], "bytes"}` |
 | GET | `/api/admin/aliases` | | `200 {"aliases": {alias: database}}` |
 | PUT | `/api/admin/aliases/<alias>` | `{"target"}` | `200 {"alias", "target"}` (new alias or flip) |
@@ -249,7 +250,7 @@ Sources, detected from the content (a file name never decides a snapshot):
 |---|---|
 | packed snapshot `.gsnap`, full | a plain database; its embedding models come along when it carries them; when it names a model without carrying it, the model is taken from the server's shared `models/` when that holds it (hard-linked like any shared blob, listed in `modelsResolved`), else the database is created in the state `needs-model` (`model` names it; kept across restarts, cleared by `POST /api/admin/models` or the first successful load) |
 | packed snapshot, layer (`.layer.gsnap`) | a layer database over the `role = "base"` database with the snapshot's base identity: `base` names it, else the only base database with it; none (or the named one does not match): `409` naming the identity |
-| Store directory or single-file `.gstore` | copied file by file into a directory Store (verified; its creation parameters come along); a layer Store is matched with its base like a layer snapshot |
+| Store directory or single-file `.gstore` | copied file by file into a directory Store (verified; its creation parameters come along); a layer Store is matched with its base like a layer snapshot. A model blob the Store lacks is filled into the copy from the server's shared `models/` (checked by its SHA-256, then hard-linked to `models/`; its model listed in `modelsResolved`, a note says it was filled). A blob `models/` lacks too is `409` (help: add the model, `POST /api/admin/models`, then import again): unlike a snapshot, a Store copy is verified and cannot leave a referenced blob out, so it is never created as `needs-model`. A blob `models/` holds damaged (its bytes do not match its name) is `500`, the error naming the file `models/blobs/<2 hex>/<hash>`, with help |
 | GraphSON (`.json`, `.jsonl`, `.graphson`) or GraphML (`.xml`, `.graphml`) | a plain database holding the file's graph (the Store gets `server.toml`'s `[defaults]`); data GraphSON cannot hold is skipped and noted |
 
 Without an extension (an upload) a file that is neither a snapshot nor a Store is GraphSON when
@@ -271,7 +272,7 @@ The answer is the new entry (state `unloaded`, or `needs-model`) with `"import"`
 | `format` | string | always | `snapshot`, `store`, `graphson`, `graphml` |
 | `layerBase` | string | layers | the base identity the layer was built over |
 | `modelsMissing` | [string] | always | the models (repositories) named but not carried, and `models/` lacks them (the database is `needs-model`) |
-| `modelsResolved` | [string] | always | the models named but not carried, taken from `models/` at the import |
+| `modelsResolved` | [string] | always | the models taken from `models/` at the import: named but not carried (a snapshot), or whose blob a Store lacked (filled into the copy) |
 | `skipped` | number | always | values, entries or elements the import skipped (GraphSON) |
 | `notes` | [string] | always | what was skipped or converted, missing models |
 
@@ -309,8 +310,8 @@ A model (one blob):
 | `links` | number | unix | the hard links of the file in `models/blobs/` (`1`: no database links it) |
 
 `POST /api/admin/models` adds models: `{"path": "/absolute/path"}` names a Model2Vec model
-directory (`repo` and `license` for a directory that does not name them) or a `.gsnap` carrying
-model blobs, read on the server's machine (a relative path `400`, a missing one `404`, one
+directory (`repo` and `license` for a directory that does not name them), an uncompressed tar
+archive of one, or a `.gsnap` carrying model blobs, read on the server's machine (a relative path `400`, a missing one `404`, one
 that holds no model `400`); `{"repo"}` alone names a model `models/` already holds (`404` with
 help when it does not). Then every plain `needs-model` database whose repository `models/` now
 holds gets it (the blob its catalog references restored from `models/`, or, when its catalog
@@ -319,6 +320,22 @@ has no definition of the model, the model imported from the blob's files) and be
 frozen; only a hand-edited `database.toml` could mark one). An import of a snapshot that names
 a model it does not carry takes it from `models/` right away when `models/` holds it (see
 Import), so only a model `models/` lacks leaves a database `needs-model`.
+
+The **upload form** sends the file itself as the body (`Content-Type:
+application/octet-stream`, anything but JSON) with the query parameters `repo`, `license` (as
+in the JSON form) and `format` (`gsnap` or `tar`; default: detected from the content; a file
+of another format than the one named is `400`); any other parameter `400`. The body is
+streamed into `tmp/` exactly like an import upload (same `[limits] upload_bytes`, same `413`
+behaviour, an empty body `400`), added as a path, and removed. A file that is neither a packed
+snapshot nor a tar archive is `400`. A tar archive is POSIX ustar, uncompressed (`tar -cf
+model.tar -C potion-base-8M .`, or `tar -cf model.tar potion-base-8M`): the model directory is
+the archive's root or its only top-level directory. It is unpacked into `tmp/` first and
+refused as a whole (`400`, `not a usable model archive: ...`) for an absolute path, a `..`
+component, a backslash or a colon in a name, a symbolic or hard link, a device or FIFO, a GNU
+long name, more than 1000 entries, nesting deeper than 16 directories, a file in it twice, an
+entry past the end or a broken header checksum; pax headers and macOS resource forks (`._*`)
+are skipped. The bytes written are bounded by the upload itself. The console's `models add
+FILE.tar` takes the same archives.
 
 `DELETE /api/admin/models/<repo>` (the repository's slash is part of the path) removes every
 blob of the repository from `models/` (a blob hash removes that blob); refused (`409`, the
@@ -360,7 +377,8 @@ admin core imports `SOURCE` itself; through a running server the console sends t
 with `SOURCE` made absolute (the server reads it; no upload). Its answer is the import answer
 above; the text names the format, the kind and the state, and lists the notes.
 
-`models add SOURCE` sends the path form with `SOURCE` made absolute when it exists, else
+`models add SOURCE` (a model directory, a `.tar` of one or a `.gsnap`) sends the path form
+with `SOURCE` made absolute when it exists, else
 `SOURCE` as a repository (`{"repo"}`). `models list` prints one line per model blob (repository,
 bytes, short hash, the databases using it, a link warning) and the `needs-model` databases
 whose model is missing.

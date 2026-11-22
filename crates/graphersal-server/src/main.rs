@@ -110,7 +110,8 @@ Usage:
                     [--description TEXT] [--role normal|base] [--json]
       Import SOURCE into DIR as the new database NAME: a packed snapshot (.gsnap; a layer
       snapshot needs a role=base database with its base identity, --base names it), a Store
-      directory or .gstore file (copied into a directory Store), or a GraphSON (.json,
+      directory or .gstore file (copied into a directory Store; a model blob it lacks is
+      filled from the shared models, else it is refused), or a GraphSON (.json,
       .jsonl, .graphson) or GraphML (.xml, .graphml) file. FORMAT (snapshot, store,
       graphson, graphml) overrides the detection. An embedding model the source names but
       does not carry is taken from the shared models when they hold it; otherwise the
@@ -124,9 +125,9 @@ Usage:
       links). Through a running server like db.
         models list              every model, its size and the databases using it
         models add SOURCE [--repo REPO] [--license SPDX]
-            SOURCE: a Model2Vec model directory or a .gsnap carrying models (--repo and
-            --license for a directory that does not name them), or the repository of a model
-            the shared models hold. Every needs-model database whose model is then there
+            SOURCE: a Model2Vec model directory, a tar archive of one (.tar, uncompressed)
+            or a .gsnap carrying models (--repo and --license for a directory that does not
+            name them), or the repository of a model the shared models hold. Every needs-model database whose model is then there
             gets it and can be loaded.
         models remove REPO       refused while a database uses it
   graphersal-server --help | --version

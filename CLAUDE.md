@@ -31,7 +31,7 @@ from published files). When this file disagrees with the code, the code wins: sa
   pulling hyper's body one frame per read via `Handle::block_on`, idle timeout 120 s), a download
   is `pump`ed from its file through a bounded channel (`Outgoing::Stream`, `Content-Length`); a
   declared body over `MAX_DECLARED_BODY_BYTES` (64 MiB), or over the upload limit for an import
-  upload (`is_upload`: `POST /api/admin/import` not JSON; `Router::upload_limit`, read per
+  upload (`is_upload`: `POST /api/admin/import` or `POST /api/admin/models` not JSON; `Router::upload_limit`, read per
   request), is answered 413 JSON at once without reading (`refuse_oversize`, Host check first;
   `Expect: 100-continue` never gets its 100) with `Connection: close`; a body the route left
   unread closes the connection after the answer (a declared rest up to 256 KiB is drained);
@@ -65,7 +65,10 @@ from published files). When this file disagrees with the code, the code wins: sa
   no `admin`) to the per-DB `/api/info`), `admin_api` (`GET /api/admin/databases` `{databases, aliases, problems}`, alias
   rows carry `aliasOf`; listing rows (`Extras`) add `sizeBytes` (`layout::dir_bytes`),
   `pooled`/`pooledBy` (`Admin::pooled_bases`), `linkWarning`; no `memoryBytes` (only the session
-  thread knows it); `GET|POST models`, `DELETE models/<repo...>`; 409 helps: name taken,
+  thread knows it); `GET|POST models` (POST JSON `{path|repo}`, or the upload form
+  `POST models?repo=&license=&format=gsnap|tar` with the file as the body: `receive_upload`
+  (shared with the import upload) into `tmp/`, kind checked by `ModelFileFormat::of`, then
+  `model_add` of that path), `DELETE models/<repo...>`; 409 helps: name taken,
   read-only base, base of layers (delete), base of loaded layers (unload); `GET /api/admin/databases/<name|alias>`; field names = the web UI's
   (`ui/databases.js` `databaseRows`); the actions: `POST databases` create, `DELETE databases/<name>`, `POST
   .../<name>/clone|load|unload|promote`, `PUT .../<name>/read-only|auto-load`, `GET aliases`, `PUT|DELETE
@@ -115,7 +118,14 @@ from published files). When this file disagrees with the code, the code wins: sa
   marker in `database.toml` (state `needs-model`, kept by the scan via `DbState::at_rest`,
   cleared by `Registry::clear_needs_model` after a successful load); layer `.gsnap` =
   `matching_base` (shared with restore, refusal names the identity) + `read_layer_snapshot` +
-  `create_layer_with`; Store dir / `.gstore` = `Store::convert` then `inspect` for a layer;
+  `create_layer_with`; Store dir / `.gstore` = `Store::convert_with(.., ConvertOptions::new()
+  .with_fill_missing_blobs(BlobSource::store(models/)))` (V18: a blob the source lacks is filled
+  from `models/` into the copy, then `adopt_build` hard-links it; `Built::models_filled`, merged
+  into `models_resolved`, note "filled from the shared models"; `BlobUnavailable` ->
+  `ServerError::ModelUnavailable` (409, repos from the source's `Store::models_dir`, help names
+  `POST /api/admin/models`: a Store copy cannot become `needs-model`), `BlobDamaged` ->
+  `ServerError::ModelDamaged` (500, the `models/blobs/..` path parsed from the reason)) then
+  `inspect` for a layer;
   GraphSON/GraphML = `GraphSONImport::load` / `GraphSource::from_graphml_reader` +
   `Store::create_with`; `import_as(.., DatabaseRole::Base)` (`import` = role normal) makes a
   base of a PLAIN source: a layer source -> `InvalidInput` (400) before its base is matched, a
@@ -159,6 +169,9 @@ from published files). When this file disagrees with the code, the code wins: sa
   database)). Every admin change writes its file first
   (atomically), then memory, under the registry's write lock. `serve::start` scans after the
   bind and before `ready()` (`/readyz` 503 meanwhile); `Running::registry()`.
+- `model_archive` (private, V18): `is_tar` (ustar magic + checksum) and `unpack(archive, dir)`,
+  the safe unpack of a model directory's tar (rules in its module docs; tests beside it, their
+  `entry`/`archive`/`model_tar` builders reused by `models_tests.rs`).
 - `models` (`ModelsDir` over `models/`, U9): one physical copy of every model blob in
   `models/blobs/<2 hex>/<sha256>` (the Store blob layout), HARD-LINKED into each database's
   `store/blobs/`; no engine change. `adopt(store_dir)` = the dedupe pass (same name + length in
@@ -176,8 +189,11 @@ from published files). When this file disagrees with the code, the code wins: sa
   BlobSource::store(models/))` when a definition's blob is missing; a repo without a definition
   -> its blob unpacked into `tmp/` + `Store::import_model_dir`; then adopt. `copied_blobs` feeds
   the listing's `linkWarning`. Admin side in `ops_models.rs` (`models_index`, `model_add`
-  (`ModelAddSpec`: a model dir via a scratch Store + `import_model_dir`, a `.gsnap` via
-  `create_from_packed_dir`, harvested by adoption; or a repo `models/` holds; then
+  (`ModelAddSpec`: a model dir via a scratch Store + `import_model_dir`, a ustar `.tar` of one
+  unpacked first by `model_archive::unpack` into a second scratch in `tmp/` (V18; refuses
+  absolute paths, `..`, `\`/`:`, links, devices, GNU long names, > 1000 entries, depth > 16,
+  duplicates; skips pax headers and `._*`; the model dir = the root or its only top dir), a
+  `.gsnap` via `create_from_packed_dir`, harvested by adoption; or a repo `models/` holds; then
   `resolve_waiting`: plain `needs-model` databases (bases skipped), checked with `while_idle`, resolved, marker
   cleared + state `unloaded` under `while_idle`), `model_remove` (refused while a database
   holds a blob, waits for it or names it in `Store::models_dir`)). An import resolves
@@ -237,7 +253,9 @@ from published files). When this file disagrees with the code, the code wins: sa
   cross-tab links through `api.navigate(tab, {db})`), the pure models `admin-api.js` (requests,
   rules, texts of every admin action) and `databases.js` (`databaseRows`, `fetchDatabases`,
   `hostHeaders`, `downloadBlob`), `shared.js` (one list, admin client and root info for every
-  tab; polls while a database is loading), `server-ui.css` (`srv-*` classes on the playground's
+  tab; polls while a database is loading); uploads (Import tab, Models tab's "A file from this
+  computer": `modelUploadRequest` + `uploadImport({kind: 'model'})`) go through XHR with
+  progress, sized against `api.info.host.uploadBytes` first; `server-ui.css` (`srv-*` classes on the playground's
   theme tokens and generic classes). Modules import ONLY `vue` and `./<own file>.js` (checked by
   `ui/tests/profile.test.mjs`) and fetch `/api/admin/*` themselves with the host headers. A new
   file in `ui/` goes into `ui_assets::FILES`. Tests: `ui/tests/*.test.mjs` (node:http mocks of

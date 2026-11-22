@@ -11,7 +11,7 @@ import {
   adminRequest, createAdmin, AdminError, transferActions, backupRows, restoreOverAction, exportPath,
   uploadLimit, uploadSizeProblem, importRequest, isAbsolutePath, progressText, uploadImport,
   modelRows, missingRows, removeModelAction, addModelBody, needsModelHint, poolText, suggestName,
-  confirmText, outcomeText,
+  confirmText, outcomeText, modelUploadRequest, modelFileFormat, MODEL_UPLOAD_FORMATS,
 } from '../admin-api.js';
 import { databaseRows } from '../databases.js';
 
@@ -84,6 +84,20 @@ async function mockServer({ limit = 1 << 20 } = {}) {
     if (path === 'models' && req.method === 'GET') {
       const missing = [...dbs.keys()].filter((n) => dbs.get(n).state === 'needs-model').map((n) => ({ database: n, model: dbs.get(n).model }));
       return send(200, { models, missing });
+    }
+    if (path === 'models' && req.method === 'POST' && req.headers['content-type'] !== 'application/json') {
+      // the upload form: the file as the body (first byte `X`: a refused archive)
+      for (const k of url.searchParams.keys()) {
+        if (!['repo', 'license', 'format'].includes(k)) return send(400, { error: `models: unknown parameter ${k}` });
+      }
+      if (raw.length > limit) return send(413, { error: `the body is larger than ${limit} bytes` });
+      if (raw[0] === 0x58) return send(400, { error: "'upload': not a usable model archive: the entry \"../x\" leaves the archive's root (refused)" });
+      const repo = url.searchParams.get('repo') || 'owner/other';
+      const m = { repo, identity: '', license: url.searchParams.get('license'), blob: 'ef'.repeat(32), bytes: raw.length, users: [], waiting: [], copied: false, copiedIn: [] };
+      models.push(m);
+      const resolved = [...dbs.keys()].filter((n) => dbs.get(n).state === 'needs-model' && dbs.get(n).model === repo);
+      for (const n of resolved) Object.assign(dbs.get(n), { state: 'unloaded', reason: undefined, model: undefined });
+      return send(201, { added: [m], resolved, stillMissing: [], notes: [] });
     }
     if (path === 'models' && req.method === 'POST') {
       if (body.repo && !body.path) {
@@ -456,6 +470,59 @@ test('models: list, the waiting databases, add by path and by repository, remove
     assert.equal(odd[0].linkWarning, 'no hard links here');
     assert.match(removeModelAction(odd[0]).title, /Waited for by w/);
     assert.deepEqual(missingRows({ missing: [{ database: 'a' }, { database: 'b', model: 'm' }] }), [{ database: 'b', model: 'm' }]);
+  } finally {
+    server.close();
+  }
+});
+
+test('model upload: the request from the form, progress, the waiting database resolved, refusals and the limit', async () => {
+  const { server, options, log, dbs } = await mockServer({ limit: 64 * 1024 });
+  try {
+    assert.deepEqual(MODEL_UPLOAD_FORMATS, ['', 'gsnap', 'tar']);
+    assert.equal(modelFileFormat('potion.TAR'), 'tar');
+    assert.equal(modelFileFormat('emb.gsnap'), 'gsnap');
+    assert.equal(modelFileFormat('model'), '');
+    for (const name of ['m.tar.gz', 'm.tgz', 'm.zip', 'm.tar.zst']) assert.equal(modelFileFormat(name), null, name);
+    assert.deepEqual(modelUploadRequest({ file: { name: 'm.zip', size: 10 } }, null).problems,
+      ['Upload a .gsnap or an uncompressed .tar of the model directory (a compressed archive is not taken).']);
+    assert.deepEqual(modelUploadRequest({}, null).problems, ['Choose a file.']);
+    assert.deepEqual(modelUploadRequest({ file: { name: 'big.tar', size: 100 * 1024 } }, 64 * 1024).problems,
+      ['The file has 100 KB; the server takes uploads up to 64 KB ([limits] upload_bytes in server.toml). Add it from a path on the server instead.']);
+    assert.equal(log.length, 0, 'nothing was sent');
+    assert.deepEqual(modelUploadRequest({ file: { name: 'emb.gsnap', size: 5 }, repo: ' ', license: '' }).upload,
+      { path: 'api/admin/models?format=gsnap', size: 5 });
+    assert.deepEqual(modelUploadRequest({ file: { name: 'blob', size: 5 } }).upload, { path: 'api/admin/models', size: 5 });
+
+    // a .tar naming its repository: progress, the answer, the waiting database resolved
+    const file = Buffer.alloc(40 * 1024, 0x41);
+    const built = modelUploadRequest({ file: { name: 'other.tar', size: file.length }, repo: 'owner/other', license: 'MIT' }, 64 * 1024);
+    assert.deepEqual(built.upload, { path: 'api/admin/models?repo=owner%2Fother&license=MIT&format=tar', size: file.length });
+    const progress = [];
+    let sent = false;
+    const answer = await uploadImport({ ...options, XHR: NodeXHR, limit: 64 * 1024, kind: 'model' }, built.upload, file, {
+      onProgress: (loaded, total) => progress.push([loaded, total]),
+      onSent: () => { sent = true; },
+    }).promise;
+    assert.equal(answer.added[0].repo, 'owner/other');
+    assert.deepEqual(answer.resolved, ['vectors']);
+    assert.equal(outcomeText('addModel', '', answer), 'Added 1 model blob; ready to load: vectors.');
+    assert.equal(dbs.get('vectors').state, 'unloaded');
+    assert.deepEqual(progress.at(-1), [file.length, file.length]);
+    assert.equal(sent, true);
+    assert.equal(NodeXHR.last.headers['Content-Type'], 'application/octet-stream', 'never JSON: the upload form');
+    const req = log.find((r) => r.path === '/api/admin/models' && r.method === 'POST');
+    assert.equal(req.bytes, file.length);
+    assert.equal(req.query, '?repo=owner%2Fother&license=MIT&format=tar');
+
+    // a refused archive: the server's error; a 413 gets the model wording of the advice
+    await assert.rejects(uploadImport({ ...options, XHR: NodeXHR, kind: 'model' }, { path: 'api/admin/models', size: 3 }, Buffer.from('XYZ')).promise,
+      (e) => e.status === 400 && /not a usable model archive/.test(e.message));
+    await assert.rejects(uploadImport({ ...options, XHR: NodeXHR, limit: 64 * 1024, kind: 'model' }, { path: 'api/admin/models', size: 100 * 1024 }, Buffer.alloc(100 * 1024)).promise,
+      (e) => e.status === 413 && /up to 64 KB; add a larger model from a path on the server\.$/.test(e.help));
+    class Dropped { constructor() { this.upload = {}; } open() {} setRequestHeader() {} send() { setTimeout(() => this.onerror(), 0); } abort() {} }
+    await assert.rejects(uploadImport({ ...options, XHR: Dropped, limit: 10, kind: 'model' }, { path: 'api/admin/models', size: 1e9 }, null).promise,
+      (e) => /larger than its upload limit/.test(e.message) && e.help === 'Add it from a path on the server instead.');
+    assert.match(needsModelHint({ state: 'needs-model', model: 'o/n' }), /upload a \.gsnap or a \.tar of the model directory/);
   } finally {
     server.close();
   }

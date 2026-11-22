@@ -170,6 +170,30 @@ pub enum ServerError {
         /// The repository (or blob hash) asked for.
         repo: String,
     },
+    /// A Store import needs a model blob the source Store lacks, and the shared models
+    /// (`models/`) do not hold it either: the Store cannot be copied without it.
+    #[non_exhaustive]
+    ModelUnavailable {
+        /// The database being imported.
+        name: String,
+        /// The repositories of the source's models whose blob is missing (empty when the
+        /// source's catalog cannot be read).
+        repos: Vec<String>,
+        /// The Store's reason (names the missing blob `blobs/<2 hex>/<hash>`).
+        message: String,
+    },
+    /// A Store import needs a model blob the source Store lacks, and the shared models hold it
+    /// DAMAGED (its bytes do not match its name).
+    #[non_exhaustive]
+    ModelDamaged {
+        /// The database being imported.
+        name: String,
+        /// The damaged file in the shared models (`models/blobs/<2 hex>/<hash>`), when the
+        /// Store's reason names the blob.
+        blob: Option<PathBuf>,
+        /// The Store's reason.
+        message: String,
+    },
     /// The running server refused an admin request (the console's admin client): its answer.
     #[non_exhaustive]
     Remote {
@@ -271,6 +295,39 @@ impl fmt::Display for ServerError {
             ServerError::ModelNotFound { repo } => {
                 write!(f, "the server's shared models hold no model '{repo}'")
             }
+            ServerError::ModelUnavailable {
+                name,
+                repos,
+                message,
+            } => {
+                let what = match repos.as_slice() {
+                    [] => "an embedding model".to_string(),
+                    [repo] => format!("the embedding model '{repo}'"),
+                    many => format!("the embedding models '{}'", many.join("', '")),
+                };
+                write!(
+                    f,
+                    "'{name}': the source Store lacks the blob of {what} and the server's shared \
+                     models do not hold it, so the Store cannot be copied: {message}"
+                )
+            }
+            ServerError::ModelDamaged {
+                name,
+                blob,
+                message,
+            } => match blob {
+                Some(blob) => write!(
+                    f,
+                    "'{name}': the source Store lacks a model blob and the server's shared copy \
+                     {} is damaged (its bytes do not match its name): {message}",
+                    blob.display()
+                ),
+                None => write!(
+                    f,
+                    "'{name}': the source Store lacks a model blob and the server's shared copy \
+                     is damaged (its bytes do not match its name): {message}"
+                ),
+            },
             ServerError::Remote { message, .. } => f.write_str(message),
         }
     }
