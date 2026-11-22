@@ -152,7 +152,11 @@ are content-addressed and immutable, so for the engine the link is an ordinary b
 database's delete or prune removes only its link, an export embeds the bytes. Every create,
 clone, import and restore links the new database's model blobs before the database appears; at
 start the server does it for every idle database. An import whose source names a model without
-carrying it gets the model from `models/` (linked the same way) when `models/` holds it.
+carrying it gets the model from `models/` (linked the same way) when `models/` holds it. A
+Store import whose source lacks a model blob gets the blob filled into its copy from
+`models/blobs/` (checked by its hash), and the filled file is then replaced by a hard link like
+any other; a blob `models/` lacks too refuses the import (add the model first), one `models/`
+holds damaged refuses it naming the file.
 
 Where the file system refuses hard links (another file system, FAT/exFAT, most SMB shares, FUSE
 mounts) the blob is COPIED instead: correct, but no disk saving. The server logs a warning and
@@ -164,7 +168,9 @@ size read from the model's own manifest inside the blob; the databases holding i
 listing and model change and never read back: edits are lost.
 
 `graphersal-server models list|add|remove` and `/api/admin/models` manage it
-(`docs/admin-api.md`).
+(`docs/admin-api.md`): a model is added from a Model2Vec model directory, an uncompressed `.tar`
+of one (unpacked safely into `tmp/` first) or a `.gsnap` carrying models, on the server's machine
+or uploaded through the web UI's Models tab (the upload goes through `tmp/` too).
 
 ## `backups/`
 
@@ -183,8 +189,8 @@ A deleted database, and the database a restore replaced, move to `trash/<name>-<
 
 ## `tmp/`
 
-New databases, backups, exports and upload bodies are written in `tmp/` and renamed into place
-(or streamed and removed). The server empties it at every start; leave it alone while a server
+New databases, backups, exports, upload bodies (imports and models) and unpacked model archives
+are written in `tmp/` and renamed into place (or streamed or read, then removed). The server empties it at every start; leave it alone while a server
 runs.
 
 ## External backups of the whole directory

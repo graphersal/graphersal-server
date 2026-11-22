@@ -56,8 +56,9 @@ const seg = (name) => encodeURIComponent(String(name));
  * backup(name), backups(name), restore(name, backup, newName?) (no `name` field when restoring
  * over the database itself), importPath({path, name, base?, format?, description?, role?}), models,
  * addModel({path?, repo?, license?}), removeModel(repo or blob hash), promote(name) (no body;
- * one way: a base is frozen forever). The two transfers that are not JSON requests are
- * `exportPath` (a download) and `uploadImport` (the file as the body).
+ * one way: a base is frozen forever). The transfers that are not JSON requests are
+ * `exportPath` (a download) and `uploadImport` (the file as the body: an import, or a model
+ * from `modelUploadRequest`).
  */
 export const adminRequest = Object.freeze({
   list: () => ({ method: 'GET', path: 'api/admin/databases' }),
@@ -422,12 +423,22 @@ export function uploadLimit(info) {
   return typeof n === 'number' && Number.isFinite(n) && n > 0 ? n : null;
 }
 
-/** The problem with uploading `size` bytes under `limit` (null: none announced), or null. */
-export function uploadSizeProblem(size, limit) {
+/** What to do instead of an upload that is too large, per upload kind (`import`, `model`). */
+const PATH_ADVICE = Object.freeze({
+  import: { instead: 'Import it from a path on the server instead.', larger: 'import a larger file from a path on the server' },
+  model: { instead: 'Add it from a path on the server instead.', larger: 'add a larger model from a path on the server' },
+});
+const advice = (kind) => PATH_ADVICE[kind] || PATH_ADVICE.import;
+
+/**
+ * The problem with uploading `size` bytes under `limit` (null: none announced), or null; `kind`
+ * (`import` | `model`) words the advice.
+ */
+export function uploadSizeProblem(size, limit, kind = 'import') {
   if (typeof size !== 'number' || !Number.isFinite(size)) return 'Choose a file.';
   if (size === 0) return 'The file is empty.';
   if (limit !== null && limit !== undefined && size > limit) {
-    return `The file has ${bytesText(size)}; the server takes uploads up to ${bytesText(limit)} ([limits] upload_bytes in server.toml). Import it from a path on the server instead.`;
+    return `The file has ${bytesText(size)}; the server takes uploads up to ${bytesText(limit)} ([limits] upload_bytes in server.toml). ${advice(kind).instead}`;
   }
   return null;
 }
@@ -500,10 +511,13 @@ export function progressText(loaded, total) {
  * limit's advice; a connection the server closed (it answers an upload declared far above its
  * limit without reading it) names the limit; `abort()` rejects with `aborted: true`.
  * `onProgress(loaded, total)` follows `xhr.upload.onprogress`; `onSent()` fires when the body is
- * sent (the import then runs within the request). `XHR` is injectable (tests).
- * @param {{base: URL|string, headers?: Object<string,string>, XHR?: Function, limit?: number|null}} options
+ * sent (the import then runs within the request). `XHR` is injectable (tests). `kind`
+ * (`import` | `model`: a model upload, `modelUploadRequest`'s `upload`) words the advice.
+ * @param {{base: URL|string, headers?: Object<string,string>, XHR?: Function, limit?: number|null, kind?: string}} options
  */
-export function uploadImport({ base, headers = {}, XHR = globalThis.XMLHttpRequest, limit = null }, upload, file, { onProgress = () => {}, onSent = () => {} } = {}) {
+export function uploadImport({ base, headers = {}, XHR = globalThis.XMLHttpRequest, limit = null, kind = 'import' }, upload, file, { onProgress = () => {}, onSent = () => {} } = {}) {
+  const words = advice(kind);
+  const capital = (t) => t.charAt(0).toUpperCase() + t.slice(1);
   let xhr = null;
   const promise = new Promise((resolve, reject) => {
     if (typeof XHR !== 'function') {
@@ -531,7 +545,7 @@ export function uploadImport({ base, headers = {}, XHR = globalThis.XMLHttpReque
       }
       const err = parseAdminError(xhr.status, text);
       if (xhr.status === 413 && !err.help) {
-        err.help = limit ? `The server takes uploads up to ${bytesText(limit)}; import a larger file from a path on the server.` : 'Import a larger file from a path on the server.';
+        err.help = limit ? `The server takes uploads up to ${bytesText(limit)}; ${words.larger}.` : `${capital(words.larger)}.`;
       }
       reject(err);
     };
@@ -541,7 +555,7 @@ export function uploadImport({ base, headers = {}, XHR = globalThis.XMLHttpReque
         tooBig
           ? `The server closed the connection: the file is larger than its upload limit (${bytesText(limit)}).`
           : 'The upload failed: the connection was closed before the server answered.',
-        { help: tooBig ? 'Import it from a path on the server instead.' : '' },
+        { help: tooBig ? words.instead : '' },
       ));
     };
     xhr.onabort = () => {
@@ -620,11 +634,54 @@ export function addModelBody(form) {
   return { body };
 }
 
+/** The formats a model upload names (`format`); '' = detected from the content. */
+export const MODEL_UPLOAD_FORMATS = Object.freeze(['', 'gsnap', 'tar']);
+
+/**
+ * The model upload format a file name suggests: `gsnap`, `tar`, '' (another name: the server
+ * detects it), or null for a compressed archive the server does not take (`.tar.gz`, `.tgz`,
+ * `.zip`, ...).
+ */
+export function modelFileFormat(fileName) {
+  const name = String(fileName || '').toLowerCase();
+  if (name.endsWith('.gsnap')) return 'gsnap';
+  if (name.endsWith('.tar')) return 'tar';
+  if (/\.(tar\.[a-z0-9]+|tgz|tbz2?|txz|zip|7z|rar|gz|bz2|xz|zst)$/.test(name)) return null;
+  return '';
+}
+
+/**
+ * The model upload from the add-model form, or the problems: `{upload: {path, size}}` (the
+ * file as the body of `POST api/admin/models?<query>`, for `uploadImport` with `kind: 'model'`)
+ * or `{problems: [text]}`. Form: `{file ({name, size}), repo, license}`: a `.gsnap` carrying
+ * model blobs, or an uncompressed `.tar` of a Model2Vec model directory (`repo`/`license` name
+ * its model when the directory does not); `limit` = `uploadLimit(info)`. `format` is sent when
+ * the file name says it; only set parameters are sent.
+ */
+export function modelUploadRequest(form, limit = null) {
+  const f = form || {};
+  const problems = [];
+  const size = f.file && typeof f.file.size === 'number' ? f.file.size : NaN;
+  const sp = uploadSizeProblem(size, limit, 'model');
+  if (sp) problems.push(sp);
+  const format = f.file ? modelFileFormat(f.file.name) : '';
+  if (format === null) problems.push('Upload a .gsnap or an uncompressed .tar of the model directory (a compressed archive is not taken).');
+  if (problems.length) return { problems };
+  const fields = {};
+  const repo = typeof f.repo === 'string' ? f.repo.trim() : '';
+  const license = typeof f.license === 'string' ? f.license.trim() : '';
+  if (repo) fields.repo = repo;
+  if (license) fields.license = license;
+  if (format) fields.format = format;
+  const query = Object.entries(fields).map(([k, v]) => `${k}=${encodeURIComponent(v)}`).join('&');
+  return { upload: { path: `api/admin/models${query ? `?${query}` : ''}`, size } };
+}
+
 /** The hint of a `needs-model` row: how to get it loadable (empty for other states). */
 export function needsModelHint(row) {
   if (!row || row.state !== 'needs-model') return '';
   const model = row.model ? `"${row.model}"` : 'its model';
-  return `Add ${model} under Models (from a model directory or .gsnap on the server; when models/ already holds it: "Give to waiting"); the database then becomes unloaded and can be loaded.`;
+  return `Add ${model} under Models (upload a .gsnap or a .tar of the model directory, or name one on the server; when models/ already holds it: "Give to waiting"); the database then becomes unloaded and can be loaded.`;
 }
 
 /**

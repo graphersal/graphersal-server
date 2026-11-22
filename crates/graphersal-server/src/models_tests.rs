@@ -648,3 +648,317 @@ fn models_add_leaves_a_marked_base_alone() {
         DbState::needs_model("acme/tiny")
     );
 }
+
+// ---------------------------------------------------------------- V18: Store fill, model upload
+
+/// A closed Store directory `name` (outside the server directory) holding the tiny model
+/// `acme/tiny` (seed 1, as in [`snapshots`]); answers it and its blob's relative name
+/// `blobs/<2 hex>/<hash>`.
+fn store_with_model(temp: &TempDir, name: &str) -> (PathBuf, String) {
+    let dir = temp.path().join(name);
+    let store = Store::create_with(
+        &dir,
+        graphersal::prelude::TraversalGraph::new(),
+        StoreOptions::new(),
+    )
+    .unwrap();
+    store
+        .import_model(
+            ModelSource::Files(crate::test_models::tiny_model(1, "acme/tiny")),
+            ImportModelOptions::new(),
+        )
+        .expect("the model");
+    store.close().unwrap();
+    let blobs = blob_files(&dir.join("blobs")).unwrap();
+    assert_eq!(blobs.len(), 1);
+    let hash = blobs[0].0.clone();
+    let blob = format!("blobs/{}/{hash}", &hash[..2]);
+    (dir, blob)
+}
+
+/// [`store_with_model`] with its blob file removed: a source Store lacking its model blob.
+fn store_without_blob(temp: &TempDir, name: &str) -> PathBuf {
+    let (dir, blob) = store_with_model(temp, name);
+    fs::remove_file(dir.join(blob)).unwrap();
+    dir
+}
+
+/// A single-file `.gstore` holding the tiny model's definition without its blob.
+fn gstore_without_blob(temp: &TempDir) -> PathBuf {
+    use graphersal::persist::{SingleFileDir, StoreDir};
+    let (dir, blob) = store_with_model(temp, "gstore-source");
+    let file = temp.path().join("lacks.gstore");
+    Store::convert(&dir, &file).unwrap();
+    SingleFileDir::new(&file).remove_file(&blob).unwrap();
+    file
+}
+
+/// An upload to `endpoint` (with its query) of the admin route over `admin`.
+fn upload(admin: &Admin, endpoint: &str, bytes: Vec<u8>) -> (u16, Value) {
+    let length = bytes.len();
+    let url = format!("/api/admin/{endpoint}");
+    let path = endpoint.split('?').next().unwrap();
+    let mut request = Request::new(Method::Post, &url, Cursor::new(bytes))
+        .with_header("Content-Type", "application/octet-stream")
+        .with_body_length(Some(length));
+    match crate::admin_api::route(admin, &Method::Post, path, &mut request) {
+        Ok(response) => (
+            response.status(),
+            serde_json::from_slice(response.body()).unwrap_or(Value::Null),
+        ),
+        Err(err) => (err.status(), json!({ "error": err.message() })),
+    }
+}
+
+fn tmp_is_empty(dir: &ServerDir) -> bool {
+    fs::read_dir(dir.tmp()).map_or(true, |mut l| l.next().is_none())
+}
+
+#[test]
+fn a_store_import_fills_a_missing_model_blob_from_the_shared_models() {
+    let temp = TempDir::new("models-fill");
+    let dir = server(&temp);
+    let admin = offline(&dir);
+    let (with, _) = snapshots(&temp, &admin);
+    let source = store_without_blob(&temp, "lacks");
+    let gstore = gstore_without_blob(&temp);
+
+    // models/ lacks it: refused (409 + help naming models add), nothing is created.
+    let err = admin
+        .import(&ImportSource::new(&source), "early", None, None)
+        .unwrap_err();
+    match &err {
+        ServerError::ModelUnavailable { repos, message, .. } => {
+            assert_eq!(repos, &["acme/tiny"], "{err}");
+            assert!(message.contains("blobs/"), "{message}");
+        }
+        other => panic!("{other}"),
+    }
+    assert!(err.to_string().contains("'acme/tiny'"), "{err}");
+    let body = json!({"path": source.to_str().unwrap(), "name": "early"});
+    let (status, answer) = route(&admin, Method::Post, "import", Some(body));
+    assert_eq!(status, 409, "{answer}");
+    assert!(
+        answer["help"]
+            .as_str()
+            .unwrap()
+            .contains("POST /api/admin/models"),
+        "{answer}"
+    );
+    assert!(admin.registry().get("early").is_err());
+    assert!(tmp_is_empty(&dir));
+
+    // models/ holds it: the core, the path form and the upload form (.gstore).
+    admin.model_add(&ModelAddSpec::path(&with)).unwrap();
+    let imported = admin
+        .import(&ImportSource::new(&source), "core", None, None)
+        .expect("imported");
+    assert_eq!(imported.entry.state, DbState::Unloaded);
+    assert!(imported.models_missing.is_empty(), "{imported:?}");
+    assert_eq!(imported.models_resolved, ["acme/tiny"]);
+    assert!(
+        imported
+            .notes
+            .iter()
+            .any(|n| n.contains("'acme/tiny'") && n.contains("filled from the shared models")),
+        "{:?}",
+        imported.notes
+    );
+    let body = json!({"path": source.to_str().unwrap(), "name": "by-path"});
+    let (status, answer) = route(&admin, Method::Post, "import", Some(body));
+    assert_eq!(status, 201, "{answer}");
+    assert_eq!(answer["state"], "unloaded");
+    assert_eq!(answer["import"]["format"], "store");
+    assert_eq!(answer["import"]["modelsResolved"], json!(["acme/tiny"]));
+    assert!(
+        answer["import"]["notes"][0]
+            .as_str()
+            .unwrap()
+            .contains("filled from the shared models"),
+        "{answer}"
+    );
+    let (status, answer) = upload(&admin, "import?name=by-upload", fs::read(&gstore).unwrap());
+    assert_eq!(status, 201, "{answer}");
+    assert_eq!(answer["import"]["modelsResolved"], json!(["acme/tiny"]));
+    #[cfg(unix)]
+    assert_eq!(
+        shared_links(&admin, &["core", "by-path", "by-upload"]),
+        4,
+        "models + 3 databases: the filled blob is a hard link"
+    );
+    assert!(tmp_is_empty(&dir));
+    // The source is unchanged and the copies load with their model.
+    assert!(blob_files(&source.join("blobs")).unwrap().is_empty());
+    for name in ["core", "by-upload"] {
+        assert!(matches!(
+            model_state(&admin, name, "acme/tiny"),
+            Some(state) if state != ModelState::Missing
+        ));
+    }
+    let loader = loader_of(&dir);
+    for name in ["core", "by-upload"] {
+        loader.load(name).unwrap();
+        assert_eq!(loader.wait(name, WAIT).unwrap(), DbState::Loaded, "{name}");
+    }
+    loader.shutdown().unwrap();
+}
+
+#[test]
+fn a_damaged_shared_blob_refuses_the_store_import() {
+    let temp = TempDir::new("models-fill-damaged");
+    let dir = server(&temp);
+    let admin = offline(&dir);
+    let (with, _) = snapshots(&temp, &admin);
+    let source = store_without_blob(&temp, "lacks");
+    admin.model_add(&ModelAddSpec::path(&with)).unwrap();
+    let index = admin.models_index().unwrap();
+    let shared = admin.models().blob_path(&index.models[0].blob);
+    let len = fs::metadata(&shared).unwrap().len();
+    fs::write(&shared, vec![0x5au8; len as usize]).unwrap();
+
+    let err = admin
+        .import(&ImportSource::new(&source), "d", None, None)
+        .unwrap_err();
+    match &err {
+        ServerError::ModelDamaged { blob, .. } => {
+            assert_eq!(blob.as_deref(), Some(shared.as_path()), "{err}")
+        }
+        other => panic!("{other}"),
+    }
+    assert!(
+        err.to_string().contains(&shared.display().to_string()),
+        "{err}"
+    );
+    let body = json!({"path": source.to_str().unwrap(), "name": "d"});
+    let (status, answer) = route(&admin, Method::Post, "import", Some(body));
+    assert_eq!(status, 500, "{answer}");
+    assert!(
+        answer["error"].as_str().unwrap().contains("damaged"),
+        "{answer}"
+    );
+    assert!(
+        answer["help"].as_str().unwrap().contains(&format!(
+            "DELETE /api/admin/models/{}",
+            index.models[0].blob
+        )),
+        "{answer}"
+    );
+    assert!(admin.registry().get("d").is_err());
+    assert!(tmp_is_empty(&dir));
+}
+
+#[test]
+fn a_model_upload_adds_a_gsnap_or_a_tar_archive_and_resolves_the_waiting() {
+    let temp = TempDir::new("models-upload");
+    let dir = server(&temp);
+    let admin = offline(&dir);
+    let (with, without) = snapshots(&temp, &admin);
+    admin
+        .import(&ImportSource::new(&without), "waits", None, None)
+        .unwrap();
+
+    // A tar archive of the model directory (the same files: the same blob).
+    let tar = crate::model_archive::tests::model_tar(1, Some("tiny"));
+    let (status, answer) = upload(
+        &admin,
+        "models?repo=acme%2Ftiny&license=mit&format=tar",
+        tar.clone(),
+    );
+    assert_eq!(status, 201, "{answer}");
+    assert_eq!(answer["added"][0]["repo"], "acme/tiny", "{answer}");
+    assert_eq!(answer["resolved"], json!(["waits"]), "{answer}");
+    assert_eq!(answer["stillMissing"], json!([]));
+    assert_eq!(
+        admin.registry().get("waits").unwrap().state,
+        DbState::Unloaded
+    );
+    assert!(tmp_is_empty(&dir));
+    let loader = loader_of(&dir);
+    loader.load("waits").unwrap();
+    assert_eq!(loader.wait("waits", WAIT).unwrap(), DbState::Loaded);
+    loader.shutdown().unwrap();
+
+    // A .gsnap upload (format detected) on another server directory.
+    let other = TempDir::new("models-upload-2");
+    let dir2 = server(&other);
+    let admin2 = offline(&dir2);
+    let (_, without2) = snapshots(&other, &admin2);
+    admin2
+        .import(&ImportSource::new(&without2), "w", None, None)
+        .unwrap();
+    let (status, answer) = upload(&admin2, "models", fs::read(&with).unwrap());
+    assert_eq!(status, 201, "{answer}");
+    assert_eq!(answer["added"][0]["repo"], "acme/tiny");
+    assert_eq!(answer["resolved"], json!(["w"]));
+    assert!(tmp_is_empty(&dir2));
+
+    // The console's path form takes the archive too.
+    let third = TempDir::new("models-upload-3");
+    let dir3 = server(&third);
+    let admin3 = offline(&dir3);
+    let file = third.path().join("tiny.tar");
+    fs::write(&file, &tar).unwrap();
+    let added = admin3
+        .model_add(&ModelAddSpec::path(&file).with_repo(Some("acme/tiny".into())))
+        .expect("from a .tar path");
+    assert_eq!(added.added[0].repo.as_deref(), Some("acme/tiny"));
+    assert!(tmp_is_empty(&dir3));
+}
+
+#[test]
+fn a_model_upload_refuses_malicious_archives_and_other_files() {
+    use crate::model_archive::tests::{archive, entry};
+    let temp = TempDir::new("models-upload-refused");
+    let dir = server(&temp);
+    let admin = offline(&dir);
+    let cases = [
+        archive(&[
+            entry("config.json", b'0', b"{}"),
+            entry("../escape", b'0', b"x"),
+        ]),
+        archive(&[entry("/abs", b'0', b"x")]),
+        archive(&[entry("link", b'2', b"")]),
+        archive(&[entry("hard", b'1', b"")]),
+    ];
+    for bytes in cases {
+        let (status, answer) = upload(&admin, "models?repo=acme%2Fevil", bytes);
+        assert_eq!(status, 400, "{answer}");
+        assert!(
+            answer["error"]
+                .as_str()
+                .unwrap()
+                .contains("not a usable model archive"),
+            "{answer}"
+        );
+        assert!(!temp.path().join("escape").exists());
+        assert!(!dir.root().join("escape").exists());
+        assert!(tmp_is_empty(&dir), "the unpack is removed");
+    }
+    // Neither a snapshot nor a tar; a format that does not match; an unknown parameter; empty.
+    let (status, answer) = upload(&admin, "models", b"{\"not\": \"a model\"}".to_vec());
+    assert_eq!(status, 400, "{answer}");
+    assert!(answer["error"].as_str().unwrap().contains("neither"));
+    let tar = crate::model_archive::tests::model_tar(1, None);
+    let (status, answer) = upload(&admin, "models?format=gsnap", tar);
+    assert_eq!(status, 400, "{answer}");
+    assert!(answer["error"].as_str().unwrap().contains("not a packed"));
+    let (status, _) = upload(&admin, "models?path=x", b"x".to_vec());
+    assert_eq!(status, 400);
+    let (status, _) = upload(&admin, "models?format=zip", b"x".to_vec());
+    assert_eq!(status, 400);
+    let (status, _) = upload(&admin, "models", Vec::new());
+    assert_eq!(status, 400);
+    assert!(admin.models_index().unwrap().models.is_empty());
+    assert!(tmp_is_empty(&dir));
+    // The listener lets a model upload pass up to the upload limit.
+    assert!(crate::admin_api::is_upload(
+        &Method::Post,
+        "/api/admin/models",
+        Some("application/octet-stream")
+    ));
+    assert!(!crate::admin_api::is_upload(
+        &Method::Post,
+        "/api/admin/models",
+        Some("application/json")
+    ));
+}

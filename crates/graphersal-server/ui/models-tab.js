@@ -2,22 +2,28 @@
 // models/ directory (`GET api/admin/models`: repository, licence, size, the databases holding it,
 // the ones waiting for it with "Give to waiting" (`{repo}`), a warning when a database holds a
 // copy instead of a hard link), the `needs-model` databases whose model models/ does not hold,
-// add (`POST api/admin/models`: a model directory or .gsnap on the server, or a repository
-// models/ already holds, which also resolves the waiting databases) and remove (`DELETE
-// api/admin/models/<repo>`; refused with help while a database uses it). Rules and texts:
-// ./admin-api.js. The models are read again whenever the database list was reloaded.
+// add (`POST api/admin/models`: a file uploaded from this browser (a .gsnap carrying model blobs
+// or an uncompressed .tar of a Model2Vec model directory, the raw body through XMLHttpRequest
+// for the progress bar like the Import tab, the size checked against the root `/api/info`
+// `uploadBytes` (`api.info.host`) first; Cancel aborts it), a model directory, .tar or .gsnap on
+// the server, or a repository models/ already holds; every add also resolves the waiting
+// databases) and remove (`DELETE api/admin/models/<repo>`; refused with help while a database
+// uses it). Rules and texts: ./admin-api.js (`modelUploadRequest`, `addModelBody`). The models
+// are read again whenever the database list was reloaded.
 
-import { reactive, ref, nextTick, onMounted, watch } from 'vue';
+import { reactive, ref, computed, nextTick, onMounted, watch } from 'vue';
 import {
-  modelRows, missingRows, removeModelAction, addModelBody, confirmText, outcomeText, bytesText,
+  modelRows, missingRows, removeModelAction, addModelBody, modelUploadRequest, uploadImport,
+  uploadLimit, uploadSizeProblem, progressText, confirmText, outcomeText, bytesText,
 } from './admin-api.js';
-import { admin, list, reload, errorNotice, noticeClass } from './shared.js';
+import { admin, ROOT, headers, list, reload, errorNotice, noticeClass } from './shared.js';
+import { hostInfo } from './databases.js';
 
-const freshForm = () => ({ source: 'path', path: '', repo: '', license: '' });
+const freshForm = () => ({ source: 'upload', file: null, path: '', repo: '', license: '' });
 
 export default {
   props: { api: { type: Object, required: true }, params: { type: Object, default: () => ({}) } },
-  setup() {
+  setup(props) {
     const models = ref([]);
     const missing = ref([]);
     const error = ref(null);
@@ -25,7 +31,13 @@ export default {
     const busy = reactive({});
     const notice = ref(null);
     const dlg = ref(null);
-    const dialog = reactive({ form: freshForm(), problems: [], error: null, busy: false });
+    const dialog = reactive({ form: freshForm(), problems: [], error: null, busy: false, loaded: 0, total: 0, sent: false });
+    const fileInput = ref(null);
+    let running = null;
+    const limit = computed(() => uploadLimit(hostInfo(props.api)));
+    const fileProblem = computed(() => (dialog.form.source === 'upload' && dialog.form.file
+      ? uploadSizeProblem(dialog.form.file.size, limit.value, 'model') : null));
+    const percent = computed(() => (dialog.total > 0 ? Math.min(100, (dialog.loaded / dialog.total) * 100) : 0));
 
     async function load() {
       try {
@@ -83,7 +95,8 @@ export default {
     }
 
     async function openAdd(init = {}) {
-      Object.assign(dialog, { form: { ...freshForm(), ...init }, problems: [], error: null, busy: false });
+      Object.assign(dialog, { form: { ...freshForm(), ...init }, problems: [], error: null, busy: false, loaded: 0, total: 0, sent: false });
+      if (fileInput.value) fileInput.value.value = '';
       await nextTick();
       if (dlg.value && !dlg.value.open) dlg.value.showModal();
     }
@@ -91,15 +104,38 @@ export default {
       if (dialog.busy) return;
       if (dlg.value && dlg.value.open) dlg.value.close();
     }
+    /** Cancel: aborts a running upload, else closes the dialog. */
+    function cancelAdd() {
+      if (running) {
+        running.abort();
+        return;
+      }
+      closeAdd();
+    }
+    function pickFile(event) {
+      const file = event.target.files && event.target.files[0];
+      dialog.form.file = file || null;
+    }
     async function submitAdd() {
       if (dialog.busy) return;
-      const built = addModelBody(dialog.form);
+      const upload = dialog.form.source === 'upload';
+      const built = upload ? modelUploadRequest(dialog.form, limit.value) : addModelBody(dialog.form);
       dialog.problems = built.problems || [];
-      if (!built.body) return;
+      if (!built.body && !built.upload) return;
       dialog.busy = true;
       dialog.error = null;
       try {
-        const answer = await admin.addModel(built.body);
+        let answer;
+        if (upload) {
+          Object.assign(dialog, { loaded: 0, total: built.upload.size, sent: false });
+          running = uploadImport({ base: ROOT, headers, limit: limit.value, kind: 'model' }, built.upload, dialog.form.file, {
+            onProgress: (loaded, total) => { dialog.loaded = loaded; dialog.total = total; },
+            onSent: () => { dialog.sent = true; },
+          });
+          answer = await running.promise;
+        } else {
+          answer = await admin.addModel(built.body);
+        }
         dialog.busy = false;
         notice.value = addedNotice(answer);
         closeAdd();
@@ -107,6 +143,7 @@ export default {
         dialog.error = errorNotice(err);
       } finally {
         dialog.busy = false;
+        running = null;
         await changed();
       }
     }
@@ -114,7 +151,8 @@ export default {
     onMounted(load);
     watch(() => list.version, load);
     return {
-      models, missing, error, loaded, busy, notice, dlg, dialog, load, remove, addByRepo, openAdd, closeAdd, submitAdd,
+      models, missing, error, loaded, busy, notice, dlg, dialog, load, remove, addByRepo, openAdd, closeAdd, cancelAdd, submitAdd,
+      fileInput, pickFile, limit, fileProblem, percent, progressText,
       bytesText, noticeClass, removeAct: removeModelAction,
       held: (repo) => models.value.some((m) => m.repo === repo),
       shortHash: (h) => h.slice(0, 12),
@@ -168,7 +206,7 @@ export default {
             <td class="mono">{{ m.model }}</td>
             <td class="srv-actions">
               <button v-if="held(m.model)" type="button" class="btn small" :disabled="!!busy['repo:' + m.model]" title="models/ holds it: give it to the waiting databases" @click="addByRepo(m.model)">Use from models/</button>
-              <button v-else type="button" class="btn small" title="Add it from a model directory or .gsnap on the server" @click="openAdd({ repo: m.model })">Add…</button>
+              <button v-else type="button" class="btn small" title="Add it: upload a .gsnap or a .tar of the model directory, or name one on the server" @click="openAdd({ repo: m.model })">Add…</button>
             </td>
           </tr>
         </tbody>
@@ -176,33 +214,42 @@ export default {
       </div>
     </template>
 
-    <dialog ref="dlg" class="store-dialog srv-dialog" aria-labelledby="srv-model-title" @cancel.prevent="closeAdd" @click.self="closeAdd">
+    <dialog ref="dlg" class="store-dialog srv-dialog" aria-labelledby="srv-model-title" @cancel.prevent="cancelAdd" @click.self="closeAdd">
       <form @submit.prevent="submitAdd">
         <div class="dialog-head">
           <h2 id="srv-model-title">Add a model</h2><span class="spacer"></span>
           <button type="button" class="icon-btn" @click="closeAdd" aria-label="Close">×</button>
         </div>
         <div class="dialog-body srv-form">
-          <fieldset>
+          <fieldset :disabled="dialog.busy">
             <legend>From</legend>
-            <label class="inline"><input type="radio" value="path" v-model="dialog.form.source"> A Model2Vec model directory or .gsnap on the server's machine</label>
+            <label class="inline"><input type="radio" value="upload" v-model="dialog.form.source"> A file from this computer (uploaded)</label>
+            <label class="inline"><input type="radio" value="path" v-model="dialog.form.source"> A Model2Vec model directory, .tar or .gsnap on the server's machine</label>
             <label class="inline"><input type="radio" value="repo" v-model="dialog.form.source"> A repository models/ already holds</label>
           </fieldset>
+          <label v-if="dialog.form.source === 'upload'">File (.gsnap carrying models, or an uncompressed .tar of a model directory)
+            <input ref="fileInput" type="file" name="file" accept=".gsnap,.tar" @change="pickFile" :disabled="dialog.busy">
+            <span class="muted srv-sub">{{ limit ? 'Up to ' + bytesText(limit) + ' per upload.' : '' }}<template v-if="dialog.form.file"> This file: {{ bytesText(dialog.form.file.size) }}.</template></span></label>
+          <p v-if="fileProblem" class="srv-problems" role="alert">{{ fileProblem }}</p>
           <label v-if="dialog.form.source === 'path'">Absolute path
             <input v-model="dialog.form.path" name="path" class="mono" autocomplete="off" spellcheck="false" placeholder="/models/potion-base-8M"></label>
-          <label>Repository (owner/name){{ dialog.form.source === 'path' ? ', when the directory does not name it' : '' }}
-            <input v-model="dialog.form.repo" name="repo" class="mono" autocomplete="off" spellcheck="false"></label>
-          <label v-if="dialog.form.source === 'path'">Licence (SPDX id, when the directory does not name it)
-            <input v-model="dialog.form.license" name="license" class="mono" autocomplete="off" spellcheck="false"></label>
+          <label>Repository (owner/name){{ dialog.form.source !== 'repo' ? ', when the directory does not name it' : '' }}
+            <input v-model="dialog.form.repo" name="repo" class="mono" autocomplete="off" spellcheck="false" :disabled="dialog.busy"></label>
+          <label v-if="dialog.form.source !== 'repo'">Licence (SPDX id, when the directory does not name it)
+            <input v-model="dialog.form.license" name="license" class="mono" autocomplete="off" spellcheck="false" :disabled="dialog.busy"></label>
           <p class="muted srv-sub">Every database waiting for the model gets it and can be loaded.</p>
+          <div v-if="dialog.busy && dialog.form.source === 'upload'" class="srv-progress" role="status">
+            <progress :value="dialog.sent ? 100 : percent" max="100"></progress>
+            <span class="muted">{{ dialog.sent ? 'Uploaded; the server is adding the model…' : 'Uploading ' + progressText(dialog.loaded, dialog.total) }}</span>
+          </div>
           <ul v-if="dialog.problems.length" class="srv-problems" role="alert"><li v-for="p in dialog.problems" :key="p">{{ p }}</li></ul>
           <div v-if="dialog.error" class="notice srv-notice srv-error" role="alert">
             <div class="srv-notice-text"><span>{{ dialog.error.text }}</span>
               <p v-if="dialog.error.help" class="srv-help">{{ dialog.error.help }}</p></div>
           </div>
           <div class="store-dialog-buttons">
-            <button type="submit" class="btn primary" :disabled="dialog.busy">{{ dialog.busy ? 'Adding…' : 'Add' }}</button>
-            <button type="button" class="btn" :disabled="dialog.busy" @click="closeAdd">Cancel</button>
+            <button type="submit" class="btn primary" :disabled="dialog.busy || !!fileProblem">{{ dialog.busy ? 'Adding…' : 'Add' }}</button>
+            <button type="button" class="btn" :disabled="dialog.busy && (dialog.form.source !== 'upload' || dialog.sent)" @click="cancelAdd">{{ dialog.busy && dialog.form.source === 'upload' && !dialog.sent ? 'Cancel upload' : 'Cancel' }}</button>
           </div>
         </div>
       </form>

@@ -14,9 +14,14 @@
 //!   identity ([`BaseRef`]): the one named by `base`, or the only base database with that
 //!   identity; refused otherwise, naming the identity;
 //! - a Store (a directory, or a single-file `.gstore`): copied file by file into a directory
-//!   Store ([`Store::convert`], verified; its creation parameters come along); a layer Store is
-//!   matched with its base like a layer snapshot; a missing model blob is taken from
-//!   `models/` like a snapshot's, or marks `needs-model`;
+//!   Store ([`Store::convert_with`], verified; its creation parameters come along); a layer
+//!   Store is matched with its base like a layer snapshot; a model blob the source lacks is
+//!   filled into the copy from `models/` (checked by its hash, then hard-linked to `models/`
+//!   by the adoption; [`Imported::models_resolved`] names its model). A blob `models/` lacks
+//!   too refuses the import ([`ServerError::ModelUnavailable`], `409`: a Store copy is
+//!   verified and cannot leave a referenced blob out, so unlike a snapshot it cannot become
+//!   `needs-model`; add the model, then import again); one `models/` holds damaged is
+//!   [`ServerError::ModelDamaged`] naming the file;
 //! - GraphSON (`.json`, `.jsonl`, `.graphson`) or GraphML (`.xml`, `.graphml`): a new plain
 //!   database holding the file's graph (the Store gets `server.toml`'s `[defaults]`); data
 //!   GraphSON cannot hold is skipped and listed in the import's notes.
@@ -41,7 +46,8 @@ use std::path::{Path, PathBuf};
 use graphersal::GraphSource;
 use graphersal::io::{GraphSONImport, ImportReport};
 use graphersal::persist::{
-    ModelState, PersistError, ReadOptions, Store, read_layer_snapshot, read_snapshot_info,
+    BlobSource, ConvertOptions, ModelState, PersistError, ReadOptions, Store, StoreFailure,
+    read_layer_snapshot, read_snapshot_info,
 };
 use graphersal::storage::{BaseRef, LayeredGraph};
 
@@ -50,6 +56,7 @@ use super::FailPoint;
 use super::{Admin, store_error};
 use crate::database::{DatabaseConfig, DatabaseKind, DatabaseRole};
 use crate::error::ServerError;
+use crate::models::{ModelsDir, manifest_of};
 use crate::registry::DatabaseEntry;
 
 /// The format of an import source.
@@ -137,7 +144,8 @@ pub struct Imported {
     /// lacks them too).
     pub models_missing: Vec<String>,
     /// The embedding models (repositories) the source named without carrying them, taken
-    /// from the server's shared `models/` at the import.
+    /// from the server's shared `models/` at the import: a snapshot's model, or a model whose
+    /// blob a source Store lacked (filled into the copy).
     pub models_resolved: Vec<String>,
     /// How many values, entries or elements the import skipped (GraphSON).
     pub skipped: usize,
@@ -151,6 +159,8 @@ struct Built {
     layer: Option<(BaseRef, String)>,
     models_missing: Vec<String>,
     models_resolved: Vec<String>,
+    /// The repositories of the model blobs a Store import filled from `models/`.
+    models_filled: Vec<String>,
     skipped: usize,
     notes: Vec<String>,
 }
@@ -166,7 +176,9 @@ impl Admin {
     /// recognized); [`ServerError::InvalidInput`] (the source does not read as its format, a
     /// `base` for a plain source); [`ServerError::Refused`] (a layer without its base database:
     /// the message names the base identity); [`ServerError::Store`] (the Store cannot be
-    /// written); [`ServerError::Config`]; [`ServerError::Io`].
+    /// written); [`ServerError::ModelUnavailable`] / [`ServerError::ModelDamaged`] (a source
+    /// Store lacks a model blob that `models/` lacks too / holds damaged);
+    /// [`ServerError::Config`]; [`ServerError::Io`].
     pub fn import(
         &self,
         source: &ImportSource,
@@ -312,7 +324,13 @@ impl Admin {
             format,
             layer_base: built.layer.map(|(identity, _)| identity.to_string()),
             models_missing: built.models_missing,
-            models_resolved: built.models_resolved,
+            models_resolved: dedup(
+                built
+                    .models_filled
+                    .into_iter()
+                    .chain(built.models_resolved)
+                    .collect(),
+            ),
             skipped: built.skipped,
             notes: built.notes,
         })
@@ -383,8 +401,16 @@ impl Admin {
         base: Option<&str>,
         as_base: bool,
     ) -> Result<Built, ServerError> {
-        Store::convert(path, store_dir)
-            .map_err(|err| store_error(name, &format!("cannot copy the Store: {err}")))?;
+        // A model blob the source lacks is filled from `models/` (laid out as
+        // `blobs/<2 hex>/<hash>`) into the copy, checked by its hash; the filled file is
+        // replaced by a hard link to `models/` afterwards (the adoption in `import_as`).
+        let models = self.models();
+        let report = Store::convert_with(
+            path,
+            store_dir,
+            ConvertOptions::new().with_fill_missing_blobs(BlobSource::store(models.root())),
+        )
+        .map_err(|err| convert_error(name, path, &models, err))?;
         let info = Store::inspect(store_dir)
             .map_err(|err| store_error(name, &format!("cannot inspect the copy: {err}")))?;
         let mut built = Built::default();
@@ -399,6 +425,20 @@ impl Admin {
                 built.models_missing = dedup(missing_blobs(name, store_dir)?);
             }
         }
+        for blob in &report.blobs_filled {
+            let model = filled_model(&models, blob);
+            tracing::info!(
+                target: "graphersal_server",
+                "database '{name}': the blob of {model} filled from models/"
+            );
+            built.notes.push(format!(
+                "the source Store lacks the blob of {model}: filled from the shared models"
+            ));
+            if let Some(repo) = model_repo(&models, blob) {
+                built.models_filled.push(repo);
+            }
+        }
+        built.models_filled = dedup(std::mem::take(&mut built.models_filled));
         Ok(built)
     }
 
@@ -437,6 +477,7 @@ impl Admin {
             layer: None,
             models_missing: Vec::new(),
             models_resolved: Vec::new(),
+            models_filled: Vec::new(),
             skipped: report.skipped(),
             notes,
         })
@@ -519,6 +560,70 @@ fn missing_blobs(name: &str, dir: &Path) -> Result<Vec<String>, ServerError> {
         .filter(|model| matches!(model.state, ModelState::Missing))
         .map(|model| model.repo)
         .collect())
+}
+
+/// The error of a Store copy: a model blob neither the source nor `models/` holds
+/// ([`ServerError::ModelUnavailable`]), one `models/` holds damaged
+/// ([`ServerError::ModelDamaged`]), anything else the Store's.
+fn convert_error(name: &str, source: &Path, models: &ModelsDir, err: PersistError) -> ServerError {
+    match err {
+        PersistError::Store {
+            cause: StoreFailure::BlobUnavailable,
+            reason,
+            ..
+        } => ServerError::ModelUnavailable {
+            name: name.to_string(),
+            // The source's catalog names the models whose blob it lacks (no lock taken).
+            repos: Store::models_dir(source)
+                .map(|models| {
+                    dedup(
+                        models
+                            .into_iter()
+                            .filter(|m| matches!(m.state, ModelState::Missing))
+                            .map(|m| m.repo)
+                            .collect(),
+                    )
+                })
+                .unwrap_or_default(),
+            message: reason,
+        },
+        PersistError::Store {
+            cause: StoreFailure::BlobDamaged,
+            reason,
+            ..
+        } => ServerError::ModelDamaged {
+            name: name.to_string(),
+            blob: blob_named(&reason).map(|hash| models.blob_path(hash)),
+            message: reason,
+        },
+        other => store_error(name, &format!("cannot copy the Store: {other}")),
+    }
+}
+
+/// The hash of the first `blobs/<2 hex>/<64 hex>` a Store's reason names.
+fn blob_named(reason: &str) -> Option<&str> {
+    reason.split_whitespace().find_map(|word| {
+        let hash = word.strip_prefix("blobs/")?.split('/').nth(1)?;
+        let hash = hash.get(..64)?;
+        hash.bytes().all(|b| b.is_ascii_hexdigit()).then_some(hash)
+    })
+}
+
+/// The repository of the model blob `blob` (`blobs/<2 hex>/<hash>`) as `models/` holds it.
+fn model_repo(models: &ModelsDir, blob: &str) -> Option<String> {
+    let hash = blob.rsplit('/').next().filter(|h| h.len() == 64)?;
+    manifest_of(&models.blob_path(hash)).ok().flatten()?.repo
+}
+
+/// The model blob `blob` in words: `the embedding model '<repo>'`, else `blob <12 hex>`.
+fn filled_model(models: &ModelsDir, blob: &str) -> String {
+    match model_repo(models, blob) {
+        Some(repo) => format!("the embedding model '{repo}'"),
+        None => {
+            let hash = blob.rsplit('/').next().unwrap_or(blob);
+            format!("the blob {}", hash.get(..12).unwrap_or(hash))
+        }
+    }
 }
 
 fn dedup(mut repos: Vec<String>) -> Vec<String> {

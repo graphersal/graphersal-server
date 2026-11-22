@@ -81,8 +81,8 @@ databases and missing models. Paths and commands are never wrapped.
 | `db backup NAME`, `db backups NAME` | verified ZIP backups in `DIR/backups/NAME/` |
 | `db restore NAME BACKUP [--name NEW]` | over NAME (unloaded) or into the new database NEW |
 | `db export NAME --out FILE [--no-models] [--materialize]` | a packed snapshot (`.gsnap`) |
-| `import DIR SOURCE --name NAME [--base BASE] [--format F] [--description TEXT] [--role normal\|base]` | a new database from a `.gsnap`, a Store (directory or `.gstore`), GraphSON or GraphML; an embedding model it names without carrying comes from `models/` (else the database is `needs-model` until `models add`); `--role base` makes a base of a plain source |
-| `models list`, `models add SOURCE [--repo R] [--license L]`, `models remove REPO` | the shared embedding models |
+| `import DIR SOURCE --name NAME [--base BASE] [--format F] [--description TEXT] [--role normal\|base]` | a new database from a `.gsnap`, a Store (directory or `.gstore`), GraphSON or GraphML; an embedding model it names without carrying comes from `models/` (else the database is `needs-model` until `models add`); a model blob a Store lacks is filled from `models/` (else the import is refused: add the model, import again); `--role base` makes a base of a plain source |
+| `models list`, `models add SOURCE [--repo R] [--license L]`, `models remove REPO` | the shared embedding models; SOURCE: a Model2Vec model directory, an uncompressed `.tar` of one, a `.gsnap` carrying models, or a repository `models/` holds |
 
 `graphersal-server --help` has the details. Exit codes: `0` ok, `1` failed (`Error: ...` and a
 `Help: ...` line on stderr; where the admin API's help names a route, the console names the
@@ -109,7 +109,9 @@ same mechanism graphersal-memory uses for its `memory` profile; the playground's
 built into the binary: `profile.json`, the tabs `databases-tab.js` (the list with load,
 unload, clone, promote, delete, read-only and auto-load, create, aliases), `backups-tab.js`
 (back up, list, restore), `import-tab.js` (upload with progress, or a path on the server),
-`export-tab.js` (`.gsnap` download) and `models-tab.js` (the shared models), the pure model
+`export-tab.js` (`.gsnap` download) and `models-tab.js` (the shared models; add one by
+uploading a `.gsnap` or a `.tar` of a model directory with progress, or from a path on the
+server), the pure model
 `admin-api.js` and `databases.js`, the tabs' shared state `shared.js` and the style sheet
 `server-ui.css` (on the playground's theme tokens; the profile names it in `styles`, so the
 playground links it itself and `/` serves the playground's `index.html` unchanged). Every module imports only `vue` and the
@@ -176,6 +178,12 @@ every file and key: [`docs/server-dir.md`](docs/server-dir.md).
   model later, so a source naming a model that neither it nor `models/` carries is refused as
   a base: add the model (`models add`) and import again, or import it as an ordinary database,
   add the model, then promote it.
+- A **Store import lacking a model blob** that `models/` does not hold either is refused
+  (`409`), not imported as `needs-model` like a snapshot: a Store copy is verified and cannot
+  leave a referenced blob out. Add the model to `models/`, then import again (the blob is
+  filled in and hard-linked).
+- A model archive is an **uncompressed ustar `.tar`** (`tar -cf model.tar -C <model dir> .`);
+  compressed archives and `.zip` are not taken.
 - A **layer `.gsnap` export carries no models** (an engine rule); export the layer with
   `materialize=true` (`--materialize`) for a standalone snapshot with the models.
 - **No memory figures** in the database listing (only `sizeBytes` on disk): a loaded database's

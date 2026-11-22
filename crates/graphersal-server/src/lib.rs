@@ -35,6 +35,7 @@ pub mod layout;
 pub mod loader;
 pub mod lock;
 mod mcp;
+mod model_archive;
 pub mod models;
 mod mounts;
 pub mod names;

@@ -14,6 +14,7 @@ use graphersal::prelude::TraversalGraph;
 use super::Admin;
 use crate::database::{DatabaseKind, DatabaseRole};
 use crate::error::ServerError;
+use crate::model_archive;
 use crate::models::{ModelBlob, ModelsDir, ModelsIndex, ScanEntry, catalog_users};
 use crate::registry::DbState;
 
@@ -23,8 +24,9 @@ use crate::registry::DbState;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ModelAddSpec {
-    /// A Model2Vec model directory or a packed snapshot (`.gsnap`) carrying model blobs, on the
-    /// server's machine.
+    /// A Model2Vec model directory, a tar archive of one (module docs of
+    /// `model_archive`: ustar, unpacked safely into `tmp/`) or a packed snapshot (`.gsnap`)
+    /// carrying model blobs, on the server's machine (an upload: its file in `tmp/`).
     pub path: Option<PathBuf>,
     /// The repository (`owner/name`): of a directory that does not name it, or alone: a model
     /// `models/` already holds (the waiting databases are resolved again).
@@ -34,7 +36,7 @@ pub struct ModelAddSpec {
 }
 
 impl ModelAddSpec {
-    /// The models of the directory or `.gsnap` file `path`.
+    /// The models of the directory, `.tar` or `.gsnap` file `path`.
     pub fn path(path: impl Into<PathBuf>) -> Self {
         Self {
             path: Some(path.into()),
@@ -175,14 +177,14 @@ impl Admin {
         }
     }
 
-    /// Adds models to `models/` (from a Model2Vec directory or a `.gsnap`, through a scratch
-    /// Store in `tmp/`; or a repository `models/` holds already), then resolves every
+    /// Adds models to `models/` (from a Model2Vec directory, a tar archive of one or a
+    /// `.gsnap`, through a scratch Store in `tmp/`; or a repository `models/` holds already), then resolves every
     /// `needs-model` database whose model `models/` now has (module docs of
     /// [`crate::models`]).
     ///
     /// `Err`: [`ServerError::SourceNotFound`]; [`ServerError::InvalidInput`] (nothing given, a
-    /// directory that is not a model, a file that is not a packed snapshot or carries no
-    /// model); [`ServerError::ModelNotFound`] (a repository `models/` lacks);
+    /// directory that is not a model, an archive refused by the safe unpack, a file that is
+    /// neither a tar archive nor a packed snapshot or carries no model); [`ServerError::ModelNotFound`] (a repository `models/` lacks);
     /// [`ServerError::Io`].
     pub fn model_add(&self, spec: &ModelAddSpec) -> Result<ModelAdded, ServerError> {
         let mut out = ModelAdded::default();
@@ -235,7 +237,7 @@ impl Admin {
         Ok(out)
     }
 
-    /// The blobs of a model directory or `.gsnap` `path`, adopted into `models/` through a
+    /// The blobs of a model directory, `.tar` or `.gsnap` `path`, adopted into `models/` through a
     /// scratch Store in `tmp/` (removed afterwards).
     fn harvest(
         &self,
@@ -248,26 +250,18 @@ impl Admin {
                 path: path.to_path_buf(),
             });
         }
-        let scratch = Scratch::new(&self.registry.dir().tmp())?;
+        let tmp = self.registry.dir().tmp();
+        let scratch = Scratch::new(&tmp, "models-add")?;
         let label = path.display().to_string();
         if path.is_dir() {
-            Store::create_with(scratch.path(), TraversalGraph::new(), StoreOptions::new())
-                .and_then(Store::close)
-                .map_err(|err| store(&label, &format!("cannot create a scratch Store: {err}")))?;
-            let mut options = ImportModelOptions::new();
-            if let Some(repo) = &spec.repo {
-                options = options.with_repo(repo.clone());
-            }
-            if let Some(license) = &spec.license {
-                options = options.with_license(license.clone());
-            }
-            let report = Store::import_model_dir(
-                scratch.path(),
-                ModelSource::Dir(path.to_path_buf()),
-                options,
-            )
-            .map_err(|err| model_input(&label, &format!("not an importable model: {err}")))?;
-            notes.extend(report.warnings);
+            import_dir(scratch.path(), path, spec, &label, notes)?;
+        } else if model_archive::is_tar(path) {
+            // A model directory as a tar archive: unpacked safely into `tmp/` first.
+            let unpacked = Scratch::new(&tmp, "models-unpack")?;
+            let root = model_archive::unpack(path, unpacked.path()).map_err(|why| {
+                model_input(&label, &format!("not a usable model archive: {why}"))
+            })?;
+            import_dir(scratch.path(), &root, spec, &label, notes)?;
         } else {
             let file = File::open(path).map_err(|err| ServerError::io("read", path, err))?;
             Store::create_from_packed_dir(
@@ -410,18 +404,42 @@ impl Admin {
     }
 }
 
+/// The Model2Vec model directory `dir` imported into a new scratch Store `scratch`.
+fn import_dir(
+    scratch: &Path,
+    dir: &Path,
+    spec: &ModelAddSpec,
+    label: &str,
+    notes: &mut Vec<String>,
+) -> Result<(), ServerError> {
+    Store::create_with(scratch, TraversalGraph::new(), StoreOptions::new())
+        .and_then(Store::close)
+        .map_err(|err| store(label, &format!("cannot create a scratch Store: {err}")))?;
+    let mut options = ImportModelOptions::new();
+    if let Some(repo) = &spec.repo {
+        options = options.with_repo(repo.clone());
+    }
+    if let Some(license) = &spec.license {
+        options = options.with_license(license.clone());
+    }
+    let report = Store::import_model_dir(scratch, ModelSource::Dir(dir.to_path_buf()), options)
+        .map_err(|err| model_input(label, &format!("not an importable model: {err}")))?;
+    notes.extend(report.warnings);
+    Ok(())
+}
+
 /// A scratch directory in `tmp/`, removed on drop.
 struct Scratch {
     path: PathBuf,
 }
 
 impl Scratch {
-    fn new(tmp: &Path) -> Result<Self, ServerError> {
+    fn new(tmp: &Path, prefix: &str) -> Result<Self, ServerError> {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         fs::create_dir_all(tmp).map_err(|err| ServerError::io("create directory", tmp, err))?;
         let n = NEXT.fetch_add(1, Ordering::SeqCst);
         Ok(Self {
-            path: tmp.join(format!("models-add-{}-{n}", std::process::id())),
+            path: tmp.join(format!("{prefix}-{}-{n}", std::process::id())),
         })
     }
 

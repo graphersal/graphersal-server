@@ -21,6 +21,7 @@
 //! | POST | `import` | JSON `{"path", "name", "base"?, "format"?, "description"?, "role"?}` (a file or directory on the server's machine, absolute) | `201` entry + `"import"` |
 //! | GET | `models` | | `200 {"models": [model...], "missing": [{"database", "model"}...]}` (rebuilds `models/models.toml`) |
 //! | POST | `models` | `{"path"?, "repo"?, "license"?}` (`path`: a Model2Vec directory or a `.gsnap`, absolute, on the server's machine; `repo` alone: a model `models/` holds) | `201` (from a path) / `200` `{"added": [model...], "resolved": [database...], "stillMissing": [{"database", "model"}...], "notes": [text...]}` |
+//! | POST | `models?repo=<r>&license=<l>&format=<gsnap\|tar>` | the file itself (any content type but JSON): a `.gsnap` carrying model blobs or a tar archive of a Model2Vec model directory (format detected unless given) | `201` as above |
 //! | DELETE | `models/<repo or blob hash>` | | `200 {"model", "removed": [blob...], "bytes"}`; `409` while a database uses it |
 //! | GET | `aliases` | | `200 {"aliases": {alias: database}}` |
 //! | PUT | `aliases/<alias>` | `{"target"}` | `200 {"alias", "target"}` |
@@ -43,11 +44,21 @@
 //!
 //! An import upload's body is streamed into `tmp/upload-*.bin` (never held in memory; at most
 //! `server.toml`'s `[limits] upload_bytes`, default 4 GiB, else `413`), imported, and removed.
+//! A model upload (`POST models?...` with the file as the body) is streamed into `tmp/` the
+//! same way (same limit), then added like a path: a tar archive (ustar, uncompressed) is
+//! unpacked into `tmp/` first, refusing absolute paths, `..`, links, devices and more than
+//! 1000 entries (`400`: `not a usable model archive: ...`); a file that is neither a `.gsnap`
+//! nor a tar archive, or not of the `format` given, is `400`.
+//!
 //! `"import"` of the answer: `{"format": "snapshot" | "store" | "graphson" | "graphml",
 //! "layerBase"?, "modelsMissing": [repo...], "modelsResolved": [repo...], "skipped": n,
 //! "notes": [text...]}`; a model the source names without carrying it is taken from the shared
 //! `models/` when that holds it (`modelsResolved`), else the database has the state
-//! `needs-model` (`modelsMissing`). `role=base` makes a base database (read-only, frozen) of
+//! `needs-model` (`modelsMissing`). A Store (directory or `.gstore`) lacking a model blob gets
+//! it filled from `models/` (hard-linked afterwards; its model in `modelsResolved`, a note
+//! says it was filled); a blob `models/` lacks too is `409` (help: add the model, import
+//! again; a Store copy cannot leave a referenced blob out), one `models/` holds damaged `500`
+//! naming the file. `role=base` makes a base database (read-only, frozen) of
 //! a plain source; a layer source is `400`, a source naming a model it does not carry and
 //! `models/` lacks `409`.
 //!
@@ -93,7 +104,7 @@ use crate::loader::LoadStart;
 use crate::names::fold;
 use crate::ops::{
     Admin, BackupInfo, CreateSpec, ExportFile, ExportSpec, ImportFormat, ImportSource,
-    ModelAddSpec, TmpFile,
+    ModelAddSpec, ModelAdded, TmpFile,
 };
 use crate::registry::{DatabaseEntry, DbState, Registry};
 
@@ -251,7 +262,13 @@ pub(crate) fn route(
             .models_index()
             .map(|index| Response::json(200, &models_json(&index)))
             .map_err(|err| (err, None)),
-        (Method::Post, ["models"]) => return model_add(admin, request),
+        (Method::Post, ["models"]) => {
+            return if is_json(request) {
+                model_add(admin, request)
+            } else {
+                model_upload(admin, request)
+            };
+        }
         (Method::Delete, ["models", rest @ ..])
             if rest.iter().all(|s| !s.is_empty()) && !rest.is_empty() =>
         {
@@ -336,11 +353,11 @@ fn is_json(request: &Request<'_>) -> bool {
         .is_some_and(|value| value.to_ascii_lowercase().contains("application/json"))
 }
 
-/// Whether `method path` with the content type `content_type` is an import upload (the
-/// listener lets its body pass up to the upload limit).
+/// Whether `method path` with the content type `content_type` is an upload (an import or a
+/// model: the listener lets its body pass up to the upload limit).
 pub(crate) fn is_upload(method: &Method, path: &str, content_type: Option<&str>) -> bool {
     matches!(method, Method::Post)
-        && path == "/api/admin/import"
+        && matches!(path, "/api/admin/import" | "/api/admin/models")
         && !content_type
             .is_some_and(|value| value.to_ascii_lowercase().contains("application/json"))
 }
@@ -370,44 +387,21 @@ fn import_path(admin: &Admin, request: &mut Request<'_>) -> Result<Response, Htt
 
 /// `POST import?name=...` with the file as the body: streamed into `tmp/`, then imported.
 fn import_upload(admin: &Admin, request: &mut Request<'_>) -> Result<Response, HttpError> {
-    let query = request
-        .url()
-        .split_once('?')
-        .map(|(_, query)| query.to_string())
-        .unwrap_or_default();
-    let mut name = None;
-    let mut base = None;
-    let mut format = None;
-    let mut description = None;
-    let mut role = None;
-    for pair in query.split('&').filter(|p| !p.is_empty()) {
-        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
-        let value = query_decode(value)
-            .ok_or_else(|| HttpError::bad_request(format!("import: {key}: a broken escape")))?;
-        let slot = match key {
-            "name" => &mut name,
-            "base" => &mut base,
-            "format" => &mut format,
-            "description" => &mut description,
-            "role" => &mut role,
-            other => {
-                return Err(HttpError::bad_request(format!(
-                    "import: unknown parameter {other:?} (name, base, format, description, role)"
-                )));
-            }
-        };
-        if slot.replace(value).is_some() {
-            return Err(HttpError::bad_request(format!("import: {key} given twice")));
-        }
-    }
-    let Some(name) = name.filter(|n| !n.is_empty()) else {
+    let mut params = query_params(
+        request.url(),
+        "import",
+        &["name", "base", "format", "description", "role"],
+    )?;
+    let Some(name) = params.remove("name").filter(|n| !n.is_empty()) else {
         return Err(HttpError::bad_request(
             "import: name the new database: POST /api/admin/import?name=<name> with the file \
              as the body",
         ));
     };
-    let format = parse_format(format.as_deref())?;
-    let role = parse_role(role.as_deref())?;
+    let base = params.remove("base");
+    let description = params.remove("description");
+    let format = parse_format(params.remove("format").as_deref())?;
+    let role = parse_role(params.remove("role").as_deref())?;
     // The quick refusals before the body is read (the listener drains it).
     let key = fold(&name);
     if let Err(err) = crate::names::validate_name(&key) {
@@ -420,15 +414,71 @@ fn import_upload(admin: &Admin, request: &mut Request<'_>) -> Result<Response, H
         };
         return Ok(error_answer(&err, None));
     }
+    let (upload, received) = receive_upload(admin, request, "import")?;
+    tracing::info!(
+        target: "graphersal_server",
+        "import upload for '{key}': {received} bytes received"
+    );
+    let source = ImportSource::new(upload.path()).with_format(format);
+    let answer = import_answer(
+        admin,
+        &source,
+        &name,
+        base.as_deref(),
+        description.as_deref(),
+        role,
+    );
+    // The upload is removed now (the import copied what it needs).
+    drop(upload);
+    Ok(answer)
+}
+
+/// The query of `url` as `key -> value` (`%XX`/`+` decoded); `400` for a key not in
+/// `allowed`, a key given twice or a broken escape (`what` names the route).
+fn query_params(
+    url: &str,
+    what: &str,
+    allowed: &[&str],
+) -> Result<BTreeMap<String, String>, HttpError> {
+    let query = url
+        .split_once('?')
+        .map(|(_, query)| query)
+        .unwrap_or_default();
+    let mut out = BTreeMap::new();
+    for pair in query.split('&').filter(|p| !p.is_empty()) {
+        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+        let value = query_decode(value)
+            .ok_or_else(|| HttpError::bad_request(format!("{what}: {key}: a broken escape")))?;
+        if !allowed.contains(&key) {
+            return Err(HttpError::bad_request(format!(
+                "{what}: unknown parameter {key:?} ({})",
+                allowed.join(", ")
+            )));
+        }
+        if out.insert(key.to_string(), value).is_some() {
+            return Err(HttpError::bad_request(format!("{what}: {key} given twice")));
+        }
+    }
+    Ok(out)
+}
+
+/// Streams the body of `request` into a new `tmp/upload-*.bin` (at most `server.toml`'s
+/// `[limits] upload_bytes`, else `413`; an empty body `400`): the file (removed on drop) and
+/// its length. `what` names the route in the messages.
+fn receive_upload(
+    admin: &Admin,
+    request: &mut Request<'_>,
+    what: &str,
+) -> Result<(TmpFile, u64), HttpError> {
     let registry = admin.registry();
-    let limit = match registry.dir().load_config() {
-        Ok(config) => config.limits.upload_bytes,
-        Err(err) => return Ok(error_answer(&err, None)),
-    };
-    let upload = match TmpFile::new(&registry.dir().tmp(), "upload", "bin") {
-        Ok(upload) => upload,
-        Err(err) => return Ok(error_answer(&err, None)),
-    };
+    let server_error = |err: ServerError| HttpError::new(status_of(&err), err.to_string());
+    let limit = registry
+        .dir()
+        .load_config()
+        .map_err(server_error)?
+        .limits
+        .upload_bytes;
+    let upload = TmpFile::new(&registry.dir().tmp(), "upload", "bin").map_err(server_error)?;
     let file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -455,26 +505,11 @@ fn import_upload(admin: &Admin, request: &mut Request<'_>) -> Result<Response, H
         .map_err(|err| HttpError::new(500, format!("cannot store the upload: {err}")))?;
     drop(file);
     if received == 0 {
-        return Err(HttpError::bad_request(
-            "import: the body is empty; send the file as the request body",
-        ));
+        return Err(HttpError::bad_request(format!(
+            "{what}: the body is empty; send the file as the request body"
+        )));
     }
-    tracing::info!(
-        target: "graphersal_server",
-        "import upload for '{key}': {received} bytes received"
-    );
-    let source = ImportSource::new(upload.path()).with_format(format);
-    let answer = import_answer(
-        admin,
-        &source,
-        &name,
-        base.as_deref(),
-        description.as_deref(),
-        role,
-    );
-    // The upload is removed now (the import copied what it needs).
-    drop(upload);
-    Ok(answer)
+    Ok((upload, received))
 }
 
 /// The format hint of an import (`400` for an unknown one).
@@ -685,6 +720,7 @@ pub(crate) fn status_of(err: &ServerError) -> u16 {
         ServerError::NameInUse { .. }
         | ServerError::Refused { .. }
         | ServerError::DatabaseFailed { .. }
+        | ServerError::ModelUnavailable { .. }
         | ServerError::Locked { .. } => 409,
         ServerError::Remote { status, .. } => *status,
         _ => 500,
@@ -705,6 +741,25 @@ fn error_answer(err: &ServerError, help: Option<String>) -> Response {
         ServerError::BackupNotFound { database, .. } => Some(format!(
             "GET /api/admin/databases/{database}/backups lists its backups"
         )),
+        ServerError::ModelUnavailable { .. } => Some(
+            "add the model to the shared models, then import again: POST /api/admin/models \
+             {\"path\": \"<model directory, .tar or .gsnap>\"} (or upload it in the Models tab \
+             of the web UI)"
+                .to_string(),
+        ),
+        ServerError::ModelDamaged { blob, .. } => {
+            let file = blob
+                .as_ref()
+                .and_then(|b| b.file_name())
+                .map(|hash| hash.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "<hash>".to_string());
+            Some(format!(
+                "replace the damaged file in the shared models with an intact copy: restore it \
+                 from a backup of the server directory, or remove it (DELETE \
+                 /api/admin/models/{file}, refused while a database uses it) and add the model \
+                 again (POST /api/admin/models), then import again"
+            ))
+        }
         _ => None,
     });
     let mut body = json!({ "error": err.to_string() });
@@ -1126,6 +1181,87 @@ fn model_json(model: &crate::models::ModelBlob) -> Value {
     row
 }
 
+/// `POST models?repo=&license=&format=` with the file as the body (a `.gsnap` carrying model
+/// blobs, or a tar archive of a Model2Vec model directory): streamed into `tmp/`, then added
+/// like a path.
+fn model_upload(admin: &Admin, request: &mut Request<'_>) -> Result<Response, HttpError> {
+    let mut params = query_params(request.url(), "models", &["repo", "license", "format"])?;
+    let non_empty = |value: Option<String>| value.filter(|v| !v.trim().is_empty());
+    let repo = non_empty(params.remove("repo"));
+    let license = non_empty(params.remove("license"));
+    let format = match non_empty(params.remove("format")).as_deref() {
+        None => None,
+        Some(hint) => Some(ModelFileFormat::parse(hint).ok_or_else(|| {
+            HttpError::bad_request(format!("models: unknown format {hint:?} (gsnap, tar)"))
+        })?),
+    };
+    let (upload, received) = receive_upload(admin, request, "models")?;
+    tracing::info!(
+        target: "graphersal_server",
+        "model upload: {received} bytes received"
+    );
+    let found = ModelFileFormat::of(upload.path());
+    match (format, found) {
+        (_, None) => {
+            return Err(HttpError::bad_request(
+                "models: the file is neither a packed snapshot (.gsnap) nor a tar archive of a \
+                 Model2Vec model directory",
+            ));
+        }
+        (Some(hint), Some(found)) if hint != found => {
+            return Err(HttpError::bad_request(format!(
+                "models: the file is a {}, not a {}",
+                found.describe(),
+                hint.describe()
+            )));
+        }
+        _ => {}
+    }
+    let spec = ModelAddSpec::path(upload.path())
+        .with_repo(repo)
+        .with_license(license);
+    let answer = model_added_answer(admin.model_add(&spec), 201);
+    // The upload is removed now (the model is in `models/`).
+    drop(upload);
+    Ok(answer)
+}
+
+/// The format of an uploaded model file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModelFileFormat {
+    Snapshot,
+    Tar,
+}
+
+impl ModelFileFormat {
+    /// The format a hint names: `gsnap` / `snapshot`, `tar`.
+    fn parse(hint: &str) -> Option<Self> {
+        match hint.trim().to_ascii_lowercase().as_str() {
+            "gsnap" | "snapshot" => Some(Self::Snapshot),
+            "tar" => Some(Self::Tar),
+            _ => None,
+        }
+    }
+
+    /// The format of the file at `path`, read from its content.
+    fn of(path: &Path) -> Option<Self> {
+        if crate::model_archive::is_tar(path) {
+            return Some(Self::Tar);
+        }
+        let file = File::open(path).ok()?;
+        graphersal::persist::read_snapshot_info(std::io::BufReader::new(file))
+            .is_ok()
+            .then_some(Self::Snapshot)
+    }
+
+    fn describe(self) -> &'static str {
+        match self {
+            Self::Snapshot => "packed snapshot (gsnap)",
+            Self::Tar => "tar archive (tar)",
+        }
+    }
+}
+
 /// `POST models {"path"?, "repo"?, "license"?}`.
 fn model_add(admin: &Admin, request: &mut Request<'_>) -> Result<Response, HttpError> {
     let body: ModelAddBody = body_of(request)?;
@@ -1145,7 +1281,15 @@ fn model_add(admin: &Admin, request: &mut Request<'_>) -> Result<Response, HttpE
     }
     .with_repo(body.repo)
     .with_license(body.license);
-    Ok(match admin.model_add(&spec) {
+    Ok(model_added_answer(
+        admin.model_add(&spec),
+        if from_path { 201 } else { 200 },
+    ))
+}
+
+/// The answer of a model add (module docs), `status` when it succeeded.
+fn model_added_answer(added: Result<ModelAdded, ServerError>, status: u16) -> Response {
+    match added {
         Ok(added) => {
             let missing: Vec<Value> = added
                 .missing
@@ -1153,7 +1297,7 @@ fn model_add(admin: &Admin, request: &mut Request<'_>) -> Result<Response, HttpE
                 .map(|(database, model)| json!({ "database": database, "model": model }))
                 .collect();
             Response::json(
-                if from_path { 201 } else { 200 },
+                status,
                 &json!({
                     "added": added.added.iter().map(model_json).collect::<Vec<_>>(),
                     "resolved": added.resolved,
@@ -1163,7 +1307,7 @@ fn model_add(admin: &Admin, request: &mut Request<'_>) -> Result<Response, HttpE
             )
         }
         Err(err) => error_answer(&err, None),
-    })
+    }
 }
 
 /// `POST /api/admin/models`.

@@ -3,7 +3,8 @@
 #
 # Builds the binary, makes a server directory in a temporary directory, serves it on
 # 127.0.0.1:0 (the URL read from server.run) and walks through the admin API, the database
-# pages (with a promotion to a base and a layer over it), the MCP endpoint and a clean stop.
+# pages (with a promotion to a base and a layer over it), a model upload (.tar), the MCP endpoint
+# and a clean stop.
 # Prints one `ok <step>` line per step, or `FAIL <step>: <why>` and exits 1 at the first
 # failure. The server is killed on any exit.
 #
@@ -388,6 +389,35 @@ req GET /api/admin/models
 expect_status 200
 [ "$(jget models)" = "[]" ] || fail "models: $(jget models)"
 [ "$(jget missing)" = "[]" ] || fail "missing: $(jget missing)"
+ok
+
+STEP="model upload (.tar of a model directory)"
+# A tiny synthetic Model2Vec model (4 tokens x 3 dimensions), as the unit tests' test_models.rs.
+mkdir -p "$WORK/tiny-model"
+python3 -I - "$WORK/tiny-model" <<'PY' || fail "cannot write the tiny model"
+import json, struct, sys, os
+d = sys.argv[1]
+vocab = ["[UNK]", "graph", "vector", "model"]
+open(os.path.join(d, "config.json"), "w").write('{"normalize": true}')
+tok = {"version": "1.0", "truncation": None, "padding": None, "added_tokens": [],
+       "normalizer": {"type": "Lowercase"}, "pre_tokenizer": {"type": "Whitespace"},
+       "post_processor": None, "decoder": None,
+       "model": {"type": "WordLevel", "vocab": {t: i for i, t in enumerate(vocab)}, "unk_token": "[UNK]"}}
+open(os.path.join(d, "tokenizer.json"), "w").write(json.dumps(tok))
+data = b"".join(struct.pack("<f", 1.0 + i) for i in range(len(vocab) * 3))
+header = json.dumps({"embeddings": {"dtype": "F32", "shape": [len(vocab), 3], "data_offsets": [0, len(data)]}})
+header += " " * (-len(header) % 8)
+open(os.path.join(d, "model.safetensors"), "wb").write(struct.pack("<Q", len(header)) + header.encode() + data)
+open(os.path.join(d, "README.md"), "w").write("---\nlicense: mit\n---\n# A tiny model\n")
+PY
+COPYFILE_DISABLE=1 tar -cf "$WORK/tiny-model.tar" --format ustar -C "$WORK" tiny-model \
+  || fail "cannot write the model archive"
+req POST "/api/admin/models?repo=smoke%2Ftiny&license=mit&format=tar" \
+  -H 'Content-Type: application/octet-stream' --data-binary "@$WORK/tiny-model.tar"
+expect_status 201
+expect_json added.0.repo smoke/tiny
+req GET /api/admin/models
+expect_json models.0.repo smoke/tiny
 ok
 
 # --- MCP ----------------------------------------------------------------------------------
