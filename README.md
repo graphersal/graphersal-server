@@ -15,9 +15,10 @@ Graphersal playground.
 
 This version holds `init`, `serve`, the server lock, the run file, the health probes,
 `/api/info`, the database registry (read at start) and the loader (databases with
-`auto_load = true` are loaded in the background at start and unloaded cleanly at stop; no HTTP
-routes to them yet). The HTTP routes of the databases, the admin API, the playground and MCP come
-in later versions.
+`auto_load = true` are loaded in the background at start and unloaded cleanly at stop), the
+loaded databases under `/db/<name>/` (playground, API, aliases resolved per request), the
+playground's landing view at `/` and the admin listing. The admin actions over HTTP (create,
+load, unload, ...) and the server-wide MCP endpoint come in later versions.
 
 ## Use
 
@@ -59,7 +60,12 @@ while a layer names it.
 | `GET /healthz` | liveness: `200 {"status":"ok"}` |
 | `GET /readyz` | readiness: `200 ready`, `503 loading` / `503 stopping` |
 | `GET /api/info` | `{"server":"graphersal-server","version":...,"experimental":true,"admin":true}` |
-| `GET /` | a placeholder text (the playground comes later) |
+| `GET /` | the playground's landing view: the list of databases with their states |
+| `/db/<name>/...` | the playground and its API on the database `<name>` (or the database the alias `<name>` names, resolved per request); `/db/<name>` redirects to `/db/<name>/`; `404` for an unknown name; `409 {"error": "database 'x' is not loaded", "help": "load it: POST /api/admin/databases/x/load"}` for a database that is not loaded (never an implicit load) |
+| `GET /api/admin/databases` | `{"databases": [{"name", "state", "kind", "role", "readOnly", "autoLoad", "description", "base"?, "reason"?, "aliasOf"?}], "aliases": {...}, "problems": [...]}` |
+| `GET /api/admin/databases/<name>` | one entry (`<name>` may be an alias) |
+
+Every path but the probes is checked by Host and Origin (DNS rebinding, cross-site pages).
 
 ## Building
 
