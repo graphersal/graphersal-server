@@ -12,7 +12,7 @@ use graphersal::persist::{ImportModelOptions, ModelSource, Store, StoreOptions};
 use graphersal::prelude::TraversalGraph;
 
 use super::Admin;
-use crate::database::DatabaseKind;
+use crate::database::{DatabaseKind, DatabaseRole};
 use crate::error::ServerError;
 use crate::models::{ModelBlob, ModelsDir, ModelsIndex, ScanEntry, catalog_users};
 use crate::registry::DbState;
@@ -287,7 +287,8 @@ impl Admin {
         Ok(blobs)
     }
 
-    /// Resolves every `needs-model` plain database whose repository `index` has.
+    /// Resolves every `needs-model` plain database whose repository `index` has (a base is
+    /// skipped: it is frozen).
     fn resolve_waiting(&self, index: &ModelsIndex, out: &mut ModelAdded) {
         for entry in self.registry.list() {
             let Some(config) = &entry.config else {
@@ -296,7 +297,11 @@ impl Admin {
             let Some(repo) = config.needs_model.clone() else {
                 continue;
             };
-            if config.kind != DatabaseKind::Plain || index.of_repo(&repo).next().is_none() {
+            // A base is never written (only a hand-edited `database.toml` could mark one).
+            if config.kind != DatabaseKind::Plain
+                || config.role == DatabaseRole::Base
+                || index.of_repo(&repo).next().is_none()
+            {
                 continue;
             }
             let name = entry.name.clone();

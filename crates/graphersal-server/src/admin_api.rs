@@ -44,10 +44,12 @@
 //! An import upload's body is streamed into `tmp/upload-*.bin` (never held in memory; at most
 //! `server.toml`'s `[limits] upload_bytes`, default 4 GiB, else `413`), imported, and removed.
 //! `"import"` of the answer: `{"format": "snapshot" | "store" | "graphson" | "graphml",
-//! "layerBase"?, "modelsMissing": [repo...], "skipped": n, "notes": [text...]}`; a database
-//! whose snapshot names a model it does not carry has the state `needs-model`. `role=base`
-//! makes a base database (read-only, frozen) of a plain source; a layer source is `400`, a
-//! source naming a model it does not carry `409`.
+//! "layerBase"?, "modelsMissing": [repo...], "modelsResolved": [repo...], "skipped": n,
+//! "notes": [text...]}`; a model the source names without carrying it is taken from the shared
+//! `models/` when that holds it (`modelsResolved`), else the database has the state
+//! `needs-model` (`modelsMissing`). `role=base` makes a base database (read-only, frozen) of
+//! a plain source; a layer source is `400`, a source naming a model it does not carry and
+//! `models/` lacks `409`.
 //!
 //! A promotion (`POST databases/<name>/promote`) turns an UNLOADED plain database into a base
 //! (`role: base`, read-only) for good: a base is frozen forever and no route turns it back.
@@ -512,6 +514,7 @@ fn import_answer(
             let mut details = json!({
                 "format": imported.format.as_str(),
                 "modelsMissing": imported.models_missing,
+                "modelsResolved": imported.models_resolved,
                 "skipped": imported.skipped,
                 "notes": imported.notes,
             });
@@ -524,8 +527,9 @@ fn import_answer(
         Err(err) => {
             let help = match &err {
                 ServerError::Refused { .. } if role == DatabaseRole::Base => Some(
-                    "import it as an ordinary database (without role=base), add its model \
-                     (POST /api/admin/models), then promote it: POST \
+                    "add its model to the shared models (POST /api/admin/models) and import \
+                     again with role=base; or import it as an ordinary database (without \
+                     role=base), add its model, then promote it: POST \
                      /api/admin/databases/<name>/promote"
                         .to_string(),
                 ),

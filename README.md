@@ -73,7 +73,7 @@ With a server running on `DIR` the command goes to its admin API (address from
 | `db backup NAME`, `db backups NAME` | verified ZIP backups in `DIR/backups/NAME/` |
 | `db restore NAME BACKUP [--name NEW]` | over NAME (unloaded) or into the new database NEW |
 | `db export NAME --out FILE [--no-models] [--materialize]` | a packed snapshot (`.gsnap`) |
-| `import DIR SOURCE --name NAME [--base BASE] [--format F] [--description TEXT] [--role normal\|base]` | a new database from a `.gsnap`, a Store (directory or `.gstore`), GraphSON or GraphML; `--role base` makes a base of a plain source |
+| `import DIR SOURCE --name NAME [--base BASE] [--format F] [--description TEXT] [--role normal\|base]` | a new database from a `.gsnap`, a Store (directory or `.gstore`), GraphSON or GraphML; an embedding model it names without carrying comes from `models/` (else the database is `needs-model` until `models add`); `--role base` makes a base of a plain source |
 | `models list`, `models add SOURCE [--repo R] [--license L]`, `models remove REPO` | the shared embedding models |
 
 `graphersal-server --help` has the details. Exit codes: `0` ok, `1` failed (the error and a
@@ -125,16 +125,14 @@ every file and key: [`docs/server-dir.md`](docs/server-dir.md).
   /api/admin/databases/<name>/promote`). Promotion is one way: no command turns a base back
   into an ordinary database. To change a base's data, build a new base (clone it before
   promoting, or import again) and rebuild the layers over it. A base cannot get an embedding
-  model later, so a source naming a model it does not carry is refused as a base: import it
-  as an ordinary database, add the model, then promote it.
+  model later, so a source naming a model that neither it nor `models/` carries is refused as
+  a base: add the model (`models add`) and import again, or import it as an ordinary database,
+  add the model, then promote it.
 - A **layer `.gsnap` export carries no models** (an engine rule); export the layer with
   `materialize=true` (`--materialize`) for a standalone snapshot with the models.
 - An **upload declaring more than the upload limit** gets its `413`, but the server abandons
   the connection without reading the body (tiny_http 0.12); clients should check the size
   against `uploadBytes` of `GET /api/info` before sending.
-- An **import of a snapshot naming an embedding model it does not carry** stays `needs-model`
-  even when `models/` holds the model, until `models add <repo>` (or `POST /api/admin/models
-  {"repo"}`) resolves it.
 - **No memory figures** in the database listing (only `sizeBytes` on disk): a loaded database's
   memory is known only inside its session thread.
 - No admin tools over MCP; MCP sessions live in memory (a restart forgets them).
