@@ -17,8 +17,9 @@ This version holds `init`, `serve`, the server lock, the run file, the health pr
 `/api/info`, the database registry (read at start) and the loader (databases with
 `auto_load = true` are loaded in the background at start and unloaded cleanly at stop), the
 loaded databases under `/db/<name>/` (playground, API, aliases resolved per request), the
-playground's landing view at `/` and the admin listing. The admin actions over HTTP (create,
-load, unload, ...) and the server-wide MCP endpoint come in later versions.
+playground's landing view at `/`, and the admin operations (create, delete, clone, load,
+unload, read-only, auto-load, aliases) over HTTP and from the console (`db ...`). Backups,
+imports, models and the server-wide MCP endpoint come in later versions.
 
 ## Use
 
@@ -31,6 +32,22 @@ target/release/graphersal-server serve --dir ./srv --listen 127.0.0.1:0   # a fr
 
 `serve` writes the address it actually bound into `<dir>/server.run` while it runs (removed at
 stop); a second `serve` on the same directory is refused (`server.lock`).
+
+```bash
+graphersal-server db create acme --dir ./srv                 # a new empty plain database
+graphersal-server db create product --role base --dir ./srv  # a frozen base (read-only)
+graphersal-server db create acme-l --base product --dir ./srv  # a layer over it
+graphersal-server db list --dir ./srv
+graphersal-server db load acme --dir ./srv                   # running server only
+graphersal-server db clone acme acme-copy --dir ./srv
+graphersal-server db read-only acme on --dir ./srv
+graphersal-server db alias set current acme --dir ./srv
+graphersal-server db unload acme --dir ./srv && graphersal-server db delete acme --dir ./srv
+```
+
+With a server running on the directory the `db` commands go through its admin API (address
+from `server.run`); otherwise they act on the directory directly. Both call the same admin
+core. `docs/admin-api.md` documents the admin API.
 
 ## Server directory
 
@@ -64,6 +81,7 @@ while a layer names it.
 | `/db/<name>/...` | the playground and its API on the database `<name>` (or the database the alias `<name>` names, resolved per request); `/db/<name>` redirects to `/db/<name>/`; `404` for an unknown name; `409 {"error": "database 'x' is not loaded", "help": "load it: POST /api/admin/databases/x/load"}` for a database that is not loaded (never an implicit load) |
 | `GET /api/admin/databases` | `{"databases": [{"name", "state", "kind", "role", "readOnly", "autoLoad", "description", "base"?, "reason"?, "aliasOf"?}], "aliases": {...}, "problems": [...]}` |
 | `GET /api/admin/databases/<name>` | one entry (`<name>` may be an alias) |
+| `/api/admin/...` | create, delete (into `trash/`), clone, load, unload, read-only, auto-load, aliases: `docs/admin-api.md` |
 
 Every path but the probes is checked by Host and Origin (DNS rebinding, cross-site pages).
 

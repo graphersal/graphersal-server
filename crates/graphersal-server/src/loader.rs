@@ -72,6 +72,14 @@ pub enum LoadStart {
     AlreadyLoaded,
 }
 
+/// The open Store of a loaded plain or layer database ([`Loader::open_store_of`]).
+pub(crate) enum OpenStoreRef {
+    /// A plain database's Store.
+    Plain(Arc<Store>),
+    /// A layer database's layer Store.
+    Layer(Arc<Store<LayeredGraph>>),
+}
+
 /// What a loaded database is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Kind {
@@ -200,6 +208,57 @@ impl Loader {
             .collect()
     }
 
+    /// The open Store of the loaded plain or layer database `name` with its context: holding
+    /// the context makes an unload wait (bounded) until it is dropped. `None` when it is not
+    /// loaded, or is a base (served without opening its Store).
+    pub(crate) fn open_store_of(&self, name: &str) -> Option<(Arc<Context>, OpenStoreRef)> {
+        let state = self.lock();
+        let db = state.loaded.get(&fold(name))?;
+        let store = match (&db.store, &db.layer_store) {
+            (Some(store), _) => OpenStoreRef::Plain(store.clone()),
+            (None, Some(store)) => OpenStoreRef::Layer(store.clone()),
+            (None, None) => return None,
+        };
+        Some((db.context.clone(), store))
+    }
+
+    /// The pooled base `name`, when a loaded layer or the base itself uses it.
+    pub(crate) fn pooled_base(&self, name: &str) -> Option<LayerBase> {
+        self.lock()
+            .pool
+            .get(&fold(name))
+            .map(|entry| entry.base.clone())
+    }
+
+    /// Runs `change` while the database `name` is neither loaded nor being loaded or unloaded,
+    /// holding the loader's lock so that no load starts meanwhile (a delete). Refused
+    /// otherwise.
+    pub(crate) fn while_idle<T>(
+        &self,
+        name: &str,
+        change: impl FnOnce() -> Result<T, ServerError>,
+    ) -> Result<T, ServerError> {
+        let key = fold(name);
+        let state = self.lock();
+        let busy = if state.loaded.contains_key(&key) {
+            Some("it is loaded; unload it first")
+        } else if state.loading.contains(&key) {
+            Some("it is being loaded; unload it once it is loaded")
+        } else if state.unloading.contains(&key) {
+            Some("it is being unloaded; try again in a moment")
+        } else if state.pool.contains_key(&key) {
+            Some("loaded layers use it as their base; unload them first")
+        } else {
+            None
+        };
+        if let Some(message) = busy {
+            return Err(refused(&key, message));
+        }
+        let out = change();
+        drop(state);
+        out
+    }
+
     /// Starts loading the database `name` on a background thread (module docs). Loading a
     /// database that is loaded or being loaded is no error: the answer says so. A database
     /// whose last load failed (or that needs a model) may be loaded again.
@@ -235,7 +294,11 @@ impl Loader {
                 ));
             }
             state.loading.insert(key.clone());
-            self.registry.set_state(&key, DbState::Loading)?;
+            if let Err(err) = self.registry.set_state(&key, DbState::Loading) {
+                // Deleted meanwhile.
+                state.loading.remove(&key);
+                return Err(err);
+            }
         }
         tracing::info!(target: "graphersal_server", "loading database '{key}'");
         let loader = self.clone();

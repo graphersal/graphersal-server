@@ -102,7 +102,8 @@ impl Router {
                 Err(not_allowed(&method, path))
             }
         } else if let Some(endpoint) = path.strip_prefix("/api/admin/") {
-            crate::admin_api::route(loader.registry(), &method, endpoint)
+            let admin = crate::ops::Admin::online(loader.clone());
+            crate::admin_api::route(&admin, &method, endpoint, &mut request)
         } else if path == "/api" || path.starts_with("/api/") {
             Err(HttpError::new(404, format!("unknown endpoint {path}")))
         } else if path == "/mcp" {

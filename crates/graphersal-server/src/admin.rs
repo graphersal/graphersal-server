@@ -207,6 +207,75 @@ impl Registry {
         drop(inner);
         committed
     }
+
+    /// Moves the database `name` out of the registry into `trash/<name>-<UTC time>/` (a
+    /// counter is added when that exists) and answers its name and trash directory. Refused
+    /// while it is loaded or being loaded (the caller holding the loader makes sure it stays
+    /// so: [`crate::ops::Admin::delete`]), while an alias names it (no alias is removed
+    /// implicitly) and for a database that layers name as their base. A failed database may be
+    /// deleted.
+    pub fn delete(&self, name: &str) -> Result<(String, PathBuf), ServerError> {
+        let key = fold(name);
+        let mut inner = self.write();
+        let entry = inner.entries.get(&key).ok_or_else(|| not_found(name))?;
+        let refuse = |message: String| ServerError::Refused {
+            name: key.clone(),
+            message,
+        };
+        if matches!(entry.state, DbState::Loaded | DbState::Loading) {
+            return Err(refuse(format!(
+                "it is {}; unload it first",
+                entry.state.as_str()
+            )));
+        }
+        let aliases: Vec<&str> = inner
+            .aliases
+            .iter()
+            .filter(|(_, target)| **target == key)
+            .map(|(alias, _)| alias.as_str())
+            .collect();
+        if !aliases.is_empty() {
+            return Err(refuse(format!(
+                "the aliases {} name it; remove them or point them at another database first",
+                aliases.join(", ")
+            )));
+        }
+        let layers: Vec<&str> = inner
+            .entries
+            .values()
+            .filter(|e| {
+                e.config.as_ref().is_some_and(|c| {
+                    c.kind == DatabaseKind::Layer && c.base.as_deref() == Some(key.as_str())
+                })
+            })
+            .map(|e| e.name.as_str())
+            .collect();
+        if !layers.is_empty() {
+            return Err(refuse(format!(
+                "it is the base of the layers {}; delete them first",
+                layers.join(", ")
+            )));
+        }
+        let source = entry.dir.clone();
+        let trash_root = self.dir.trash();
+        fs::create_dir_all(&trash_root)
+            .map_err(|err| ServerError::io("create directory", &trash_root, err))?;
+        let stamp = crate::database::utc_now().replace(':', "-");
+        let mut target = trash_root.join(format!("{key}-{stamp}"));
+        let mut n = 1;
+        while target.exists() {
+            n += 1;
+            target = trash_root.join(format!("{key}-{stamp}-{n}"));
+        }
+        fs::rename(&source, &target).map_err(|err| ServerError::io("rename", &source, err))?;
+        inner.entries.remove(&key);
+        tracing::info!(
+            target: "graphersal_server",
+            "database '{key}' moved to {}",
+            target.display()
+        );
+        Ok((key, target))
+    }
 }
 
 /// Moves `build` into `databases/` under the held write lock.

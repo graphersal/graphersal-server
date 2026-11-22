@@ -568,3 +568,181 @@ fn databases_are_served_under_their_names_and_aliases() {
     assert_eq!(status, 409, "{body}");
     running.stop().unwrap();
 }
+
+/// Runs `graphersal-server db ARGS --dir DIR`: (exit code, stdout, stderr).
+fn db(dir: &Path, args: &[&str]) -> (i32, String, String) {
+    let out = Command::new(BIN)
+        .arg("db")
+        .args(args)
+        .arg("--dir")
+        .arg(dir)
+        .output()
+        .unwrap();
+    (
+        out.status.code().unwrap_or(-1),
+        text(&out.stdout),
+        text(&out.stderr),
+    )
+}
+
+#[test]
+fn db_commands_act_on_the_directory_when_no_server_runs() {
+    let temp = TempDir::new("console-offline");
+    let dir = ServerDir::init(temp.path()).unwrap().dir;
+    let root = temp.path();
+    let schema = temp.path().join("schema.json");
+    std::fs::write(
+        &schema,
+        r#"{"vertices": {"person": {"schema": {"type": "object"}}}}"#,
+    )
+    .unwrap();
+    let (code, out, err) = db(
+        root,
+        &[
+            "create",
+            "acme",
+            "--description",
+            "Acme graph",
+            "--schema",
+            schema.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("created database 'acme' (plain)"), "{out}");
+    assert!(!err.contains("note:"), "offline: {err}");
+    let (code, out, err) = db(root, &["create", "base", "--role", "base"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("base, read-only"), "{out}");
+    let (code, out, err) = db(root, &["create", "l1", "--base", "base"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("layer over 'base'"), "{out}");
+    let (code, _, err) = db(root, &["create", "l2", "--base", "acme"]);
+    assert_eq!(code, 1);
+    assert!(err.contains("not a base database"), "{err}");
+
+    let (code, out, _) = db(root, &["list"]);
+    assert_eq!(code, 0);
+    let lines: Vec<&str> = out.lines().collect();
+    assert!(lines[0].starts_with("NAME"), "{out}");
+    assert!(
+        lines[1].starts_with("acme") && lines[1].contains("Acme graph"),
+        "{out}"
+    );
+    assert!(lines[2].contains("read-only"), "{out}");
+    let (code, out, _) = db(root, &["list", "--json"]);
+    assert_eq!(code, 0);
+    assert_eq!(json(&out)["databases"].as_array().unwrap().len(), 3);
+
+    // Offline: no load, but flags, aliases, clone and delete.
+    let (code, _, err) = db(root, &["load", "acme"]);
+    assert_eq!(code, 1);
+    assert!(err.contains("no server runs"), "{err}");
+    let (code, out, _) = db(root, &["read-only", "acme", "on"]);
+    assert_eq!(
+        (code, out.trim()),
+        (0, "read-only is on for database 'acme'")
+    );
+    let (code, _, _) = db(root, &["auto-load", "acme", "on"]);
+    assert_eq!(code, 0);
+    let (code, out, err) = db(root, &["clone", "acme", "acme-2"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        out.contains("cloned database 'acme' into 'acme-2'"),
+        "{out}"
+    );
+    let (code, _, _) = db(root, &["alias", "set", "current", "acme"]);
+    assert_eq!(code, 0);
+    let (code, _, err) = db(root, &["delete", "acme"]);
+    assert_eq!(code, 1);
+    assert!(err.contains("current"), "{err}");
+    assert!(err.contains("help: remove the alias first"), "{err}");
+    let (code, _, _) = db(root, &["alias", "remove", "current"]);
+    assert_eq!(code, 0);
+    let (code, out, err) = db(root, &["delete", "acme"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("moved to trash/acme-"), "{out}");
+    assert!(!dir.databases().join("acme").exists());
+    assert!(
+        !ServerLock::is_held(&dir).unwrap(),
+        "the console released the lock"
+    );
+
+    // Invalid invocations.
+    assert_eq!(db(root, &["create"]).0, 2);
+    assert_eq!(db(root, &["frobnicate", "x"]).0, 2);
+    assert_eq!(db(root, &["read-only", "acme-2", "maybe"]).0, 2);
+    assert_eq!(db(root, &["delete", "acme-2", "--base", "x"]).0, 2);
+    assert_eq!(run(&["db", "list"]).status.code(), Some(2));
+}
+
+#[test]
+fn db_commands_go_through_a_running_server() {
+    let temp = TempDir::new("console-online");
+    let dir = ServerDir::init(temp.path()).unwrap().dir;
+    let root = temp.path();
+    let mut server = ServerProcess(
+        Command::new(BIN)
+            .args(["serve", "--dir"])
+            .arg(root)
+            .args(["--listen", "127.0.0.1:0"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let info = wait_for_run_file(&dir);
+    let note = format!("sent to its admin API at {}", info.address);
+
+    let (code, out, err) = db(root, &["create", "acme"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("created database 'acme'"), "{out}");
+    assert!(err.contains(&note), "through the server: {err}");
+    let (code, out, err) = db(root, &["list"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("acme") && out.contains("unloaded"), "{out}");
+
+    // Load waits for the end of the load; the database is served at once.
+    let (code, out, err) = db(root, &["load", "acme"]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(out.trim(), "database 'acme' is loaded");
+    let (status, _) = get(info.address, "/db/acme/api/info");
+    assert_eq!(status, 200);
+    // Delete of a loaded database: refused with the API's help.
+    let (code, _, err) = db(root, &["delete", "acme"]);
+    assert_eq!(code, 1);
+    assert!(err.contains("unload it first"), "{err}");
+    assert!(err.contains("help:"), "{err}");
+    let (code, out, err) = db(root, &["clone", "acme", "acme-2"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("'acme-2'"), "{out}");
+    let (code, out, _) = db(root, &["unload", "acme"]);
+    assert_eq!((code, out.trim()), (0, "unloaded database 'acme'"));
+    let (code, out, err) = db(root, &["delete", "acme"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("trash/acme-"), "{out}");
+    let (code, out, _) = db(root, &["list", "--json"]);
+    assert_eq!(code, 0);
+    let names: Vec<String> = json(&out)["databases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["name"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(names, ["acme-2"]);
+    assert_eq!(get(info.address, "/db/acme/api/info").0, 404);
+
+    #[cfg(unix)]
+    {
+        let status = Command::new("kill")
+            .args(["-TERM", &server.0.id().to_string()])
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while server.0.try_wait().unwrap().is_none() {
+            assert!(Instant::now() < deadline, "the server did not stop");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+    let _ = &mut server;
+}

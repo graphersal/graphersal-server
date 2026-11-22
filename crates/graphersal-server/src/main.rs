@@ -3,6 +3,7 @@
 //! ```text
 //! graphersal-server init DIR
 //! graphersal-server serve --dir DIR [--listen ADDR]
+//! graphersal-server db list|create|delete|clone|load|unload|read-only|auto-load|alias ... --dir DIR [--json]
 //! ```
 //!
 //! stdout carries only results, stderr diagnostics and the log. Exit codes: `0` ok, `1` the
@@ -14,7 +15,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 
 use graphersal_server::config::parse_listen;
-use graphersal_server::{ServeOptions, ServerDir, serve};
+use graphersal_server::console::{self, DbCommand, Via};
+use graphersal_server::{CreateSpec, DatabaseKind, DatabaseRole, ServeOptions, ServerDir, serve};
 
 const EXIT_FAILED: u8 = 1;
 const EXIT_USAGE: u8 = 2;
@@ -31,6 +33,22 @@ Usage:
       Serve the server directory DIR. ADDR (IP:PORT, port 0 = a free port) overrides
       server.toml's listen. The bound address is written to DIR/server.run while the server
       runs. Ctrl+C or SIGTERM stops it.
+  graphersal-server db COMMAND ... --dir DIR [--json]
+      Administer the databases of DIR. When a server runs on DIR the command goes through
+      its admin API (address from DIR/server.run), otherwise it acts on DIR directly.
+        db list
+        db create NAME [--base BASE] [--kind plain|layer] [--role normal|base]
+                  [--schema FILE.json] [--description TEXT] [--auto-load] [--read-only]
+            A new empty database; --base makes a layer over a role=base database.
+        db delete NAME           an unloaded database, moved to DIR/trash/
+        db clone SOURCE NAME     a fork of SOURCE's latest state (it may be loaded)
+        db load NAME [--no-wait] (running server only)
+        db unload NAME           (running server only)
+        db read-only NAME on|off
+        db auto-load NAME on|off
+        db alias set ALIAS DATABASE
+        db alias remove ALIAS
+      --json prints the admin API's JSON answer instead of text.
   graphersal-server --help | --version
 
 Log level: RUST_LOG (default info).";
@@ -49,6 +67,7 @@ fn main() -> ExitCode {
         }
         Some("init") => init(&args[1..]),
         Some("serve") => serve_command(&args[1..]),
+        Some("db") => db_command(&args[1..]),
         Some(other) => usage_error(&format!("unknown command {other:?}")),
     }
 }
@@ -181,4 +200,241 @@ fn serve_command(args: &[String]) -> ExitCode {
             ExitCode::from(EXIT_FAILED)
         }
     }
+}
+
+/// `db ...`: parses the command, runs it (on the directory or through the running server) and
+/// prints the answer.
+fn db_command(args: &[String]) -> ExitCode {
+    let mut positional: Vec<String> = Vec::new();
+    let mut values: Vec<(String, String)> = Vec::new();
+    let mut switches: Vec<String> = Vec::new();
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        if !arg.starts_with("--") {
+            positional.push(arg.clone());
+            continue;
+        }
+        let (flag, inline) = match arg.split_once('=') {
+            Some((flag, value)) => (flag.to_string(), Some(value.to_string())),
+            None => (arg.clone(), None),
+        };
+        match flag.as_str() {
+            "--dir" | "--kind" | "--role" | "--base" | "--schema" | "--description" => {
+                let Some(value) = inline.or_else(|| rest.next().cloned()) else {
+                    return usage_error(&format!("db: {flag} needs a value"));
+                };
+                if values.iter().any(|(f, _)| *f == flag) {
+                    return usage_error(&format!("db: {flag} given twice"));
+                }
+                values.push((flag, value));
+            }
+            "--json" | "--auto-load" | "--read-only" | "--no-wait" if inline.is_none() => {
+                switches.push(flag);
+            }
+            _ => return usage_error(&format!("db: unknown argument {arg:?}")),
+        }
+    }
+    let value = |flag: &str| {
+        values
+            .iter()
+            .find(|(f, _)| f == flag)
+            .map(|(_, v)| v.clone())
+    };
+    let switch = |flag: &str| switches.iter().any(|s| s == flag);
+    let Some(dir) = value("--dir") else {
+        return usage_error("db needs --dir DIR");
+    };
+    let command = match parse_db(&positional, &value, &switch) {
+        Ok(command) => command,
+        Err(Problem::Usage(message)) => return usage_error(&format!("db: {message}")),
+        Err(Problem::Failed(message)) => {
+            eprintln!("Error: {message}");
+            return ExitCode::from(EXIT_FAILED);
+        }
+    };
+    let dir = match ServerDir::open(&dir) {
+        Ok(dir) => dir,
+        Err(err) => {
+            eprintln!("Error: {err}");
+            return ExitCode::from(EXIT_FAILED);
+        }
+    };
+    match console::run(&dir, &command) {
+        Ok(outcome) => {
+            if let Via::Server(address) = outcome.via {
+                eprintln!(
+                    "note: a server runs on {}; sent to its admin API at {address}",
+                    dir.root().display()
+                );
+            }
+            if switch("--json") {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&outcome.body).unwrap_or_default()
+                );
+            } else {
+                println!("{}", console::render(&command, &outcome.body));
+            }
+            if console::failed(&command, &outcome.body) {
+                ExitCode::from(EXIT_FAILED)
+            } else {
+                ExitCode::SUCCESS
+            }
+        }
+        Err(err) => {
+            eprintln!("Error: {err}");
+            if let graphersal_server::ServerError::Remote {
+                help: Some(help), ..
+            } = &err
+            {
+                eprintln!("help: {help}");
+            }
+            ExitCode::from(EXIT_FAILED)
+        }
+    }
+}
+
+/// Why a `db` command line was refused.
+enum Problem {
+    /// An invalid invocation (exit code 2).
+    Usage(String),
+    /// A file named by it cannot be used (exit code 1).
+    Failed(String),
+}
+
+/// The `db` command of the positional arguments and the flags.
+fn parse_db(
+    positional: &[String],
+    value: &dyn Fn(&str) -> Option<String>,
+    switch: &dyn Fn(&str) -> bool,
+) -> Result<DbCommand, Problem> {
+    let usage = |message: &str| Problem::Usage(message.to_string());
+    let words: Vec<&str> = positional.iter().map(String::as_str).collect();
+    let on_off = |word: &str| match word {
+        "on" | "true" | "yes" => Ok(true),
+        "off" | "false" | "no" => Ok(false),
+        other => Err(Problem::Usage(format!("expected on or off, not {other:?}"))),
+    };
+    let only_create_flags = || {
+        for flag in ["--kind", "--role", "--base", "--schema", "--description"] {
+            if value(flag).is_some() {
+                return Err(Problem::Usage(format!("{flag} belongs to db create")));
+            }
+        }
+        for flag in ["--auto-load", "--read-only"] {
+            if switch(flag) {
+                return Err(Problem::Usage(format!("{flag} belongs to db create")));
+            }
+        }
+        Ok(())
+    };
+    let command = match words.as_slice() {
+        ["list"] => DbCommand::List,
+        ["create", name] => {
+            return create_command(name, value, switch);
+        }
+        ["delete", name] => DbCommand::Delete {
+            name: name.to_string(),
+        },
+        ["clone", source, name] => DbCommand::Clone {
+            source: source.to_string(),
+            name: name.to_string(),
+        },
+        ["load", name] => DbCommand::Load {
+            name: name.to_string(),
+            wait: !switch("--no-wait"),
+        },
+        ["unload", name] => DbCommand::Unload {
+            name: name.to_string(),
+        },
+        ["read-only", name, word] => DbCommand::ReadOnly {
+            name: name.to_string(),
+            on: on_off(word)?,
+        },
+        ["auto-load", name, word] => DbCommand::AutoLoad {
+            name: name.to_string(),
+            on: on_off(word)?,
+        },
+        ["alias", "set", alias, target] => DbCommand::AliasSet {
+            alias: alias.to_string(),
+            target: target.to_string(),
+        },
+        ["alias", "remove", alias] => DbCommand::AliasRemove {
+            alias: alias.to_string(),
+        },
+        [] => return Err(usage("no db command given")),
+        [other, ..] => {
+            return Err(Problem::Usage(format!(
+                "unknown command or wrong arguments: db {other} {}",
+                words[1..].join(" ")
+            )));
+        }
+    };
+    only_create_flags()?;
+    if switch("--no-wait") && !matches!(command, DbCommand::Load { .. }) {
+        return Err(usage("--no-wait belongs to db load"));
+    }
+    Ok(command)
+}
+
+/// `db create NAME ...`.
+fn create_command(
+    name: &str,
+    value: &dyn Fn(&str) -> Option<String>,
+    switch: &dyn Fn(&str) -> bool,
+) -> Result<DbCommand, Problem> {
+    if switch("--no-wait") {
+        return Err(Problem::Usage("--no-wait belongs to db load".to_string()));
+    }
+    let base = value("--base");
+    let kind = match value("--kind").as_deref() {
+        None if base.is_some() => DatabaseKind::Layer,
+        None | Some("plain") => DatabaseKind::Plain,
+        Some("layer") => DatabaseKind::Layer,
+        Some(other) => {
+            return Err(Problem::Usage(format!(
+                "--kind is plain or layer, not {other:?}"
+            )));
+        }
+    };
+    let role = match value("--role").as_deref() {
+        None | Some("normal") => DatabaseRole::Normal,
+        Some("base") => DatabaseRole::Base,
+        Some(other) => {
+            return Err(Problem::Usage(format!(
+                "--role is normal or base, not {other:?}"
+            )));
+        }
+    };
+    let mut spec = match (kind, base) {
+        (DatabaseKind::Layer, Some(base)) => CreateSpec::layer(base),
+        (DatabaseKind::Layer, None) => {
+            return Err(Problem::Usage(
+                "a layer needs --base BASE (a role=base database)".to_string(),
+            ));
+        }
+        (_, Some(_)) => {
+            return Err(Problem::Usage(
+                "--base makes a layer: drop --kind plain".to_string(),
+            ));
+        }
+        (_, None) => CreateSpec::plain(),
+    }
+    .with_role(role)
+    .with_auto_load(switch("--auto-load"))
+    .with_read_only(switch("--read-only"));
+    if let Some(description) = value("--description") {
+        spec = spec.with_description(description);
+    }
+    if let Some(file) = value("--schema") {
+        let text = std::fs::read_to_string(&file)
+            .map_err(|err| Problem::Failed(format!("cannot read {file}: {err}")))?;
+        let schema: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|err| Problem::Failed(format!("{file} is not JSON: {err}")))?;
+        spec = spec.with_schema(schema);
+    }
+    Ok(DbCommand::Create {
+        name: name.to_string(),
+        spec,
+    })
 }
