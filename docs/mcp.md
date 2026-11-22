@@ -128,7 +128,7 @@ A database that is not loaded is listed with its state. Selecting it (`use_graph
 - `database 'x' is not loaded: it needs the embedding model '<repo>'; ask an operator to add the model and load it`
 
 The MCP endpoint never loads or unloads a database: only an operator does, through the admin
-API, the console or the playground's admin panel. A database unloaded while a session has it
+API, the console or the server's web UI. A database unloaded while a session has it
 selected answers the same error until it is loaded again (the session keeps its selection).
 
 A per-database endpoint of a database that is not loaded answers the mount's `409` (see

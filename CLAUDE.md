@@ -12,7 +12,8 @@ from published files). When this file disagrees with the code, the code wins: sa
   a one-line justification); one crate `crates/graphersal-server` (lib + bin, `publish = false`).
 - graphersal with features `persist`, `persist-zip` (verified ZIP backups) and `io` (GraphSON
   and GraphML imports); graphersal-serve
-  with features `ui-assets` (the embedded playground per mount and at `/`) and `mcp` (each
+  with features `ui-assets` (the embedded playground per mount and at `/`, where it shows the
+  server's own `server` UI profile) and `mcp` (each
   context a host of the shared MCP endpoint); graphersal-mcp (the endpoint, directory mode).
 - Path dependencies on the graphersal repository's MAIN checkout beside this one:
   `../graphersal/crates/graphersal`, `../graphersal/crates/graphersal-serve` and
@@ -30,28 +31,35 @@ from published files). When this file disagrees with the code, the code wins: sa
   and its stream leaked (tiny_http allocates the declared rest on drop; the answer has no
   Content-Length); every unread declared rest is drained in small reads before the answer), `router` (probes and 503s
   through `graphersal_serve::Server`, then `HostCheck::check` on everything else, then the
-  routes: `/db/<name>/...` via `mounts`, `GET /api/info` (root identity, `admin: true`, no
-  `mountPath` = the playground's landing view, `uploadBytes` = the upload limit, `mcp` =
+  routes: `/db/<name>/...` via `mounts`, `GET /api/info` (root identity: `server:
+  "graphersal-dev"` because the playground takes a `uiProfile` only from that identity,
+  `product: "graphersal-server"`, NO `admin` (the playground would show its old landing view),
+  `uiProfile` = `ui_assets::profile()`, `uploadBytes` = the upload limit, `mcp` =
   `Mcp::status()` or null), `/mcp` (every method) via `mcp::route` (404 when MCP is off),
-  `/api/admin/...` via `admin_api`, other `/api/*` 404, every other GET a file of the embedded playground at the root (`/` =
-  `index.html`); `ready(loader)` installs the resolver), `mounts` (`/db/<name>/<rest>`:
+  `/api/admin/...` via `admin_api`, other `/api/*` 404, `GET /server-ui/<file>` the profile's
+  files (`ui_assets::file`), every other GET a file of the embedded playground at the root (`/` =
+  `index.html` with `ui_assets::BOOT_TAGS`, the profile's style sheet); `ready(loader)` installs
+  the resolver), `ui_assets` (the `server` UI profile built into the binary: `include_bytes!`
+  table of `crates/graphersal-server/ui/` (the tests excluded), `FILES_PREFIX` `/server-ui/`,
+  `profile()` adds the binary's version; a unit test checks every file in `ui/` is built in),
+  `mounts` (`/db/<name>/<rest>`:
   `registry.resolve` on EVERY request (alias flips at once), unknown -> 404 JSON, `/db/x` ->
   308 `/db/x/` (query kept), no context -> 409 `{"error": "database 'x' is not loaded", "help":
   "load it: POST /api/admin/databases/x/load", "state"}` (the text names loading / failed
   (reason) / needs-model; loading adds `Retry-After: 1`), else `forward`: prefix stripped,
   client `X-Graphersal-Graph` dropped and set to the REAL name, `Server::handle`; the resolver
   `Databases` takes `loader.context(header)` and the request holds that `Arc` only for its
-  duration; `DatabaseInfo` hooks add `database` (real name) and `admin: true` to the per-DB
-  `/api/info`), `admin_api` (`GET /api/admin/databases` `{databases, aliases, problems}`, alias
+  duration; `DatabaseInfo` hooks add `database` (real name), `home: "/"` (the link back to the server UI)
+  and `admin: true` (today's playground links home through it) to the per-DB `/api/info`), `admin_api` (`GET /api/admin/databases` `{databases, aliases, problems}`, alias
   rows carry `aliasOf`; listing rows (`Extras`) add `sizeBytes` (`layout::dir_bytes`),
   `pooled`/`pooledBy` (`Admin::pooled_bases`), `linkWarning`; no `memoryBytes` (only the session
   thread knows it); `GET|POST models`, `DELETE models/<repo...>`; 409 helps: name taken,
-  read-only base, base of layers (delete), base of loaded layers (unload); `GET /api/admin/databases/<name|alias>`; field names = the playground's
-  landing view; the actions: `POST databases` create, `DELETE databases/<name>`, `POST
+  read-only base, base of layers (delete), base of loaded layers (unload); `GET /api/admin/databases/<name|alias>`; field names = the web UI's
+  (`ui/databases.js` `databaseRows`); the actions: `POST databases` create, `DELETE databases/<name>`, `POST
   .../<name>/clone|load|unload|promote`, `PUT .../<name>/read-only|auto-load`, `GET aliases`, `PUT|DELETE
   aliases/<alias>`; JSON bodies `deny_unknown_fields`; core errors -> `{"error","help"?}` via
   `status_of` (400 invalid name/input, 404, 409 rule refusals, 500); the route table is in its
-  module docs and `docs/admin-api.md` (the playground panel's contract: keep them in sync);
+  module docs and `docs/admin-api.md` (the web UI's contract, `ui/admin-api.js`: keep them in sync);
   `POST .../<name>/backup`, `GET .../<name>/backups`, `POST .../<name>/restore {"backup",
   "name"?}`, `GET .../<name>/export?models=&materialize=`; `POST import?name=&base=&format=&description=&role=`
   with the raw file as the body (streamed by `copy_body_to` into `tmp/upload-*.bin` = `TmpFile`,
@@ -192,6 +200,20 @@ from published files). When this file disagrees with the code, the code wins: sa
   `Admin::export_to_file`, through a server streams the download into `FILE.part`) (prints `note: ... sent to its admin API at ADDR` on stderr when it went through a
   server, `help:` lines for refusals), the tracing subscriber, the ctrlc handler. stdout =
   results, stderr = diagnostics/log; exit codes 0 ok, 1 failed, 2 usage.
+- `crates/graphersal-server/ui/`: the server's web UI, the playground UI profile `server`
+  (the graphersal-memory `memory` profile's pattern; the engine's playground mechanism: its
+  `playground/CLAUDE.md` "UI profiles"): `profile.json` (module tabs Databases, Backups, Import,
+  Export, Models; no workspace: the root has no graph; `files` = `server-ui/` relative to `/`),
+  the tab modules `*-tab.js` (Vue options components with `template`, props `api` and `params`;
+  cross-tab links through `api.navigate(tab, {db})`), the pure models `admin-api.js` (requests,
+  rules, texts of every admin action) and `databases.js` (`databaseRows`, `fetchDatabases`,
+  `hostHeaders`, `downloadBlob`), `shared.js` (one list, admin client and root info for every
+  tab; polls while a database is loading), `server-ui.css` (`srv-*` classes on the playground's
+  theme tokens and generic classes). Modules import ONLY `vue` and `./<own file>.js` (checked by
+  `ui/tests/profile.test.mjs`) and fetch `/api/admin/*` themselves with the host headers. A new
+  file in `ui/` goes into `ui_assets::FILES`. Tests: `ui/tests/*.test.mjs` (node:http mocks of
+  the admin API; the profile checked with the engine's `validateProfile` from
+  `GRAPHERSAL_PLAYGROUND` or `../graphersal/playground`).
 - Docs (the contract for readers who did not follow the code; keep them in sync with it):
   `README.md` (what it is, run, console, HTTP, known limitations), `docs/server-dir.md` (every
   file and key of the server directory), `docs/admin-api.md` (every admin route, checked
@@ -213,6 +235,7 @@ Run every build/test/server under `../graphersal/ai/bench/watchdog.sh` (RSS ceil
 ```bash
 ../graphersal/ai/bench/watchdog.sh cargo test
 cargo fmt --all --check                      # rustfmt.toml: max_width = 100
+node --test crates/graphersal-server/ui/tests/*.test.mjs   # the web UI's modules
 ../graphersal/ai/bench/watchdog.sh cargo clippy --all-targets -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps -p graphersal-server
 WD_TIMEOUT=600 ../graphersal/ai/bench/watchdog.sh scripts/smoke.sh   # end to end, ok/FAIL lines

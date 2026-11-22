@@ -1,0 +1,44 @@
+/* graphersal-server: the `server` profile's own styles (ui/*-tab.js), on the playground's theme
+   tokens (--border, --text, --text-muted, --danger, --danger-soft, --warn, --warn-soft, ...) and
+   its generic classes (btn, badge, data-table, notice, store-dialog, dialog-head, muted, mono). */
+.srv-tab { max-width: 1160px; }
+.srv-tab h1 { margin: 0; font-size: 24px; letter-spacing: -.01em; }
+.srv-tab h2 { margin: 28px 0 0; font-size: 15px; text-transform: uppercase; letter-spacing: .05em; color: var(--text-muted); }
+.srv-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0 0 4px; }
+.srv-head h2 ~ .btn { margin-top: 28px; }
+.srv-table-wrap { max-width: 100%; overflow-x: auto; }
+.srv-table { width: 100%; margin-top: 12px; }
+.srv-table td { vertical-align: top; }
+.srv-table .srv-sub { margin-top: 2px; font-size: 12px; overflow-wrap: anywhere; }
+.srv-table td.num { text-align: right; white-space: nowrap; }
+/* Up to seven row actions: a wide column, and they wrap rather than hide. */
+.srv-table .srv-actions { white-space: normal; min-width: 250px; text-align: right; }
+.srv-table .srv-actions .btn { margin: 2px 0 2px 4px; }
+.srv-tab .notice, .srv-dialog .notice { display: flex; align-items: flex-start; gap: 8px; margin: 12px 0 0; border: 1px solid var(--border); border-radius: 6px; font-size: 13px; }
+.srv-notice .srv-notice-text { flex: 1 1 auto; min-width: 0; }
+.srv-notice .icon-btn { flex: none; color: inherit; }
+.notice.srv-error { background: var(--danger-soft); color: var(--danger); }
+.notice.srv-warn-notice { background: var(--warn-soft); color: var(--warn); }
+.srv-help { margin: 4px 0 0; color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere; }
+.srv-problems { margin: 10px 0 0; padding-left: 18px; color: var(--danger); font-size: 12.5px; }
+p.srv-problems { padding-left: 0; }
+.srv-warn { color: var(--warn); }
+.srv-hint { color: var(--text); }
+.srv-dialog { width: min(560px, calc(100% - 32px)); }
+.srv-narrow { max-width: 620px; margin-top: 12px; }
+.srv-form label { display: flex; flex-direction: column; gap: 4px; margin: 0 0 10px; font-size: 13px; }
+.srv-form label.inline { flex-direction: row; align-items: center; gap: 8px; }
+.srv-form fieldset { margin: 0 0 10px; padding: 6px 10px; border: 1px solid var(--border); border-radius: 6px; }
+.srv-form legend { padding: 0 4px; font-size: 12px; color: var(--text-muted); }
+.srv-form input:not([type]), .srv-form select, .srv-form textarea { width: 100%; box-sizing: border-box; font: inherit; }
+.srv-form textarea { resize: vertical; font-family: var(--font-mono); font-size: 12.5px; }
+.srv-form input.mono { font-family: var(--font-mono); }
+.srv-form .store-dialog-buttons a.btn { text-decoration: none; }
+.srv-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 12px 0 0; font-size: 12.5px; }
+.srv-inline-form { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px; max-width: 620px; margin-top: 12px; }
+.srv-inline-form label { flex: 1 1 200px; }
+.srv-inline-form .btn { margin-bottom: 10px; }
+.srv-restore { margin-top: 12px; max-width: 620px; }
+.srv-progress { display: flex; flex-direction: column; gap: 4px; margin: 0 0 10px; font-size: 12.5px; }
+.srv-progress progress { width: 100%; }
+.srv-tab h2.srv-sub-head { margin: 20px 0 0; font-size: 14px; text-transform: none; letter-spacing: 0; color: var(--text); }

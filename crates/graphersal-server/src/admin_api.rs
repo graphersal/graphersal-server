@@ -77,7 +77,7 @@
 //! `reason` (`failed`: why; `needs-model`: the missing model), `model` (`needs-model`: the
 //! model's repository), `aliasOf` (an alias row: the database it names; its other fields are
 //! that database's). A database whose `database.toml` cannot be read has no `kind`, `role`,
-//! `autoLoad` or `description`. The field names are those of the playground's landing view.
+//! `autoLoad` or `description`. The field names are those the web UI reads (`ui/databases.js`).
 
 use std::collections::BTreeMap;
 use std::fs::File;

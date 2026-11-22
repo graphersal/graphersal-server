@@ -191,7 +191,7 @@ fn serve_answers_refuses_a_second_server_and_stops_cleanly() {
     let (status, body) = get(info.address, "/api/info");
     assert_eq!(status, 200, "{body}");
     let info_json: serde_json::Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(info_json["admin"], true);
+    assert_eq!(info_json["uiProfile"]["name"], "server");
     assert_eq!(info_json["experimental"], true);
     let (status, _) = get(info.address, "/");
     assert_eq!(status, 200);
@@ -483,13 +483,17 @@ fn databases_are_served_under_their_names_and_aliases() {
     assert_eq!(info["mountPath"], "/db/a");
     assert_eq!(info["database"], "a");
     assert_eq!(info["admin"], true);
+    assert_eq!(info["home"], "/");
     let info = json(&call(address, "GET", "/db/current/api/info", &[], "").2);
     assert_eq!(info["database"], "b", "an alias shows the real database");
     assert_eq!(info["mountPath"], "/db/b");
-    // The root info announces the admin API (the playground shows its landing view).
+    // The root info delivers the server's own UI profile (no graph, no landing view).
     let root = json(&get(address, "/api/info").1);
-    assert_eq!(root["admin"], true);
-    assert_eq!(root["server"], "graphersal-server");
+    assert!(root.get("admin").is_none());
+    assert_eq!(root["server"], "graphersal-dev");
+    assert_eq!(root["product"], "graphersal-server");
+    assert_eq!(root["uiProfile"]["name"], "server");
+    assert_eq!(root["uiProfile"]["version"], env!("CARGO_PKG_VERSION"));
     assert!(root.get("mountPath").is_none());
 
     // Not loaded: 409 with the exact text; unknown: 404.
@@ -525,6 +529,30 @@ fn databases_are_served_under_their_names_and_aliases() {
             Some("text/javascript; charset=utf-8")
         );
     }
+    // The root page carries the profile's style sheet, a mount's page does not; the profile's
+    // files are served under /server-ui/.
+    assert!(
+        call(address, "GET", "/", &[], "")
+            .2
+            .contains("server-ui/server-ui.css")
+    );
+    assert!(
+        !call(address, "GET", "/db/a/", &[], "")
+            .2
+            .contains("server-ui/server-ui.css")
+    );
+    let (status, head, body) = call(address, "GET", "/server-ui/profile.json", &[], "");
+    assert_eq!(status, 200);
+    assert_eq!(
+        header_of(&head, "Content-Type"),
+        Some("application/json; charset=utf-8")
+    );
+    assert_eq!(json(&body)["name"], "server");
+    assert_eq!(call(address, "GET", "/server-ui/none.js", &[], "").0, 404);
+    assert_eq!(
+        call(address, "POST", "/server-ui/shared.js", &[], "").0,
+        405
+    );
     assert_eq!(call(address, "GET", "/no-such-file.js", &[], "").0, 404);
     assert_eq!(call(address, "GET", "/api/nothing", &[], "").0, 404);
 
