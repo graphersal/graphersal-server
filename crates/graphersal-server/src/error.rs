@@ -133,6 +133,14 @@ pub enum ServerError {
         /// What failed, with the Store's reason.
         message: String,
     },
+    /// A database name has no backup of this name in `backups/<database>/`.
+    #[non_exhaustive]
+    BackupNotFound {
+        /// The database name.
+        database: String,
+        /// The backup asked for.
+        backup: String,
+    },
     /// The running server cannot be reached (the console's admin client).
     #[non_exhaustive]
     Connect {
@@ -221,6 +229,10 @@ impl fmt::Display for ServerError {
             ServerError::Serve { name, message } => write!(f, "database '{name}': {message}"),
             ServerError::InvalidInput { name, message } => write!(f, "'{name}': {message}"),
             ServerError::Store { name, message } => write!(f, "database '{name}': {message}"),
+            ServerError::BackupNotFound { database, backup } => write!(
+                f,
+                "database '{database}' has no backup '{backup}' (backups/{database}/{backup}.zip)"
+            ),
             ServerError::Connect { address, message } => write!(
                 f,
                 "cannot reach the running graphersal-server at {address}: {message}"

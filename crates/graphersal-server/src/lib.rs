@@ -11,9 +11,9 @@
 //! resolved per request, `409` for a database that is not loaded), the embedded playground at
 //! `/` (its landing view lists the databases), `/api/info` and the admin listing
 //! the admin API (`/api/admin/...`: list, create, delete, clone, load, unload, read-only,
-//! auto-load, aliases) over ONE admin core ([`ops::Admin`]) that the console's `db` commands
+//! auto-load, aliases, backup, backups, restore, export) over ONE admin core ([`ops::Admin`]) that the console's `db` commands
 //! ([`console`]) use too, on the directory itself or through the running server's API. The
-//! server-wide MCP endpoint, backups, imports and models come in later versions.
+//! server-wide MCP endpoint, imports and shared models come in later versions.
 //!
 //! The server has NO access control: it listens on the loopback by default and warns when it
 //! listens on any other address.
@@ -38,6 +38,8 @@ mod router;
 pub mod run_file;
 pub mod serve;
 #[cfg(test)]
+pub(crate) mod test_models;
+#[cfg(test)]
 pub(crate) mod test_support;
 
 pub use admin::TmpBuild;
@@ -47,7 +49,7 @@ pub use error::ServerError;
 pub use layout::{InitReport, ServerDir};
 pub use loader::{LoadStart, Loader};
 pub use lock::ServerLock;
-pub use ops::{Admin, CreateSpec, Deleted};
+pub use ops::{Admin, BackupInfo, CreateSpec, Deleted, ExportSpec, Exported, Restored};
 pub use registry::{DatabaseEntry, DbState, Registry};
 pub use run_file::RunInfo;
 pub use serve::{Running, ServeOptions};

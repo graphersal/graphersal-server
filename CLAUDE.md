@@ -10,7 +10,8 @@ from published files). When this file disagrees with the code, the code wins: sa
 
 - Workspace root `Cargo.toml` (all dependency versions in `[workspace.dependencies]`, each with
   a one-line justification); one crate `crates/graphersal-server` (lib + bin, `publish = false`).
-- graphersal-serve with feature `ui-assets` (the embedded playground per mount and at `/`).
+- graphersal with features `persist` and `persist-zip` (verified ZIP backups); graphersal-serve
+  with feature `ui-assets` (the embedded playground per mount and at `/`).
 - Path dependencies on the graphersal repository's MAIN checkout beside this one:
   `../graphersal/crates/graphersal`, `../graphersal/crates/graphersal-serve` and
   `../graphersal/crates/graphersal-session` (later also `graphersal-mcp`). Never edit that
@@ -38,7 +39,12 @@ from published files). When this file disagrees with the code, the code wins: sa
   .../<name>/clone|load|unload`, `PUT .../<name>/read-only|auto-load`, `GET aliases`, `PUT|DELETE
   aliases/<alias>`; JSON bodies `deny_unknown_fields`; core errors -> `{"error","help"?}` via
   `status_of` (400 invalid name/input, 404, 409 rule refusals, 500); the route table is in its
-  module docs and `docs/admin-api.md` (the playground panel's contract: keep them in sync)),
+  module docs and `docs/admin-api.md` (the playground panel's contract: keep them in sync);
+  `POST .../<name>/backup`, `GET .../<name>/backups`, `POST .../<name>/restore {"backup",
+  "name"?}`, `GET .../<name>/export?models=&materialize=`; the export is NOT answered by
+  `route`: the router asks `export_target` first and answers `Answer::Download` (the `.gsnap`
+  written into `tmp/` by `Admin::export_to_tmp`, streamed by `serve.rs` from the file with
+  `Content-Length`, then removed); `Router::route` (tests) buffers it),
   `ops` (`Admin`: THE admin core of the API and the console; online = with the `Loader`,
   offline = `Admin::open_offline` takes the server lock and scans; `create` (empty, optional
   schema, plain/layer, built in `tmp/` via `prepare_tmp`/`commit`, Store options from
@@ -48,13 +54,29 @@ from published files). When this file disagrees with the code, the code wins: sa
   `clone_database` (loaded: the open Store's `fork` with the context held so an unload waits;
   unloaded: `Store::fork_dir` / `fork_layer_dir`; config copied, `auto_load` off), load/unload
   (offline: refused naming `serve`), read-only (offline: base refuses `false`), auto-load,
-  aliases; `#[cfg(test)] FailPoint` injects a failure/crash after the Store is written; tests in
-  `ops_tests.rs`, also over a real listener), `console` (`DbCommand` -> one admin API request;
+  aliases; backup/backups/restore/export in `ops_transfer.rs` (a child module of `ops`:
+  backups = `Store::backup_zip` of the open Store (context held) or `Store::backup_zip_dir`,
+  built in `tmp/`, renamed to `backups/<name>/<UTC time with ->.zip` + sidecar `<stamp>.toml`
+  (kind, role, base, description, layer base identity); restore = `Store::restore_zip` into a
+  `prepare_tmp` build (new name; an existing OTHER database is `NameInUse`) or a
+  `Registry::prepare_replace` build over the database's own name (unloaded only, under
+  `while_idle`; `commit_replace` moves the old dir to `trash/` then renames; a base that layers
+  name is refused); the kind/base come from `Store::inspect` of the restored Store: a layer's
+  `layer_base` must equal the named (or the only matching) base database's identity
+  (`base_identity`: pooled `LayerBase::base_ref`, else `BaseRef::new(inspect.graph_id,
+  commit_seq, last_commit_at)`); export = `write_graph_snapshot` of the open graph, or of
+  `Store::open_read_only` / `open_layer_read_only(...).into_graph()` for an unloaded one,
+  `WriteOptions::with_materialize` for a materialized layer, `ModelCopy` from the spec (a
+  layer snapshot never carries models)); `#[cfg(test)] FailPoint` injects a failure/crash after
+  the Store is written (create and restore); tests in `ops_tests.rs` and
+  `ops_transfer_tests.rs` (tiny synthetic model in `test_models.rs`, copied from graphersal's
+  `model_fixture.rs`), also over a real listener), `console` (`DbCommand` -> one admin API request;
   `run`: offline = the SAME `admin_api::route` over an offline `Admin` with a built `Request`,
   locked = `client` to `RunInfo.address` (503 retried 10 s; `load` polls until not loading);
   refusals = `ServerError::Remote {status, message, help}`; `render` = human text), `client`
   (minimal std `TcpStream` HTTP/1.1 client: `Host` = address, no `Origin`, `Connection: close`,
-  Content-Length/chunked/close bodies, timeouts), `error`
+  Content-Length/chunked/close bodies, timeouts; `download` streams a `200` body into a writer:
+  `db export` through a server), `error`
   (`ServerError`), `names` (name rule `[a-z0-9][a-z0-9._-]{0,62}`, Windows device names refused,
   `fold` = lower case for case-insensitive lookups), `database` (`database.toml`:
   `DatabaseConfig`, `DatabaseKind`, `DatabaseRole`, `deny_unknown_fields`, `utc_now`),
@@ -65,7 +87,8 @@ from published files). When this file disagrees with the code, the code wins: sa
   no chains), `set_auto_load`, `set_read_only` (persists the flag only; a base with layers stays
   read-only), `prepare_tmp` -> `TmpBuild` -> `commit` (build in `tmp/`, atomic rename into
   `databases/`; a dropped build is removed), `delete` (the registry half of a delete: move into
-  `trash/`, refusals)). Every admin change writes its file first
+  `trash/`, refusals), `prepare_replace` / `commit_replace` (a restore over an existing
+  database)). Every admin change writes its file first
   (atomically), then memory, under the registry's write lock. `serve::start` scans after the
   bind and before `ready()` (`/readyz` 503 meanwhile); `Running::registry()`.
 - `loader` (`Loader`, beside the registry, `Running::loader()`): `load` (background thread,
@@ -87,8 +110,9 @@ from published files). When this file disagrees with the code, the code wins: sa
   state, then registry. Tests in `loader_tests.rs` (synthetic stores from the `modern` and
   `large` samples; `test_support::skip_on_ci`).
 - `src/main.rs`: the hand-parsed command line (no parser crate, like graphersal's CLI): `init`,
-  `serve`, `db list|create|delete|clone|load|unload|read-only|auto-load|alias ... --dir DIR
-  [--json]` (prints `note: ... sent to its admin API at ADDR` on stderr when it went through a
+  `serve`, `db list|create|delete|clone|load|unload|read-only|auto-load|alias|backup|backups|
+  restore|export ... --dir DIR [--json]` (`db export` offline writes the file through
+  `Admin::export_to_file`, through a server streams the download into `FILE.part`) (prints `note: ... sent to its admin API at ADDR` on stderr when it went through a
   server, `help:` lines for refusals), the tracing subscriber, the ctrlc handler. stdout =
   results, stderr = diagnostics/log; exit codes 0 ok, 1 failed, 2 usage.
 - Tests: unit tests beside the code (`test_support::TempDir`), end-to-end tests in

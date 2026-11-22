@@ -2,9 +2,9 @@
 //! machine (std `TcpStream`, no dependency): one request per connection (`Connection: close`),
 //! `Host` = the server's address (its `Host` check accepts it), no `Origin`, a JSON body with
 //! `Content-Length`, timeouts on connect, read and write. Answers `Content-Length`, chunked and
-//! close-delimited bodies.
+//! close-delimited bodies. [`download`] streams a `200` answer's body into a writer (an export).
 
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::time::Duration;
 
@@ -64,6 +64,148 @@ pub(crate) fn request(
     let json = serde_json::from_slice(&body)
         .map_err(|err| failed(format!("the answer is not JSON ({err})")))?;
     Ok((status, json))
+}
+
+/// What [`download`] received.
+pub(crate) struct Downloaded {
+    /// The status.
+    pub(crate) status: u16,
+    /// The headers, in order.
+    pub(crate) headers: Vec<(String, String)>,
+    /// The body bytes written into the writer (`200`).
+    pub(crate) bytes: u64,
+    /// The JSON body of an error answer (`Value::Null` for `200` or a body that is not JSON).
+    pub(crate) error: Value,
+}
+
+impl Downloaded {
+    /// The value of the header `name` (case-insensitive).
+    pub(crate) fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(field, _)| field.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
+    }
+}
+
+/// Sends `GET path` to the server at `address` and streams a `200` answer's body into `out`
+/// (`Content-Length`, chunked or close-delimited); an error answer's JSON body is read instead.
+pub(crate) fn download(
+    address: SocketAddr,
+    path: &str,
+    out: &mut dyn Write,
+) -> Result<Downloaded, ServerError> {
+    let failed = |message: String| ServerError::Connect {
+        address: address.to_string(),
+        message,
+    };
+    let mut stream = TcpStream::connect_timeout(&address, CONNECT_TIMEOUT)
+        .map_err(|err| failed(err.to_string()))?;
+    stream
+        .set_read_timeout(Some(READ_TIMEOUT))
+        .and_then(|()| stream.set_write_timeout(Some(CONNECT_TIMEOUT)))
+        .map_err(|err| failed(err.to_string()))?;
+    let head = format!(
+        "GET {path} HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\nUser-Agent: \
+         graphersal-server-console\r\nContent-Length: 0\r\n\r\n"
+    );
+    stream
+        .write_all(head.as_bytes())
+        .and_then(|()| stream.flush())
+        .map_err(|err| failed(format!("cannot send the request: {err}")))?;
+    let mut reader = BufReader::new(stream);
+    let mut status_line = String::new();
+    reader
+        .read_line(&mut status_line)
+        .map_err(|err| failed(format!("cannot read the answer: {err}")))?;
+    let status = status_line
+        .split(' ')
+        .nth(1)
+        .and_then(|code| code.parse::<u16>().ok())
+        .ok_or_else(|| failed("the answer has no status".to_string()))?;
+    let mut headers = Vec::new();
+    loop {
+        let mut line = String::new();
+        let n = reader
+            .read_line(&mut line)
+            .map_err(|err| failed(format!("cannot read the answer: {err}")))?;
+        let line = line.trim_end();
+        if n == 0 || line.is_empty() {
+            break;
+        }
+        if let Some((field, value)) = line.split_once(':') {
+            headers.push((field.trim().to_string(), value.trim().to_string()));
+        }
+    }
+    let mut answer = Downloaded {
+        status,
+        headers,
+        bytes: 0,
+        error: Value::Null,
+    };
+    let chunked = answer
+        .header("Transfer-Encoding")
+        .is_some_and(|v| v.to_ascii_lowercase().contains("chunked"));
+    let length = answer
+        .header("Content-Length")
+        .and_then(|v| v.parse::<u64>().ok());
+    if status != 200 {
+        let mut body = Vec::new();
+        (&mut reader)
+            .take(MAX_ANSWER_BYTES)
+            .read_to_end(&mut body)
+            .map_err(|err| failed(format!("cannot read the answer: {err}")))?;
+        let body = if chunked {
+            dechunk(&body).unwrap_or_default()
+        } else {
+            body
+        };
+        answer.error = serde_json::from_slice(&body).unwrap_or(Value::Null);
+        return Ok(answer);
+    }
+    let copied = if chunked {
+        copy_chunked(&mut reader, out)
+    } else if let Some(length) = length {
+        std::io::copy(&mut (&mut reader).take(length), out).and_then(|n| {
+            if n == length {
+                Ok(n)
+            } else {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    format!("the answer ended after {n} of {length} bytes"),
+                ))
+            }
+        })
+    } else {
+        std::io::copy(&mut reader, out)
+    };
+    answer.bytes = copied.map_err(|err| failed(format!("cannot read the download: {err}")))?;
+    Ok(answer)
+}
+
+/// Copies a chunked body from `reader` into `out`; answers the bytes copied.
+fn copy_chunked(reader: &mut dyn BufRead, out: &mut dyn Write) -> std::io::Result<u64> {
+    let broken =
+        |what: &str| std::io::Error::new(std::io::ErrorKind::InvalidData, what.to_string());
+    let mut total = 0;
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line)? == 0 {
+            return Err(broken("the chunked answer ended early"));
+        }
+        let size_text = line.split(';').next().unwrap_or("").trim();
+        let size = u64::from_str_radix(size_text, 16).map_err(|_| broken("a broken chunk size"))?;
+        if size == 0 {
+            return Ok(total);
+        }
+        let n = std::io::copy(&mut (&mut *reader).take(size), out)?;
+        if n != size {
+            return Err(broken("a truncated chunk"));
+        }
+        total += n;
+        let mut end = [0u8; 2];
+        reader.read_exact(&mut end)?;
+    }
 }
 
 /// The status and the body of a raw HTTP/1.1 answer.
@@ -139,5 +281,15 @@ mod tests {
         assert_eq!(parse_answer(closed).unwrap().0, 404);
         assert!(parse_answer(b"HTTP/1.1 200 OK\r\n").is_err());
         assert!(parse_answer(b"HTTP/1.1 200 OK\r\nContent-Length: 9\r\n\r\n{}").is_err());
+    }
+
+    #[test]
+    fn chunked_downloads_are_decoded() {
+        let mut body: &[u8] = b"3\r\nabc\r\n2;x=y\r\nde\r\n0\r\n\r\n";
+        let mut out = Vec::new();
+        assert_eq!(copy_chunked(&mut body, &mut out).unwrap(), 5);
+        assert_eq!(out, b"abcde");
+        let mut cut: &[u8] = b"3\r\nab";
+        assert!(copy_chunked(&mut cut, &mut Vec::new()).is_err());
     }
 }

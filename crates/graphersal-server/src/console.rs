@@ -10,9 +10,15 @@
 //!
 //! Either way the answer is the admin API's JSON, and a refusal is [`ServerError::Remote`]
 //! with the API's status, `error` and `help`. [`render`] turns an answer into the human text.
+//!
+//! `db export` is a download: offline the admin core writes the file itself
+//! ([`Admin::export_to_file`]); through a server the client streams the API's answer into
+//! `<FILE>.part` and renames it. Its answer is the JSON `{"database", "file", "bytes",
+//! "snapshot": "full" | "layer", "models": "included" | "excluded"}`.
 
 use std::io::Cursor;
 use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use graphersal_serve::{Method, Request};
@@ -21,7 +27,7 @@ use serde_json::{Map, Value, json};
 use crate::database::DatabaseKind;
 use crate::error::ServerError;
 use crate::layout::ServerDir;
-use crate::ops::{Admin, CreateSpec};
+use crate::ops::{Admin, CreateSpec, ExportSpec};
 use crate::run_file::RunInfo;
 
 /// How long the console waits for a load to end (`db load` without `--no-wait`).
@@ -94,6 +100,34 @@ pub enum DbCommand {
         /// The alias.
         alias: String,
     },
+    /// `db backup NAME`.
+    Backup {
+        /// The database.
+        name: String,
+    },
+    /// `db backups NAME`.
+    Backups {
+        /// The database name (also of a deleted database).
+        name: String,
+    },
+    /// `db restore NAME BACKUP [--name NEW]`.
+    Restore {
+        /// The database name whose backup is restored.
+        name: String,
+        /// The backup (its name or file name).
+        backup: String,
+        /// The database restored into (default: `name`, which must be unloaded).
+        target: Option<String>,
+    },
+    /// `db export NAME --out FILE [--no-models] [--materialize]`.
+    Export {
+        /// The database.
+        name: String,
+        /// What the file holds.
+        spec: ExportSpec,
+        /// The file written.
+        out: PathBuf,
+    },
 }
 
 impl DbCommand {
@@ -141,6 +175,32 @@ impl DbCommand {
                 Some(json!({ "target": target })),
             ),
             DbCommand::AliasRemove { alias } => (Method::Delete, format!("aliases/{alias}"), None),
+            DbCommand::Backup { name } => (Method::Post, format!("databases/{name}/backup"), None),
+            DbCommand::Backups { name } => (Method::Get, format!("databases/{name}/backups"), None),
+            DbCommand::Restore {
+                name,
+                backup,
+                target,
+            } => {
+                let mut body = Map::new();
+                body.insert("backup".into(), json!(backup));
+                if let Some(target) = target {
+                    body.insert("name".into(), json!(target));
+                }
+                (
+                    Method::Post,
+                    format!("databases/{name}/restore"),
+                    Some(Value::Object(body)),
+                )
+            }
+            DbCommand::Export { name, spec, .. } => (
+                Method::Get,
+                format!(
+                    "databases/{name}/export?models={}&materialize={}",
+                    spec.models, spec.materialize
+                ),
+                None,
+            ),
         }
     }
 }
@@ -177,6 +237,17 @@ pub struct Outcome {
 pub fn run(dir: &ServerDir, command: &DbCommand) -> Result<Outcome, ServerError> {
     let (method, path, body) = command.request();
     match Admin::open_offline(dir) {
+        Ok((admin, _lock)) if matches!(command, DbCommand::Export { .. }) => Ok(Outcome {
+            body: export_offline(&admin, command)?,
+            via: Via::Directory,
+        }),
+        Err(ServerError::Locked { .. }) if matches!(command, DbCommand::Export { .. }) => {
+            let address = server_address(dir)?;
+            Ok(Outcome {
+                body: export_remote(address, &path, command)?,
+                via: Via::Server(address),
+            })
+        }
         Ok((admin, _lock)) => {
             let body = offline(&admin, &method, &path, body.as_ref())?;
             Ok(Outcome {
@@ -223,6 +294,102 @@ fn offline(
             help: None,
         }),
     }
+}
+
+/// `db export` on the directory: the admin core writes the file.
+fn export_offline(admin: &Admin, command: &DbCommand) -> Result<Value, ServerError> {
+    let DbCommand::Export { name, spec, out } = command else {
+        return Err(ServerError::InvalidInput {
+            name: "export".to_string(),
+            message: "not an export command".to_string(),
+        });
+    };
+    let exported = admin
+        .export_to_file(name, *spec, out)
+        .map_err(|err| remote_error(&err))?;
+    Ok(json!({
+        "database": exported.database,
+        "file": out.display().to_string(),
+        "bytes": exported.bytes,
+        "snapshot": if exported.layer { "layer" } else { "full" },
+        "models": if exported.models { "included" } else { "excluded" },
+    }))
+}
+
+/// An admin core error as the API would answer it ([`ServerError::Remote`]).
+fn remote_error(err: &ServerError) -> ServerError {
+    ServerError::Remote {
+        status: crate::admin_api::status_of(err),
+        message: err.to_string(),
+        help: None,
+    }
+}
+
+/// `db export` through the server at `address`: its download streamed into `<out>.part`,
+/// renamed into `out` when complete.
+fn export_remote(
+    address: SocketAddr,
+    path: &str,
+    command: &DbCommand,
+) -> Result<Value, ServerError> {
+    let DbCommand::Export { out, .. } = command else {
+        return Err(ServerError::InvalidInput {
+            name: "export".to_string(),
+            message: "not an export command".to_string(),
+        });
+    };
+    let part = part_path(out);
+    let url = format!("/api/admin/{path}");
+    let deadline = Instant::now() + START_WAIT;
+    let answer = loop {
+        let mut file =
+            std::fs::File::create(&part).map_err(|err| ServerError::io("create", &part, err))?;
+        let answer = crate::client::download(address, &url, &mut file);
+        let answer = answer.and_then(|answer| {
+            file.sync_all()
+                .map_err(|err| ServerError::io("write", &part, err))?;
+            Ok(answer)
+        });
+        match answer {
+            Ok(answer) if answer.status == 503 && Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            other => break other,
+        }
+    };
+    let answer = match answer {
+        Ok(answer) => answer,
+        Err(err) => {
+            let _ = std::fs::remove_file(&part);
+            return Err(err);
+        }
+    };
+    if answer.status != 200 {
+        let _ = std::fs::remove_file(&part);
+        return answer_of(answer.status, answer.error);
+    }
+    std::fs::rename(&part, out).map_err(|err| {
+        let _ = std::fs::remove_file(&part);
+        ServerError::io("rename", &part, err)
+    })?;
+    let name = match command {
+        DbCommand::Export { name, .. } => name.clone(),
+        _ => String::new(),
+    };
+    Ok(json!({
+        "database": name,
+        "file": out.display().to_string(),
+        "bytes": answer.bytes,
+        "snapshot": answer.header("X-Graphersal-Snapshot").unwrap_or("full"),
+        "models": answer.header("X-Graphersal-Models").unwrap_or("included"),
+    }))
+}
+
+/// `<path>.part`.
+fn part_path(path: &Path) -> PathBuf {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(".part");
+    path.with_file_name(name)
 }
 
 /// The address of the server holding `dir`, from its run file (waits a moment for a starting
@@ -345,7 +512,59 @@ pub fn render(command: &DbCommand, answer: &Value) -> String {
             format!("alias '{}' -> database '{}'", s("alias"), s("target"))
         }
         DbCommand::AliasRemove { .. } => format!("removed alias '{}'", s("alias")),
+        DbCommand::Backup { .. } => format!(
+            "backed up database '{}' into {} ({} bytes)",
+            s("database"),
+            s("file"),
+            answer["bytes"].as_u64().unwrap_or_default()
+        ),
+        DbCommand::Backups { name } => render_backups(name, answer),
+        DbCommand::Restore { .. } => {
+            let from = &answer["restoredFrom"];
+            let mut text = format!(
+                "restored backup {} of '{}' into database '{}' ({})",
+                from["backup"].as_str().unwrap_or_default(),
+                from["database"].as_str().unwrap_or_default(),
+                s("name"),
+                kind(answer)
+            );
+            if let Some(trash) = answer["trash"].as_str() {
+                text.push_str(&format!("; the replaced database moved to {trash}"));
+            }
+            text
+        }
+        DbCommand::Export { .. } => format!(
+            "exported database '{}' into {} ({} bytes, {} snapshot, models {})",
+            s("database"),
+            s("file"),
+            answer["bytes"].as_u64().unwrap_or_default(),
+            s("snapshot"),
+            s("models")
+        ),
     }
+}
+
+/// The backups of `name` as lines.
+fn render_backups(name: &str, answer: &Value) -> String {
+    let rows = answer["backups"].as_array().cloned().unwrap_or_default();
+    if rows.is_empty() {
+        return format!("database '{name}' has no backups");
+    }
+    let mut out = String::new();
+    for row in rows {
+        let mut line = format!(
+            "{}  {} bytes  {}",
+            row["backup"].as_str().unwrap_or_default(),
+            row["bytes"].as_u64().unwrap_or_default(),
+            row["file"].as_str().unwrap_or_default()
+        );
+        if let Some(base) = row["base"].as_str() {
+            line.push_str(&format!("  (layer over '{base}')"));
+        }
+        out.push_str(&line);
+        out.push('\n');
+    }
+    out.trim_end().to_string()
 }
 
 /// `plain`, `layer over 'b'`, `base`.

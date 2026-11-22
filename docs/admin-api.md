@@ -58,6 +58,10 @@ A `failed` database whose `database.toml` cannot be read has only `name`, `state
 | POST | `/api/admin/databases/<name>/unload` | | `200` entry + `"unloaded": true` (was loaded) or `false` (was not) |
 | PUT | `/api/admin/databases/<name>/read-only` | `{"readOnly": bool}` | `200` entry |
 | PUT | `/api/admin/databases/<name>/auto-load` | `{"autoLoad": bool}` | `200` entry |
+| POST | `/api/admin/databases/<name>/backup` | | `201` backup |
+| GET | `/api/admin/databases/<name>/backups` | | `200 {"database", "backups": [backup...]}` (oldest first; also for the name of a deleted database) |
+| POST | `/api/admin/databases/<name>/restore` | `{"backup", "name"?}` | `201` entry + `"restoredFrom": {"database", "backup"}`, `"replaced": bool`, `"trash"` (when replaced) |
+| GET | `/api/admin/databases/<name>/export?models=true\|false&materialize=true\|false` | | `200` the `.gsnap` file as a download |
 | GET | `/api/admin/aliases` | | `200 {"aliases": {alias: database}}` |
 | PUT | `/api/admin/aliases/<alias>` | `{"target"}` | `200 {"alias", "target"}` (new alias or flip) |
 | DELETE | `/api/admin/aliases/<alias>` | | `200 {"alias", "removed": true}` |
@@ -109,13 +113,83 @@ is not loaded answer `409 {"error", "help": "load it: POST /api/admin/databases/
 applied at once: writes through its API and MCP endpoint are refused with a read-only error;
 a running request finishes. A base refuses `false` (`409`). `auto-load` is persisted only.
 
+### Backup
+
+`POST .../<name>/backup` writes a verified ZIP backup of the database's latest state into
+`backups/<name>/<UTC time>.zip` (the time with dashes instead of colons, such as
+`2026-11-22T10-00-00Z`; `-2`, `-3`, ... when that exists). Every entry is read back and checked;
+damage fails the backup and nothing is kept. It works on a loaded database (its open Store; an
+unload waits for it) and on an unloaded one. The archive is written in `tmp/` and renamed into
+place; a sidecar `<backup>.toml` beside it records the database's `kind`, `role`, `base`,
+`description` and, for a layer, its base's identity. A layer's backup holds only the layer: it
+restores only over the same base.
+
+A backup object:
+
+| Field | Type | When | Meaning |
+|---|---|---|---|
+| `database` | string | always | the database backed up |
+| `backup` | string | always | its name (the UTC time with dashes): what `restore` takes |
+| `file` | string | always | `backups/<database>/<backup>.zip`, relative to the server directory |
+| `bytes` | number | always | the archive's size |
+| `created` | string | sidecar | UTC, RFC 3339 |
+| `kind`, `role` | string | sidecar | the database's kind and role when it was taken |
+| `base` | string | layers | the base database's name when it was taken |
+| `layerBase` | string | layers | the base's identity (`graph <lineage id> at commit <n> (commit time <micros>)`) |
+
+### Restore
+
+`POST .../<name>/restore {"backup": "<backup>", "name"?: "<new>"}` restores the backup
+`<backup>` (or `<backup>.zip`) of `<name>`:
+
+- without `name` (or `name` = `<name>`): over the database `<name>` itself, which must be
+  UNLOADED (`409`, help `POST .../unload`). The new Store is built in `tmp/`; the old directory
+  moves to `trash/<name>-<UTC time>/` (`"trash"` in the answer), then the build is renamed into
+  its place. The database keeps its `autoLoad`, `readOnly` and `description`. When `<name>`
+  no longer exists (deleted), the backup becomes a new database of that name. A base that
+  layers name is not replaced (`409`: restore it into a new name).
+- with another `name`: a new database (`409` when the name is taken), `autoLoad` off, built in
+  `tmp/` like a create.
+
+A layer's backup is checked against its base: the base database the sidecar names (without a
+sidecar: any base database) must be a `role = "base"` database whose identity is the one the
+layer was built over; otherwise `409` naming that identity (and the base databases that have
+it, if any). Unknown backup: `404` with help `GET .../<name>/backups`. The restored database is
+`unloaded`.
+
+### Export
+
+`GET .../<name>/export` answers a packed snapshot (`.gsnap`) of the database's latest state as a
+download: `Content-Type: application/octet-stream`, `Content-Length`,
+`Content-Disposition: attachment; filename="<name>.gsnap"` (`<name>.layer.gsnap` for a layer
+snapshot), `X-Graphersal-Snapshot: full | layer`, `X-Graphersal-Models: included | excluded`.
+The query:
+
+- `models` (default `true`): carry the embedding models' blobs. `false`: the model definitions
+  stay in the snapshot's catalog, the blobs are left out (an importer resolves them by name).
+- `materialize` (default `false`, layers only): `false` writes a LAYER snapshot (only the
+  layer's changes; it loads only over the same base and never carries models); `true` writes a
+  standalone full snapshot of everything the layer shows (portable; with the base's models
+  unless `models=false`).
+
+Other parameters or values: `400`. It works on a loaded database (its open graph at its last
+commit; writes wait while it is encoded) and on an unloaded one (read from its files). The file
+is written into `tmp/` first and streamed from there (removed after the answer), so an error
+is still a JSON answer.
+
 ## Console
 
 ```
 graphersal-server db list|create|delete|clone|load|unload|read-only|auto-load|alias ... --dir DIR [--json]
+graphersal-server db backup NAME | backups NAME | restore NAME BACKUP [--name NEW] --dir DIR [--json]
+graphersal-server db export NAME --out FILE [--no-models] [--materialize] --dir DIR [--json]
 ```
 
 With a server running on `DIR` (its `server.lock` is held) the console sends these requests to
 the address in `DIR/server.run` and notes so on stderr; otherwise it takes the lock itself and
 answers them on the directory (then `load`/`unload` are refused: nothing would serve the
 database). `--json` prints the answer above; errors go to stderr with `help:`; exit code `1`.
+
+`db export` writes `FILE` (through `FILE.part`, renamed when complete): offline the admin core
+writes it, through a server the console streams the download. Its `--json` answer is
+`{"database", "file", "bytes", "snapshot": "full" | "layer", "models": "included" | "excluded"}`.

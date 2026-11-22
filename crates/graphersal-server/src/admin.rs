@@ -187,6 +187,7 @@ impl Registry {
             config,
             dir,
             done: false,
+            replace: false,
         })
     }
 
@@ -195,6 +196,12 @@ impl Registry {
     /// `store/` or a layer's base is no longer a base database; a refused or failed commit
     /// discards the build.
     pub fn commit(&self, mut build: TmpBuild) -> Result<DatabaseEntry, ServerError> {
+        if build.replace {
+            return Err(ServerError::Refused {
+                name: build.name.clone(),
+                message: "a replacement build (use commit_replace)".to_string(),
+            });
+        }
         let mut inner = self.write();
         inner.pending.remove(&build.name);
         let committed = commit_build(&self.dir.databases(), &mut inner, &build);
@@ -206,6 +213,161 @@ impl Registry {
         }
         drop(inner);
         committed
+    }
+
+    /// Starts building a REPLACEMENT of the existing database `name` with `config` in `tmp/`
+    /// (a restore over the same name): like [`Registry::prepare_tmp`], but the name must be
+    /// a database; [`Registry::commit_replace`] swaps the build in. Refused while another
+    /// replacement of it is being built, and for a base database that layers name (its
+    /// identity would change under them).
+    pub fn prepare_replace(
+        self: &Arc<Self>,
+        name: &str,
+        mut config: DatabaseConfig,
+    ) -> Result<TmpBuild, ServerError> {
+        let key = fold(name);
+        config.check().map_err(|message| ServerError::Refused {
+            name: key.clone(),
+            message,
+        })?;
+        if config.role == DatabaseRole::Base {
+            config.read_only = true;
+        }
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let dir = self.dir.tmp().join(format!(
+            "replace-{key}-{}",
+            NEXT.fetch_add(1, Ordering::SeqCst)
+        ));
+        let mut inner = self.write();
+        let entry = inner.entries.get(&key).ok_or_else(|| not_found(name))?;
+        if inner.pending.contains(&key) {
+            return Err(ServerError::Refused {
+                name: key,
+                message: "it is being replaced already; try again when that ends".to_string(),
+            });
+        }
+        if entry
+            .config
+            .as_ref()
+            .is_some_and(|c| c.role == DatabaseRole::Base)
+            && inner.has_layers_over(&key)
+        {
+            return Err(ServerError::Refused {
+                name: key,
+                message: "it is the base of layers; replacing it would change the base under \
+                          them: delete the layers first, or restore into a new name"
+                    .to_string(),
+            });
+        }
+        if config.kind == DatabaseKind::Layer
+            && let Some(problem) = config.base.as_deref().and_then(|b| inner.base_problem(b))
+        {
+            return Err(ServerError::Refused {
+                name: key,
+                message: problem,
+            });
+        }
+        fs::create_dir_all(&dir).map_err(|err| ServerError::io("create directory", &dir, err))?;
+        inner.pending.insert(key.clone());
+        Ok(TmpBuild {
+            registry: self.clone(),
+            name: key,
+            config,
+            dir,
+            done: false,
+            replace: true,
+        })
+    }
+
+    /// Swaps the replacement `build` ([`Registry::prepare_replace`]) in: the current
+    /// `databases/<name>/` moves into `trash/<name>-<UTC time>/`, then the build is renamed
+    /// into its place (if that rename fails, the old directory is moved back). Answers the new
+    /// entry and the trash directory of the old one. Refused while the database is loaded or
+    /// being loaded (the caller holding the loader makes sure it stays so); a refused or
+    /// failed swap discards the build.
+    pub fn commit_replace(
+        &self,
+        mut build: TmpBuild,
+    ) -> Result<(DatabaseEntry, PathBuf), ServerError> {
+        if !build.replace {
+            return Err(ServerError::Refused {
+                name: build.name.clone(),
+                message: "not a replacement build (use commit)".to_string(),
+            });
+        }
+        let mut inner = self.write();
+        let key = build.name.clone();
+        let entry = inner.entries.get(&key).ok_or_else(|| not_found(&key))?;
+        if matches!(entry.state, DbState::Loaded | DbState::Loading) {
+            return Err(ServerError::Refused {
+                name: key,
+                message: format!("it is {}; unload it first", entry.state.as_str()),
+            });
+        }
+        if build.config.kind == DatabaseKind::Layer
+            && let Some(problem) = build
+                .config
+                .base
+                .as_deref()
+                .and_then(|b| inner.base_problem(b))
+        {
+            return Err(ServerError::Refused {
+                name: key,
+                message: problem,
+            });
+        }
+        if !build.store_dir().is_dir() {
+            return Err(ServerError::Refused {
+                name: key,
+                message: format!("the build has no Store ({STORE_DIR}/ is missing)"),
+            });
+        }
+        let old = entry.dir.clone();
+        build.config.write(&build.dir)?;
+        let trash = self.trash_target(&key)?;
+        fs::rename(&old, &trash).map_err(|err| ServerError::io("rename", &old, err))?;
+        if let Err(err) = fs::rename(&build.dir, &old) {
+            if let Err(back) = fs::rename(&trash, &old) {
+                tracing::error!(
+                    target: "graphersal_server",
+                    "database '{key}': cannot move {} back after a failed replace: {back}; \
+                     it is kept there",
+                    trash.display()
+                );
+            }
+            return Err(ServerError::io("rename", &build.dir, err));
+        }
+        build.done = true;
+        inner.pending.remove(&key);
+        let entry = DatabaseEntry {
+            name: key.clone(),
+            dir: old,
+            config: Some(build.config.clone()),
+            state: DbState::Unloaded,
+        };
+        inner.entries.insert(key.clone(), entry.clone());
+        tracing::info!(
+            target: "graphersal_server",
+            "database '{key}' replaced (the old one moved to {})",
+            trash.display()
+        );
+        Ok((entry, trash))
+    }
+
+    /// A free `trash/<key>-<UTC time>` path (`-2`, `-3`, ... on a clash; dashes instead of
+    /// colons for Windows), its parent made.
+    fn trash_target(&self, key: &str) -> Result<PathBuf, ServerError> {
+        let trash_root = self.dir.trash();
+        fs::create_dir_all(&trash_root)
+            .map_err(|err| ServerError::io("create directory", &trash_root, err))?;
+        let stamp = crate::database::utc_now().replace(':', "-");
+        let mut target = trash_root.join(format!("{key}-{stamp}"));
+        let mut n = 1;
+        while target.exists() {
+            n += 1;
+            target = trash_root.join(format!("{key}-{stamp}-{n}"));
+        }
+        Ok(target)
     }
 
     /// Moves the database `name` out of the registry into `trash/<name>-<UTC time>/` (a
@@ -257,16 +419,7 @@ impl Registry {
             )));
         }
         let source = entry.dir.clone();
-        let trash_root = self.dir.trash();
-        fs::create_dir_all(&trash_root)
-            .map_err(|err| ServerError::io("create directory", &trash_root, err))?;
-        let stamp = crate::database::utc_now().replace(':', "-");
-        let mut target = trash_root.join(format!("{key}-{stamp}"));
-        let mut n = 1;
-        while target.exists() {
-            n += 1;
-            target = trash_root.join(format!("{key}-{stamp}-{n}"));
-        }
+        let target = self.trash_target(&key)?;
         fs::rename(&source, &target).map_err(|err| ServerError::io("rename", &source, err))?;
         inner.entries.remove(&key);
         tracing::info!(
@@ -358,6 +511,8 @@ pub struct TmpBuild {
     config: DatabaseConfig,
     dir: PathBuf,
     done: bool,
+    /// A replacement of an existing database ([`Registry::prepare_replace`]).
+    replace: bool,
 }
 
 impl TmpBuild {
@@ -379,6 +534,17 @@ impl TmpBuild {
     /// Where the caller writes the new Store (`<build>/store/`, not created here).
     pub fn store_dir(&self) -> PathBuf {
         self.dir.join(STORE_DIR)
+    }
+
+    /// Changes the configuration the commit writes (a restore learns a backup's kind from
+    /// the restored Store); the commit checks it again.
+    pub(crate) fn config_mut(&mut self) -> &mut DatabaseConfig {
+        &mut self.config
+    }
+
+    /// Whether this build replaces an existing database ([`Registry::prepare_replace`]).
+    pub fn is_replacement(&self) -> bool {
+        self.replace
     }
 }
 

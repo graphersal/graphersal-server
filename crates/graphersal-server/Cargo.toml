@@ -17,8 +17,10 @@ name = "graphersal-server"
 path = "src/main.rs"
 
 [dependencies]
-# `persist`: the defaults of new databases in `server.toml` (chunk size, damage policy).
-graphersal = { workspace = true, features = ["persist"] }
+# `persist`: the defaults of new databases in `server.toml` (chunk size, damage policy);
+# `persist-zip`: verified ZIP backups of a database (`backups/<name>/<UTC time>.zip`; no extra
+# dependency, the engine writes the archive itself).
+graphersal = { workspace = true, features = ["persist", "persist-zip"] }
 # `ui-assets`: every database mount and the landing page at `/` serve the embedded playground.
 graphersal-serve = { workspace = true, features = ["ui-assets"] }
 graphersal-session = { workspace = true }

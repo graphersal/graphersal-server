@@ -20,6 +20,10 @@
 //!   (built in `tmp/` like a create); works on a loaded database (its open Store forks, the
 //!   unload waits for it) and on an unloaded one (forked from its files); a layer's clone is a
 //!   layer over the same base.
+//! - [`Admin::backup`], [`Admin::backups`], [`Admin::restore`], [`Admin::export`]: backups into
+//!   `backups/<name>/<UTC time>.zip`, their restore (unloaded only; into the same name or a new
+//!   one; a layer's base checked by its identity) and `.gsnap` exports (with or without models;
+//!   a layer as a layer snapshot or materialized), in `ops_transfer.rs`.
 //! - `load`, `unload`, `set_read_only`, `set_auto_load`, `alias_set`, `alias_remove`: delegated
 //!   to the [`Loader`] and the [`Registry`].
 //!
@@ -140,7 +144,8 @@ pub struct Deleted {
     pub trash: PathBuf,
 }
 
-/// A test hook of [`Admin::create`]: fail after the Store was written into `tmp/`.
+/// A test hook of [`Admin::create`] and [`Admin::restore`]: fail after the Store was written
+/// into `tmp/`.
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FailPoint {
@@ -508,6 +513,15 @@ fn describe(config: Option<&DatabaseConfig>) -> String {
     }
 }
 
+#[path = "ops_transfer.rs"]
+mod transfer;
+pub(crate) use transfer::ExportFile;
+pub use transfer::{BackupInfo, ExportSpec, Exported, Restored};
+
 #[cfg(test)]
 #[path = "ops_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "ops_transfer_tests.rs"]
+mod transfer_tests;
