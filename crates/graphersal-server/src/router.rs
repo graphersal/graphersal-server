@@ -27,6 +27,12 @@ use serde_json::json;
 use crate::loader::Loader;
 use crate::mounts::{self, Databases};
 
+/// The host name every `GET /api/info` answers as `server`: the root's and each database
+/// mount's (`ContextBuilder::server_name`), so a client tells this server from the CLI's dev
+/// server (`graphersal-dev`). The playground recognises a Graphersal host by `protocol`
+/// ([`graphersal_serve::PROTOCOL`]), not by this name.
+pub(crate) const SERVER_NAME: &str = "graphersal-server";
+
 /// The answer to a request ([`Router::answer`]).
 pub(crate) enum Answer {
     /// An answer in memory.
@@ -211,8 +217,10 @@ fn error_response(error: HttpError) -> Response {
 }
 
 /// `GET /api/info` at the root: the server's identity (`server: "graphersal-server"`), the
-/// host-neutral protocol marker of a Graphersal host (`protocol: "graphersal/1"`) and its UI. The playground served at `/` takes the answer as its engine's because it names its host
-/// and carries `uiProfile`, the `server` profile ([`crate::ui_assets::profile`]: the database
+/// host-neutral protocol marker of a Graphersal host (`protocol: "graphersal/1"`,
+/// [`graphersal_serve::PROTOCOL`]), `dev: false` (not a dev server) and its UI. The playground
+/// served at `/` takes the answer as its engine's because it carries the protocol marker; it
+/// shows `uiProfile`, the `server` profile ([`crate::ui_assets::profile`]: the database
 /// list and the admin tabs, no workspace, so the page never asks the root for a graph).
 /// `uploadBytes` is the largest import upload (a client checks a file's size before it sends
 /// it; the profile's modules read it from `api.info.host`); `mcp` is the MCP endpoint's status
@@ -225,8 +233,9 @@ fn info(upload_bytes: u64, mcp: Option<serde_json::Value>) -> Result<Response, H
     Ok(Response::json(
         200,
         &json!({
-            "server": "graphersal-server",
-            "protocol": "graphersal/1",
+            "server": SERVER_NAME,
+            "protocol": graphersal_serve::PROTOCOL,
+            "dev": false,
             "version": env!("CARGO_PKG_VERSION"),
             "experimental": true,
             "uploadBytes": upload_bytes,
@@ -329,6 +338,30 @@ mod tests {
         );
     }
 
+    /// `ui/tests/root-info.json` is the root info the node test `profile.test.mjs` hands the
+    /// playground's `isEngineInfo`: every field it names is what [`info`] answers, so the node
+    /// test checks the real answer, not a copy that can drift.
+    #[test]
+    fn the_node_tests_root_info_is_the_answer() {
+        let fixture: Value =
+            serde_json::from_str(include_str!("../ui/tests/root-info.json")).unwrap();
+        let answer = json_of(&info(1024, None).unwrap());
+        let fixture = fixture.as_object().unwrap();
+        for (key, value) in fixture {
+            assert_eq!(&answer[key], value, "{key}");
+        }
+        let mut rest: Vec<&str> = answer
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .filter(|key| !fixture.contains_key(*key))
+            .collect();
+        rest.sort_unstable();
+        // The fields the fixture leaves out vary per server (the node test adds the profile).
+        assert_eq!(rest, ["mcp", "uiProfile", "uploadBytes", "version"]);
+    }
+
     #[test]
     fn ready_routes() {
         let router = router();
@@ -343,6 +376,7 @@ mod tests {
         );
         assert_eq!(info["server"], "graphersal-server");
         assert_eq!(info["protocol"], "graphersal/1");
+        assert_eq!(info["dev"], false);
         assert!(info.get("product").is_none());
         assert_eq!(info["experimental"], true);
         assert_eq!(info["uiProfile"]["name"], "server");

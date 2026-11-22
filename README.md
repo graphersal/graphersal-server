@@ -83,7 +83,7 @@ With a server running on `DIR` the command goes to its admin API (address from
 | Path | What |
 |---|---|
 | `GET /healthz`, `GET /readyz` | liveness `200`; readiness `200` or `503` while starting or stopping |
-| `GET /api/info` | the server's identity (`server: "graphersal-server"`, `protocol: "graphersal/1"`), its UI profile `uiProfile`, `uploadBytes`, the MCP endpoint |
+| `GET /api/info` | the server's identity (`server: "graphersal-server"`, `protocol: "graphersal/1"`, `dev: false`), its UI profile `uiProfile`, `uploadBytes`, the MCP endpoint |
 | `GET /` | the server's web UI (the playground showing the `server` UI profile) |
 | `GET /server-ui/<file>` | the `server` UI profile's files (its modules and style sheet) |
 | `/db/<name>/...` | the playground and its HTTP API (`POST /db/<name>/api/execute {"script"}`, ...) on the database or alias `<name>`, resolved per request; `409` with help when it is not loaded (never loaded implicitly), `404` when unknown |
@@ -107,12 +107,14 @@ profile's own files and calls the admin API itself, sending the host's request h
 has no workspace tab, so the page only reads `GET /api/info` and the admin API (the modules get
 the root info, e.g. `uploadBytes`, from the playground as `api.info.host`). Each loaded
 database keeps the ordinary playground under `/db/<name>/`; its `/api/info` carries `home: "/"`
-(the link back to the server's UI) and `database`.
+(the link back to the server's UI), `database`, and the same `server: "graphersal-server"`,
+`protocol: "graphersal/1"` and `dev: false` as the root.
 
-The root `GET /api/info` answers `"server": "graphersal-server"` with `uiProfile`; the
-playground takes such an answer (a named host delivering a UI profile) as its engine's. It also
-carries `"protocol": "graphersal/1"`, the host-neutral marker of a Graphersal host (the
-playground will recognise hosts by it instead of by `server`).
+Every `GET /api/info`, the root's and each database's, carries `"protocol": "graphersal/1"`,
+the host-neutral marker of a Graphersal host: the playground takes an answer as its engine's
+by this marker alone, not by `server`. `server: "graphersal-server"` only names the host (the
+CLI's dev server answers `graphersal-dev`), and `dev: false` keeps the playground's DEV badge
+off. The root answer adds `uiProfile`, the `server` profile the page at `/` shows.
 
 Tests of the UI's modules (Node only, no browser):
 
@@ -121,7 +123,8 @@ node --test crates/graphersal-server/ui/tests/*.test.mjs
 ```
 
 `profile.test.mjs` also checks the profile with the engine playground's own `validateProfile`,
-and that its `isEngineInfo` accepts the root info, from `GRAPHERSAL_PLAYGROUND` (a playground
+and that its `isEngineInfo` accepts the root info (the fixed fields in `ui/tests/root-info.json`,
+which a Rust test checks against the real answer) and refuses one without `protocol`, from `GRAPHERSAL_PLAYGROUND` (a playground
 directory), else `../graphersal/playground`.
 
 ## Server directory
