@@ -33,6 +33,9 @@
 //! - [`Admin::promote`]: an UNLOADED plain database becomes a base (`role = "base"`,
 //!   read-only), one way (a base is frozen forever, user decision U11); an import with
 //!   [`DatabaseRole::Base`] ([`Admin::import_as`]) makes a base holding the imported data.
+//! - [`Admin::runs`], [`Admin::cancel_run`]: the queued and running runs of the loaded
+//!   databases, whatever their client, and the cancel of one by its id (online only;
+//!   `ops_runs.rs`).
 //! - `load`, `unload`, `set_read_only`, `set_auto_load`, `alias_set`, `alias_remove`: delegated
 //!   to the [`Loader`] and the [`Registry`].
 //!
@@ -605,6 +608,10 @@ pub use transfer::{BackupInfo, ExportSpec, Exported, Restored};
 #[path = "ops_models.rs"]
 mod models;
 pub use models::{ModelAddSpec, ModelAdded, ModelRemoved};
+
+#[path = "ops_runs.rs"]
+mod runs;
+pub use runs::DatabaseRun;
 
 #[cfg(test)]
 #[path = "ops_tests.rs"]

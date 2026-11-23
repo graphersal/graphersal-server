@@ -171,7 +171,9 @@ pub enum ServerError {
         repo: String,
     },
     /// A Store import needs a model blob the source Store lacks, and the shared models
-    /// (`models/`) do not hold it either: the Store cannot be copied without it.
+    /// (`models/`) do not hold it either: the Store cannot be copied without it. Since
+    /// graphersal 0.7.1 the import leaves such a blob out (the database becomes `needs-model`),
+    /// so this answers only a Store failure of that kind the copy could not skip.
     #[non_exhaustive]
     ModelUnavailable {
         /// The database being imported.

@@ -10,7 +10,8 @@
     { "id": "backups", "title": "Backups", "module": "backups-tab.js" },
     { "id": "import", "title": "Import", "module": "import-tab.js" },
     { "id": "export", "title": "Export", "module": "export-tab.js" },
-    { "id": "models", "title": "Models", "module": "models-tab.js" }
+    { "id": "models", "title": "Models", "module": "models-tab.js" },
+    { "id": "runs", "title": "Runs", "module": "runs-tab.js" }
   ],
   "cards": {},
   "graph": {}

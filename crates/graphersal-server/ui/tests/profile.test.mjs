@@ -57,7 +57,7 @@ async function playgroundModule(t, rel) {
 test('the profile: name, files, tabs of its own, no workspace', () => {
   assert.equal(profile.name, 'server');
   assert.equal(profile.files, 'server-ui/', 'relative to the page at the server root');
-  assert.deepEqual(profile.tabs.map((t) => t.id), ['databases', 'backups', 'import', 'export', 'models']);
+  assert.deepEqual(profile.tabs.map((t) => t.id), ['databases', 'backups', 'import', 'export', 'models', 'runs']);
   assert.equal(profile.startTab, 'databases');
   for (const tab of profile.tabs) {
     assert.equal(tab.builtin, undefined, `${tab.id}: no built-in workspace (no graph at the root)`);

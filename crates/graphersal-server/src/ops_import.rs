@@ -18,10 +18,12 @@
 //!   Store is matched with its base like a layer snapshot; a model blob the source lacks is
 //!   filled into the copy from `models/` (checked by its hash, then hard-linked to `models/`
 //!   by the adoption; [`Imported::models_resolved`] names its model). A blob `models/` lacks
-//!   too refuses the import ([`ServerError::ModelUnavailable`], `409`: a Store copy is
-//!   verified and cannot leave a referenced blob out, so unlike a snapshot it cannot become
-//!   `needs-model`; add the model, then import again); one `models/` holds damaged is
-//!   [`ServerError::ModelDamaged`] naming the file;
+//!   too is left out of the copy (`ConvertOptions::with_skip_missing_blobs`: a Store without a
+//!   model blob is a valid Store, as after a snapshot import), and the database gets the state
+//!   `needs-model (<repo>)` like a snapshot (add the model to `models/`, which resolves it);
+//!   a base is refused instead ([`ServerError::Refused`], as below). One `models/` holds
+//!   damaged is [`ServerError::ModelDamaged`] naming the file, and a damaged blob of the source
+//!   itself fails the copy's verification ([`ServerError::Store`]);
 //! - GraphSON (`.json`, `.jsonl`, `.graphson`) or GraphML (`.xml`, `.graphml`): a new plain
 //!   database holding the file's graph (the Store gets `server.toml`'s `[defaults]`); data
 //!   GraphSON cannot hold is skipped and listed in the import's notes.
@@ -176,8 +178,8 @@ impl Admin {
     /// recognized); [`ServerError::InvalidInput`] (the source does not read as its format, a
     /// `base` for a plain source); [`ServerError::Refused`] (a layer without its base database:
     /// the message names the base identity); [`ServerError::Store`] (the Store cannot be
-    /// written); [`ServerError::ModelUnavailable`] / [`ServerError::ModelDamaged`] (a source
-    /// Store lacks a model blob that `models/` lacks too / holds damaged);
+    /// written); [`ServerError::ModelDamaged`] (a source Store lacks a model blob that
+    /// `models/` holds damaged; one `models/` lacks too makes the database `needs-model`);
     /// [`ServerError::Config`]; [`ServerError::Io`].
     pub fn import(
         &self,
@@ -403,12 +405,16 @@ impl Admin {
     ) -> Result<Built, ServerError> {
         // A model blob the source lacks is filled from `models/` (laid out as
         // `blobs/<2 hex>/<hash>`) into the copy, checked by its hash; the filled file is
-        // replaced by a hard link to `models/` afterwards (the adoption in `import_as`).
+        // replaced by a hard link to `models/` afterwards (the adoption in `import_as`). A blob
+        // `models/` lacks too is left out: `missing_blobs` below names its model, and the
+        // database becomes `needs-model` (a base is refused in `import_as`).
         let models = self.models();
         let report = Store::convert_with(
             path,
             store_dir,
-            ConvertOptions::new().with_fill_missing_blobs(BlobSource::store(models.root())),
+            ConvertOptions::new()
+                .with_fill_missing_blobs(BlobSource::store(models.root()))
+                .with_skip_missing_blobs(),
         )
         .map_err(|err| convert_error(name, path, &models, err))?;
         let info = Store::inspect(store_dir)
@@ -563,7 +569,8 @@ fn missing_blobs(name: &str, dir: &Path) -> Result<Vec<String>, ServerError> {
 }
 
 /// The error of a Store copy: a model blob neither the source nor `models/` holds
-/// ([`ServerError::ModelUnavailable`]), one `models/` holds damaged
+/// ([`ServerError::ModelUnavailable`]; not expected since the copy skips such a blob, kept for
+/// a Store failure of that kind), one `models/` holds damaged
 /// ([`ServerError::ModelDamaged`]), anything else the Store's.
 fn convert_error(name: &str, source: &Path, models: &ModelsDir, err: PersistError) -> ServerError {
     match err {

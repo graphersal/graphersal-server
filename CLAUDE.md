@@ -16,7 +16,7 @@ from published files). When this file disagrees with the code, the code wins: sa
   server's own `server` UI profile) and `mcp` (each
   context a host of the shared MCP endpoint); graphersal-mcp (the endpoint, directory mode).
 - The four Graphersal crates (graphersal, graphersal-serve, graphersal-session, graphersal-mcp)
-  from crates.io, pinned exactly (`=0.7.0`: EXPERIMENTAL crates, exact pin during 0.x), all on
+  from crates.io, pinned exactly (`=0.7.1`: EXPERIMENTAL crates, exact pin during 0.x), all on
   the same version; `Cargo.lock` is committed and CI builds `--locked`. The embedded playground
   is the `ui/` of the published graphersal-serve crate. Moving to a new Graphersal version:
   bump the four pins together, `cargo update -p graphersal ...`, commit the lock. Never edit the
@@ -84,6 +84,12 @@ from published files). When this file disagrees with the code, the code wins: sa
   aliases/<alias>`; JSON bodies `deny_unknown_fields`; core errors -> `{"error","help"?}` via
   `status_of` (400 invalid name/input, 404, 409 rule refusals, 500); the route table is in its
   module docs and `docs/admin-api.md` (the web UI's contract, `ui/admin-api.js`: keep them in sync);
+  the run administration (V25, graphersal-serve 0.7.1 #32): `GET runs` (every loaded
+  database), `GET databases/<name>/runs` (`loaded`), `POST databases/<name>/runs/cancel {"id"}`
+  over `Admin::runs` / `Admin::cancel_run` (`ops_runs.rs`: each context's OWN `Runs`
+  (`Context::runs()`), ids unique per database; offline `Refused`); the mounts keep
+  `ContextBuilder::admin_runs` OFF (query texts only through the admin surface, no token: the
+  admin surface has no access control); web UI tab `runs-tab.js`;
   `POST .../<name>/backup`, `GET .../<name>/backups`, `POST .../<name>/restore {"backup",
   "name"?}`, `GET .../<name>/export?models=&materialize=`; `POST import?name=&base=&format=&description=&role=`
   with the raw file as the body (streamed by `copy_body_to` into `tmp/upload-*.bin` = `TmpFile`,
@@ -128,13 +134,16 @@ from published files). When this file disagrees with the code, the code wins: sa
   cleared by `Registry::clear_needs_model` after a successful load); layer `.gsnap` =
   `matching_base` (shared with restore, refusal names the identity) + `read_layer_snapshot` +
   `create_layer_with`; Store dir / `.gstore` = `Store::convert_with(.., ConvertOptions::new()
-  .with_fill_missing_blobs(BlobSource::store(models/)))` (V18: a blob the source lacks is filled
-  from `models/` into the copy, then `adopt_build` hard-links it; `Built::models_filled`, merged
-  into `models_resolved`, note "filled from the shared models"; `BlobUnavailable` ->
-  `ServerError::ModelUnavailable` (409, repos from the source's `Store::models_dir`, help names
-  `POST /api/admin/models`: a Store copy cannot become `needs-model`), `BlobDamaged` ->
+  .with_fill_missing_blobs(BlobSource::store(models/)).with_skip_missing_blobs())` (V18: a blob
+  the source lacks is filled from `models/` into the copy, then `adopt_build` hard-links it;
+  `Built::models_filled`, merged into `models_resolved`, note "filled from the shared models";
+  V25 (graphersal 0.7.1, H7): a blob `models/` lacks too is left out and `missing_blobs` of the
+  copy makes the database `needs-model` like a snapshot (a base -> `Refused`, 409);
+  `BlobUnavailable` -> `ServerError::ModelUnavailable` (409) is kept only as a defensive
+  mapping, `BlobDamaged` ->
   `ServerError::ModelDamaged` (500, the `models/blobs/..` path parsed from the reason)) then
-  `inspect` for a layer;
+  `inspect` for a layer (a layer Store lacking a blob is no longer refused but is not marked
+  `needs-model` either: `missing_blobs` runs for plain Stores only, as for layer snapshots);
   GraphSON/GraphML = `GraphSONImport::load` / `GraphSource::from_graphml_reader` +
   `Store::create_with`; `import_as(.., DatabaseRole::Base)` (`import` = role normal) makes a
   base of a PLAIN source: a layer source -> `InvalidInput` (400) before its base is matched, a
@@ -260,7 +269,7 @@ from published files). When this file disagrees with the code, the code wins: sa
 - `crates/graphersal-server/ui/`: the server's web UI, the playground UI profile `server`
   (the graphersal-memory `memory` profile's pattern; the engine's playground mechanism: its
   `playground/CLAUDE.md` "UI profiles"): `profile.json` (module tabs Databases, Backups, Import,
-  Export, Models; no workspace: the root has no graph; `files` = `server-ui/` relative to `/`),
+  Export, Models, Runs; no workspace: the root has no graph; `files` = `server-ui/` relative to `/`),
   the tab modules `*-tab.js` (Vue options components with `template`, props `api` and `params`;
   cross-tab links through `api.navigate(tab, {db})`), the pure models `admin-api.js` (requests,
   rules, texts of every admin action) and `databases.js` (`databaseRows`, `fetchDatabases`,

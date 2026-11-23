@@ -723,33 +723,64 @@ fn a_store_import_fills_a_missing_model_blob_from_the_shared_models() {
     let source = store_without_blob(&temp, "lacks");
     let gstore = gstore_without_blob(&temp);
 
-    // models/ lacks it: refused (409 + help naming models add), nothing is created.
-    let err = admin
+    // models/ lacks it: imported without the blob (graphersal 0.7.1
+    // `with_skip_missing_blobs`), the database waits in `needs-model` like a snapshot import;
+    // the core, the path form and the upload form (.gstore). A base is refused (409).
+    let imported = admin
         .import(&ImportSource::new(&source), "early", None, None)
-        .unwrap_err();
-    match &err {
-        ServerError::ModelUnavailable { repos, message, .. } => {
-            assert_eq!(repos, &["acme/tiny"], "{err}");
-            assert!(message.contains("blobs/"), "{message}");
-        }
-        other => panic!("{other}"),
-    }
-    assert!(err.to_string().contains("'acme/tiny'"), "{err}");
-    let body = json!({"path": source.to_str().unwrap(), "name": "early"});
+        .expect("imported without its blob");
+    assert_eq!(imported.entry.state, DbState::needs_model("acme/tiny"));
+    assert_eq!(imported.models_missing, ["acme/tiny"], "{imported:?}");
+    assert!(imported.models_resolved.is_empty(), "{imported:?}");
+    assert_eq!(
+        model_state(&admin, "early", "acme/tiny"),
+        Some(ModelState::Missing)
+    );
+    let body = json!({"path": source.to_str().unwrap(), "name": "early-path"});
+    let (status, answer) = route(&admin, Method::Post, "import", Some(body));
+    assert_eq!(status, 201, "{answer}");
+    assert_eq!(answer["state"], "needs-model", "{answer}");
+    assert_eq!(answer["model"], "acme/tiny", "{answer}");
+    assert_eq!(answer["import"]["format"], "store");
+    assert_eq!(answer["import"]["modelsMissing"], json!(["acme/tiny"]));
+    let (status, answer) = upload(
+        &admin,
+        "import?name=early-upload",
+        fs::read(&gstore).unwrap(),
+    );
+    assert_eq!(status, 201, "{answer}");
+    assert_eq!(answer["import"]["modelsMissing"], json!(["acme/tiny"]));
+    let body = json!({"path": source.to_str().unwrap(), "name": "early-base", "role": "base"});
     let (status, answer) = route(&admin, Method::Post, "import", Some(body));
     assert_eq!(status, 409, "{answer}");
     assert!(
-        answer["help"]
-            .as_str()
-            .unwrap()
-            .contains("POST /api/admin/models"),
+        answer["error"].as_str().unwrap().contains("'acme/tiny'"),
         "{answer}"
     );
-    assert!(admin.registry().get("early").is_err());
+    assert!(admin.registry().get("early-base").is_err());
     assert!(tmp_is_empty(&dir));
+    let loader = loader_of(&dir);
+    loader.load("early").unwrap();
+    assert_eq!(
+        loader.wait("early", WAIT).unwrap(),
+        DbState::needs_model("acme/tiny")
+    );
+    loader.shutdown().unwrap();
+
+    // Adding the model resolves the waiting copies (then the imports below fill it at once).
+    let added = admin.model_add(&ModelAddSpec::path(&with)).unwrap();
+    let mut resolved = added.resolved.clone();
+    resolved.sort();
+    assert_eq!(
+        resolved,
+        ["early", "early-path", "early-upload"],
+        "{added:?}"
+    );
+    for name in ["early", "early-path", "early-upload"] {
+        assert_eq!(admin.registry().get(name).unwrap().state, DbState::Unloaded);
+    }
 
     // models/ holds it: the core, the path form and the upload form (.gstore).
-    admin.model_add(&ModelAddSpec::path(&with)).unwrap();
     let imported = admin
         .import(&ImportSource::new(&source), "core", None, None)
         .expect("imported");
@@ -782,9 +813,19 @@ fn a_store_import_fills_a_missing_model_blob_from_the_shared_models() {
     assert_eq!(answer["import"]["modelsResolved"], json!(["acme/tiny"]));
     #[cfg(unix)]
     assert_eq!(
-        shared_links(&admin, &["core", "by-path", "by-upload"]),
-        4,
-        "models + 3 databases: the filled blob is a hard link"
+        shared_links(
+            &admin,
+            &[
+                "early",
+                "early-path",
+                "early-upload",
+                "core",
+                "by-path",
+                "by-upload"
+            ]
+        ),
+        7,
+        "models + 6 databases: the filled and the resolved blobs are hard links"
     );
     assert!(tmp_is_empty(&dir));
     // The source is unchanged and the copies load with their model.

@@ -3,7 +3,8 @@
 #
 # Builds the binary, makes a server directory in a temporary directory, serves it on
 # 127.0.0.1:0 (the URL read from server.run) and walks through the admin API, the database
-# pages (with a promotion to a base and a layer over it), a model upload (.tar, .tar.gz), the MCP endpoint
+# pages (with a promotion to a base and a layer over it), the run administration, a model upload
+# (.tar, .tar.gz), the MCP endpoint
 # and a clean stop.
 # Prints one `ok <step>` line per step, or `FAIL <step>: <why>` and exits 1 at the first
 # failure. The server is killed on any exit.
@@ -339,6 +340,42 @@ expect_status 200
 expect_json readOnly false
 execute acme 'g.v().has_label("person").count().next()'
 [ "$RESULT" = 1 ] || fail "acme counts $RESULT after the refused write"
+ok
+
+STEP="run administration (list and stop another client's query)"
+req GET /api/admin/runs
+expect_status 200
+expect_json textHeadChars 200
+req GET /db/acme/api/admin/runs
+expect_status 404
+# A page's endless query, in the background; the admin sees it and stops it.
+curl -sS -o "$WORK/endless.json" --max-time 120 -H 'Content-Type: application/json' \
+  -H 'X-Graphersal-Client: smoke' \
+  --data-binary '{"script": "let n = 0; loop { n += 1; }", "runId": "endless"}' \
+  "${URL}/db/acme/api/execute" &
+ENDLESS_PID=$!
+RUN_ID=""
+for _ in $(seq 1 300); do
+  req GET /api/admin/databases/acme/runs
+  expect_status 200
+  RUN_ID=$(python3 -I -c '
+import json, sys
+runs = json.load(open(sys.argv[1])).get("runs", [])
+print(next((str(r["id"]) for r in runs if r.get("alias") == "endless" and r.get("state") == "running"), ""))
+' "$BODY")
+  [ -n "$RUN_ID" ] && break
+  sleep 0.1
+done
+[ -n "$RUN_ID" ] || fail "the endless query never showed: $(head -c 400 "$BODY")"
+req GET /api/admin/runs
+expect_body_contains '"client":"page:smoke"'
+jreq POST /api/admin/databases/acme/runs/cancel "{\"id\": $RUN_ID}"
+expect_status 200
+expect_json cancelled true
+wait "$ENDLESS_PID" || fail "the endless query's request failed"
+grep -q '"ok":false' "$WORK/endless.json" || fail "the stopped query answered: $(head -c 400 "$WORK/endless.json")"
+jreq POST /api/admin/databases/acme/runs/cancel "{\"id\": $RUN_ID}"
+expect_json cancelled false
 ok
 
 STEP="backup and restore into a new name"
