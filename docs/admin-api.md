@@ -88,6 +88,9 @@ A `failed` database whose `database.toml` cannot be read has only `name`, `state
 | GET | `/api/admin/aliases` | | `200 {"aliases": {alias: database}}` |
 | PUT | `/api/admin/aliases/<alias>` | `{"target"}` | `200 {"alias", "target"}` (new alias or flip) |
 | DELETE | `/api/admin/aliases/<alias>` | | `200 {"alias", "removed": true}` |
+| GET | `/api/admin/runs` | | `200 {"runs": [run...], "textHeadChars": 200}` (every loaded database) |
+| GET | `/api/admin/databases/<name>/runs` | | `200 {"database", "loaded": bool, "runs": [run...], "textHeadChars": 200}` |
+| POST | `/api/admin/databases/<name>/runs/cancel` | `{"id"}` | `200 {"database", "id", "cancelled": bool}` |
 
 ### Create
 
@@ -250,7 +253,7 @@ Sources, detected from the content (a file name never decides a snapshot):
 |---|---|
 | packed snapshot `.gsnap`, full | a plain database; its embedding models come along when it carries them; when it names a model without carrying it, the model is taken from the server's shared `models/` when that holds it (hard-linked like any shared blob, listed in `modelsResolved`), else the database is created in the state `needs-model` (`model` names it; kept across restarts, cleared by `POST /api/admin/models` or the first successful load) |
 | packed snapshot, layer (`.layer.gsnap`) | a layer database over the `role = "base"` database with the snapshot's base identity: `base` names it, else the only base database with it; none (or the named one does not match): `409` naming the identity |
-| Store directory or single-file `.gstore` | copied file by file into a directory Store (verified; its creation parameters come along); a layer Store is matched with its base like a layer snapshot. A model blob the Store lacks is filled into the copy from the server's shared `models/` (checked by its SHA-256, then hard-linked to `models/`; its model listed in `modelsResolved`, a note says it was filled). A blob `models/` lacks too is `409` (help: add the model, `POST /api/admin/models`, then import again): unlike a snapshot, a Store copy is verified and cannot leave a referenced blob out, so it is never created as `needs-model`. A blob `models/` holds damaged (its bytes do not match its name) is `500`, the error naming the file `models/blobs/<2 hex>/<hash>`, with help |
+| Store directory or single-file `.gstore` | copied file by file into a directory Store (verified; its creation parameters come along); a layer Store is matched with its base like a layer snapshot. A model blob the Store lacks is filled into the copy from the server's shared `models/` (checked by its SHA-256, then hard-linked to `models/`; its model listed in `modelsResolved`, a note says it was filled). A blob `models/` lacks too is left out of the copy, and the database is created in the state `needs-model` like a snapshot naming a model it does not carry (`model` and `modelsMissing` name it; `POST /api/admin/models` with the model resolves it; a load before that answers `needs-model` again). A blob `models/` holds damaged (its bytes do not match its name) is `500`, the error naming the file `models/blobs/<2 hex>/<hash>`, with help; a damaged blob in the source Store itself fails the copy's verification (`500`) |
 | GraphSON (`.json`, `.jsonl`, `.graphson`) or GraphML (`.xml`, `.graphml`) | a plain database holding the file's graph (the Store gets `server.toml`'s `[defaults]`); data GraphSON cannot hold is skipped and noted |
 
 Without an extension (an upload) a file that is neither a snapshot nor a Store is GraphSON when
@@ -346,6 +349,41 @@ are skipped. The bytes written are bounded by the (uncompressed) archive itself.
 blob of the repository from `models/` (a blob hash removes that blob); refused (`409`, the
 message names them, with help) while any database holds one of its blobs, waits for it, or
 names it in its Store's catalog.
+
+### Runs
+
+The run administration: every query that waits or runs on a loaded database, whatever its
+client (a browser page under `/db/<name>/`, an MCP agent on `/mcp` or `/db/<name>/mcp`, a
+script calling `/db/<name>/api/execute`), and stopping one of them. It is part of the admin
+surface and has its access rules (none in this version: the loopback listen and the
+`Host`/`Origin` checks); the query texts are other clients' data, so they are offered only here:
+the databases' own mounts keep the playground engine's `/db/<name>/api/admin/runs` off (`404`),
+and a page under `/db/<name>/` shows no Runs button. The server's web UI has a **Runs** tab (and
+a "Runs…" button on each loaded database's row).
+
+`GET /api/admin/runs` lists the runs of every loaded database (by database name, then oldest
+first); `GET /api/admin/databases/<name>/runs` those of one database (`loaded: false` and no
+runs when it is not loaded; `404` for an unknown name, `409` offline). A run:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `database` | string | the database it runs on |
+| `id` | number | its id, unique within the database (not across databases) |
+| `client` | string | the client's key: `page:<id>` (a page's `X-Graphersal-Client`), `mcp:<session>` or `mcp`, ... |
+| `alias` | string or null | the client's own id of the run (a page's `runId`, an MCP request id) |
+| `kind` | string | `query`, `layout`, `tool` (an MCP tool call), `other` |
+| `state` | string | `queued` (its job waits for the database's session) or `running` |
+| `cancelled` | bool | stopped: it ends at its next check (or when it starts) |
+| `startedAtMs` | number | when it was registered (Unix milliseconds) |
+| `durationMs` | number | the time since then, waiting included |
+| `text` | string or null | the first `textHeadChars` (200) characters of its query text |
+
+`POST /api/admin/databases/<name>/runs/cancel` with `{"id": <n>}` stops that run of the
+database, whatever its client: a waiting run stops when it starts, a running one at its next
+check, and its changes roll back (its client gets an error answer). `cancelled: false` when the
+database has no such run now (it ended, the id belongs to another database, or the database is
+not loaded). A non-numeric `id` or another field is `400`. A client stopping its own run keeps
+using its database's `POST /db/<name>/api/cancel`.
 
 ### Help on refusals
 

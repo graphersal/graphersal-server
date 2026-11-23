@@ -651,3 +651,165 @@ fn admin_requests_keep_the_host_check() {
     assert!(!dir.databases().join("evil").exists());
     running.stop().unwrap();
 }
+
+#[test]
+fn the_run_administration_lists_and_cancels_a_databases_runs_over_http() {
+    let temp = TempDir::new("ops-runs");
+    let dir = server(&temp);
+    // Offline: nothing runs, the core refuses (409 over the admin route).
+    {
+        let (admin, _lock) = Admin::open_offline(&dir).unwrap();
+        assert!(matches!(admin.runs(None), Err(ServerError::Refused { .. })));
+        assert!(matches!(
+            admin.cancel_run("acme", 1),
+            Err(ServerError::Refused { .. })
+        ));
+    }
+    let running = start(&dir);
+    let address = running.address();
+    let (status, _) = post_create(address, json!({"name": "acme"}));
+    assert_eq!(status, 201);
+    let (status, _) = post_create(address, json!({"name": "idle"}));
+    assert_eq!(status, 201);
+
+    // Unloaded: an empty list, `loaded: false`; an unknown database 404; a cancel `false`.
+    let (status, answer) = call(address, "GET", "/api/admin/databases/acme/runs", None);
+    assert_eq!(status, 200, "{answer}");
+    assert_eq!(answer["database"], "acme");
+    assert_eq!(answer["loaded"], false);
+    assert_eq!(answer["runs"], json!([]));
+    assert_eq!(answer["textHeadChars"], 200);
+    let (status, answer) = call(address, "GET", "/api/admin/databases/none/runs", None);
+    assert_eq!(status, 404, "{answer}");
+    let (status, answer) = call(
+        address,
+        "POST",
+        "/api/admin/databases/acme/runs/cancel",
+        Some(json!({"id": 1})),
+    );
+    assert_eq!(status, 200, "{answer}");
+    assert_eq!(answer["cancelled"], false);
+    for (method, path, body, expected) in [
+        ("POST", "/api/admin/runs", None, 405),
+        ("DELETE", "/api/admin/databases/acme/runs", None, 405),
+        ("GET", "/api/admin/databases/acme/runs/cancel", None, 405),
+        (
+            "POST",
+            "/api/admin/databases/acme/runs/cancel",
+            Some(json!({"id": "x"})),
+            400,
+        ),
+        (
+            "POST",
+            "/api/admin/databases/acme/runs/cancel",
+            Some(json!({"id": 1, "all": true})),
+            400,
+        ),
+    ] {
+        let (status, answer) = call(address, method, path, body);
+        assert_eq!(status, expected, "{method} {path}: {answer}");
+    }
+
+    for name in ["acme", "idle"] {
+        call(
+            address,
+            "POST",
+            &format!("/api/admin/databases/{name}/load"),
+            None,
+        );
+        assert_eq!(wait_loaded(address, name)["state"], "loaded");
+    }
+    // The database's own mount keeps graphersal-serve's run administration off.
+    let (status, _) = call(address, "GET", "/db/acme/api/admin/runs", None);
+    assert_eq!(status, 404);
+
+    // A page's endless query: listed (per database and server-wide), then cancelled.
+    let endless = "let n = 0; loop { n += 1; }";
+    let page = std::thread::spawn(move || {
+        call(
+            address,
+            "POST",
+            "/db/acme/api/execute",
+            Some(json!({"script": endless, "runId": "r1"})),
+        )
+    });
+    let deadline = std::time::Instant::now() + WAIT;
+    let run = loop {
+        let (status, answer) = call(address, "GET", "/api/admin/databases/acme/runs", None);
+        assert_eq!(status, 200, "{answer}");
+        assert_eq!(answer["loaded"], true);
+        let running = answer["runs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|run| run["state"] == "running")
+            .cloned();
+        if let Some(run) = running {
+            break run;
+        }
+        assert!(std::time::Instant::now() < deadline, "the run never showed");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert_eq!(run["database"], "acme");
+    assert_eq!(run["kind"], "query");
+    assert_eq!(run["alias"], "r1");
+    assert_eq!(run["text"], endless);
+    assert_eq!(run["cancelled"], false);
+    assert!(run["client"].as_str().unwrap().starts_with("page"), "{run}");
+    assert!(run["startedAtMs"].as_u64().unwrap() > 0, "{run}");
+    assert!(run["durationMs"].is_u64(), "{run}");
+    let (_, all) = call(address, "GET", "/api/admin/runs", None);
+    let rows = all["runs"].as_array().unwrap();
+    assert!(
+        rows.iter()
+            .any(|r| r["database"] == "acme" && r["id"] == run["id"]),
+        "{all}"
+    );
+    assert!(rows.iter().all(|r| r["database"] == "acme"), "{all}");
+    let (_, idle) = call(address, "GET", "/api/admin/databases/idle/runs", None);
+    assert_eq!(
+        idle["runs"],
+        json!([]),
+        "another database's runs stay apart"
+    );
+    // The id names a run of `acme` only: the other database has no such run.
+    let kill = json!({"id": run["id"]});
+    let (status, answer) = call(
+        address,
+        "POST",
+        "/api/admin/databases/idle/runs/cancel",
+        Some(kill.clone()),
+    );
+    assert_eq!(status, 200, "{answer}");
+    assert_eq!(answer["cancelled"], false);
+    let (status, answer) = call(
+        address,
+        "POST",
+        "/api/admin/databases/acme/runs/cancel",
+        Some(kill.clone()),
+    );
+    assert_eq!(status, 200, "{answer}");
+    assert_eq!(answer["cancelled"], true, "{answer}");
+    assert_eq!(answer["id"], run["id"]);
+    let (status, answer) = page.join().unwrap();
+    let stopped = status >= 400 || answer["ok"] == false;
+    assert!(stopped, "the page's query was cancelled: {status} {answer}");
+    // Ended: no longer listed, a second cancel is `false`.
+    let deadline = std::time::Instant::now() + WAIT;
+    loop {
+        let (_, answer) = call(address, "GET", "/api/admin/databases/acme/runs", None);
+        if answer["runs"] == json!([]) {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "{answer}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let (_, answer) = call(
+        address,
+        "POST",
+        "/api/admin/databases/acme/runs/cancel",
+        Some(kill),
+    );
+    assert_eq!(answer["cancelled"], false);
+    running.stop().unwrap();
+}

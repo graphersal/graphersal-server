@@ -16,7 +16,7 @@ pub(crate) const FILES_PREFIX: &str = "/server-ui/";
 const PROFILE: &str = include_str!("../ui/profile.json");
 
 /// The files under [`FILES_PREFIX`]: name and bytes.
-const FILES: [(&str, &[u8]); 10] = [
+const FILES: [(&str, &[u8]); 11] = [
     ("profile.json", PROFILE.as_bytes()),
     ("server-ui.css", include_bytes!("../ui/server-ui.css")),
     ("admin-api.js", include_bytes!("../ui/admin-api.js")),
@@ -27,6 +27,7 @@ const FILES: [(&str, &[u8]); 10] = [
     ("import-tab.js", include_bytes!("../ui/import-tab.js")),
     ("export-tab.js", include_bytes!("../ui/export-tab.js")),
     ("models-tab.js", include_bytes!("../ui/models-tab.js")),
+    ("runs-tab.js", include_bytes!("../ui/runs-tab.js")),
 ];
 
 /// The profile object (the engine's playground validates it), with this binary's version as
@@ -81,7 +82,7 @@ mod tests {
             assert_eq!(file(style).map(|f| f.1), Some("text/css; charset=utf-8"));
         }
         let tabs = profile["tabs"].as_array().unwrap();
-        assert_eq!(tabs.len(), 5);
+        assert_eq!(tabs.len(), 6);
         for tab in tabs {
             let module = tab["module"].as_str().unwrap();
             assert!(file(module).is_some(), "{module} is not built in");

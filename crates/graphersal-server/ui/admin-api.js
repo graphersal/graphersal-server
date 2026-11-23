@@ -56,7 +56,9 @@ const seg = (name) => encodeURIComponent(String(name));
  * backup(name), backups(name), restore(name, backup, newName?) (no `name` field when restoring
  * over the database itself), importPath({path, name, base?, format?, description?, role?}), models,
  * addModel({path?, repo?, license?}), removeModel(repo or blob hash), promote(name) (no body;
- * one way: a base is frozen forever). The transfers that are not JSON requests are
+ * one way: a base is frozen forever), runs(name?) (one loaded database's queued and running runs,
+ * or every loaded database's without a name), cancelRun(name, id) (the run administration: a
+ * run id is unique within its database only). The transfers that are not JSON requests are
  * `exportPath` (a download) and `uploadImport` (the file as the body: an import, or a model
  * from `modelUploadRequest`).
  */
@@ -85,6 +87,8 @@ export const adminRequest = Object.freeze({
   addModel: (body) => ({ method: 'POST', path: 'api/admin/models', body }),
   removeModel: (id) => ({ method: 'DELETE', path: `api/admin/models/${modelSegs(id)}` }),
   promote: (name) => ({ method: 'POST', path: `api/admin/databases/${seg(name)}/promote` }),
+  runs: (name) => ({ method: 'GET', path: name ? `api/admin/databases/${seg(name)}/runs` : 'api/admin/runs' }),
+  cancelRun: (name, id) => ({ method: 'POST', path: `api/admin/databases/${seg(name)}/runs/cancel`, body: { id } }),
 });
 
 /** A model's repository (`owner/name`: its slash stays part of the path) or blob hash as path segments. */
@@ -261,6 +265,8 @@ export function confirmText(action, subject, extra = '') {
       return `Remove the model "${subject}" from the server's models/ directory? Its blob files are deleted.`;
     case 'promote':
       return `Promote "${subject}" to a base? ${BASE_IS_FROZEN}`;
+    case 'cancelRun':
+      return `Stop run ${extra} of "${subject}"? Its query ends at its next check and its changes roll back; its client gets an error.`;
     default:
       return null;
   }
@@ -300,6 +306,9 @@ export function outcomeText(action, subject, answer = {}) {
       return `Added ${added} model blob${added === 1 ? '' : 's'}${resolved.length ? `; ready to load: ${resolved.join(', ')}` : ''}.`;
     }
     case 'removeModel': return `Removed the model "${answer.model || subject}"${typeof answer.bytes === 'number' ? ` (${bytesText(answer.bytes)} freed)` : ''}.`;
+    case 'cancelRun': return answer.cancelled
+      ? `Run ${answer.id} of "${subject}" is stopping.`
+      : `Run ${answer.id} of "${subject}" had already ended.`;
     case 'promote': return `"${answer.name || subject}" is now a base (read-only, frozen); create layers over it with "New database…".`;
     default: return '';
   }
@@ -731,4 +740,60 @@ export function promoteAction(row, { busy = false } = {}) {
   if (row.state === 'needs-model') return off('Add its model first: a base cannot get a model later');
   if (row.state !== 'unloaded') return off(`Only an unloaded database can be promoted (it is ${row.state})`);
   return { enabled: true, title: `Turn it into a base. ${BASE_IS_FROZEN}` };
+}
+
+// ------------------------------------------------------------------ the run administration
+
+/** How often the Runs tab reads the runs again while it is shown (milliseconds). */
+export const RUNS_POLL_MS = 2000;
+
+/**
+ * The runs of a `GET api/admin/runs` or `GET api/admin/databases/<name>/runs` answer as rows
+ * `{database, id, client, alias, kind, state, cancelled, startedAtMs, durationMs, text}`, in the
+ * order sent (by database, oldest first); malformed ones skipped.
+ */
+export function runRows(answer) {
+  const runs = answer && Array.isArray(answer.runs) ? answer.runs : [];
+  return runs
+    .filter((r) => r && typeof r === 'object' && typeof r.database === 'string' && Number.isInteger(r.id))
+    .map((r) => ({
+      database: r.database,
+      id: r.id,
+      client: typeof r.client === 'string' ? r.client : '',
+      alias: typeof r.alias === 'string' ? r.alias : '',
+      kind: typeof r.kind === 'string' ? r.kind : '',
+      state: typeof r.state === 'string' ? r.state : '',
+      cancelled: r.cancelled === true,
+      startedAtMs: typeof r.startedAtMs === 'number' ? r.startedAtMs : null,
+      durationMs: typeof r.durationMs === 'number' ? r.durationMs : null,
+      text: typeof r.text === 'string' ? r.text : '',
+    }));
+}
+
+/** A duration in milliseconds as text (`850 ms`, `12.3 s`, `4 min 5 s`, `2 h 3 min`), '' when missing. */
+export function durationText(ms) {
+  if (typeof ms !== 'number' || !Number.isFinite(ms) || ms < 0) return '';
+  if (ms < 1000) return `${Math.round(ms)} ms`;
+  const s = ms / 1000;
+  if (s < 60) return `${s.toFixed(1)} s`;
+  const total = Math.floor(s);
+  if (total < 3600) return `${Math.floor(total / 60)} min ${total % 60} s`;
+  return `${Math.floor(total / 3600)} h ${Math.floor((total % 3600) / 60)} min`;
+}
+
+/**
+ * The query text of a run as shown (one line, white space folded), with `…` when the server cut
+ * it at `textHeadChars` characters; '' for a run without a text.
+ */
+export function runTextHead(run, textHeadChars = 200) {
+  const text = run && typeof run.text === 'string' ? run.text : '';
+  const line = text.replace(/\s+/g, ' ').trim();
+  return [...text].length >= textHeadChars ? `${line}…` : line;
+}
+
+/** Whether a run row offers its Stop button, `{enabled, title}`. */
+export function cancelRunAction(run, { busy = false } = {}) {
+  if (busy) return { enabled: false, title: 'Wait until the running action ends' };
+  if (run.cancelled) return { enabled: false, title: 'Already stopping: it ends at its next check' };
+  return { enabled: true, title: 'Stop this run, whatever its client (its changes roll back)' };
 }

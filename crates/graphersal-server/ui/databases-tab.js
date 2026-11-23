@@ -2,7 +2,7 @@
 // (state, kind and role, read-only and auto-load toggles, size and memory when the server sends
 // them, a link to each one's playground `db/<name>/`), the row actions (load with a poll until it
 // ends, unload, clone, promote to a base, delete; Backups… and Export… open those tabs for the
-// row), create (plain, base, or a layer over a base; optional description and schema) and the
+// row, Runs… (a loaded row) the Runs tab), create (plain, base, or a layer over a base; optional description and schema) and the
 // aliases (set, flip, remove). Requests and rules: ./admin-api.js. Errors show the server's
 // `error` and `help` verbatim. A `needs-model` row carries the hint to add its model; a base held
 // by loaded layers reads "in pool"; a database holding copied model blobs shows the server's link
@@ -153,6 +153,7 @@ export default {
       loadDb, unloadDb, deleteDb, promoteDb, setFlag, openCreate, openClone, openAlias, closeDialog, submitDialog, removeAlias,
       openBackups: (name) => props.api.navigate('backups', name ? { db: name } : {}),
       openExport: (row) => props.api.navigate('export', { db: row.name }),
+      openRuns: (row) => props.api.navigate('runs', { db: row.name }),
       openImport: () => props.api.navigate('import'),
       openModels: () => props.api.navigate('models'),
       kindText: (row) => [row.kind, row.role === 'base' ? 'base' : ''].filter(Boolean).join(' · '),
@@ -219,6 +220,7 @@ export default {
               <button type="button" class="btn small" :disabled="!acts(row).clone.enabled" :title="acts(row).clone.title" @click="openClone(row)">Clone…</button>
               <button type="button" class="btn small" :disabled="!more(row).backups.enabled" :title="more(row).backups.title" @click="openBackups(row.name)">Backups…</button>
               <button type="button" class="btn small" :disabled="!more(row).export.enabled" :title="more(row).export.title" @click="openExport(row)">Export…</button>
+              <button v-if="row.state === 'loaded' && !row.aliasOf" type="button" class="btn small" title="The queries that wait or run on it, whatever their client; stop one" @click="openRuns(row)">Runs…</button>
               <button type="button" class="btn small" :disabled="!promo(row).enabled" :title="promo(row).title" @click="promoteDb(row)">{{ busy[row.name] === 'promote' ? 'Promoting…' : 'Promote to base…' }}</button>
               <button type="button" class="btn small danger" :disabled="!acts(row).delete.enabled" :title="acts(row).delete.title" @click="deleteDb(row)">Delete…</button>
             </template>

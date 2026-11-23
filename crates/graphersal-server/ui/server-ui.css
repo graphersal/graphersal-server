@@ -42,3 +42,6 @@ p.srv-problems { padding-left: 0; }
 .srv-progress { display: flex; flex-direction: column; gap: 4px; margin: 0 0 10px; font-size: 12.5px; }
 .srv-progress progress { width: 100%; }
 .srv-tab h2.srv-sub-head { margin: 20px 0 0; font-size: 14px; text-transform: none; letter-spacing: 0; color: var(--text); }
+/* The Runs tab: the query text wraps, the one action needs no wide column. */
+.srv-runs .srv-actions { min-width: 0; }
+.srv-runs .srv-run-text { overflow-wrap: anywhere; max-width: 48ch; font-size: 12.5px; }

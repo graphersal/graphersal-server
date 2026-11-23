@@ -23,6 +23,9 @@
 //! | POST | `models` | `{"path"?, "repo"?, "license"?}` (`path`: a Model2Vec directory or a `.gsnap`, absolute, on the server's machine; `repo` alone: a model `models/` holds) | `201` (from a path) / `200` `{"added": [model...], "resolved": [database...], "stillMissing": [{"database", "model"}...], "notes": [text...]}` |
 //! | POST | `models?repo=<r>&license=<l>&format=<gsnap\|tar>` | the file itself (any content type but JSON): a `.gsnap` carrying model blobs or a tar archive (or `.tar.gz`) of a Model2Vec model directory (format detected unless given) | `201` as above |
 //! | DELETE | `models/<repo or blob hash>` | | `200 {"model", "removed": [blob...], "bytes"}`; `409` while a database uses it |
+//! | GET | `runs` | | `200 {"runs": [run...], "textHeadChars"}`: every loaded database's queued and running runs |
+//! | GET | `databases/<name>/runs` | | `200 {"database", "loaded", "runs": [run...], "textHeadChars"}` |
+//! | POST | `databases/<name>/runs/cancel` | `{"id"}` | `200 {"database", "id", "cancelled": bool}` (`false`: no such run now) |
 //! | GET | `aliases` | | `200 {"aliases": {alias: database}}` |
 //! | PUT | `aliases/<alias>` | `{"target"}` | `200 {"alias", "target"}` |
 //! | DELETE | `aliases/<alias>` | | `200 {"alias", "removed": true}` |
@@ -56,11 +59,19 @@
 //! `models/` when that holds it (`modelsResolved`), else the database has the state
 //! `needs-model` (`modelsMissing`). A Store (directory or `.gstore`) lacking a model blob gets
 //! it filled from `models/` (hard-linked afterwards; its model in `modelsResolved`, a note
-//! says it was filled); a blob `models/` lacks too is `409` (help: add the model, import
-//! again; a Store copy cannot leave a referenced blob out), one `models/` holds damaged `500`
-//! naming the file. `role=base` makes a base database (read-only, frozen) of
+//! says it was filled); a blob `models/` lacks too is left out of the copy and the database
+//! is `needs-model` (`modelsMissing`), one `models/` holds damaged `500` naming the file. `role=base` makes a base database (read-only, frozen) of
 //! a plain source; a layer source is `400`, a source naming a model it does not carry and
 //! `models/` lacks `409`.
+//!
+//! A run (the run administration, [`crate::ops::Admin::runs`]): `database`, `id` (unique within
+//! the database), `client` (`page:<id>`, `mcp:<session>`, ...), `alias` (the client's own run
+//! id or `null`), `kind` (`query` | `layout` | `tool` | `other`), `state` (`queued` |
+//! `running`), `cancelled`, `startedAtMs` (Unix milliseconds), `durationMs`, `text` (the first
+//! `textHeadChars` characters of its query text, or `null`). Every client's runs are listed,
+//! whoever asks: the query texts are other clients' data, readable through the admin surface
+//! only (the databases' mounts keep graphersal-serve's own `/db/<name>/api/admin/runs` off).
+//! Offline (the console on a stopped server) the routes are `409`.
 //!
 //! A promotion (`POST databases/<name>/promote`) turns an UNLOADED plain database into a base
 //! (`role: base`, read-only) for good: a base is frozen forever and no route turns it back.
@@ -103,7 +114,7 @@ use crate::error::ServerError;
 use crate::loader::LoadStart;
 use crate::names::fold;
 use crate::ops::{
-    Admin, BackupInfo, CreateSpec, ExportFile, ExportSpec, ImportFormat, ImportSource,
+    Admin, BackupInfo, CreateSpec, DatabaseRun, ExportFile, ExportSpec, ImportFormat, ImportSource,
     ModelAddSpec, ModelAdded, TmpFile,
 };
 use crate::registry::{DatabaseEntry, DbState, Registry};
@@ -298,6 +309,30 @@ pub(crate) fn route(
                     (err, help)
                 })
         }
+        (_, ["runs"]) if read => admin
+            .runs(None)
+            .map(|runs| Response::json(200, &runs_json(None, &runs)))
+            .map_err(|err| (err, None)),
+        (_, ["databases", name, "runs"]) if read => admin
+            .runs(Some(name))
+            .map(|runs| {
+                let mut answer = runs_json(Some(&fold(name)), &runs);
+                answer["loaded"] = Value::Bool(admin.is_loaded(name));
+                Response::json(200, &answer)
+            })
+            .map_err(|err| (err, None)),
+        (Method::Post, ["databases", name, "runs", "cancel"]) => {
+            let body: CancelRunBody = body_of(request)?;
+            admin
+                .cancel_run(name, body.id)
+                .map(|cancelled| {
+                    Response::json(
+                        200,
+                        &json!({ "database": fold(name), "id": body.id, "cancelled": cancelled }),
+                    )
+                })
+                .map_err(|err| (err, None))
+        }
         (_, ["aliases"]) if read => Ok(Response::json(
             200,
             &json!({ "aliases": registry.aliases() }),
@@ -329,9 +364,11 @@ pub(crate) fn route(
                 "databases",
                 _,
                 "clone" | "load" | "unload" | "promote" | "read-only" | "auto-load" | "backup"
-                | "backups" | "restore" | "export",
+                | "backups" | "restore" | "export" | "runs",
             ],
         )
+        | (_, ["databases", _, "runs", "cancel"])
+        | (_, ["runs"])
         | (_, ["aliases"])
         | (_, ["aliases", _])
         | (_, ["models", ..])
@@ -705,6 +742,12 @@ struct AutoLoadBody {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct CancelRunBody {
+    id: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AliasBody {
     target: String,
 }
@@ -910,6 +953,38 @@ fn restore_help(registry: &Registry, target: &str, err: &ServerError) -> Option<
 }
 
 /// A backup as JSON (module docs).
+/// `{"runs": [run...], "textHeadChars"}` (+ `"database"` for one database's list).
+fn runs_json(database: Option<&str>, runs: &[DatabaseRun]) -> Value {
+    let rows: Vec<Value> = runs
+        .iter()
+        .map(|run| {
+            json!({
+                "database": run.database,
+                "id": run.id,
+                "client": run.client,
+                "alias": run.alias,
+                "kind": run.kind,
+                "state": run.state,
+                "cancelled": run.cancelled,
+                "startedAtMs": run
+                    .started_at
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX)),
+                "durationMs": u64::try_from(run.duration.as_millis()).unwrap_or(u64::MAX),
+                "text": run.text,
+            })
+        })
+        .collect();
+    let mut answer = json!({
+        "runs": rows,
+        "textHeadChars": graphersal_serve::RUN_TEXT_HEAD_CHARS,
+    });
+    if let Some(database) = database {
+        answer["database"] = Value::String(database.to_string());
+    }
+    answer
+}
+
 fn backup_json(registry: &Registry, info: &BackupInfo) -> Value {
     let mut row = json!({
         "database": info.database,

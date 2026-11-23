@@ -8,7 +8,8 @@ serving MANY databases from one server directory, over HTTP. A database is eithe
 or a layer over a shared, frozen base database (many layers, one base in memory). Each loaded
 database gets the Graphersal playground and its HTTP API under `/db/<name>/`; one MCP endpoint
 (`/mcp`) lets an AI agent list the databases and pick one per session; the admin operations
-(create, load, clone, back up, restore, export, import, aliases, shared embedding models) are
+(create, load, clone, back up, restore, export, import, aliases, shared embedding models, the
+list of running queries with a stop per query) are
 an HTTP API, a console (`graphersal-server db ...`) and the server's own web UI at `/`.
 
 > **No access control.** Anyone who reaches the port can read, change and delete every
@@ -106,7 +107,7 @@ databases and missing models. Paths and commands are never wrapped.
 | `db backup NAME`, `db backups NAME` | verified ZIP backups in `DIR/backups/NAME/` |
 | `db restore NAME BACKUP [--name NEW]` | over NAME (unloaded) or into the new database NEW |
 | `db export NAME --out FILE [--no-models] [--materialize]` | a packed snapshot (`.gsnap`) |
-| `import DIR SOURCE --name NAME [--base BASE] [--format F] [--description TEXT] [--role normal\|base]` | a new database from a `.gsnap`, a Store (directory or `.gstore`), GraphSON or GraphML; an embedding model it names without carrying comes from `models/` (else the database is `needs-model` until `models add`); a model blob a Store lacks is filled from `models/` (else the import is refused: add the model, import again); `--role base` makes a base of a plain source |
+| `import DIR SOURCE --name NAME [--base BASE] [--format F] [--description TEXT] [--role normal\|base]` | a new database from a `.gsnap`, a Store (directory or `.gstore`), GraphSON or GraphML; an embedding model it names without carrying comes from `models/` (else the database is `needs-model` until `models add`); a model blob a Store lacks is filled from `models/` (else the database is `needs-model` until `models add`, like a snapshot); `--role base` makes a base of a plain source |
 | `models list`, `models add SOURCE [--repo R] [--license L]`, `models remove REPO` | the shared embedding models; SOURCE: a Model2Vec model directory, a `.tar` or `.tar.gz` of one, a `.gsnap` carrying models, or a repository `models/` holds |
 
 `graphersal-server --help` has the details. Exit codes: `0` ok, `1` failed (`Error: ...` and a
@@ -123,7 +124,7 @@ the usage), `141` stdout closed before the result was written (`| head`).
 | `GET /` | the server's web UI (the playground showing the `server` UI profile) |
 | `GET /server-ui/<file>` | the `server` UI profile's files (its modules and style sheet) |
 | `/db/<name>/...` | the playground and its HTTP API (`POST /db/<name>/api/execute {"script"}`, ...) on the database or alias `<name>`, resolved per request; `409` with help when it is not loaded (never loaded implicitly), `404` when unknown |
-| `/api/admin/...` | the admin API: [`docs/admin-api.md`](docs/admin-api.md) |
+| `/api/admin/...` | the admin API: [`docs/admin-api.md`](docs/admin-api.md); also the run administration (`GET /api/admin/runs`, `GET /api/admin/databases/<name>/runs`, `POST /api/admin/databases/<name>/runs/cancel {"id"}`: every client's queued and running queries, stop one) |
 | `/mcp`, `/db/<name>/mcp` | the MCP endpoints: [`docs/mcp.md`](docs/mcp.md) |
 
 ## Web UI
@@ -134,9 +135,11 @@ same mechanism graphersal-memory uses for its `memory` profile; the playground's
 built into the binary: `profile.json`, the tabs `databases-tab.js` (the list with load,
 unload, clone, promote, delete, read-only and auto-load, create, aliases), `backups-tab.js`
 (back up, list, restore), `import-tab.js` (upload with progress, or a path on the server),
-`export-tab.js` (`.gsnap` download) and `models-tab.js` (the shared models; add one by
+`export-tab.js` (`.gsnap` download), `models-tab.js` (the shared models; add one by
 uploading a `.gsnap` or a `.tar` of a model directory with progress, or from a path on the
-server), the pure model
+server) and `runs-tab.js` (the run administration: the queries that wait or run on the loaded
+databases, whatever their client, refreshed every 2 s, with a Stop button per run; a loaded
+database's row opens it filtered by "Runs…"), the pure model
 `admin-api.js` and `databases.js`, the tabs' shared state `shared.js` and the style sheet
 `server-ui.css` (on the playground's theme tokens; the profile names it in `styles`, so the
 playground links it itself and `/` serves the playground's `index.html` unchanged). Every module imports only `vue` and the
@@ -210,10 +213,14 @@ every file and key: [`docs/server-dir.md`](docs/server-dir.md).
   model later, so a source naming a model that neither it nor `models/` carries is refused as
   a base: add the model (`models add`) and import again, or import it as an ordinary database,
   add the model, then promote it.
-- A **Store import lacking a model blob** that `models/` does not hold either is refused
-  (`409`), not imported as `needs-model` like a snapshot: a Store copy is verified and cannot
-  leave a referenced blob out. Add the model to `models/`, then import again (the blob is
-  filled in and hard-linked).
+- A **Store import lacking a model blob** that `models/` does not hold either becomes a
+  `needs-model` database (since Graphersal 0.7.1, like a snapshot naming a model it does not
+  carry): add the model to `models/` (`models add`, or the Models tab) and it is resolved. As a
+  base (`--role base`) such a source is refused (`409`): a base cannot get a model later.
+- The **run administration** (the Runs tab, `/api/admin/runs`) is under the admin surface and
+  shares its lack of access control: anyone who reaches the port sees every client's query
+  texts and can stop them. The databases' own pages (`/db/<name>/`) do not offer it. A run id
+  is unique within its database only.
 - A model archive is a **ustar `.tar`**, uncompressed or gzip-compressed (`tar -cf model.tar
   -C <model dir> .`, `tar -czf model.tar.gz ...`); zstd, bzip2, xz and `.zip` are not taken.
 - A **layer `.gsnap` export carries no models** (an engine rule); export the layer with
