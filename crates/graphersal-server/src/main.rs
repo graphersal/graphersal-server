@@ -71,7 +71,9 @@ Usage:
   graphersal-server init DIR
       Create a server directory (server.toml, databases/, models/blobs/, backups/, trash/,
       tmp/). DIR must be missing, empty, or a server directory (then only missing
-      parts are created; server.toml is kept).
+      parts are created; server.toml is kept). A directory without access.toml gets its
+      first admin (user admin): its token is printed ONCE on stderr (the first serve of
+      such a directory does the same).
   graphersal-server serve --dir DIR [--listen ADDR] [--max-connections N]
                          [--header-timeout SECS] [--idle-timeout SECS]
       Serve the server directory DIR (HTTP/1.1 and h2c). ADDR (IP:PORT, port 0 = a free
@@ -198,10 +200,22 @@ fn init(args: &[String]) -> ExitCode {
     match ServerDir::init(&dir) {
         Ok(report) => {
             out(&console::init_text(&report, &dir));
+            if let Some(first) = &report.first_admin {
+                print_first_admin(first, &dir);
+            }
             exit(0)
         }
         Err(error) => failure(&error),
     }
+}
+
+/// The first admin's token, ONCE, in a framed block on stderr (styled on a terminal).
+fn print_first_admin(first: &graphersal_server::FirstAdmin, dir: &std::path::Path) {
+    let styled = std::io::stderr().is_terminal();
+    err(&format!(
+        "\n{}\n",
+        console::first_admin_text(first, dir, styled)
+    ));
 }
 
 fn serve_command(args: &[String]) -> ExitCode {
@@ -282,12 +296,15 @@ fn serve_command(args: &[String]) -> ExitCode {
         return failure_text(&format!("cannot install the signal handler: {err}"));
     }
 
-    let running = match serve::start(&dir, options) {
+    let mut running = match serve::start(&dir, options) {
         Ok(running) => running,
         Err(error) => return failure(&error),
     };
     // The start block on stderr, the address alone on stdout (scripts read it).
     err(&console::start_block(&running));
+    if let Some(first) = running.take_first_admin() {
+        print_first_admin(&first, running.dir().root());
+    }
     out(&console::address_line(&running));
     // Wait for a signal (a closed channel cannot happen while the handler lives).
     let _ = stop_rx.recv();

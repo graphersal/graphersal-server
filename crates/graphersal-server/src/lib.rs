@@ -19,13 +19,19 @@
 //! of the registry (`list_graphs`, `use_graph`, an optional `graph` per call) and
 //! `/db/<name>/mcp` per loaded database, one shared endpoint (`server.toml` `[mcp]`).
 //!
-//! The server has NO access control: it listens on the loopback by default and warns when it
-//! listens on any other address.
+//! Access control ([`access`]): `access.toml` (users, token hashes, grants), the principal of a
+//! request from the authenticator chain, and the level per database; a server directory
+//! without `access.toml` is closed (`init` and the first `serve` create the first admin and
+//! print its token once). Every administrative event goes through the audit sink
+//! ([`audit`]). The routes do not enforce the levels yet: the server listens on the loopback
+//! by default and warns when it listens on any other address.
 
 #![warn(missing_docs)]
 
+pub mod access;
 pub mod admin;
 mod admin_api;
+pub mod audit;
 mod client;
 pub mod config;
 pub mod console;
@@ -51,7 +57,9 @@ pub(crate) mod test_support;
 pub(crate) mod text;
 mod ui_assets;
 
+pub use access::{Access, FirstAdmin, Level, Principal, PrincipalKind};
 pub use admin::{Renamed, TmpBuild};
+pub use audit::{Audit, AuditEvent, AuditSink};
 pub use config::{
     DEFAULT_HEADER_TIMEOUT_SECS, DEFAULT_IDLE_TIMEOUT_SECS, DEFAULT_LISTEN,
     DEFAULT_MAX_CONNECTIONS, DEFAULT_MCP_SESSIONS, DatabaseDefaults, Limits, McpConfig,

@@ -38,10 +38,12 @@ use crate::layout::ServerDir;
 use crate::ops::{Admin, CreateSpec, ExportSpec};
 use crate::run_file::RunInfo;
 
+mod first_admin;
 mod help;
 mod render;
 mod start;
 
+pub use first_admin::first_admin_text;
 pub use render::{
     command_error_text, error_text, failed, init_text, render, render_outcome, usage_error_text,
 };

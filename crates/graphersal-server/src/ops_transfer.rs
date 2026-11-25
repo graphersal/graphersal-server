@@ -40,6 +40,7 @@ use serde::{Deserialize, Serialize};
 #[cfg(test)]
 use super::FailPoint;
 use super::{Admin, store_error};
+use crate::audit::AuditEvent;
 use crate::database::{DatabaseConfig, DatabaseKind, DatabaseRole, utc_now};
 use crate::error::ServerError;
 use crate::loader::OpenStoreRef;
@@ -327,13 +328,11 @@ impl Admin {
             .map_err(|err| ServerError::io("rename", tmp.path(), err))?;
         drop(_naming);
         let info = backup_info(&entry.name, &backup, &target, Some(sidecar));
-        tracing::info!(
-            target: "graphersal_server",
-            "database '{}' backed up into {} ({} bytes)",
-            entry.name,
-            target.display(),
-            info.bytes
-        );
+        self.audit().record(AuditEvent::DatabaseBackedUp {
+            name: entry.name.clone(),
+            path: target.clone(),
+            bytes: info.bytes,
+        });
         Ok(info)
     }
 
@@ -477,12 +476,12 @@ impl Admin {
         } else {
             (self.registry.commit(build)?, None)
         };
-        tracing::info!(
-            target: "graphersal_server",
-            "backup {backup} of '{source}' restored into '{}'{}",
-            entry.name,
-            if replaced.is_some() { " (replaced)" } else { "" }
-        );
+        self.audit().record(AuditEvent::DatabaseRestored {
+            source: source.clone(),
+            backup: backup.clone(),
+            name: entry.name.clone(),
+            replaced: replaced.is_some(),
+        });
         Ok(Restored {
             entry,
             from_database: source,

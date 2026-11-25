@@ -4,6 +4,10 @@
 //! (`--listen` and port `0` included), and removes it when it stops. A run file is only
 //! trustworthy while `server.lock` is held ([`crate::ServerLock::is_held`]): after a crash it
 //! stays behind, and the next server overwrites it.
+//!
+//! It also carries the operator token of this run (a new one per start): the console on this
+//! machine authenticates with it as the operator. So the file is written for its owner only
+//! (mode `0600` on unix).
 
 use std::fs;
 use std::io;
@@ -11,8 +15,9 @@ use std::net::SocketAddr;
 
 use serde::{Deserialize, Serialize};
 
+use crate::access::Secret;
 use crate::error::ServerError;
-use crate::layout::{ServerDir, write_atomic};
+use crate::layout::{ServerDir, write_atomic_private};
 
 /// The contents of `server.run`.
 ///
@@ -28,6 +33,10 @@ pub struct RunInfo {
     pub pid: u32,
     /// The server's version.
     pub version: String,
+    /// The operator token of this run (`Authorization: Bearer <token>`: full rights), if the
+    /// server has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operator_token: Option<Secret>,
 }
 
 impl RunInfo {
@@ -38,10 +47,17 @@ impl RunInfo {
             url,
             pid: std::process::id(),
             version: env!("CARGO_PKG_VERSION").to_string(),
+            operator_token: None,
         }
     }
 
-    /// Writes the run file of `dir` (atomically).
+    /// The run information with the operator token `token`.
+    pub fn with_operator_token(mut self, token: Secret) -> Self {
+        self.operator_token = Some(token);
+        self
+    }
+
+    /// Writes the run file of `dir` (atomically, for its owner only: mode `0600` on unix).
     pub fn write(&self, dir: &ServerDir) -> Result<(), ServerError> {
         let path = dir.run_path();
         let body = toml::to_string(self).map_err(|err| ServerError::Config {
@@ -52,7 +68,7 @@ impl RunInfo {
             "# Written by the running graphersal-server and removed when it stops; valid only \
              while server.lock is held.\n{body}"
         );
-        write_atomic(&path, text.as_bytes())
+        write_atomic_private(&path, text.as_bytes())
     }
 
     /// Reads the run file of `dir`: `None` when there is none.
@@ -101,5 +117,33 @@ mod tests {
         RunInfo::remove(&dir).unwrap();
         RunInfo::remove(&dir).unwrap();
         assert_eq!(RunInfo::read(&dir).unwrap(), None);
+    }
+
+    #[test]
+    fn the_operator_token_is_kept_for_the_owner_only() {
+        let temp = TempDir::new("run-file-token");
+        let dir = ServerDir::init(temp.path()).unwrap().dir;
+        let token = Secret::generate().unwrap();
+        let info = RunInfo::new(
+            "127.0.0.1:4242".parse().unwrap(),
+            "http://127.0.0.1:4242/".to_string(),
+        )
+        .with_operator_token(token.clone());
+        info.write(&dir).unwrap();
+        let read = RunInfo::read(&dir).unwrap().unwrap();
+        assert_eq!(
+            read.operator_token.as_ref().map(Secret::expose),
+            Some(token.expose())
+        );
+        assert!(!format!("{read:?}").contains(token.expose()));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(dir.run_path())
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
     }
 }

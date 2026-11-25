@@ -37,6 +37,7 @@ flate2 = { workspace = true }
 hyper = { workspace = true }
 hyper-util = { workspace = true }
 tokio = { workspace = true }
+ring = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 ctrlc = { workspace = true }

@@ -3,8 +3,10 @@
 //! [`start`] opens the server directory, takes its `server.lock` (a second server on the same
 //! directory is refused with [`ServerError::Locked`]), binds the listen address (`--listen`
 //! over `server.toml`'s `listen`; port `0` picks a free port), writes the bound address into
-//! `server.run`, scans the database registry ([`Registry::scan`]; `/readyz` answers
-//! `503 loading` until it is done), starts loading the `auto_load` databases in the background
+//! `server.run` (with a new operator token for this run, [`crate::access`]), scans the database
+//! registry ([`Registry::scan`]; `/readyz` answers `503 loading` until it is done), opens the
+//! access state ([`Access::open`]: a directory without `access.toml` gets its first admin
+//! here, its token handed out once by [`Running::take_first_admin`]), starts loading the `auto_load` databases in the background
 //! ([`Loader::auto_load`]), shares the model blobs of every idle database through `models/`
 //! on a background thread ([`crate::ops::Admin::adopt_all`]), and serves HTTP/1.1 and h2c
 //! (HTTP/2 over plain TCP with prior knowledge: a connection that starts with the HTTP/2
@@ -73,6 +75,8 @@ use tokio::runtime::{Handle, Runtime};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch};
 use tokio::task::JoinHandle;
 
+use crate::access::{Access, FirstAdmin, Secret};
+use crate::audit::Audit;
 use crate::config::Limits;
 use crate::error::ServerError;
 use crate::layout::ServerDir;
@@ -239,6 +243,8 @@ pub struct Running {
     address: SocketAddr,
     url: String,
     exposure: Exposure,
+    access: Option<Arc<Access>>,
+    first_admin: Option<FirstAdmin>,
 }
 
 /// A `ServerError::Config`-style refusal of a `serve` option that is 0.
@@ -312,7 +318,12 @@ pub fn start(
         overflow: Arc::new(Semaphore::new(OVERFLOW_CONNECTIONS)),
         saturated: AtomicBool::new(false),
     });
-    RunInfo::new(address, url.clone()).write(&dir)?;
+    // A new operator token per run: the console on this machine reads it from `server.run`.
+    let operator = Secret::generate().map_err(|message| ServerError::Random { message })?;
+    let operator_hash = operator.hash();
+    RunInfo::new(address, url.clone())
+        .with_operator_token(operator)
+        .write(&dir)?;
     let (stop, stop_rx) = watch::channel(false);
     let accept = runtime.spawn(accept(socket, shared.clone(), stop_rx));
     let mcp = crate::mcp::endpoint(&config.mcp);
@@ -332,6 +343,8 @@ pub fn start(
         address,
         url,
         exposure,
+        access: None,
+        first_admin: None,
     };
     // The scan with the lock held and the listener up: the probes answer meanwhile.
     match Registry::scan(&running.dir) {
@@ -344,7 +357,22 @@ pub fn start(
             return Err(err);
         }
     }
+    // The access state: a directory without `access.toml` is closed and gets its first admin.
+    match Access::open(&running.dir, Some(operator_hash), Audit::default()) {
+        Ok((access, first_admin)) => {
+            running.access = Some(Arc::new(access));
+            running.first_admin = first_admin;
+        }
+        Err(err) => {
+            let _ = running.shutdown();
+            return Err(err);
+        }
+    }
     if let Err(err) = running.shared.router.ready(running.loader.clone()) {
+        // A first admin nobody will see must not close the directory for good.
+        if let Some(first) = running.first_admin.take() {
+            let _ = std::fs::remove_file(&first.path);
+        }
         let _ = running.shutdown();
         return Err(ServerError::Thread {
             message: err.to_string(),
@@ -408,6 +436,18 @@ impl Running {
     /// The loaded databases and their loads ([`Loader`]).
     pub fn loader(&self) -> &Arc<Loader> {
         &self.loader
+    }
+
+    /// The access state (users, grants, the authenticator chain, browser sessions): always
+    /// `Some` for a server [`start`] returned.
+    pub fn access(&self) -> Option<&Arc<Access>> {
+        self.access.as_ref()
+    }
+
+    /// The first admin made at this start (the directory had no `access.toml`): its token, to
+    /// be shown ONCE; `None` afterwards (and when the file existed).
+    pub fn take_first_admin(&mut self) -> Option<FirstAdmin> {
+        self.first_admin.take()
     }
 
     /// The connection limits the server runs with.

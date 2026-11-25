@@ -24,11 +24,28 @@ from published files). When this file disagrees with the code, the code wins: sa
   graphersal's). Temporarily (the access series) the root `Cargo.toml` takes the four crates as
   PATH dependencies on `../graphersal-sa/crates/...` (the worktree of graphersal's branch
   `feat/server-access`); task B-PIN restores `=0.8.0` from crates.io.
-- `src/lib.rs` modules: `config` (`server.toml`, `ServerConfig`, `parse_listen`, `[limits]
+- `src/lib.rs` modules: `access` (B2: `access.toml` = `AccessFile` (`[users.<name>] roles,
+  token_sha256, token_last4`; `[[grant]] subject/database/level`, `deny_unknown_fields`,
+  written atomically mode 0600, hashes only), `Principal` (`identity()`: `user:<name>`,
+  `operator`, anonymous = `None`; `subjects()` incl. `anonymous` for everyone), `Level`
+  (`None < Read < Write`; `granted_level` = admin/operator `Write`, else the highest grant of
+  any subject; `effective_level` = min with the database mode (read-only flag or base);
+  `Access::level_in` resolves aliases), `Secret`/`TokenHash` (256-bit OS random via `ring`,
+  SHA-256, constant-time compare, redacted `Debug`), the authenticator chain
+  (`Authenticator` trait: `OperatorToken` (per run, `server.run`), `UserTokens` (Bearer),
+  `SessionCookie` (`gs_session`, `SessionTable` trait, `MemorySessions`; a session ends when
+  its user's token changes); wrong credentials are `AuthError`, never anonymous), `Access`
+  (open/authenticate/login/logout, user and grant changes audited), the first admin
+  (`ensure_first_admin`: `init` (`InitReport::first_admin`) and `serve::start`
+  (`Running::take_first_admin`) on a directory without `access.toml`; `console::first_admin_text`
+  frames the token, printed once on stderr by `main.rs`); NO route enforcement yet (B3)),
+  `audit` (`AuditEvent` typed, `Audit` handle = sink + actor, `TracingAudit` on target
+  `graphersal_server::audit`; `Admin::with_audit` records create/delete/clone/import/restore/
+  promote/backup, read-only, auto-load, aliases), `config` (`server.toml`, `ServerConfig`, `parse_listen`, `[limits]
   upload_bytes` (default 4 GiB), `max_connections`, `header_timeout_secs`, `idle_timeout_secs`
   = `Limits`), `layout`
   (`ServerDir`, `init`, file names, `write_atomic`), `lock` (`ServerLock`, fd-lock on
-  `server.lock`), `run_file` (`RunInfo`, `server.run`), `serve` (`start` -> `Running`, the
+  `server.lock`), `run_file` (`RunInfo`, `server.run`, mode 0600: it carries the per-run `operator_token`), `serve` (`start` -> `Running`, the
   listener: hyper 1.x `http1` server connections, and `http2` ones for h2c with prior
   knowledge (`sniff` peeks the preface; the HTTP/1 path is unchanged otherwise), on a tokio
   multi-thread runtime owned by `Running`; connection cap `[limits] max_connections`
@@ -326,6 +343,8 @@ WD_TIMEOUT=600 ../graphersal/ai/bench/watchdog.sh scripts/smoke.sh   # end to en
 - English in every file. Synthetic test data only; servers on port 0; kill what you start.
 - Do not change or delete an existing test without listing it (file, name, reason) in the
   task report.
-- No access control in this version: default listen `127.0.0.1:8484`, a warning for any
+- Tokens and session ids: only hashes at rest, never logged (`Secret`'s `Debug` is redacted;
+  audit events show `token_last4` only).
+- No access control ENFORCED yet (the model is in `access`, routes come with B3): default listen `127.0.0.1:8484`, a warning for any
   non-loopback address (once, in the console's start block; `serve::start` itself only logs a
   debug line), `graphersal_serve::HostCheck` on every request but the probes.

@@ -1,0 +1,335 @@
+//! Access control: who sends a request ([`Principal`], the authenticator chain) and what it may
+//! reach ([`Level`] per database, from `access.toml`'s grants).
+//!
+//! - `access.toml` ([`AccessFile`]): users with roles and the SHA-256 of their tokens (plus
+//!   the token's last four characters for listings), and grants keyed by subject. Written
+//!   atomically, mode `0600` on unix, hashes only.
+//! - A server directory without `access.toml` is CLOSED: `init` and the first `serve` create
+//!   the first admin ([`FIRST_ADMIN`], role `admin`) and hand its token back once
+//!   ([`FirstAdmin`]) for the console to print; nothing else ever shows it.
+//! - [`Access`]: the live access state of a running server: the file (re-written on every
+//!   change), the authenticator chain (operator token of this run, user bearer tokens, the
+//!   browser session cookie, else anonymous), browser login/logout, the level computation, and
+//!   the user and grant changes, each recorded through the [`crate::audit`] sink.
+//!
+//! Tokens and session ids are 256 random bits from the OS ([`Secret`]); only their hashes are
+//! kept, compared in constant time; none is ever logged.
+//!
+//! Enforcement on the routes is not part of this module: the router asks [`Access`] for the
+//! principal and the level and refuses accordingly.
+
+mod auth;
+mod model;
+mod principal;
+mod token;
+
+use std::path::PathBuf;
+use std::sync::{Arc, RwLock};
+use std::time::SystemTime;
+
+use graphersal_serve::Request;
+
+pub use auth::{
+    AuthError, AuthStep, Authenticator, BrowserSession, MemorySessions, OperatorToken,
+    SESSION_COOKIE, SessionCookie, SessionTable, UserTokens, authenticate_with, bearer_token,
+    cookie,
+};
+pub use model::{
+    AccessFile, FIRST_ADMIN, Grant, Level, Subject, User, database_read_only, effective_level,
+};
+pub use principal::{ADMIN_ROLE, Principal, PrincipalKind};
+pub use token::{Secret, TokenHash};
+
+use crate::audit::{Audit, AuditEvent};
+use crate::error::ServerError;
+use crate::layout::ServerDir;
+use crate::registry::Registry;
+
+/// The first admin of a server directory, made because it had no `access.toml`: its token,
+/// to be shown ONCE.
+///
+/// `#[non_exhaustive]`: further details may be added.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct FirstAdmin {
+    /// The user's name ([`FIRST_ADMIN`]).
+    pub name: String,
+    /// Its token, in clear text (never stored: print it once).
+    pub token: Secret,
+    /// The `access.toml` written.
+    pub path: PathBuf,
+}
+
+/// Creates the first admin of `dir` when it has no `access.toml` (the event recorded through
+/// `audit`): `None` when the file exists.
+pub fn ensure_first_admin(
+    dir: &ServerDir,
+    audit: &Audit,
+) -> Result<Option<FirstAdmin>, ServerError> {
+    let Some((_, token)) = AccessFile::create_first_admin(dir)? else {
+        return Ok(None);
+    };
+    audit.record(AuditEvent::FirstAdminCreated {
+        name: FIRST_ADMIN.to_string(),
+        token_last4: token.last4(),
+    });
+    Ok(Some(FirstAdmin {
+        name: FIRST_ADMIN.to_string(),
+        token,
+        path: dir.access_path(),
+    }))
+}
+
+/// The access state of a running server (module docs).
+pub struct Access {
+    dir: ServerDir,
+    file: Arc<RwLock<AccessFile>>,
+    sessions: Arc<dyn SessionTable>,
+    chain: Vec<Box<dyn Authenticator>>,
+    audit: Audit,
+}
+
+impl std::fmt::Debug for Access {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Access")
+            .field("dir", &self.dir)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Access {
+    /// The access state of `dir` with the in-memory session table: its `access.toml` read
+    /// (a missing file first gets the first admin, returned once); `operator`: the hash of
+    /// this run's operator token (`None`: no operator link).
+    ///
+    /// `Err`: a broken `access.toml` ([`ServerError::Config`]: the server does not start, the
+    /// directory stays closed), an I/O error, the random generator failing.
+    pub fn open(
+        dir: &ServerDir,
+        operator: Option<TokenHash>,
+        audit: Audit,
+    ) -> Result<(Self, Option<FirstAdmin>), ServerError> {
+        Self::open_with(dir, operator, Arc::new(MemorySessions::new()), audit)
+    }
+
+    /// [`Access::open`] with the session table `sessions`.
+    pub fn open_with(
+        dir: &ServerDir,
+        operator: Option<TokenHash>,
+        sessions: Arc<dyn SessionTable>,
+        audit: Audit,
+    ) -> Result<(Self, Option<FirstAdmin>), ServerError> {
+        let first = ensure_first_admin(dir, &audit)?;
+        let file = AccessFile::read(dir)?.ok_or_else(|| ServerError::Config {
+            path: dir.access_path(),
+            message: "the file disappeared while the server started".to_string(),
+        })?;
+        let file = Arc::new(RwLock::new(file));
+        let mut chain: Vec<Box<dyn Authenticator>> = Vec::new();
+        if let Some(hash) = operator {
+            chain.push(Box::new(OperatorToken::new(hash)));
+        }
+        chain.push(Box::new(UserTokens::new(file.clone())));
+        chain.push(Box::new(SessionCookie::new(file.clone(), sessions.clone())));
+        let access = Self {
+            dir: dir.clone(),
+            file,
+            sessions,
+            chain,
+            audit,
+        };
+        Ok((access, first))
+    }
+
+    /// The principal of `request` (the chain of the module docs): anonymous without credentials,
+    /// `Err` for credentials that are wrong.
+    pub fn authenticate(&self, request: &Request<'_>) -> Result<Principal, AuthError> {
+        authenticate_with(&self.chain, request)
+    }
+
+    /// A browser login with the user token `token`: a new session id (the cookie's value,
+    /// handed to the browser once) and the user's principal. Only user tokens log in (the
+    /// operator token is the console's).
+    pub fn login(&self, token: &str) -> Result<(Secret, Principal), AuthError> {
+        let hash = TokenHash::of(token);
+        let user = {
+            let file = self.read();
+            file.user_by_token(&hash)
+                .map(|(name, user)| Principal::user(name, user.roles.clone()))
+        };
+        let Some(principal) = user else {
+            self.audit.record(AuditEvent::LoginFailed {
+                reason: "a token no user holds".to_string(),
+            });
+            return Err(AuthError::InvalidToken);
+        };
+        let id = Secret::generate().map_err(AuthError::Unavailable)?;
+        let session = BrowserSession::new(principal.id.clone(), hash, SystemTime::now());
+        self.sessions
+            .insert(id.hash(), session)
+            .map_err(|err| AuthError::Unavailable(err.to_string()))?;
+        self.audit
+            .with_actor(principal.identity())
+            .record(AuditEvent::LoginSucceeded {
+                principal: principal.id.clone(),
+            });
+        Ok((id, principal))
+    }
+
+    /// Ends the browser session `session_id` (the cookie's value): whether it was live.
+    pub fn logout(&self, session_id: &str) -> Result<bool, ServerError> {
+        let Some(session) = self.sessions.remove(&TokenHash::of(session_id))? else {
+            return Ok(false);
+        };
+        self.audit
+            .with_actor(Some(format!("user:{}", session.user)))
+            .record(AuditEvent::LoggedOut {
+                principal: session.user,
+            });
+        Ok(true)
+    }
+
+    /// A copy of the access file as it is now.
+    pub fn file(&self) -> AccessFile {
+        self.read().clone()
+    }
+
+    /// The effective level of `principal` on the database or alias `name` of `registry` (an
+    /// alias's level is its target's); [`Level::None`] for an unknown name.
+    pub fn level_in(&self, registry: &Registry, principal: &Principal, name: &str) -> Level {
+        match registry.resolve(name) {
+            Ok(entry) => self.read().level(principal, &entry),
+            Err(_) => Level::None,
+        }
+    }
+
+    /// Adds the user `name` with `roles`: its token (show it once). `actor`: who did it.
+    pub fn add_user(
+        &self,
+        actor: &Principal,
+        name: &str,
+        roles: Vec<String>,
+    ) -> Result<Secret, ServerError> {
+        self.change(actor, |file| {
+            let token = file.add_user(name, roles.clone())?;
+            let event = AuditEvent::UserAdded {
+                name: crate::names::fold(name),
+                roles,
+                token_last4: token.last4(),
+            };
+            Ok((token, vec![event]))
+        })
+    }
+
+    /// Gives the user `name` a new token (show it once); its browser sessions end.
+    pub fn issue_token(&self, actor: &Principal, name: &str) -> Result<Secret, ServerError> {
+        self.change(actor, |file| {
+            let token = file.issue_token(name)?;
+            let event = AuditEvent::TokenIssued {
+                name: crate::names::fold(name),
+                token_last4: token.last4(),
+            };
+            Ok((token, vec![event]))
+        })
+    }
+
+    /// Takes the user `name`'s token away; its browser sessions end.
+    pub fn revoke_token(&self, actor: &Principal, name: &str) -> Result<(), ServerError> {
+        self.change(actor, |file| {
+            file.revoke_token(name)?;
+            let name = crate::names::fold(name);
+            Ok(((), vec![AuditEvent::TokenRevoked { name }]))
+        })
+    }
+
+    /// Sets the user `name`'s roles.
+    pub fn set_roles(
+        &self,
+        actor: &Principal,
+        name: &str,
+        roles: Vec<String>,
+    ) -> Result<(), ServerError> {
+        self.change(actor, |file| {
+            file.set_roles(name, roles.clone())?;
+            let name = crate::names::fold(name);
+            Ok(((), vec![AuditEvent::RolesSet { name, roles }]))
+        })
+    }
+
+    /// Removes the user `name`, its grants and its browser sessions.
+    pub fn remove_user(&self, actor: &Principal, name: &str) -> Result<(), ServerError> {
+        self.change(actor, |file| {
+            file.remove_user(name)?;
+            let name = crate::names::fold(name);
+            Ok(((), vec![AuditEvent::UserRemoved { name }]))
+        })
+    }
+
+    /// Sets `grant`.
+    pub fn grant(&self, actor: &Principal, grant: Grant) -> Result<(), ServerError> {
+        self.change(actor, |file| {
+            let event = AuditEvent::GrantSet {
+                subject: grant.subject.to_string(),
+                database: grant.database.clone(),
+                level: grant.level.as_str().to_string(),
+            };
+            file.grant(grant);
+            Ok(((), vec![event]))
+        })
+    }
+
+    /// Removes the grant of `subject` on `database`: whether there was one.
+    pub fn revoke(
+        &self,
+        actor: &Principal,
+        subject: &Subject,
+        database: &str,
+    ) -> Result<bool, ServerError> {
+        self.change(actor, |file| {
+            if !file.revoke(subject, database) {
+                return Ok((false, Vec::new()));
+            }
+            let event = AuditEvent::GrantRevoked {
+                subject: subject.to_string(),
+                database: database.to_string(),
+            };
+            Ok((true, vec![event]))
+        })
+    }
+
+    /// Applies `change` to a copy of the file, writes it, then makes it live; browser sessions
+    /// that are no longer live end; the events are recorded as `actor`.
+    fn change<T>(
+        &self,
+        actor: &Principal,
+        change: impl FnOnce(&mut AccessFile) -> Result<(T, Vec<AuditEvent>), ServerError>,
+    ) -> Result<T, ServerError> {
+        let mut live = self.file.write().unwrap_or_else(|p| p.into_inner());
+        let mut next = live.clone();
+        let (value, events) = change(&mut next)?;
+        if events.is_empty() {
+            return Ok(value);
+        }
+        next.write(&self.dir)?;
+        *live = next;
+        let ended = self
+            .sessions
+            .retain(&|session| auth::session_principal(&live, session).is_some());
+        drop(live);
+        if let Err(err) = ended {
+            tracing::warn!(target: "graphersal_server", "browser sessions: {err}");
+        }
+        let audit = self.audit.with_actor(actor.identity());
+        for event in events {
+            audit.record(event);
+        }
+        Ok(value)
+    }
+
+    fn read(&self) -> std::sync::RwLockReadGuard<'_, AccessFile> {
+        self.file.read().unwrap_or_else(|p| p.into_inner())
+    }
+}
+
+#[cfg(test)]
+mod tests;

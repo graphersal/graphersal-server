@@ -393,6 +393,7 @@ dependencies = [
  "graphersal-session",
  "hyper",
  "hyper-util",
+ "ring",
  "serde",
  "serde_json",
  "tokio",
