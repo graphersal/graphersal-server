@@ -597,6 +597,81 @@ fn start_scans_the_registry_and_broken_databases_are_not_fatal() {
     running.stop().unwrap();
 }
 
+/// Sends `GET path` (or `POST` with `body`) with `Host: host` and no credentials: (status,
+/// head, body).
+fn as_host(
+    address: SocketAddr,
+    host: &str,
+    method: &str,
+    path: &str,
+    body: &str,
+) -> (u16, String, String) {
+    let head = format!(
+        "{method} {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\
+         Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    );
+    let mut stream = TcpStream::connect(address).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(30)))
+        .unwrap();
+    stream.write_all(head.as_bytes()).unwrap();
+    let mut answer = Vec::new();
+    stream.read_to_end(&mut answer).unwrap();
+    let answer = text(&answer);
+    let (head, body) = answer.split_once("\r\n\r\n").unwrap_or((&answer, ""));
+    let status = head.split(' ').nth(1).and_then(|s| s.parse().ok()).unwrap();
+    (status, head.to_string(), body.to_string())
+}
+
+#[test]
+fn server_toml_modes_access_off_https_and_allowed_hosts() {
+    let temp = TempDir::new("modes");
+    let report = ServerDir::init(temp.path()).unwrap();
+    let dir = report.dir;
+    let admin_token = report.first_admin.unwrap().token.expose().to_string();
+    // The first admin exists already (init): access off ignores it.
+    std::fs::write(
+        dir.config_path(),
+        "listen = \"127.0.0.1:0\"\n[access]\nenabled = false\n[sessions]\nlifetime_secs = 7200\n\
+         [http]\npublic_scheme = \"https\"\nallowed_hosts = [\"db.example.com\"]\n",
+    )
+    .unwrap();
+    let running = serve::start(temp.path(), ServeOptions::new()).unwrap();
+    let address = running.address();
+    assert!(!running.config().access.enabled);
+    let block = graphersal_server::console::start_block(&running);
+    assert!(block.contains("ACCESS CONTROL OFF"), "{block}");
+    assert!(block.contains("warning: access control is off"), "{block}");
+    assert!(block.contains("OFF: every request is an admin"), "{block}");
+    assert!(block.contains("https, TLS ended by a proxy"), "{block}");
+    assert!(block.contains("db.example.com (any port)"), "{block}");
+    // Through the proxy name, without credentials: the admin `everyone`.
+    let (status, _, body) = as_host(address, "db.example.com", "GET", "/api/info", "");
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(json(&body)["principal"]["kind"], "everyone", "{body}");
+    let (status, _, body) = as_host(
+        address,
+        "db.example.com:443",
+        "GET",
+        "/api/admin/databases",
+        "",
+    );
+    assert_eq!(status, 200, "{body}");
+    // Another name is refused, naming the setting.
+    let (status, _, body) = as_host(address, "other.example.com", "GET", "/api/info", "");
+    assert_eq!(status, 403, "{body}");
+    assert!(body.contains("allowed_hosts"), "{body}");
+    // A login (unnecessary, but it works) sets a Secure cookie that outlives the browser.
+    let login = serde_json::json!({ "token": admin_token }).to_string();
+    let (status, head, body) = as_host(address, "db.example.com", "POST", "/api/login", &login);
+    assert_eq!(status, 200, "{body}");
+    let cookie = header_of(&head, "Set-Cookie").unwrap();
+    assert!(cookie.contains("; Max-Age=7200;"), "{cookie}");
+    assert!(cookie.ends_with("; Secure"), "{cookie}");
+    running.stop().unwrap();
+}
+
 #[test]
 fn the_listen_address_comes_from_server_toml() {
     let temp = TempDir::new("config-listen");

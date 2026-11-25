@@ -5,9 +5,11 @@
 //! principal:
 //!
 //! - `POST /api/login {"token"}`: a browser session for a user token, its id in the
-//!   `gs_session` cookie (`HttpOnly; SameSite=Strict; Path=/`); `POST /api/logout` ends it and
-//!   clears the cookie. Both run before authentication (a stale cookie must not lock a browser
-//!   out of logging in again).
+//!   `gs_session` cookie (`Max-Age=<[sessions] lifetime_secs, else 400 days>; HttpOnly;
+//!   SameSite=Strict; Path=/`, plus `Secure` when `[http] public_scheme = "https"`: a browser
+//!   restart keeps the login); `POST /api/logout` ends it and clears the cookie (`Max-Age=0`).
+//!   Both run before authentication (a stale cookie must not lock a browser out of logging in
+//!   again).
 //! - `/db/<name>/...`: the database `<name>` (or the database an alias names, resolved per
 //!   request), its playground, API and MCP endpoint, with the prefix stripped
 //!   ([`crate::mounts`]), for a principal granted at least `read` on it. Without a grant the
@@ -37,6 +39,12 @@
 //!
 //! A `401` is `{"error", "login": "/"}` with `WWW-Authenticate: Bearer`; a refused session
 //! cookie is cleared with it.
+//!
+//! Access control off (`server.toml [access] enabled = false`): nothing is refused for its
+//! principal. Valid admin credentials keep their identity (the operator, an admin user); every
+//! other request (none, a user without the admin role, wrong credentials) runs as the admin
+//! principal `everyone` ([`Principal::everyone`]); the audit names the actor either way. Login
+//! and logout still work (a session is written to `sessions/`), but nobody needs them.
 
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
@@ -83,6 +91,76 @@ pub(crate) struct Router {
     access: OnceLock<Arc<Access>>,
     /// The playground served at the root.
     ui: Ui,
+    /// The modes of `server.toml` the router answers in (access control, cookies).
+    modes: Modes,
+}
+
+/// The default `Max-Age` of the login cookie without `[sessions] lifetime_secs`: 400 days, the
+/// longest a browser keeps a cookie.
+pub(crate) const DEFAULT_COOKIE_MAX_AGE_SECS: u64 = 400 * 24 * 60 * 60;
+
+/// The modes of `server.toml` the router answers in, read at start.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Modes {
+    /// `[access] enabled`: `false` = every request runs as an admin ([`open_principal`]).
+    pub(crate) access_enabled: bool,
+    /// `[http] public_scheme = "https"`: the login cookie gets `Secure`.
+    pub(crate) secure_cookies: bool,
+    /// The login cookie's `Max-Age` in seconds: `[sessions] lifetime_secs`, else
+    /// [`DEFAULT_COOKIE_MAX_AGE_SECS`] (a browser restart keeps the login).
+    pub(crate) cookie_max_age_secs: u64,
+}
+
+impl Default for Modes {
+    fn default() -> Self {
+        Self {
+            access_enabled: true,
+            secure_cookies: false,
+            cookie_max_age_secs: DEFAULT_COOKIE_MAX_AGE_SECS,
+        }
+    }
+}
+
+impl Modes {
+    /// The modes of `config`.
+    pub(crate) fn of(config: &crate::config::ServerConfig) -> Self {
+        Self {
+            access_enabled: config.access.enabled,
+            secure_cookies: config.http.public_scheme == crate::config::PublicScheme::Https,
+            cookie_max_age_secs: config
+                .sessions
+                .lifetime_secs
+                .unwrap_or(DEFAULT_COOKIE_MAX_AGE_SECS),
+        }
+    }
+
+    /// The `Set-Cookie` value of a new browser session `id`.
+    fn session_cookie(&self, id: &str) -> String {
+        self.cookie(id, self.cookie_max_age_secs)
+    }
+
+    /// The `Set-Cookie` value that ends the browser session cookie.
+    fn cleared_session_cookie(&self) -> String {
+        self.cookie("", 0)
+    }
+
+    fn cookie(&self, value: &str, max_age: u64) -> String {
+        let secure = if self.secure_cookies { "; Secure" } else { "" };
+        format!(
+            "{SESSION_COOKIE}={value}; Max-Age={max_age}; HttpOnly; SameSite=Strict; Path=/{secure}"
+        )
+    }
+}
+
+/// The principal of a request while access control is off: valid admin credentials keep their
+/// identity (the console's operator, an admin user: the audit names them); anything else
+/// (no credentials, a user without the admin role, refused credentials) is `everyone`, an
+/// admin too.
+fn open_principal(authenticated: Result<Principal, AuthError>) -> Principal {
+    match authenticated {
+        Ok(principal) if principal.is_admin() => principal,
+        _ => Principal::everyone(),
+    }
 }
 
 impl Router {
@@ -94,7 +172,14 @@ impl Router {
             loader: OnceLock::new(),
             access: OnceLock::new(),
             ui: Ui::embedded(),
+            modes: Modes::default(),
         }
+    }
+
+    /// The router answering in `modes` (`server.toml`'s, read at start).
+    pub(crate) fn with_modes(mut self, modes: Modes) -> Self {
+        self.modes = modes;
+        self
     }
 
     /// The server serves its routes and the databases of `loader`, each request refused or
@@ -158,15 +243,24 @@ impl Router {
             let answer = if method != Method::Post {
                 Err(not_allowed(&method, path))
             } else if path == LOGIN {
-                login(access, &mut request)
+                login(access, &self.modes, &mut request)
             } else {
-                logout(access, &request)
+                logout(access, &self.modes, &request)
             };
             return Answer::Response(answer.unwrap_or_else(error_response));
         }
         let principal = match access.authenticate(&request) {
+            authenticated if !self.modes.access_enabled => open_principal(authenticated),
             Ok(principal) => principal,
-            Err(err) => return Answer::Response(refused_credentials(&err, &method, path, &url)),
+            Err(err) => {
+                return Answer::Response(refused_credentials(
+                    &self.modes,
+                    &err,
+                    &method,
+                    path,
+                    &url,
+                ));
+            }
         };
         if let Some(identity) = principal.identity() {
             request.set_identity(identity);
@@ -262,7 +356,7 @@ impl Router {
             if is_page_request(request.method(), path) {
                 return redirect_to_login(url);
             }
-            return unauthorized("log in to reach this database", false);
+            return unauthorized("log in to reach this database", None);
         };
         let Some(rest) = rest else {
             return mounts::redirect_to_slash(path, query);
@@ -345,21 +439,15 @@ fn is_page_request(method: &Method, path: &str) -> bool {
     !(rest == "api" || rest.starts_with("api/") || rest == "mcp")
 }
 
-/// The `Set-Cookie` value that ends the browser session cookie.
-fn cleared_session_cookie() -> String {
-    format!("{SESSION_COOKIE}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0")
-}
-
-/// `401 {"error": message, "login": "/"}` with `WWW-Authenticate: Bearer`; `clear`: the session
-/// cookie is cleared too.
-fn unauthorized(message: &str, clear: bool) -> Response {
+/// `401 {"error": message, "login": "/"}` with `WWW-Authenticate: Bearer`; `clear`: the
+/// `Set-Cookie` value that clears the session cookie too.
+fn unauthorized(message: &str, clear: Option<String>) -> Response {
     let response = Response::json(401, &json!({ "error": message, "login": LOGIN_PAGE }))
         .with_header("WWW-Authenticate", "Bearer")
         .with_header("Cache-Control", "no-store");
-    if clear {
-        response.with_header("Set-Cookie", &cleared_session_cookie())
-    } else {
-        response
+    match clear {
+        Some(cookie) => response.with_header("Set-Cookie", &cookie),
+        None => response,
     }
 }
 
@@ -377,19 +465,28 @@ fn redirect_to_login(url: &str) -> Response {
 
 /// The answer to credentials the chain refused: `401`; a refused session cookie is cleared, and
 /// a browser navigating to a page goes to the login page instead.
-fn refused_credentials(err: &AuthError, method: &Method, path: &str, url: &str) -> Response {
+fn refused_credentials(
+    modes: &Modes,
+    err: &AuthError,
+    method: &Method,
+    path: &str,
+    url: &str,
+) -> Response {
     let session = *err == AuthError::InvalidSession;
     if session && is_page_request(method, path) {
-        return redirect_to_login(url).with_header("Set-Cookie", &cleared_session_cookie());
+        return redirect_to_login(url).with_header("Set-Cookie", &modes.cleared_session_cookie());
     }
-    unauthorized(&err.to_string(), session)
+    unauthorized(
+        &err.to_string(),
+        session.then(|| modes.cleared_session_cookie()),
+    )
 }
 
 /// The admin API refused to `principal`: `401` for anonymous, `404` for a principal without the
 /// admin role (as if the API did not exist).
 fn admin_refused(principal: &Principal, path: &str) -> Response {
     if principal.is_anonymous() {
-        unauthorized("log in as an admin to use the admin API", false)
+        unauthorized("log in as an admin to use the admin API", None)
     } else {
         error_response(HttpError::new(404, format!("unknown endpoint {path}")))
     }
@@ -404,16 +501,13 @@ struct LoginBody {
 
 /// `POST /api/login {"token"}`: a browser session for the user token, its id in the
 /// `gs_session` cookie; `401` for a token no user holds.
-fn login(access: &Access, request: &mut Request<'_>) -> Result<Response, HttpError> {
+fn login(access: &Access, modes: &Modes, request: &mut Request<'_>) -> Result<Response, HttpError> {
     let body = request.json_body()?;
     let body: LoginBody = serde_json::from_value(body)
         .map_err(|err| HttpError::bad_request(format!("the body must be {{\"token\"}}: {err}")))?;
     match access.login(body.token.trim()) {
         Ok((id, principal)) => {
-            let cookie = format!(
-                "{SESSION_COOKIE}={}; HttpOnly; SameSite=Strict; Path=/",
-                id.expose()
-            );
+            let cookie = modes.session_cookie(id.expose());
             Ok(Response::json(
                 200,
                 &json!({ "principal": {
@@ -432,13 +526,13 @@ fn login(access: &Access, request: &mut Request<'_>) -> Result<Response, HttpErr
                 format!("cannot start a session: {message}"),
             ))
         }
-        Err(err) => Ok(unauthorized(&err.to_string(), false)),
+        Err(err) => Ok(unauthorized(&err.to_string(), None)),
     }
 }
 
 /// `POST /api/logout`: the browser session of the request's cookie ends (if any) and the cookie
 /// is cleared; `{"loggedOut": bool}` (`false`: there was no live session).
-fn logout(access: &Access, request: &Request<'_>) -> Result<Response, HttpError> {
+fn logout(access: &Access, modes: &Modes, request: &Request<'_>) -> Result<Response, HttpError> {
     let ended = match crate::access::cookie(request, SESSION_COOKIE) {
         Some(id) => access.logout(id).map_err(|err| {
             tracing::error!(target: "graphersal_server", "logout: {err}");
@@ -447,7 +541,7 @@ fn logout(access: &Access, request: &Request<'_>) -> Result<Response, HttpError>
         None => false,
     };
     Ok(Response::json(200, &json!({ "loggedOut": ended }))
-        .with_header("Set-Cookie", &cleared_session_cookie())
+        .with_header("Set-Cookie", &modes.cleared_session_cookie())
         .with_header("Cache-Control", "no-store"))
 }
 

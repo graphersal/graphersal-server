@@ -11,7 +11,7 @@ use graphersal::prelude::TraversalGraph;
 use graphersal_serve::{Exposure, HostCheck, Method, Request, Response};
 use serde_json::{Value, json};
 
-use super::Router;
+use super::{Modes, Router};
 use crate::access::{Access, Grant, Level, Principal, Subject, TokenHash};
 use crate::audit::{Audit, MemoryAudit};
 use crate::loader::Loader;
@@ -50,6 +50,11 @@ struct Fixture {
 }
 
 fn fixture(name: &str) -> Fixture {
+    fixture_with(name, Vec::new(), Modes::default())
+}
+
+/// [`fixture`] with the allowed host names `allowed` and the router's `modes`.
+fn fixture_with(name: &str, allowed: Vec<String>, modes: Modes) -> Fixture {
     let temp = TempDir::new(name);
     let dir = server(&temp);
     for db in ["w", "r", "h"] {
@@ -65,7 +70,8 @@ fn fixture(name: &str) -> Fixture {
         .close()
         .unwrap();
     }
-    let host_check = HostCheck::new(Exposure::Loopback, 8484, "http://127.0.0.1:8484/");
+    let host_check = HostCheck::new(Exposure::Loopback, 8484, "http://127.0.0.1:8484/")
+        .with_allowed_hosts(allowed);
     let registry = Registry::scan(&dir).unwrap();
     registry.alias_set("cur", "r").unwrap();
     registry.alias_set("hid", "h").unwrap();
@@ -89,7 +95,7 @@ fn fixture(name: &str) -> Fixture {
         access.grant(&operator, grant).unwrap();
     }
     let access = Arc::new(access);
-    let router = Router::new(host_check);
+    let router = Router::new(host_check).with_modes(modes);
     router.ready(loader.clone(), access.clone()).unwrap();
     for db in ["w", "r", "h"] {
         loader.load(db).unwrap();
@@ -1340,4 +1346,230 @@ fn the_root_profile_follows_the_principal() {
             "{module}"
         );
     }
+}
+
+// B6: the modes of server.toml (`[access] enabled`, `[http] public_scheme`, `[http]
+// allowed_hosts`, the login cookie's `Max-Age`).
+
+fn modes(access_enabled: bool, secure_cookies: bool, cookie_max_age_secs: u64) -> Modes {
+    Modes {
+        access_enabled,
+        secure_cookies,
+        cookie_max_age_secs,
+    }
+}
+
+#[test]
+fn access_off_makes_every_request_an_admin() {
+    let fx = fixture_with(
+        "modes-access-off",
+        Vec::new(),
+        modes(false, false, super::DEFAULT_COOKIE_MAX_AGE_SECS),
+    );
+    let principal = |who| expect(get(&fx, who, "/api/info"), 200)["principal"].clone();
+    let everyone = json!({"id": "everyone", "kind": "everyone", "admin": true});
+    // No credentials, a user without the admin role, wrong credentials: `everyone`, an admin.
+    for who in [
+        Who::Anonymous,
+        Who::Bearer(&fx.carol),
+        Who::Bearer(&fx.bob),
+        Who::Bearer("nope"),
+        Who::Cookie("stale"),
+    ] {
+        assert_eq!(principal(who), everyone);
+    }
+    // Valid admin credentials keep their identity (the audit names them).
+    assert_eq!(principal(Who::Bearer(&fx.alice))["id"], "alice");
+    assert_eq!(principal(Who::Bearer(OPERATOR))["kind"], "operator");
+    // The admin view of the UI, the admin API, every database read-write.
+    let info = expect(get(&fx, Who::Anonymous, "/api/info"), 200);
+    assert_eq!(info["uiProfile"]["startTab"], "databases", "{info}");
+    assert!(info.get("uploadBytes").is_some(), "{info}");
+    expect(get(&fx, Who::Anonymous, "/api/admin/databases"), 200);
+    expect(get(&fx, Who::Anonymous, "/api/admin/users"), 200);
+    for db in ["w", "r", "h", "hid"] {
+        expect(get(&fx, Who::Anonymous, &format!("/db/{db}/api/info")), 200);
+    }
+    let before = person_count(&fx, "h");
+    execute(&fx, Who::Anonymous, "h", WRITE);
+    execute(&fx, Who::Bearer(&fx.carol), "h", WRITE);
+    assert_eq!(person_count(&fx, "h"), before + 2);
+    let listed = expect(get(&fx, Who::Anonymous, "/api/databases"), 200);
+    assert_eq!(listed["databases"].as_array().unwrap().len(), 5, "{listed}");
+    // The audit still records, with `everyone` as the actor.
+    let answer = send(
+        &fx,
+        Who::Anonymous,
+        Method::Put,
+        "/api/admin/databases/w/auto-load",
+        Some(json!({"autoLoad": true})),
+        &[],
+    );
+    assert_eq!(answer.status(), 200);
+    let lines = fx.audit.lines();
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.starts_with("everyone: ") && l.contains("auto-load")),
+        "{lines:?}"
+    );
+    // MCP: every graph, every tool, writes allowed.
+    let session = mcp_initialize(&fx, Who::Anonymous, "/mcp");
+    let (listing, error) = mcp_tool(
+        &fx,
+        Who::Anonymous,
+        "/mcp",
+        &session,
+        "list_graphs",
+        json!({}),
+    );
+    assert!(!error, "{listing}");
+    for name in ["\"w\"", "\"r\"", "\"h\"", "\"cur\"", "\"hid\""] {
+        assert!(listing.contains(name), "{name}: {listing}");
+    }
+    let before = person_count(&fx, "r");
+    let (text, error) = mcp_tool(
+        &fx,
+        Who::Anonymous,
+        "/mcp",
+        &session,
+        "query",
+        json!({"script": WRITE, "graph": "r"}),
+    );
+    assert!(!error, "{text}");
+    assert_eq!(person_count(&fx, "r"), before + 1);
+    let db = mcp_initialize(&fx, Who::Anonymous, "/db/h/mcp");
+    let tools = mcp_tool_names(&fx, Who::Anonymous, "/db/h/mcp", &db);
+    assert!(tools.iter().any(|t| t == "set_schema"), "{tools:?}");
+    // Login still works (nobody needs it) and answers the user it logged in.
+    let answer = post(&fx, Who::Anonymous, "/api/login", json!({"token": fx.bob}));
+    assert_eq!(expect(answer, 200)["principal"]["id"], "bob");
+}
+
+#[test]
+fn access_on_is_the_default_mode() {
+    assert_eq!(Modes::default(), modes(true, false, 400 * 24 * 60 * 60));
+    let config = crate::config::ServerConfig::default();
+    assert_eq!(Modes::of(&config), Modes::default());
+    let config = crate::config::ServerConfig::parse(
+        "[access]\nenabled = false\n[http]\npublic_scheme = \"https\"\n\
+         [sessions]\nlifetime_secs = 3600",
+        std::path::Path::new("server.toml"),
+    )
+    .unwrap();
+    assert_eq!(Modes::of(&config), modes(false, true, 3600));
+}
+
+/// The `Set-Cookie` of a login of `token` and of a logout with the cookie it set.
+fn login_and_logout_cookies(fx: &Fixture, token: &str) -> (String, String) {
+    let answer = post(fx, Who::Anonymous, "/api/login", json!({"token": token}));
+    assert_eq!(answer.status(), 200);
+    let set = header(&answer, "Set-Cookie").unwrap().to_string();
+    let id = set
+        .strip_prefix("gs_session=")
+        .and_then(|rest| rest.split(';').next())
+        .unwrap()
+        .to_string();
+    let answer = post(fx, Who::Cookie(&id), "/api/logout", json!({}));
+    assert_eq!(answer.status(), 200);
+    assert_eq!(json_of(&answer)["loggedOut"], true);
+    (set, header(&answer, "Set-Cookie").unwrap().to_string())
+}
+
+#[test]
+fn the_login_cookie_is_secure_only_on_https_and_persistent() {
+    // http (the default): no Secure, Max-Age 400 days; the clear cookie Max-Age=0.
+    let fx = fixture_with("modes-http", Vec::new(), Modes::default());
+    let (set, cleared) = login_and_logout_cookies(&fx, &fx.bob.clone());
+    assert!(set.contains("; Max-Age=34560000;"), "{set}");
+    assert!(!set.contains("Secure"), "{set}");
+    assert!(cleared.starts_with("gs_session=;") && cleared.contains("; Max-Age=0;"));
+    assert!(!cleared.contains("Secure"), "{cleared}");
+    // A refused cookie is cleared the same way.
+    let refused = get(&fx, Who::Cookie("stale"), "/api/info");
+    let cleared = header(&refused, "Set-Cookie").unwrap();
+    assert!(
+        cleared.contains("Max-Age=0") && !cleared.contains("Secure"),
+        "{cleared}"
+    );
+    drop(fx);
+    // https: Secure on the set and the clear cookie; Max-Age = [sessions] lifetime_secs.
+    let fx = fixture_with("modes-https", Vec::new(), modes(true, true, 3600));
+    let (set, cleared) = login_and_logout_cookies(&fx, &fx.bob.clone());
+    assert!(set.contains("; Max-Age=3600;"), "{set}");
+    assert!(
+        set.ends_with("; HttpOnly; SameSite=Strict; Path=/; Secure"),
+        "{set}"
+    );
+    assert!(
+        cleared.contains("; Max-Age=0;") && cleared.ends_with("; Secure"),
+        "{cleared}"
+    );
+    let refused = get(&fx, Who::Cookie("stale"), "/api/info");
+    let cleared = header(&refused, "Set-Cookie").unwrap();
+    assert!(
+        cleared.contains("Max-Age=0") && cleared.ends_with("; Secure"),
+        "{cleared}"
+    );
+    let page = get(&fx, Who::Cookie("stale"), "/db/w/");
+    assert_eq!(page.status(), 303);
+    assert!(header(&page, "Set-Cookie").unwrap().ends_with("; Secure"));
+}
+
+/// `GET url` as the operator with `Host: host` (and `Origin: origin`).
+fn get_from_host(fx: &Fixture, url: &str, host: &str, origin: Option<&str>) -> Response {
+    let mut request = Request::new(Method::Get, url, std::io::Cursor::new(Vec::new()))
+        .with_header("Host", host)
+        .with_header("Authorization", &format!("Bearer {OPERATOR}"));
+    if let Some(origin) = origin {
+        request = request.with_header("Origin", origin);
+    }
+    fx.router.route(request)
+}
+
+#[test]
+fn allowed_hosts_admit_a_proxy_name_and_refuse_others() {
+    let fx = fixture_with(
+        "modes-allowed-hosts",
+        vec!["db.example.com".to_string()],
+        Modes::default(),
+    );
+    for host in [
+        "db.example.com",
+        "db.example.com:443",
+        "DB.Example.com:8080",
+        HOST,
+    ] {
+        let answer = get_from_host(&fx, "/api/info", host, None);
+        assert_eq!(answer.status(), 200, "{host}");
+    }
+    let answer = get_from_host(
+        &fx,
+        "/api/info",
+        "db.example.com",
+        Some("https://db.example.com"),
+    );
+    assert_eq!(answer.status(), 200);
+    for host in [
+        "other.example.com",
+        "evil.db.example.com",
+        "example.com:443",
+    ] {
+        let answer = get_from_host(&fx, "/api/info", host, None);
+        assert_eq!(answer.status(), 403, "{host}");
+    }
+    let answer = get_from_host(
+        &fx,
+        "/api/info",
+        "db.example.com",
+        Some("https://evil.example.com"),
+    );
+    assert_eq!(answer.status(), 403);
+    // Without allowed names the proxy name is refused (as before).
+    drop(fx);
+    let fx = fixture("modes-no-allowed-hosts");
+    assert_eq!(
+        get_from_host(&fx, "/api/info", "db.example.com", None).status(),
+        403
+    );
 }

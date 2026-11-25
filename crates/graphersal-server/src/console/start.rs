@@ -1,5 +1,6 @@
 //! The stderr start block of `serve` (the graphersal CLI's `--server` start block): the
-//! banner, for a non-loopback address the network warning, then the sections Server,
+//! banner, the warnings (access control off; a non-loopback address: tokens in clear text over
+//! plain HTTP, or only the TLS proxy should reach it), then the sections Server,
 //! Databases, Embedding models and MCP. stdout keeps only the address line
 //! ([`address_line`]).
 
@@ -9,7 +10,7 @@ use graphersal_serve::Exposure;
 use serde_json::Value;
 
 use super::render::{database_table, problems_section, shell_word};
-use crate::config::ServerConfig;
+use crate::config::{PublicScheme, ServerConfig};
 use crate::serve::Running;
 use crate::text::{self, Note, Section};
 
@@ -32,40 +33,108 @@ pub fn address_line(running: &Running) -> String {
 
 /// The stderr start block of `running` (module docs).
 pub fn start_block(running: &Running) -> String {
-    let config = running.dir().load_config().ok();
-    let mut out = vec![banner(running.exposure())];
-    if running.exposure() == Exposure::Network {
-        out.push(network_warning(&running.address().to_string()));
-    }
+    // The configuration the server runs with (read at start).
+    let config = running.config();
+    let mut out = vec![banner_for(running.exposure(), config.access.enabled)];
+    out.extend(warnings(
+        running.exposure(),
+        &running.address().to_string(),
+        config,
+    ));
     out.push(String::new());
-    out.push(text::render(&sections(running, config.as_ref())));
+    out.push(text::render(&sections(running, Some(config))));
     out.join("\n")
 }
 
-/// The banner (module docs) for `exposure`.
+/// The banner (module docs) for `exposure` with access control on.
+#[cfg(test)]
 fn banner(exposure: Exposure) -> String {
-    match exposure {
-        Exposure::Network => BANNER.replacen(
-            LOOPBACK_LINE,
-            " REACHABLE FROM THE NETWORK, see the warning below.\n Users and grants in access.toml. ",
-            1,
-        ),
-        _ => BANNER.to_string(),
+    banner_for(exposure, true)
+}
+
+/// The banner (module docs) for `exposure` and `[access] enabled`.
+fn banner_for(exposure: Exposure, access_enabled: bool) -> String {
+    let line = match (exposure, access_enabled) {
+        (Exposure::Network, true) => {
+            " REACHABLE FROM THE NETWORK, see the warning below.\n Users and grants in access.toml. "
+        }
+        (Exposure::Network, false) => {
+            " REACHABLE FROM THE NETWORK WITH ACCESS CONTROL OFF: ANYONE IS AN ADMIN.\n \
+             See the warning below. "
+        }
+        (_, false) => {
+            " ACCESS CONTROL OFF ([access] enabled = false): every request is an admin.\n \
+             Loopback only. "
+        }
+        (_, true) => LOOPBACK_LINE,
+    };
+    BANNER.replacen(LOOPBACK_LINE, line, 1)
+}
+
+/// The warnings under the banner (module docs) for `exposure`, the listen `address` and
+/// `config`: each a `warning:` row at the left margin.
+fn warnings(exposure: Exposure, address: &str, config: &ServerConfig) -> Vec<String> {
+    let network = exposure == Exposure::Network;
+    if !config.access.enabled {
+        return vec![access_off_warning(network, address)];
+    }
+    if !network {
+        return Vec::new();
+    }
+    match config.http.public_scheme {
+        PublicScheme::Https => vec![proxy_warning(address)],
+        _ => vec![network_warning(address)],
     }
 }
 
-/// The warning under the banner of a server reachable from the network.
-fn network_warning(address: &str) -> String {
-    let mut section = Section::new("");
-    section.row(
-        "warning",
+/// The warning of a server with access control off: louder when it is reachable from the
+/// network (`network`, listening on `address`).
+fn access_off_warning(network: bool, address: &str) -> String {
+    let text = if network {
         format!(
-            "graphersal-server listens on {address} and is reachable from the network: \
-             requests need a user token or a browser login, and over plain HTTP tokens and \
-             session cookies travel in clear text; put a TLS proxy in front, or listen on \
-             127.0.0.1 for this machine only (serve --listen 127.0.0.1:PORT)"
-        ),
-    );
+            "ACCESS CONTROL IS OFF ([access] enabled = false in server.toml) and \
+             graphersal-server listens on {address}, reachable from the network: ANYONE WHO \
+             REACHES IT IS AN ADMIN and can read, change and delete every database without a \
+             token; set [access] enabled = true, or listen on 127.0.0.1 for this machine only \
+             (serve --listen 127.0.0.1:PORT)"
+        )
+    } else {
+        "access control is off ([access] enabled = false in server.toml): every request is \
+         an admin without a token or login, so every program and user on this machine can \
+         read, change and delete every database; set [access] enabled = true to require \
+         tokens"
+            .to_string()
+    };
+    warning_row(text)
+}
+
+/// The warning of a server reachable from the network behind a TLS proxy
+/// (`public_scheme = "https"`).
+fn proxy_warning(address: &str) -> String {
+    warning_row(format!(
+        "graphersal-server listens on {address} and is reachable from the network; \
+         [http] public_scheme = \"https\" says a TLS proxy ends the connections: let only \
+         that proxy reach this address (plain HTTP to it carries tokens and session cookies \
+         in clear text)"
+    ))
+}
+
+/// The warning under the banner of a server reachable from the network over plain HTTP
+/// (`public_scheme = "http"`).
+fn network_warning(address: &str) -> String {
+    warning_row(format!(
+        "graphersal-server listens on {address} and is reachable from the network over plain \
+         HTTP ([http] public_scheme = \"http\"): requests need a user token or a browser \
+         login, and tokens travel in clear text, session cookies too; put a TLS proxy in \
+         front and set public_scheme = \"https\", or listen on 127.0.0.1 for this machine \
+         only (serve --listen 127.0.0.1:PORT)"
+    ))
+}
+
+/// `text` as one `warning:` row at the left margin, wrapped.
+fn warning_row(text: String) -> String {
+    let mut section = Section::new("");
+    section.row("warning", text);
     // The section's rows without its heading, at the left margin.
     text::render(&[section])
         .lines()
@@ -91,6 +160,11 @@ fn sections(running: &Running, config: Option<&ServerConfig>) -> Vec<Section> {
         _ => "loopback, this machine only",
     };
     server.row("listening", format!("{} ({reach})", running.address()));
+    if let Some(config) = config {
+        for (key, value) in mode_rows(config) {
+            server.row(key, value);
+        }
+    }
     server.unwrapped("UI", format!("{url}/"));
     if let Some(config) = config {
         server.row(
@@ -192,6 +266,42 @@ fn sections(running: &Running, config: Option<&ServerConfig>) -> Vec<Section> {
     vec![server, databases, problems, models, mcp]
 }
 
+/// The start-block rows of the access and HTTP modes of `config`: access control, the public
+/// scheme (and the login cookie it implies), the allowed host names.
+fn mode_rows(config: &ServerConfig) -> Vec<(&'static str, String)> {
+    let access = if config.access.enabled {
+        "on: user tokens and browser logins (access.toml)".to_string()
+    } else {
+        "OFF: every request is an admin ([access] enabled = false)".to_string()
+    };
+    let cookie_days = config
+        .sessions
+        .lifetime_secs
+        .unwrap_or(crate::router::DEFAULT_COOKIE_MAX_AGE_SECS)
+        .div_ceil(86_400);
+    let scheme = match config.http.public_scheme {
+        PublicScheme::Https => format!(
+            "https, TLS ended by a proxy (login cookie Secure, kept {})",
+            text::count(cookie_days as usize, "day")
+        ),
+        _ => format!(
+            "http (login cookie without Secure, kept {})",
+            text::count(cookie_days as usize, "day")
+        ),
+    };
+    let hosts = if config.http.allowed_hosts.is_empty() {
+        "none besides this machine's names and the listen address ([http] allowed_hosts)"
+            .to_string()
+    } else {
+        format!("{} (any port)", config.http.allowed_hosts.join(", "))
+    };
+    vec![
+        ("access", access),
+        ("scheme", scheme),
+        ("allowed hosts", hosts),
+    ]
+}
+
 /// How many blobs `models/blobs/<2 hex>/` holds (0 when it cannot be read).
 fn model_blobs(blobs: &Path) -> usize {
     let Ok(prefixes) = std::fs::read_dir(blobs) else {
@@ -253,5 +363,121 @@ mod tests {
             lines.iter().all(|l| l.chars().count() <= WIDTH),
             "{warning}"
         );
+    }
+
+    fn config(text: &str) -> ServerConfig {
+        ServerConfig::parse(text, Path::new("server.toml")).unwrap()
+    }
+
+    fn assert_fits(text: &str) {
+        assert!(text.lines().all(|l| l.chars().count() <= WIDTH), "{text}");
+    }
+
+    #[test]
+    fn the_banner_says_when_access_control_is_off() {
+        for exposure in [Exposure::Loopback, Exposure::Network] {
+            let on = banner_for(exposure, true);
+            assert_eq!(on, banner(exposure));
+            assert!(on.contains("Users and grants in access.toml"), "{on}");
+            let off = banner_for(exposure, false);
+            assert_fits(&off);
+            assert_eq!(off.lines().next().unwrap().chars().count(), WIDTH);
+            assert!(!off.contains("Users and grants"), "{off}");
+            assert!(off.contains("ACCESS CONTROL OFF"), "{off}");
+        }
+        let loopback = banner_for(Exposure::Loopback, false);
+        assert!(loopback.contains("every request is an admin"), "{loopback}");
+        assert!(loopback.contains("Loopback only"), "{loopback}");
+        let network = banner_for(Exposure::Network, false);
+        assert!(network.contains("REACHABLE FROM THE NETWORK"), "{network}");
+        assert!(network.contains("ANYONE IS AN ADMIN"), "{network}");
+        assert!(!network.contains("Loopback only"), "{network}");
+    }
+
+    #[test]
+    fn warnings_per_mode_and_exposure() {
+        let address = "0.0.0.0:8484";
+        // Access on, on the loopback: no warning, whatever the scheme.
+        for text in ["", "[http]\npublic_scheme = \"https\""] {
+            assert!(warnings(Exposure::Loopback, address, &config(text)).is_empty());
+        }
+        // Access on, reachable over plain HTTP: tokens travel in clear text.
+        let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+        let http = warnings(Exposure::Network, address, &config("")).join("\n");
+        assert!(http.starts_with("warning: graphersal-server listens on 0.0.0.0:8484"));
+        assert!(
+            flat(&http).contains("tokens travel in clear text"),
+            "{http}"
+        );
+        assert!(flat(&http).contains("public_scheme = \"https\""), "{http}");
+        assert_fits(&http);
+        // Behind a TLS proxy: no clear-text claim, but only the proxy should reach it.
+        let https = warnings(
+            Exposure::Network,
+            address,
+            &config("[http]\npublic_scheme = \"https\""),
+        )
+        .join("\n");
+        assert!(!https.contains("tokens travel in clear text"), "{https}");
+        assert!(
+            https.contains("let only that proxy reach this address"),
+            "{https}"
+        );
+        assert_fits(&https);
+        // Access off: one loud warning, louder off the loopback.
+        let off = config("[access]\nenabled = false");
+        let local = warnings(Exposure::Loopback, address, &off);
+        assert_eq!(local.len(), 1);
+        assert!(
+            local[0].starts_with("warning: access control is off"),
+            "{local:?}"
+        );
+        assert!(flat(&local[0]).contains("every program and user on this machine"));
+        assert_fits(&local[0]);
+        let remote = warnings(Exposure::Network, address, &off);
+        assert_eq!(remote.len(), 1);
+        assert!(
+            remote[0].starts_with("warning: ACCESS CONTROL IS OFF"),
+            "{remote:?}"
+        );
+        assert!(flat(&remote[0]).contains("ANYONE WHO REACHES IT IS AN ADMIN"));
+        assert!(remote[0].contains("0.0.0.0:8484"));
+        assert_fits(&remote[0]);
+    }
+
+    #[test]
+    fn mode_rows_name_access_scheme_cookie_and_hosts() {
+        let rows = mode_rows(&config(""));
+        assert_eq!(
+            rows[0],
+            (
+                "access",
+                "on: user tokens and browser logins (access.toml)".to_string()
+            )
+        );
+        assert_eq!(rows[1].0, "scheme");
+        assert!(
+            rows[1]
+                .1
+                .starts_with("http (login cookie without Secure, kept 400 days"),
+            "{rows:?}"
+        );
+        assert_eq!(rows[2].0, "allowed hosts");
+        assert!(rows[2].1.starts_with("none"), "{rows:?}");
+        let rows = mode_rows(&config(
+            "[access]\nenabled = false\n[sessions]\nlifetime_secs = 86400\n\
+             [http]\npublic_scheme = \"https\"\nallowed_hosts = [\"db.example.com\", \"proxy\"]",
+        ));
+        assert!(
+            rows[0].1.starts_with("OFF: every request is an admin"),
+            "{rows:?}"
+        );
+        assert!(
+            rows[1]
+                .1
+                .starts_with("https, TLS ended by a proxy (login cookie Secure, kept 1 day"),
+            "{rows:?}"
+        );
+        assert_eq!(rows[2].1, "db.example.com, proxy (any port)");
     }
 }
