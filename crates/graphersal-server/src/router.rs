@@ -26,7 +26,8 @@
 //! - `GET /api/databases`: the databases and aliases the principal may reach, with its level
 //!   and the playground path of each ([`crate::user_api`]; anonymous: the ones its anonymous
 //!   grants open, often none), the web UI's "my databases" page.
-//! - `/api/admin/...` (the admin API, Runs included; [`crate::admin_api`]): admins only;
+//! - `/api/admin/...` (the admin API, Runs included; [`crate::admin_api`]; the server itself,
+//!   `server` and `shutdown`: [`crate::control`]): admins only;
 //!   anonymous gets `401`, a logged-in principal without the admin role `404` as if the API did
 //!   not exist. The admin core records its events with the principal as the actor.
 //! - `/mcp`: the server-wide MCP endpoint over the databases the principal may see
@@ -93,6 +94,10 @@ pub(crate) struct Router {
     ui: Ui,
     /// The modes of `server.toml` the router answers in (access control, cookies).
     modes: Modes,
+    /// The server's own facts for `GET /api/admin/server` ([`crate::control`]).
+    facts: Option<crate::control::ServerFacts>,
+    /// What `POST /api/admin/shutdown` calls ([`crate::control`]).
+    stop_hook: Option<crate::serve::StopHook>,
 }
 
 /// The default `Max-Age` of the login cookie without `[sessions] lifetime_secs`: 400 days, the
@@ -231,7 +236,20 @@ impl Router {
             access: OnceLock::new(),
             ui: Ui::embedded(),
             modes: Modes::default(),
+            facts: None,
+            stop_hook: None,
         }
+    }
+
+    /// The router with the server's facts and its stop hook ([`crate::control`]).
+    pub(crate) fn with_control(
+        mut self,
+        facts: crate::control::ServerFacts,
+        stop_hook: Option<crate::serve::StopHook>,
+    ) -> Self {
+        self.facts = Some(facts);
+        self.stop_hook = stop_hook;
+        self
     }
 
     /// The router answering in `modes` (`server.toml`'s, read at start).
@@ -364,6 +382,16 @@ impl Router {
         } else if let Some(endpoint) = path.strip_prefix("/api/admin/") {
             if !principal.is_admin() {
                 return Answer::Response(admin_refused(&principal, path));
+            }
+            if let Some(answer) = crate::control::route(
+                self.facts.as_ref(),
+                self.stop_hook.as_ref(),
+                (loader, access),
+                &principal,
+                &method,
+                endpoint,
+            ) {
+                return Answer::Response(answer);
             }
             let admin = crate::ops::Admin::online(loader.clone())
                 .with_audit(access.audit_as(&principal))

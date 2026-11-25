@@ -5,7 +5,8 @@
 # 127.0.0.1:0 (the URL read from server.run) and walks through the admin API, the database
 # pages (with a promotion to a base and a layer over it), users and a read-only user, the run
 # administration, the import inbox, a model upload (.tar, .tar.gz), the MCP endpoint, a clean
-# stop and a restart that keeps the browser and MCP sessions.
+# stop, a restart that keeps the browser and MCP sessions, and start/status/stop in the
+# background.
 # Prints one `ok <step>` line per step, or `FAIL <step>: <why>` and exits 1 at the first
 # failure. The server is killed on any exit.
 #
@@ -776,6 +777,27 @@ CODE=$?
 SERVER_PID=""
 [ "$CODE" = 0 ] || fail "exit code $CODE"
 if grep -q "panicked" "$WORK/server2.log"; then fail "the log shows a panic"; fi
+ok
+
+STEP="start, status, stop in the background"
+LOG="$DIR/logs/server.log"
+"$BIN" start --dir "$DIR" --listen 127.0.0.1:0 >"$WORK/start.out" 2>"$WORK/start.err" ||
+  fail "start: $(cat "$WORK/start.err")"
+SERVER_PID=$(sed -n 's/^pid = //p' "$DIR/server.run")
+[ -n "$SERVER_PID" ] || fail "start wrote no pid into server.run"
+grep -q '^Graphersal server: http://127.0.0.1:' "$WORK/start.out" ||
+  fail "start printed no address line: $(cat "$WORK/start.out")"
+grep -q 'Started in the background' "$WORK/start.err" || fail "no start note: $(cat "$WORK/start.err")"
+"$BIN" status --dir "$DIR" >"$WORK/status.out" 2>&1 || fail "status of a running server: $(cat "$WORK/status.out")"
+grep -q 'running' "$WORK/status.out" || fail "status: $(cat "$WORK/status.out")"
+"$BIN" stop --dir "$DIR" >"$WORK/stop.out" 2>&1 || fail "stop: $(cat "$WORK/stop.out")"
+grep -q '^stopped: ' "$WORK/stop.out" || fail "stop: $(cat "$WORK/stop.out")"
+kill -0 "$SERVER_PID" 2>/dev/null && fail "the server still runs after stop"
+SERVER_PID=""
+CODE=0
+"$BIN" status --dir "$DIR" >"$WORK/status.out" 2>&1 || CODE=$?
+[ "$CODE" = 3 ] || fail "status of a stopped server: exit code $CODE"
+if grep -q "panicked" "$LOG"; then fail "the log shows a panic"; fi
 ok
 
 echo "smoke: all steps passed"

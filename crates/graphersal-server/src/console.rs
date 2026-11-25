@@ -52,14 +52,15 @@ use crate::run_file::RunInfo;
 mod first_admin;
 mod help;
 mod render;
+mod service;
 mod start;
 
 pub use first_admin::first_admin_text;
-#[cfg(unix)]
 pub(crate) use render::shell_word;
 pub use render::{
     command_error_text, error_text, failed, init_text, render, render_outcome, usage_error_text,
 };
+pub use service::{started_note, started_output, status_json, status_text, stop_text};
 pub use start::{address_line, start_block, stopped_text, stopping_text};
 
 /// How long the console waits for a load to end (`db load` without `--no-wait`).
@@ -695,7 +696,7 @@ fn part_path(path: &Path) -> PathBuf {
 
 /// The run file of the server holding `dir` (address, URL) (waits a moment for a starting
 /// server).
-fn server_info(dir: &ServerDir) -> Result<RunInfo, ServerError> {
+pub(crate) fn server_info(dir: &ServerDir) -> Result<RunInfo, ServerError> {
     let deadline = Instant::now() + START_WAIT;
     loop {
         if let Some(info) = RunInfo::read(dir)? {
@@ -714,7 +715,7 @@ fn server_info(dir: &ServerDir) -> Result<RunInfo, ServerError> {
 }
 
 /// The operator token of the server's run, the console's credentials.
-fn bearer(server: &RunInfo) -> Option<&str> {
+pub(crate) fn bearer(server: &RunInfo) -> Option<&str> {
     server
         .operator_token
         .as_ref()
@@ -758,7 +759,7 @@ fn wait_for_load(server: &RunInfo, name: &str, answer: Value) -> Result<Value, S
 }
 
 /// `Ok(body)` for a success, [`ServerError::Remote`] for an error status.
-fn answer_of(status: u16, json: Value) -> Result<Value, ServerError> {
+pub(crate) fn answer_of(status: u16, json: Value) -> Result<Value, ServerError> {
     if status < 400 {
         return Ok(json);
     }

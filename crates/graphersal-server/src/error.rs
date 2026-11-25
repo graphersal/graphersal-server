@@ -228,6 +228,19 @@ pub enum ServerError {
         /// The commands fixing them: (what it does, the command).
         fixes: Vec<(String, String)>,
     },
+    /// `graphersal-server start` or `stop` could not do its part: the server is already
+    /// running, exited before it was ready, did not get ready or stop in time
+    /// ([`crate::daemon`]).
+    #[non_exhaustive]
+    Service {
+        /// What went wrong, as a sentence.
+        message: String,
+        /// What to do about it, if anything.
+        help: Option<String>,
+        /// The last lines the server wrote into its log since this command started it (empty
+        /// when there are none).
+        log_tail: Vec<String>,
+    },
     /// The running server refused an admin request (the console's admin client): its answer.
     #[non_exhaustive]
     Remote {
@@ -379,6 +392,7 @@ impl fmt::Display for ServerError {
                 dir.display(),
                 problems.join("; ")
             ),
+            ServerError::Service { message, .. } => f.write_str(message),
             ServerError::Remote { message, .. } => f.write_str(message),
         }
     }

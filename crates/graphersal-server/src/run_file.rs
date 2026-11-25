@@ -37,6 +37,10 @@ pub struct RunInfo {
     /// server has one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operator_token: Option<Secret>,
+    /// When the server started, in Unix milliseconds (`graphersal-server status` shows the
+    /// uptime even when the server does not answer); `None` in a run file of an older server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at_ms: Option<u64>,
 }
 
 impl RunInfo {
@@ -48,12 +52,19 @@ impl RunInfo {
             pid: std::process::id(),
             version: env!("CARGO_PKG_VERSION").to_string(),
             operator_token: None,
+            started_at_ms: None,
         }
     }
 
     /// The run information with the operator token `token`.
     pub fn with_operator_token(mut self, token: Secret) -> Self {
         self.operator_token = Some(token);
+        self
+    }
+
+    /// The run information with the start time `ms` (Unix milliseconds).
+    pub fn with_started_at_ms(mut self, ms: u64) -> Self {
+        self.started_at_ms = Some(ms);
         self
     }
 

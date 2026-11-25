@@ -210,6 +210,10 @@ pub enum AuditEvent {
         /// The principal's id.
         principal: String,
     },
+    /// The server was asked to stop through its admin API (`graphersal-server stop`,
+    /// `POST /api/admin/shutdown`).
+    #[non_exhaustive]
+    ShutdownRequested {},
 }
 
 impl AuditEvent {
@@ -314,6 +318,7 @@ impl fmt::Display for AuditEvent {
             AuditEvent::LoginSucceeded { principal } => write!(f, "login of '{principal}'"),
             AuditEvent::LoginFailed { reason } => write!(f, "login refused: {reason}"),
             AuditEvent::LoggedOut { principal } => write!(f, "logout of '{principal}'"),
+            AuditEvent::ShutdownRequested {} => write!(f, "server shutdown requested"),
         }
     }
 }

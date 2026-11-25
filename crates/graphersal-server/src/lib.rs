@@ -40,6 +40,8 @@ pub mod audit;
 mod client;
 pub mod config;
 pub mod console;
+mod control;
+pub mod daemon;
 pub mod database;
 pub mod error;
 pub mod layout;
@@ -87,4 +89,4 @@ pub use ops::{
 };
 pub use registry::{DatabaseEntry, DbState, Registry};
 pub use run_file::RunInfo;
-pub use serve::{ConnectionLimits, Running, ServeOptions};
+pub use serve::{ConnectionLimits, Running, ServeOptions, StopHook};

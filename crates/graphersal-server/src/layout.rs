@@ -55,6 +55,12 @@ const SUBDIRS: &[&[&str]] = &[
 /// The import inbox's directory name (`imports/`).
 pub const IMPORTS_DIR: &str = "imports";
 
+/// The log directory's name (`logs/`: `graphersal-server start`, created on its first use).
+pub const LOGS_DIR: &str = "logs";
+
+/// The log file's name in `logs/` (`server.log`).
+pub const LOG_FILE: &str = "server.log";
+
 /// A server directory (its root path; nothing is checked until it is opened).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerDir {
@@ -262,6 +268,17 @@ impl ServerDir {
     /// `sessions/` (the browser and MCP sessions: [`crate::sessions`]).
     pub fn sessions(&self) -> PathBuf {
         self.root.join(crate::sessions::SESSIONS_DIR)
+    }
+
+    /// The log directory of `graphersal-server start`, `logs/` (owner only).
+    pub fn logs(&self) -> PathBuf {
+        self.root.join(LOGS_DIR)
+    }
+
+    /// The log of a server `graphersal-server start` runs in the background,
+    /// `logs/server.log` (appended to; owner only).
+    pub fn log_path(&self) -> PathBuf {
+        self.logs().join(LOG_FILE)
     }
 
     /// `imports/` (the import inbox: [`crate::ops::Admin::inbox`]).

@@ -38,3 +38,41 @@ private ([`access.md`](access.md#the-security-model)):
   ADDRESS`, else the directory's `server.run`) and touches no file of the directory, so the
   permission checks do not apply; the audit names the token's user. Without a running server
   it is refused. `--server` without a token is a usage error.
+
+## start, stop and status
+
+A server in the background without hunting for its pid:
+
+- **`graphersal-server start --dir DIR [serve options] [--timeout SECS]`** spawns `serve` as a
+  detached process (Unix: a new session, no controlling terminal; Windows: `DETACHED_PROCESS |
+  CREATE_NEW_PROCESS_GROUP`, no fork), stdin closed, stdout and stderr appended to
+  `DIR/logs/server.log` (new: `logs/` mode `0700`, the log `0600`). It waits until the server
+  answers `GET /readyz` (at most SECS, default 60), then prints the usual start block on
+  stderr and the address line on stdout, and exits 0. A directory without `access.toml` gets
+  its first admin from `start` itself, so the token is printed once on the terminal and never
+  written into the log. Refused while a server runs on DIR (naming its pid and URL); a server
+  that exits before it is ready, or is not ready in time, is exit code 1 with the last lines of
+  its log (one still starting after the timeout keeps running, and the error says so).
+- **`graphersal-server stop --dir DIR [--timeout SECS]`** asks the running server to stop
+  through the new operator-only route `POST /api/admin/shutdown` (with the operator token of
+  `server.run`); the server answers `202` and stops exactly as on Ctrl+C. On Unix, when the
+  API cannot be reached, it falls back to SIGTERM (the same clean stop). It waits until
+  `server.lock` is released (default 60 s; after that the error names `kill`/`taskkill`) and
+  prints `stopped`. Without a server it prints `not running` and exits **0** (as LSB init
+  scripts do for stopping a stopped service); a stale `server.run` a crashed server left is
+  removed and named.
+- **`graphersal-server status --dir DIR [--json]`**: running or stopped, the pid, address,
+  version, uptime, databases (count, loaded ones by name), memory (the ceiling; the live heap
+  is not measured by this build) and the log; a stale `server.run` is reported, not removed.
+  Exit code **0** running, **3** stopped (the LSB convention).
+- `stop` and `status` also take `--token TOKEN [--server ADDRESS]` like the other console
+  commands.
+- New admin routes: `GET /api/admin/server` (the server's facts, any admin) and `POST
+  /api/admin/shutdown` (the operator or an admin user; `403` for `everyone` with access
+  control off; audited). `server.run` gains `started_at_ms`.
+- The library: `ServeOptions::with_stop_hook(StopHook)` (what the shutdown route calls; `serve`
+  routes it into its Ctrl+C channel), `graphersal_server::daemon` (`start`, `stop`, `status`
+  and their `--token` forms), `ServerError::Service`, `AuditEvent::ShutdownRequested`.
+- The `serve` start block's `stop` row names `graphersal-server stop --dir DIR`.
+- Under systemd or launchd run `serve` in the foreground: examples in
+  [`server-dir.md`](server-dir.md#running-as-a-service).
