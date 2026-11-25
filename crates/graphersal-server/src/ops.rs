@@ -178,6 +178,10 @@ pub struct Admin {
     loader: Option<Arc<Loader>>,
     /// Where the administrative events go ([`crate::audit`]), as which actor.
     audit: Audit,
+    /// The server's live access state (online; offline the user operations open the file).
+    access: Option<Arc<crate::access::Access>>,
+    /// Who acts: the actor of the user and grant changes (default: the operator).
+    principal: crate::access::Principal,
     #[cfg(test)]
     pub(crate) fail: Option<FailPoint>,
     /// Test hook: the shared models' hard links fail (the copy fallback).
@@ -192,6 +196,8 @@ impl Admin {
             registry: loader.registry().clone(),
             loader: Some(loader),
             audit: Audit::default(),
+            access: None,
+            principal: crate::access::Principal::operator(),
             #[cfg(test)]
             fail: None,
             #[cfg(test)]
@@ -206,6 +212,8 @@ impl Admin {
             registry,
             loader: None,
             audit: Audit::default(),
+            access: None,
+            principal: crate::access::Principal::operator(),
             #[cfg(test)]
             fail: None,
             #[cfg(test)]
@@ -668,6 +676,11 @@ pub use models::{ModelAddSpec, ModelAdded, ModelRemoved};
 #[path = "ops_runs.rs"]
 mod runs;
 pub use runs::DatabaseRun;
+
+#[path = "ops_users.rs"]
+mod users;
+pub use users::SessionsEnded;
+pub(crate) use users::parse_subject;
 
 #[cfg(test)]
 #[path = "ops_tests.rs"]

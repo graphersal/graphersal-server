@@ -139,6 +139,21 @@ Usage:
             name them), or the repository of a model the shared models hold. Every needs-model database whose model is then there
             gets it and can be loaded.
         models remove REPO       refused while a database uses it
+  graphersal-server user COMMAND ... --dir DIR [--json]
+      The users and grants of DIR/access.toml. Through a running server like db (its
+      sessions of a changed token end at once: browser and MCP).
+        user list                every user: roles, its token's last 4 characters, grants
+        user add NAME [--admin]  a new user; its token is printed ONCE (only a hash is kept)
+        user token NAME [--revoke]
+            A new token for NAME, printed once (the old one stops working); --revoke takes
+            the token away without a new one.
+        user remove NAME         the user and its grants
+        user admin NAME on|off   give or take the admin role (every database, the admin API)
+        user grant SUBJECT DATABASE read|write
+            SUBJECT: a user name, or anonymous (everyone, also without a token); DATABASE: a
+            database's name or '*' (every database).
+        user revoke SUBJECT DATABASE
+      The last admin (admin role and a token) cannot be removed, demoted or revoked.
   graphersal-server --help | --version
 
 stdout carries only results, stderr diagnostics and the log (level: RUST_LOG, default
@@ -161,6 +176,7 @@ fn main() -> ExitCode {
         Some("db") => db_command(&args[1..]),
         Some("import") => import_command(&args[1..]),
         Some("models") => models_command(&args[1..]),
+        Some("user") => user_command(&args[1..]),
         Some(other) => usage_error(&format!("unknown command {other:?}")),
     }
 }
@@ -549,6 +565,83 @@ fn models_command(args: &[String]) -> ExitCode {
                 "unknown command or wrong arguments: models {} (list, add SOURCE [--repo R] \
                  [--license L], remove REPO)",
                 words.join(" ")
+            ));
+        }
+    };
+    let dir = match ServerDir::open(&dir) {
+        Ok(dir) => dir,
+        Err(error) => return failure(&error),
+    };
+    print_outcome(&dir, &command, json)
+}
+
+/// `user COMMAND ... --dir DIR [--json]`.
+fn user_command(args: &[String]) -> ExitCode {
+    let mut positional: Vec<&str> = Vec::new();
+    let mut dir: Option<String> = None;
+    let (mut json, mut admin, mut revoke) = (false, false, false);
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        if !arg.starts_with("--") {
+            positional.push(arg);
+            continue;
+        }
+        let (flag, inline) = match arg.split_once('=') {
+            Some((flag, value)) => (flag, Some(value.to_string())),
+            None => (arg.as_str(), None),
+        };
+        match flag {
+            "--dir" => {
+                let Some(value) = inline.or_else(|| rest.next().cloned()) else {
+                    return usage_error("user: --dir needs a value");
+                };
+                if dir.replace(value).is_some() {
+                    return usage_error("user: --dir given twice");
+                }
+            }
+            "--json" if inline.is_none() => json = true,
+            "--admin" if inline.is_none() => admin = true,
+            "--revoke" if inline.is_none() => revoke = true,
+            _ => return usage_error(&format!("user: unknown argument {arg:?}")),
+        }
+    }
+    let Some(dir) = dir else {
+        return usage_error("user needs --dir DIR");
+    };
+    let owned = |s: &str| s.to_string();
+    let command = match positional.as_slice() {
+        ["list"] if !admin && !revoke => DbCommand::UserList,
+        ["add", name] if !revoke => DbCommand::UserAdd {
+            name: owned(name),
+            admin,
+        },
+        ["token", name] if !admin => DbCommand::UserToken {
+            name: owned(name),
+            revoke,
+        },
+        ["remove", name] if !admin && !revoke => DbCommand::UserRemove { name: owned(name) },
+        ["admin", name, on @ ("on" | "off")] if !admin && !revoke => DbCommand::UserAdmin {
+            name: owned(name),
+            on: *on == "on",
+        },
+        ["grant", subject, database, level @ ("read" | "write")] if !admin && !revoke => {
+            DbCommand::UserGrant {
+                subject: owned(subject),
+                database: owned(database),
+                level: owned(level),
+            }
+        }
+        ["revoke", subject, database] if !admin && !revoke => DbCommand::UserRevoke {
+            subject: owned(subject),
+            database: owned(database),
+        },
+        [] => return usage_error("no user command given"),
+        _ => {
+            return usage_error(&format!(
+                "unknown command or wrong arguments: user {} (list, add NAME [--admin], token \
+                 NAME [--revoke], remove NAME, admin NAME on|off, grant SUBJECT DATABASE \
+                 read|write, revoke SUBJECT DATABASE)",
+                positional.join(" ")
             ));
         }
     };

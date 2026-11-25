@@ -30,6 +30,7 @@
 //! | PUT | `aliases/<alias>` | `{"target"}` | `200 {"alias", "target"}` |
 //! | DELETE | `aliases/<alias>` | | `200 {"alias", "removed": true}` |
 //! | POST | `aliases/<alias>/rename` | `{"name"}` | `200 {"alias", "renamedFrom", "target", "mcpSessionsMoved"}` |
+//! | GET, POST, PUT, DELETE | `users...`, `grants...` | | the users and grants of `access.toml` (the `admin_api_users.rs` table) |
 //!
 //! The actions take real database names (not aliases). Errors are `{"error", "help"?}` with
 //! `400` (invalid name, body or schema), `404` (no such database, alias or endpoint), `405`,
@@ -137,6 +138,11 @@ pub(crate) fn route(
     };
     let read = matches!(method, Method::Get | Method::Head);
     let segments: Vec<&str> = endpoint.split('/').collect();
+    if matches!(segments.first(), Some(&("users" | "grants")))
+        && let Some(answer) = users::route(admin, method, &segments, request)
+    {
+        return answer;
+    }
     let answer = match (method, segments.as_slice()) {
         (_, ["databases"]) if read => Ok(Response::json(200, &list(admin))),
         (Method::Post, ["databases"]) => {
@@ -794,6 +800,7 @@ pub(crate) fn status_of(err: &ServerError) -> u16 {
         | ServerError::Refused { .. }
         | ServerError::DatabaseFailed { .. }
         | ServerError::ModelUnavailable { .. }
+        | ServerError::LastAdmin { .. }
         | ServerError::Locked { .. } => 409,
         ServerError::Remote { status, .. } => *status,
         _ => 500,
@@ -1498,6 +1505,9 @@ pub(crate) fn entry_json(entry: &DatabaseEntry, alias: Option<&str>) -> Value {
     }
     Value::Object(out)
 }
+
+#[path = "admin_api_users.rs"]
+mod users;
 
 #[cfg(test)]
 mod tests {

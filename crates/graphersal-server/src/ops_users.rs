@@ -1,0 +1,246 @@
+//! The users and grants of `access.toml` ([`Admin::users`], [`Admin::user_add`], ...): part of
+//! [`Admin`] (module docs of [`crate::ops`]), behind the admin API's `users` and `grants`
+//! routes and the console's `user` commands.
+//!
+//! - Online (a running server) the changes go through the server's live [`Access`]: the file
+//!   is rewritten, the browser sessions of a changed token end at once, and the MCP sessions
+//!   of that user end too (the endpoint's `forget_sessions_of`).
+//! - Offline (the console holding the server lock) the same [`Access`] code runs over the
+//!   directory's `access.toml` (no sessions exist then). A directory without `access.toml` is
+//!   refused: `init` or `serve` makes the first admin, whose token they print.
+//!
+//! The actor recorded with each change is the admin's principal ([`Admin::with_principal`];
+//! default: the operator, which is also what the console on the directory acts as: it holds the
+//! server lock, the operator's power). The last admin (the `admin` role and a token) cannot be
+//! removed, demoted or have its token revoked ([`ServerError::LastAdmin`]).
+
+use std::sync::Arc;
+
+use super::Admin;
+use crate::access::{ADMIN_ROLE, Access, AccessFile, Grant, Level, Principal, Secret, Subject};
+use crate::error::ServerError;
+use crate::names::{fold, validate_name};
+
+/// What a token change ended besides the token itself.
+///
+/// `#[non_exhaustive]`: further counts may be added.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub struct SessionsEnded {
+    /// The user's MCP sessions ended (always `0` offline: no server, no session).
+    pub mcp: usize,
+}
+
+impl Admin {
+    /// The admin acting with the live access state `access` of its server, as `principal` (the
+    /// actor of the user and grant changes).
+    pub fn with_access(mut self, access: Arc<Access>, principal: Principal) -> Self {
+        self.access = Some(access);
+        self.principal = principal;
+        self
+    }
+
+    /// The admin acting as `principal` (the actor of the user and grant changes; default: the
+    /// operator).
+    pub fn with_principal(mut self, principal: Principal) -> Self {
+        self.principal = principal;
+        self
+    }
+
+    /// The access state the user operations work on: the server's, or offline one over the
+    /// directory's `access.toml`.
+    fn access_state(&self) -> Result<Arc<Access>, ServerError> {
+        if let Some(access) = &self.access {
+            return Ok(access.clone());
+        }
+        let dir = self.registry().dir();
+        if self.is_online() {
+            return Err(ServerError::Refused {
+                name: "access.toml".to_string(),
+                message: "this admin has no access state (a server bug)".to_string(),
+            });
+        }
+        if AccessFile::read(dir)?.is_none() {
+            return Err(ServerError::Refused {
+                name: dir.access_path().display().to_string(),
+                message: "the directory has no access.toml yet; `init` or `serve` makes the \
+                          first admin and prints its token"
+                    .to_string(),
+            });
+        }
+        let (access, _) = Access::open(dir, None, self.audit().clone())?;
+        Ok(Arc::new(access))
+    }
+
+    /// The users and grants as they are now.
+    pub fn users(&self) -> Result<AccessFile, ServerError> {
+        Ok(self.access_state()?.file())
+    }
+
+    /// Adds the user `name` (with the `admin` role when `admin`): its token, to show once.
+    pub fn user_add(&self, name: &str, admin: bool) -> Result<Secret, ServerError> {
+        let roles = if admin {
+            vec![ADMIN_ROLE.to_string()]
+        } else {
+            Vec::new()
+        };
+        self.access_state()?.add_user(&self.principal, name, roles)
+    }
+
+    /// Gives the user `name` a new token (to show once); its browser and MCP sessions end.
+    pub fn user_token(&self, name: &str) -> Result<(Secret, SessionsEnded), ServerError> {
+        let token = self.access_state()?.issue_token(&self.principal, name)?;
+        Ok((token, self.end_sessions(name)))
+    }
+
+    /// Takes the user `name`'s token away; its browser and MCP sessions end.
+    pub fn user_revoke_token(&self, name: &str) -> Result<SessionsEnded, ServerError> {
+        self.access_state()?.revoke_token(&self.principal, name)?;
+        Ok(self.end_sessions(name))
+    }
+
+    /// Removes the user `name` with its grants; its browser and MCP sessions end. Answers the
+    /// number of grants removed with it.
+    pub fn user_remove(&self, name: &str) -> Result<(usize, SessionsEnded), ServerError> {
+        let access = self.access_state()?;
+        let subject = Subject::User(fold(name));
+        let grants = access
+            .file()
+            .grants()
+            .iter()
+            .filter(|grant| grant.subject == subject)
+            .count();
+        access.remove_user(&self.principal, name)?;
+        Ok((grants, self.end_sessions(name)))
+    }
+
+    /// Sets the user `name`'s roles.
+    pub fn user_set_roles(&self, name: &str, roles: Vec<String>) -> Result<(), ServerError> {
+        let mut clean: Vec<String> = Vec::new();
+        for role in roles {
+            let role = role.trim().to_string();
+            if role.is_empty() || role.contains(char::is_whitespace) {
+                return Err(ServerError::InvalidInput {
+                    name: name.to_string(),
+                    message: format!("role {role:?}: a role is one word"),
+                });
+            }
+            if !clean.contains(&role) {
+                clean.push(role);
+            }
+        }
+        self.access_state()?.set_roles(&self.principal, name, clean)
+    }
+
+    /// Gives the user `name` the `admin` role (`on`) or takes it away, keeping its other roles.
+    pub fn user_set_admin(&self, name: &str, on: bool) -> Result<(), ServerError> {
+        let access = self.access_state()?;
+        let file = access.file();
+        let user = file
+            .user(name)
+            .ok_or_else(|| ServerError::UserNotFound { name: fold(name) })?;
+        let mut roles: Vec<String> = user
+            .roles
+            .iter()
+            .filter(|role| *role != ADMIN_ROLE)
+            .cloned()
+            .collect();
+        if on {
+            roles.insert(0, ADMIN_ROLE.to_string());
+        }
+        access.set_roles(&self.principal, name, roles)
+    }
+
+    /// Sets the grant of `subject` (`user:<name>`, a bare user name, `anonymous`, `role:<r>`,
+    /// `group:<g>`) on `database` (a database's real name or `*`) to `level` (`read`, `write`).
+    /// A user subject must name a user; the database must exist (an alias is refused with its
+    /// target: a grant follows the database, not a name of it).
+    pub fn grant_set(
+        &self,
+        subject: &str,
+        database: &str,
+        level: &str,
+    ) -> Result<Grant, ServerError> {
+        let subject = parse_subject(subject)?;
+        let level = Level::parse_grant(level).ok_or_else(|| ServerError::InvalidInput {
+            name: level.to_string(),
+            message: "a grant's level is \"read\" or \"write\" (revoke it to give nothing)"
+                .to_string(),
+        })?;
+        if database != "*" {
+            self.grant_database(database)?;
+        }
+        let grant = Grant::new(subject.clone(), database, level).map_err(|message| {
+            ServerError::InvalidInput {
+                name: database.to_string(),
+                message,
+            }
+        })?;
+        let access = self.access_state()?;
+        if let Subject::User(name) = &subject
+            && access.file().user(name).is_none()
+        {
+            return Err(ServerError::UserNotFound { name: name.clone() });
+        }
+        access.grant(&self.principal, grant.clone())?;
+        Ok(grant)
+    }
+
+    /// Removes the grant of `subject` (as [`Admin::grant_set`] takes it) on `database` (a name
+    /// or `*`): whether there was one.
+    pub fn grant_revoke(&self, subject: &str, database: &str) -> Result<bool, ServerError> {
+        let subject = parse_subject(subject)?;
+        if database != "*" {
+            validate_name(&fold(database)).map_err(|_| ServerError::InvalidInput {
+                name: database.to_string(),
+                message: "a grant names a database or \"*\"".to_string(),
+            })?;
+        }
+        self.access_state()?
+            .revoke(&self.principal, &subject, database)
+    }
+
+    /// Checks that `database` is a database's real name (not an alias, not unknown).
+    fn grant_database(&self, database: &str) -> Result<(), ServerError> {
+        let registry = self.registry();
+        let key = fold(database);
+        if let Some(target) = registry.aliases().get(&key) {
+            return Err(ServerError::Refused {
+                name: key,
+                message: format!(
+                    "an alias of '{target}': grant on the database itself (a grant follows the \
+                     database, not one of its names)"
+                ),
+            });
+        }
+        registry.get(&key).map(|_| ())
+    }
+
+    /// Ends the MCP sessions of the user `name` (online; offline there are none).
+    fn end_sessions(&self, name: &str) -> SessionsEnded {
+        let identity = format!("user:{}", fold(name));
+        let mcp = self
+            .loader
+            .as_ref()
+            .and_then(|loader| loader.mcp())
+            .map(|mcp| mcp.forget_sessions_of(Some(&identity)))
+            .unwrap_or(0);
+        SessionsEnded { mcp }
+    }
+}
+
+/// A grant subject as the API and the console take it: `anonymous`, `user:<name>`,
+/// `role:<r>`, `group:<g>`, or a bare user name.
+pub(crate) fn parse_subject(text: &str) -> Result<Subject, ServerError> {
+    let text = text.trim();
+    let invalid = |message: String| ServerError::InvalidInput {
+        name: text.to_string(),
+        message,
+    };
+    if text.contains(':') || text == "anonymous" {
+        return Subject::parse(text).map_err(invalid);
+    }
+    let name = fold(text);
+    validate_name(&name).map_err(|err| invalid(format!("not a user name or subject: {err}")))?;
+    Ok(Subject::User(name))
+}

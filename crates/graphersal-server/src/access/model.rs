@@ -37,6 +37,10 @@ use crate::registry::DatabaseEntry;
 /// The name of the first admin a server directory gets.
 pub const FIRST_ADMIN: &str = "admin";
 
+/// Names no user may take: `anonymous` (the grant subject of everyone) and `operator` (the
+/// console's principal), so a grant or audit line never means two things.
+pub const RESERVED_USER_NAMES: [&str; 2] = ["anonymous", "operator"];
+
 /// A principal's access level on one database, ordered `None < Read < Write`.
 ///
 /// `#[non_exhaustive]`: a finer split may come later.
@@ -420,13 +424,30 @@ impl AccessFile {
         )
     }
 
+    /// How many users can act as an admin: the `admin` role and a token.
+    pub fn usable_admins(&self) -> usize {
+        self.users
+            .values()
+            .filter(|user| {
+                user.token.is_some() && user.roles.iter().any(|r| r == super::ADMIN_ROLE)
+            })
+            .count()
+    }
+
     /// Adds the user `name` with `roles` and a new token (returned: show it once).
     ///
-    /// `Err`: an invalid name ([`ServerError::InvalidName`]), a user of that name
-    /// ([`ServerError::Refused`]), the OS's random generator failing.
+    /// `Err`: an invalid name ([`ServerError::InvalidName`]), a reserved name
+    /// ([`RESERVED_USER_NAMES`]) or a user of that name ([`ServerError::Refused`]), the OS's
+    /// random generator failing.
     pub fn add_user(&mut self, name: &str, roles: Vec<String>) -> Result<Secret, ServerError> {
         let key = fold(name);
         validate_name(&key)?;
+        if RESERVED_USER_NAMES.contains(&key.as_str()) {
+            return Err(ServerError::Refused {
+                name: key,
+                message: "a reserved name (a grant subject or principal of its own)".to_string(),
+            });
+        }
         if self.users.contains_key(&key) {
             return Err(ServerError::Refused {
                 name: key,

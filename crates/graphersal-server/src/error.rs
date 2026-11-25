@@ -202,6 +202,13 @@ pub enum ServerError {
         /// The name given (folded to lower case).
         name: String,
     },
+    /// The change would leave no user who can act as an admin (the `admin` role and a token):
+    /// the last admin is not removed, demoted or locked out.
+    #[non_exhaustive]
+    LastAdmin {
+        /// The user the change was for (folded to lower case).
+        name: String,
+    },
     /// The operating system's random generator failed (a token or session id cannot be
     /// made).
     #[non_exhaustive]
@@ -346,6 +353,11 @@ impl fmt::Display for ServerError {
             ServerError::UserNotFound { name } => {
                 write!(f, "no user '{name}' in access.toml")
             }
+            ServerError::LastAdmin { name } => write!(
+                f,
+                "'{name}' is the last admin: no other user with the admin role and a token would \
+                 be left"
+            ),
             ServerError::Random { message } => {
                 write!(f, "cannot make a secret token: {message}")
             }

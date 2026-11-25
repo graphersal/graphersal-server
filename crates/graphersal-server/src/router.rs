@@ -204,8 +204,9 @@ impl Router {
             if !principal.is_admin() {
                 return Answer::Response(admin_refused(&principal, path));
             }
-            let admin =
-                crate::ops::Admin::online(loader.clone()).with_audit(access.audit_as(&principal));
+            let admin = crate::ops::Admin::online(loader.clone())
+                .with_audit(access.audit_as(&principal))
+                .with_access(access.clone(), principal.clone());
             if let Some(name) = crate::admin_api::export_target(&method, endpoint) {
                 return match crate::admin_api::export(&admin, name, query) {
                     Ok(download) => Answer::Download(download),
@@ -521,7 +522,7 @@ fn percent_encode(text: &str) -> String {
 
 /// `%XX` decoded (as `graphersal_serve` decodes static paths); `None` for a broken escape or
 /// a result that is not UTF-8.
-fn percent_decode(path: &str) -> Option<String> {
+pub(crate) fn percent_decode(path: &str) -> Option<String> {
     let bytes = path.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;

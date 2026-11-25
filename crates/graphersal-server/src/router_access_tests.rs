@@ -741,3 +741,466 @@ fn the_root_info_is_minimal_for_anonymous_and_names_the_principal() {
     );
     assert_eq!(get(&fx, Who::Anonymous, "/api/other").status(), 404);
 }
+
+// ---------------------------------------------------------------------------------------------
+// Users and grants over the admin API (B5)
+// ---------------------------------------------------------------------------------------------
+
+/// A browser login with `token`: the session id of its cookie.
+fn login(fx: &Fixture, token: &str) -> String {
+    let answer = post(fx, Who::Anonymous, "/api/login", json!({ "token": token }));
+    assert_eq!(answer.status(), 200, "login");
+    header(&answer, "Set-Cookie")
+        .and_then(|c| c.strip_prefix("gs_session="))
+        .and_then(|rest| rest.split(';').next())
+        .unwrap()
+        .to_string()
+}
+
+fn delete(fx: &Fixture, who: Who<'_>, url: &str) -> Response {
+    send(fx, who, Method::Delete, url, None, &[])
+}
+
+fn put(fx: &Fixture, who: Who<'_>, url: &str, body: Value) -> Response {
+    send(fx, who, Method::Put, url, Some(body), &[])
+}
+
+/// `response`'s JSON, asserting `status`.
+fn expect(response: Response, status: u16) -> Value {
+    assert_eq!(
+        response.status(),
+        status,
+        "{}",
+        String::from_utf8_lossy(response.body())
+    );
+    json_of(&response)
+}
+
+#[test]
+fn the_users_api_is_for_admins_and_manages_users_and_grants() {
+    let fx = fixture("access-users-api");
+    let (alice, bob) = (fx.alice.as_str(), fx.bob.as_str());
+    for url in [
+        "/api/admin/users",
+        "/api/admin/users/bob",
+        "/api/admin/grants",
+    ] {
+        assert_unauthorized(&get(&fx, Who::Anonymous, url), url);
+        let refused = expect(get(&fx, Who::Bearer(bob), url), 404);
+        assert_eq!(refused["error"], format!("unknown endpoint {url}"));
+    }
+    assert_unauthorized(
+        &post(
+            &fx,
+            Who::Anonymous,
+            "/api/admin/users",
+            json!({"name": "eve"}),
+        ),
+        "anonymous add",
+    );
+    expect(
+        post(
+            &fx,
+            Who::Bearer(bob),
+            "/api/admin/users",
+            json!({"name": "eve"}),
+        ),
+        404,
+    );
+    assert!(fx.access.file().user("eve").is_none());
+
+    // The listing: roles, the token's last 4 characters (never a hash), the grants.
+    let list = expect(get(&fx, Who::Bearer(alice), "/api/admin/users"), 200);
+    let row = |list: &Value, name: &str| {
+        list["users"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|u| u["name"] == name)
+            .cloned()
+            .unwrap_or_else(|| panic!("no {name} in {list}"))
+    };
+    let alice_row = row(&list, "alice");
+    assert_eq!(alice_row["admin"], true);
+    assert_eq!(alice_row["tokenLast4"], alice[alice.len() - 4..]);
+    assert_eq!(alice_row["hasToken"], true);
+    let bob_row = row(&list, "bob");
+    assert_eq!(bob_row["roles"], json!([]));
+    assert_eq!(
+        bob_row["grants"],
+        json!([{"database": "w", "level": "write"}, {"database": "r", "level": "read"}])
+    );
+    assert!(!list.to_string().contains(&TokenHash::of(bob).to_hex()));
+    assert_eq!(list["grants"].as_array().unwrap().len(), 2, "{list}");
+
+    // Add: the token once; it works at once.
+    let dave = expect(
+        post(
+            &fx,
+            Who::Bearer(alice),
+            "/api/admin/users",
+            json!({"name": "Dave"}),
+        ),
+        201,
+    );
+    assert_eq!(dave["name"], "dave");
+    let token = dave["token"].as_str().unwrap().to_string();
+    assert_eq!(token.len(), 64);
+    assert_eq!(dave["tokenLast4"], token[60..]);
+    let info = expect(get(&fx, Who::Bearer(&token), "/api/info"), 200);
+    assert_eq!(info["principal"]["id"], "dave");
+    assert_eq!(
+        get(&fx, Who::Bearer(&token), "/db/w/api/info").status(),
+        404
+    );
+    let again = expect(
+        post(
+            &fx,
+            Who::Bearer(alice),
+            "/api/admin/users",
+            json!({"name": "dave"}),
+        ),
+        409,
+    );
+    assert!(
+        again["error"].as_str().unwrap().contains("exists"),
+        "{again}"
+    );
+    expect(
+        post(
+            &fx,
+            Who::Bearer(alice),
+            "/api/admin/users",
+            json!({"name": "anonymous"}),
+        ),
+        409,
+    );
+    expect(
+        post(
+            &fx,
+            Who::Bearer(alice),
+            "/api/admin/users",
+            json!({"name": "no way"}),
+        ),
+        400,
+    );
+
+    // Grants: a bare user name, read; the alias and unknown names are refused.
+    let grant = expect(
+        post(
+            &fx,
+            Who::Bearer(alice),
+            "/api/admin/grants",
+            json!({"subject": "dave", "database": "W", "level": "read"}),
+        ),
+        200,
+    );
+    assert_eq!(
+        grant,
+        json!({"subject": "user:dave", "database": "w", "level": "read"})
+    );
+    assert_eq!(
+        get(&fx, Who::Bearer(&token), "/db/w/api/info").status(),
+        200
+    );
+    for (body, status) in [
+        (
+            json!({"subject": "dave", "database": "cur", "level": "read"}),
+            409,
+        ),
+        (
+            json!({"subject": "dave", "database": "nope", "level": "read"}),
+            404,
+        ),
+        (
+            json!({"subject": "nobody", "database": "w", "level": "read"}),
+            404,
+        ),
+        (
+            json!({"subject": "dave", "database": "w", "level": "admin"}),
+            400,
+        ),
+        (
+            json!({"subject": "x:y", "database": "w", "level": "read"}),
+            400,
+        ),
+    ] {
+        expect(
+            post(&fx, Who::Bearer(alice), "/api/admin/grants", body.clone()),
+            status,
+        );
+    }
+    // Anonymous grants: everyone reaches `r`, until revoked.
+    expect(
+        post(
+            &fx,
+            Who::Bearer(alice),
+            "/api/admin/grants",
+            json!({"subject": "anonymous", "database": "r", "level": "read"}),
+        ),
+        200,
+    );
+    assert_eq!(get(&fx, Who::Anonymous, "/db/r/api/info").status(), 200);
+    let revoked = expect(
+        delete(&fx, Who::Bearer(alice), "/api/admin/grants/anonymous/r"),
+        200,
+    );
+    assert_eq!(
+        revoked,
+        json!({"subject": "anonymous", "database": "r", "revoked": true})
+    );
+    assert_unauthorized(&get(&fx, Who::Anonymous, "/db/r/api/info"), "revoked");
+    let none = expect(
+        delete(&fx, Who::Bearer(alice), "/api/admin/grants/anonymous/r"),
+        200,
+    );
+    assert_eq!(none["revoked"], false);
+    // A percent-encoded subject.
+    let revoked = expect(
+        delete(&fx, Who::Bearer(alice), "/api/admin/grants/user%3Adave/w"),
+        200,
+    );
+    assert_eq!(revoked["revoked"], true, "{revoked}");
+    assert_eq!(
+        get(&fx, Who::Bearer(&token), "/db/w/api/info").status(),
+        404
+    );
+
+    // The admin flag and roles.
+    let user = expect(
+        put(
+            &fx,
+            Who::Bearer(alice),
+            "/api/admin/users/dave/admin",
+            json!({"admin": true}),
+        ),
+        200,
+    );
+    assert_eq!(user["admin"], true);
+    assert_eq!(
+        get(&fx, Who::Bearer(&token), "/api/admin/users").status(),
+        200
+    );
+    let user = expect(
+        put(
+            &fx,
+            Who::Bearer(&token),
+            "/api/admin/users/dave/roles",
+            json!({"roles": ["analyst"]}),
+        ),
+        200,
+    );
+    assert_eq!(user["roles"], json!(["analyst"]));
+    assert_eq!(user["admin"], false);
+    assert_eq!(
+        get(&fx, Who::Bearer(&token), "/api/admin/users").status(),
+        404
+    );
+    expect(
+        put(
+            &fx,
+            Who::Bearer(alice),
+            "/api/admin/users/nobody/admin",
+            json!({"admin": true}),
+        ),
+        404,
+    );
+    expect(
+        send(
+            &fx,
+            Who::Bearer(alice),
+            Method::Patch,
+            "/api/admin/users/dave",
+            None,
+            &[],
+        ),
+        405,
+    );
+
+    // Every change is audited with the actor.
+    let lines = fx.audit.lines();
+    for wanted in [
+        "user:alice: user 'dave' added",
+        "user:alice: grant user:dave read on 'w'",
+        "user:alice: grant of anonymous on 'r' revoked",
+        "user:alice: user 'dave' roles set to [admin]",
+        "user:dave: user 'dave' roles set to [analyst]",
+    ] {
+        assert!(
+            lines.iter().any(|l| l.starts_with(wanted)),
+            "{wanted}: {lines:#?}"
+        );
+    }
+}
+
+#[test]
+fn a_token_change_or_removal_ends_browser_and_mcp_sessions() {
+    let fx = fixture("access-users-sessions");
+    let (alice, bob) = (fx.alice.as_str(), fx.bob.as_str());
+    let cookie = login(&fx, bob);
+    let session = mcp_initialize(&fx, Who::Bearer(bob), "/mcp");
+    assert_eq!(
+        get(&fx, Who::Cookie(&cookie), "/db/w/api/info").status(),
+        200
+    );
+
+    // A new token: the old token, the browser session and the MCP session end.
+    let answer = expect(
+        post(
+            &fx,
+            Who::Bearer(alice),
+            "/api/admin/users/bob/token",
+            json!({}),
+        ),
+        200,
+    );
+    assert_eq!(answer["mcpSessionsEnded"], 1, "{answer}");
+    let new_token = answer["token"].as_str().unwrap().to_string();
+    assert_ne!(new_token, bob);
+    assert_eq!(answer["tokenLast4"], new_token[60..]);
+    assert_unauthorized(&get(&fx, Who::Bearer(bob), "/api/info"), "old token");
+    assert_eq!(
+        get(&fx, Who::Cookie(&cookie), "/db/w/api/info").status(),
+        401,
+        "the browser session ended"
+    );
+    // The MCP session is gone even for bob's new token (same identity).
+    let gone = mcp(
+        &fx,
+        Who::Bearer(&new_token),
+        "/mcp",
+        Some(&session),
+        json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}),
+    );
+    assert_eq!(
+        gone.status(),
+        404,
+        "{}",
+        String::from_utf8_lossy(gone.body())
+    );
+
+    // A revoked token: the same.
+    let cookie = login(&fx, &new_token);
+    let session = mcp_initialize(&fx, Who::Bearer(&new_token), "/mcp");
+    let answer = expect(
+        delete(&fx, Who::Bearer(alice), "/api/admin/users/bob/token"),
+        200,
+    );
+    assert_eq!(answer["hasToken"], false);
+    assert_eq!(answer["tokenLast4"], Value::Null);
+    assert_eq!(answer["mcpSessionsEnded"], 1);
+    assert_unauthorized(&get(&fx, Who::Bearer(&new_token), "/api/info"), "revoked");
+    assert_eq!(get(&fx, Who::Cookie(&cookie), "/api/info").status(), 401);
+    assert_eq!(
+        fx.loader
+            .mcp()
+            .unwrap()
+            .forget_sessions_of(Some("user:bob")),
+        0
+    );
+    let _ = session;
+
+    // A removed user: its sessions and grants go with it.
+    let newest = expect(
+        post(
+            &fx,
+            Who::Bearer(alice),
+            "/api/admin/users/bob/token",
+            json!({}),
+        ),
+        200,
+    )["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let cookie = login(&fx, &newest);
+    mcp_initialize(&fx, Who::Bearer(&newest), "/mcp");
+    let removed = expect(delete(&fx, Who::Bearer(alice), "/api/admin/users/bob"), 200);
+    assert_eq!(
+        removed,
+        json!({"name": "bob", "removed": true, "grantsRemoved": 2, "mcpSessionsEnded": 1})
+    );
+    assert_eq!(get(&fx, Who::Cookie(&cookie), "/api/info").status(), 401);
+    assert!(fx.access.file().grants().is_empty());
+    expect(delete(&fx, Who::Bearer(alice), "/api/admin/users/bob"), 404);
+    // Other users' sessions are untouched.
+    let carol = login(&fx, &fx.carol);
+    assert_eq!(get(&fx, Who::Cookie(&carol), "/api/info").status(), 200);
+}
+
+#[test]
+fn the_last_admin_is_never_removed_demoted_or_locked_out() {
+    let fx = fixture("access-users-last-admin");
+    let alice = fx.alice.as_str();
+    // Two admins (init's `admin` and alice): one may go.
+    expect(
+        delete(&fx, Who::Bearer(alice), "/api/admin/users/admin"),
+        200,
+    );
+    for (method, url, body) in [
+        (Method::Delete, "/api/admin/users/alice", None),
+        (Method::Delete, "/api/admin/users/alice/token", None),
+        (
+            Method::Put,
+            "/api/admin/users/alice/admin",
+            Some(json!({"admin": false})),
+        ),
+        (
+            Method::Put,
+            "/api/admin/users/alice/roles",
+            Some(json!({"roles": []})),
+        ),
+    ] {
+        for who in [Who::Bearer(alice), Who::Bearer(OPERATOR)] {
+            let refused = expect(send(&fx, who, method.clone(), url, body.clone(), &[]), 409);
+            assert!(
+                refused["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("'alice' is the last admin"),
+                "{refused}"
+            );
+            assert!(
+                refused["help"]
+                    .as_str()
+                    .unwrap()
+                    .contains("POST /api/admin/users/<name>/token"),
+                "{refused}"
+            );
+        }
+    }
+    let file = fx.access.file();
+    assert!(
+        file.user("alice")
+            .unwrap()
+            .roles
+            .contains(&"admin".to_string())
+    );
+    assert_eq!(file.usable_admins(), 1);
+    // A new token is fine (it replaces, it does not lock out); a second admin frees alice.
+    let token = expect(
+        post(
+            &fx,
+            Who::Bearer(alice),
+            "/api/admin/users/alice/token",
+            json!({}),
+        ),
+        200,
+    )["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    expect(
+        put(
+            &fx,
+            Who::Bearer(&token),
+            "/api/admin/users/carol/admin",
+            json!({"admin": true}),
+        ),
+        200,
+    );
+    expect(
+        delete(&fx, Who::Bearer(&token), "/api/admin/users/alice"),
+        200,
+    );
+}

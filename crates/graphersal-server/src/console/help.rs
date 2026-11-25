@@ -6,7 +6,8 @@
 //! Mapped routes: `GET databases`, `DELETE databases/<n>`, `POST databases` (a layer:
 //! `{"name", "base"}`), `POST databases/<n>/load|unload`, `GET databases/<n>/backups`,
 //! `GET databases/<n>/export?...`, `PUT|DELETE aliases/<a>`, `GET models`, `POST models`
-//! (`{"path"}` or `{"repo"}`), `POST import?name=&role=`.
+//! (`{"path"}` or `{"repo"}`), `POST import?name=&role=`, `GET users`, `POST users`
+//! (`{"name", "admin"}`), `POST|DELETE users/<n>/token`, `PUT users/<n>/admin` (`{"admin"}`).
 
 use serde_json::Value;
 
@@ -82,6 +83,8 @@ fn command(method: &str, path: &str, body: Option<&Value>, dir_arg: &str) -> Opt
     let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
     let db = |args: String| Some(format!("{BIN} db {args} --dir {dir_arg}"));
     let models = |args: String| Some(format!("{BIN} models {args} --dir {dir_arg}"));
+    let user = |args: String| Some(format!("{BIN} user {args} --dir {dir_arg}"));
+    let flag = |key: &str| body.and_then(|b| b[key].as_bool());
     match (method, segments.as_slice()) {
         ("GET", ["databases"]) => db("list".to_string()),
         ("POST", ["databases"]) => {
@@ -117,6 +120,26 @@ fn command(method: &str, path: &str, body: Option<&Value>, dir_arg: &str) -> Opt
             (None, Some(path)) if !path.contains(' ') => models(format!("add {path}")),
             _ => models("add SOURCE".to_string()),
         },
+        ("GET", ["users"]) => user("list".to_string()),
+        ("POST", ["users"]) => {
+            let name = field("name").unwrap_or_else(|| "NAME".to_string());
+            let admin = if flag("admin") == Some(true) {
+                " --admin"
+            } else {
+                ""
+            };
+            user(format!("add {name}{admin}"))
+        }
+        ("POST", ["users", name, "token"]) => user(format!("token {}", word(name))),
+        ("DELETE", ["users", name, "token"]) => user(format!("token {} --revoke", word(name))),
+        ("PUT", ["users", name, "admin"]) => {
+            let on = if flag("admin") == Some(false) {
+                "off"
+            } else {
+                "on"
+            };
+            user(format!("admin {} {on}", word(name)))
+        }
         ("POST", ["import"]) => {
             let name = param("name")
                 .map(word)
@@ -241,6 +264,25 @@ mod tests {
         assert_eq!(
             console_help("GET /api/admin/databases lists them", "'my srv'"),
             "graphersal-server db list --dir 'my srv' lists them"
+        );
+    }
+
+    #[test]
+    fn user_routes_in_a_help_become_user_commands() {
+        let help = "make another admin first: POST /api/admin/users {\"name\": \"<name>\", \
+                    \"admin\": true}, or PUT /api/admin/users/<user>/admin {\"admin\": true}; a \
+                    lost token is replaced (not revoked) with POST /api/admin/users/<name>/token; \
+                    GET /api/admin/users lists the users";
+        assert_eq!(
+            console_help(help, "srv"),
+            "make another admin first: graphersal-server user add NAME --admin --dir srv, or \
+             graphersal-server user admin USER on --dir srv; a lost token is replaced (not \
+             revoked) with graphersal-server user token NAME --dir srv; graphersal-server user \
+             list --dir srv lists the users"
+        );
+        assert_eq!(
+            console_help("DELETE /api/admin/users/bob/token", "srv"),
+            "graphersal-server user token bob --revoke --dir srv"
         );
     }
 }

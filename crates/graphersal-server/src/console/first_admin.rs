@@ -24,8 +24,12 @@ pub fn first_admin_text(first: &FirstAdmin, dir: &Path, styled: bool) -> String 
         "Copy it now: only its SHA-256 hash is kept, in".to_string(),
         format!("  {}", first.path.display()),
         "Send it as \"Authorization: Bearer <token>\", or paste it on the login page.".to_string(),
-        "Lost it? Stop the server, remove access.toml and start it again: a new".to_string(),
-        "admin is made (the other users and grants of the file are lost).".to_string(),
+        "Lost it? This prints a new one (the old one stops working):".to_string(),
+        format!(
+            "  graphersal-server user token {} --dir {}",
+            first.name,
+            super::render::shell_word(dir)
+        ),
         format!("Server directory: {}", dir.display()),
     ];
     let width = lines
