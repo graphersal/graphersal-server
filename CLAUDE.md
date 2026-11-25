@@ -113,6 +113,18 @@ from published files). When this file disagrees with the code, the code wins: sa
   (`Context::runs()`), ids unique per database; offline `Refused`); the mounts keep
   `ContextBuilder::admin_runs` OFF (query texts only through the admin surface, no token: the
   admin surface is admin-only since B3); web UI tab `runs-tab.js`;
+  users and grants (B5): `admin_api_users.rs` (`GET|POST users`, `GET|DELETE users/<n>`,
+  `POST|DELETE users/<n>/token`, `PUT users/<n>/admin|roles`, `GET|POST grants`,
+  `DELETE grants/<subject>/<database>` (segments percent-decoded); user row `{name, roles,
+  admin, hasToken, tokenLast4, grants}`; the token only in the add/token answer) over
+  `ops_users.rs` (`Admin::users`, `user_add`, `user_token`, `user_revoke_token`, `user_remove`,
+  `user_set_roles`, `user_set_admin`, `grant_set` (database must exist, alias refused),
+  `grant_revoke`): online through the router's `Access` (`Admin::with_access(access,
+  principal)`; token change/removal also `Mcp::forget_sessions_of(user:<n>)`), offline through
+  an `Access::open` over the directory's `access.toml` (missing file refused; actor = the
+  operator, as the console holds the lock); the last usable admin (role + token) is refused in
+  `Access` (`refuse_last_admin`, `ServerError::LastAdmin` 409); `anonymous`/`operator` are
+  reserved user names (`RESERVED_USER_NAMES`);
   `POST .../<name>/backup`, `GET .../<name>/backups`, `POST .../<name>/restore {"backup",
   "name"?}`, `GET .../<name>/export?models=&materialize=`; `POST import?name=&base=&format=&description=&role=`
   with the raw file as the body (streamed by `copy_body_to` into `tmp/upload-*.bin` = `TmpFile`,
@@ -285,7 +297,10 @@ from published files). When this file disagrees with the code, the code wins: sa
   `serve`, `db list|create|delete|clone|load|unload|promote|read-only|auto-load|alias|backup|
   backups|restore|export ... --dir DIR [--json]`, `import DIR SOURCE --name N [--base B] [--format F]
   [--description D] [--role normal|base] [--json]`, `models list|add SOURCE [--repo R] [--license L]|remove REPO
-  --dir DIR [--json]` (`DbCommand::Models*`; SOURCE absolute when it exists, else a repo)
+  --dir DIR [--json]` (`DbCommand::Models*`; SOURCE absolute when it exists, else a repo),
+  `user list|add NAME [--admin]|token NAME [--revoke]|remove NAME|admin NAME on|off|grant SUBJECT
+  DATABASE read|write|revoke SUBJECT DATABASE --dir DIR [--json]` (`DbCommand::User*`; tests in
+  `console/user_tests.rs`, both paths)
   (`DbCommand::Import`: the JSON path form, SOURCE made absolute;
   offline the same route over the offline admin) (`db export` offline writes the file through
   `Admin::export_to_file`, through a server streams the download into `FILE.part`) (prints `note: ... sent to its admin API at ADDR` on stderr when it went through a

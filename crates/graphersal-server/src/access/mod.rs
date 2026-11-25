@@ -35,7 +35,8 @@ pub use auth::{
     cookie,
 };
 pub use model::{
-    AccessFile, FIRST_ADMIN, Grant, Level, Subject, User, database_read_only, effective_level,
+    AccessFile, FIRST_ADMIN, Grant, Level, RESERVED_USER_NAMES, Subject, User, database_read_only,
+    effective_level,
 };
 pub use principal::{ADMIN_ROLE, Principal, PrincipalKind};
 pub use token::{Secret, TokenHash};
@@ -246,16 +247,18 @@ impl Access {
         })
     }
 
-    /// Takes the user `name`'s token away; its browser sessions end.
+    /// Takes the user `name`'s token away; its browser sessions end. Refused for the last admin
+    /// (`ServerError::LastAdmin`).
     pub fn revoke_token(&self, actor: &Principal, name: &str) -> Result<(), ServerError> {
         self.change(actor, |file| {
-            file.revoke_token(name)?;
+            refuse_last_admin(file, name, |file| file.revoke_token(name))?;
             let name = crate::names::fold(name);
             Ok(((), vec![AuditEvent::TokenRevoked { name }]))
         })
     }
 
-    /// Sets the user `name`'s roles.
+    /// Sets the user `name`'s roles. Refused when it takes the admin role from the last admin
+    /// (`ServerError::LastAdmin`).
     pub fn set_roles(
         &self,
         actor: &Principal,
@@ -263,16 +266,17 @@ impl Access {
         roles: Vec<String>,
     ) -> Result<(), ServerError> {
         self.change(actor, |file| {
-            file.set_roles(name, roles.clone())?;
+            refuse_last_admin(file, name, |file| file.set_roles(name, roles.clone()))?;
             let name = crate::names::fold(name);
             Ok(((), vec![AuditEvent::RolesSet { name, roles }]))
         })
     }
 
-    /// Removes the user `name`, its grants and its browser sessions.
+    /// Removes the user `name`, its grants and its browser sessions. Refused for the last admin
+    /// (`ServerError::LastAdmin`).
     pub fn remove_user(&self, actor: &Principal, name: &str) -> Result<(), ServerError> {
         self.change(actor, |file| {
-            file.remove_user(name)?;
+            refuse_last_admin(file, name, |file| file.remove_user(name))?;
             let name = crate::names::fold(name);
             Ok(((), vec![AuditEvent::UserRemoved { name }]))
         })
@@ -342,6 +346,25 @@ impl Access {
     fn read(&self) -> std::sync::RwLockReadGuard<'_, AccessFile> {
         self.file.read().unwrap_or_else(|p| p.into_inner())
     }
+}
+
+/// Applies `change` (of the user `name`) to `file`, refused when it leaves no usable admin
+/// ([`AccessFile::usable_admins`]: the `admin` role and a token) where there was one: the last
+/// admin cannot be removed, demoted or locked out (its token reissued instead, or another admin
+/// made first). `file` is a copy: a refusal leaves it half changed, never written.
+pub(crate) fn refuse_last_admin(
+    file: &mut AccessFile,
+    name: &str,
+    change: impl FnOnce(&mut AccessFile) -> Result<(), ServerError>,
+) -> Result<(), ServerError> {
+    let before = file.usable_admins();
+    change(file)?;
+    if before > 0 && file.usable_admins() == 0 {
+        return Err(ServerError::LastAdmin {
+            name: crate::names::fold(name),
+        });
+    }
+    Ok(())
 }
 
 #[cfg(test)]

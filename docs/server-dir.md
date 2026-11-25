@@ -8,6 +8,7 @@ holds `server.toml`.
 ```
 <server-dir>/
   server.toml          configuration
+  access.toml          users (token hashes), roles and grants (mode 0600)
   server.lock          one running server per directory (an OS file lock)
   server.run           the running server's address (only while it runs)
   aliases.toml         alias -> database
@@ -28,6 +29,29 @@ There is no log directory: the server logs to stderr (redirect it to keep a log 
 
 `init DIR` accepts a missing or empty directory, or an existing server directory (then it only
 creates the missing parts and keeps `server.toml` as it is).
+
+## `access.toml`
+
+The users, their roles and their grants per database; written by the server and the console
+(atomically, mode `0600` on unix), never holding a token, only its SHA-256 and its last four
+characters (for listings). `init` and the first `serve` of a directory without it make the first
+admin (`admin`) and print its token once.
+
+```toml
+[users.alice]
+roles = ["admin"]          # admin: every database (write) and the admin API
+token_sha256 = "<64 hex digits>"
+token_last4 = "a1b2"
+
+[[grant]]
+subject = "user:bob"       # or "anonymous" (everyone, also without a token), "role:<r>"
+database = "acme"          # a database name or "*"
+level = "read"             # or "write"
+```
+
+Change it with `graphersal-server user ... --dir DIR` (offline on the file, or through the
+running server so its sessions follow at once) or the admin API's `users` and `grants` routes
+(`admin-api.md`); an unknown key is an error.
 
 ## `server.toml`
 

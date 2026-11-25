@@ -2554,3 +2554,101 @@ fn access_is_enforced_over_the_listener_with_the_first_admin_token() {
     assert_eq!(as_browser("GET", "/api/admin/databases").0, 401);
     running.stop().unwrap();
 }
+
+fn user(dir: &Path, args: &[&str]) -> (i32, String, String) {
+    let out = Command::new(BIN)
+        .arg("user")
+        .args(args)
+        .arg("--dir")
+        .arg(dir)
+        .output()
+        .unwrap();
+    (
+        out.status.code().unwrap_or(-1),
+        text(&out.stdout),
+        text(&out.stderr),
+    )
+}
+
+/// The token of `user add` / `user token`'s text (its `token:` line).
+fn printed_token(out: &str) -> String {
+    out.lines()
+        .find_map(|l| l.trim().strip_prefix("token:"))
+        .map(|t| t.trim().to_string())
+        .unwrap_or_else(|| panic!("no token in {out}"))
+}
+
+#[test]
+fn user_commands_offline_and_through_a_server() {
+    let temp = TempDir::new("console-users");
+    let dir = ServerDir::init(temp.path()).unwrap().dir;
+    let root = temp.path();
+    // Offline: the console edits access.toml; the token on stdout, once.
+    let (code, out, err) = user(root, &["add", "bob"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(err.is_empty(), "{err}");
+    assert!(out.starts_with("Added user 'bob'\n"), "{out}");
+    let bob = printed_token(&out);
+    assert_eq!(bob.len(), 64, "{out}");
+    let (code, out, _) = user(root, &["list"]);
+    assert_eq!(code, 0);
+    assert!(out.contains(&format!("…{}", &bob[60..])), "{out}");
+    assert!(!out.contains(&bob), "{out}");
+    let (code, _, err) = user(root, &["remove", "admin"]);
+    assert_eq!(code, 1);
+    assert!(err.contains("is the last admin"), "{err}");
+    assert!(
+        err.contains("graphersal-server user admin USER on --dir"),
+        "{err}"
+    );
+    let (code, _, err) = user(root, &["grant", "bob", "acme", "admin"]);
+    assert_eq!(code, 2, "a usage error: {err}");
+
+    // Through a server: its sessions follow at once.
+    let mut server = ServerProcess::spawn(
+        Command::new(BIN)
+            .args(["serve", "--dir"])
+            .arg(root)
+            .args(["--listen", "127.0.0.1:0"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    );
+    let info = wait_for_run_file(&dir);
+    let note = format!("sent to its admin API at {}", info.address);
+    let bob_info = |token: &str| {
+        let auth = format!("Authorization: Bearer {token}\r\n");
+        send(info.address, "GET", "/api/info", &[], &auth, "").0
+    };
+    assert_eq!(bob_info(&bob), 200);
+    let (code, out, err) = user(root, &["token", "bob"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(err.contains(&note), "{err}");
+    assert!(out.contains("0 MCP sessions"), "{out}");
+    let renewed = printed_token(&out);
+    assert_eq!(bob_info(&bob), 401, "the old token stopped working");
+    assert_eq!(bob_info(&renewed), 200);
+    let (code, out, err) = user(root, &["admin", "bob", "on"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.starts_with("User 'bob' is an admin"), "{out}");
+    let (code, _, err) = user(root, &["remove", "admin"]);
+    assert_eq!(code, 0, "bob is an admin now: {err}");
+    let (code, out, err) = user(root, &["list", "--json"]);
+    assert_eq!(code, 0, "{err}");
+    let names: Vec<String> = json(&out)["users"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|u| u["name"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(names, ["bob"]);
+    let (code, _, err) = user(root, &["token", "bob", "--revoke"]);
+    assert_eq!(code, 1);
+    assert!(err.contains("is the last admin"), "{err}");
+
+    send_stop(&server);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while server.0.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < deadline, "the server did not stop");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}

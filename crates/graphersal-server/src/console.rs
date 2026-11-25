@@ -1,4 +1,5 @@
-//! The console's admin commands (`graphersal-server db ...`, `import`, `models ...`).
+//! The console's admin commands (`graphersal-server db ...`, `import`, `models ...`,
+//! `user ...`).
 //!
 //! Every command is one request of the admin HTTP API ([`DbCommand::request`]). [`run`] sends it
 //! where the directory is:
@@ -16,6 +17,10 @@
 //! `import` sends the source's absolute path (`POST /api/admin/import {"path", ...}`, made by
 //! [`source_path`]: no `.`/`..` segments): a running server reads the file itself, on this
 //! machine; no upload.
+//!
+//! `user ...` edits `access.toml` (`/api/admin/users...`, `/api/admin/grants...`): offline the
+//! console acts as the operator on the file (it holds the server lock); through a server with
+//! the run's operator token, so the server's sessions of a changed token end at once.
 //!
 //! `models add` sends an absolute path too (`POST /api/admin/models {"path"}`).
 //!
@@ -195,6 +200,50 @@ pub enum DbCommand {
         /// The file written.
         out: PathBuf,
     },
+    /// `user list`.
+    UserList,
+    /// `user add NAME [--admin]`: the new user's token is printed once.
+    UserAdd {
+        /// The user's name.
+        name: String,
+        /// Whether it gets the `admin` role.
+        admin: bool,
+    },
+    /// `user token NAME [--revoke]`: a new token (printed once), or with `--revoke` none.
+    UserToken {
+        /// The user.
+        name: String,
+        /// Take the token away instead of issuing a new one.
+        revoke: bool,
+    },
+    /// `user remove NAME`.
+    UserRemove {
+        /// The user.
+        name: String,
+    },
+    /// `user admin NAME on|off`.
+    UserAdmin {
+        /// The user.
+        name: String,
+        /// Give (`true`) or take the `admin` role.
+        on: bool,
+    },
+    /// `user grant SUBJECT DATABASE read|write`.
+    UserGrant {
+        /// A user name, `anonymous`, or `user:<n>`, `role:<r>`, `group:<g>`.
+        subject: String,
+        /// A database's name or `*`.
+        database: String,
+        /// `read` or `write`.
+        level: String,
+    },
+    /// `user revoke SUBJECT DATABASE`.
+    UserRevoke {
+        /// As for [`DbCommand::UserGrant`].
+        subject: String,
+        /// A database's name or `*`.
+        database: String,
+    },
 }
 
 impl DbCommand {
@@ -312,6 +361,40 @@ impl DbCommand {
                 (Method::Post, "models".into(), Some(Value::Object(body)))
             }
             DbCommand::ModelsRemove { model } => (Method::Delete, format!("models/{model}"), None),
+            DbCommand::UserList => (Method::Get, "users".into(), None),
+            DbCommand::UserAdd { name, admin } => (
+                Method::Post,
+                "users".into(),
+                Some(json!({ "name": name, "admin": admin })),
+            ),
+            DbCommand::UserToken { name, revoke } => {
+                let method = if *revoke {
+                    Method::Delete
+                } else {
+                    Method::Post
+                };
+                (method, format!("users/{name}/token"), None)
+            }
+            DbCommand::UserRemove { name } => (Method::Delete, format!("users/{name}"), None),
+            DbCommand::UserAdmin { name, on } => (
+                Method::Put,
+                format!("users/{name}/admin"),
+                Some(json!({ "admin": on })),
+            ),
+            DbCommand::UserGrant {
+                subject,
+                database,
+                level,
+            } => (
+                Method::Post,
+                "grants".into(),
+                Some(json!({ "subject": subject, "database": database, "level": level })),
+            ),
+            DbCommand::UserRevoke { subject, database } => (
+                Method::Delete,
+                format!("grants/{}/{}", segment(subject), segment(database)),
+                None,
+            ),
             DbCommand::Export { name, spec, .. } => (
                 Method::Get,
                 format!(
@@ -322,6 +405,20 @@ impl DbCommand {
             ),
         }
     }
+}
+
+/// `text` as one path segment: every byte but the URL's unreserved characters as `%XX` (the
+/// admin API decodes them; `user:bob` -> `user%3Abob`).
+fn segment(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for byte in text.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            out.push(byte as char);
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
 }
 
 /// Where a command ran.
@@ -705,3 +802,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 }
+
+#[cfg(test)]
+mod user_tests;

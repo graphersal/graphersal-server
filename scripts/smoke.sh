@@ -360,6 +360,37 @@ grep -q "^Help: unload it first: graphersal-server db unload acme --dir " "$WORK
 if grep -q "/api/admin" "$WORK/delete.err"; then fail "the console help names a route"; fi
 ok
 
+STEP="users: the console adds a user, the API grants, a new token ends the old"
+"$BIN" user add smokey --dir "$DIR" >"$WORK/user.out" 2>"$WORK/user.err" ||
+  fail "user add: $(cat "$WORK/user.err")"
+USER_TOKEN=$(sed -n 's/^  token: *//p' "$WORK/user.out")
+[ ${#USER_TOKEN} = 64 ] || fail "user add printed no token: $(cat "$WORK/user.out")"
+AUTH=$USER_TOKEN req GET /db/acme/api/info
+expect_status 404
+jreq POST /api/admin/grants '{"subject": "smokey", "database": "acme", "level": "read"}'
+expect_status 200
+expect_json subject user:smokey
+AUTH=$USER_TOKEN req GET /db/acme/api/info
+expect_status 200
+AUTH=$USER_TOKEN req GET /api/admin/users
+expect_status 404
+req GET /api/admin/users/smokey
+expect_status 200
+expect_json tokenLast4 "${USER_TOKEN:60:4}"
+"$BIN" user list --dir "$DIR" >"$WORK/users.out" 2>"$WORK/users.err" ||
+  fail "user list: $(cat "$WORK/users.err")"
+grep -q "…${USER_TOKEN:60:4}" "$WORK/users.out" || fail "user list: $(cat "$WORK/users.out")"
+req POST /api/admin/users/smokey/token
+expect_status 200
+AUTH=$USER_TOKEN req GET /api/info
+expect_status 401
+"$BIN" user remove admin --dir "$DIR" >"$WORK/rm.out" 2>"$WORK/rm.err" &&
+  fail "the last admin was removed"
+grep -q "is the last admin" "$WORK/rm.err" || fail "last admin: $(cat "$WORK/rm.err")"
+"$BIN" user remove smokey --dir "$DIR" >"$WORK/rm.out" 2>"$WORK/rm.err" ||
+  fail "user remove: $(cat "$WORK/rm.err")"
+ok
+
 STEP="alias flip"
 jreq PUT /api/admin/aliases/current '{"target": "acme"}'
 expect_status 200

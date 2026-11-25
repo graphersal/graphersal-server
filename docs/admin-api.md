@@ -3,7 +3,7 @@
 The admin HTTP API of `graphersal-server`, below `/api/admin/`. The server's web UI at `/` (the
 `server` UI profile, `crates/graphersal-server/ui/`, model `ui/admin-api.js`) and the console (`graphersal-server db ...`, when a server runs on the directory) are its
 clients. Both the API and the console's offline mode call the same admin core, so the answers
-below are also what `graphersal-server db ... --json` prints.
+below are also what `graphersal-server db ... --json` (and `user ... --json`) prints.
 
 The MCP endpoints (`/mcp`, `/db/<name>/mcp`) are documented in [`mcp.md`](mcp.md), the server
 directory and its files (`server.toml`, `database.toml`, `models/`, `backups/`) in
@@ -103,6 +103,17 @@ A `failed` database whose `database.toml` cannot be read has only `name`, `state
 | GET | `/api/admin/runs` | | `200 {"runs": [run...], "textHeadChars": 200}` (every loaded database) |
 | GET | `/api/admin/databases/<name>/runs` | | `200 {"database", "loaded": bool, "runs": [run...], "textHeadChars": 200}` |
 | POST | `/api/admin/databases/<name>/runs/cancel` | `{"id"}` | `200 {"database", "id", "cancelled": bool}` |
+| GET | `/api/admin/users` | | `200 {"users": [user...], "grants": [grant...]}` (users by name; every grant, also of `anonymous`) |
+| POST | `/api/admin/users` | `{"name", "admin"?}` | `201` user + `"token"` (shown once) |
+| GET | `/api/admin/users/<name>` | | `200` user |
+| DELETE | `/api/admin/users/<name>` | | `200 {"name", "removed": true, "grantsRemoved", "mcpSessionsEnded"}` |
+| POST | `/api/admin/users/<name>/token` | | `200` user + `"token"` (shown once) + `"mcpSessionsEnded"` |
+| DELETE | `/api/admin/users/<name>/token` | | `200` user (`hasToken: false`) + `"mcpSessionsEnded"` |
+| PUT | `/api/admin/users/<name>/admin` | `{"admin": bool}` | `200` user |
+| PUT | `/api/admin/users/<name>/roles` | `{"roles": [string...]}` | `200` user |
+| GET | `/api/admin/grants` | | `200 {"grants": [grant...]}` |
+| POST | `/api/admin/grants` | `{"subject", "database", "level"}` | `200` grant (new, or its level replaced) |
+| DELETE | `/api/admin/grants/<subject>/<database>` | | `200 {"subject", "database", "revoked": bool}` |
 
 ### Create
 
@@ -413,6 +424,45 @@ database has no such run now (it ended, the id belongs to another database, or t
 not loaded). A non-numeric `id` or another field is `400`. A client stopping its own run keeps
 using its database's `POST /db/<name>/api/cancel`.
 
+### Users and grants
+
+The users and grants of `access.toml` (format: [`server-dir.md`](server-dir.md)). A user:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `name` | string | its name (the database name rule; `anonymous` and `operator` are reserved) |
+| `roles` | [string] | its roles; `admin` = every database (write) and the admin API |
+| `admin` | bool | it has the `admin` role |
+| `hasToken` | bool | it can authenticate (`false` after a revoke) |
+| `tokenLast4` | string or null | the last four characters of its token (to tell tokens apart: the server keeps only a SHA-256 of the token) |
+| `grants` | [{`database`, `level`}] | its own `user:<name>` grants |
+
+A grant: `subject` (`user:<name>`, `anonymous` = everyone, also a request without
+credentials, `role:<r>`, `group:<g>`), `database` (a database's real name, or `*` = every
+database), `level` (`read` or `write`). A principal reaches a database at the highest level of
+any of its grants, capped by the database's mode (read-only or a base: `read`).
+
+- `POST users` makes the user with a new token (256 random bits as 64 hex digits). The token is
+  in this answer only (`token`), never again: copy it. `admin: true` gives the `admin` role.
+- `POST users/<name>/token` replaces the token (the old one stops working at once);
+  `DELETE users/<name>/token` takes it away without a new one. Either change, and `DELETE
+  users/<name>`, ends the user's browser sessions and MCP sessions at once
+  (`mcpSessionsEnded`: how many MCP sessions ended). Removing a user removes its grants.
+- `PUT users/<name>/admin {"admin": bool}` gives or takes the `admin` role and keeps the
+  other roles; `PUT users/<name>/roles {"roles"}` sets them all.
+- `POST grants`: `subject` may also be a bare user name (`bob` = `user:bob`); a user subject
+  must name a user (`404`), `database` an existing database (`404`), not an alias (`409`: grant
+  on its database; a grant follows the database, not a name of it). A second grant of the same
+  subject and database replaces the level. `DELETE grants/<subject>/<database>` removes it
+  (`revoked: false`: there was none); path segments may be percent-encoded (`user%3Abob`).
+- The last admin (the `admin` role and a token) is never removed, demoted or left without a
+  token: `409` with help (make another admin first; a lost token is replaced with `POST
+  users/<name>/token`).
+- Every change is recorded in the audit log with the actor (`user:<name>` or `operator`).
+
+The console's `user` commands are these routes (offline the console edits `access.toml` itself,
+as the operator); the web UI's Users tab uses them too.
+
 ### Help on refusals
 
 Besides the cases above, a taken name (create, clone, restore, import, alias, alias rename) answers help naming the
@@ -432,6 +482,8 @@ graphersal-server db backup NAME | backups NAME | restore NAME BACKUP [--name NE
 graphersal-server db export NAME --out FILE [--no-models] [--materialize] --dir DIR [--json]
 graphersal-server import DIR SOURCE --name NAME [--base BASE] [--format F] [--description TEXT] [--role normal|base] [--json]
 graphersal-server models list | add SOURCE [--repo R] [--license L] | remove REPO --dir DIR [--json]
+graphersal-server user list | add NAME [--admin] | token NAME [--revoke] | remove NAME --dir DIR [--json]
+graphersal-server user admin NAME on|off | grant SUBJECT DATABASE read|write | revoke SUBJECT DATABASE --dir DIR [--json]
 ```
 
 With a server running on `DIR` (its `server.lock` is held) the console sends these requests to

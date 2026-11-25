@@ -216,6 +216,85 @@ fn render_with(command: &DbCommand, answer: &Value, dir: &Path, server: Option<&
         )
         .detail("size", size(answer))
         .text(),
+        DbCommand::UserList => render_users(answer, &dir_arg),
+        DbCommand::UserAdd { .. } => {
+            let name = s("name");
+            let what = if answer["admin"] == Value::Bool(true) {
+                "admin"
+            } else {
+                "user"
+            };
+            let note = token_note(Note::new(format!("Added {what} '{name}'")), answer);
+            if answer["admin"] == Value::Bool(true) {
+                note.text()
+            } else {
+                note.command(
+                    "let it reach a database",
+                    format!("{BIN} user grant {name} DATABASE read --dir {dir_arg}"),
+                )
+                .text()
+            }
+        }
+        DbCommand::UserToken { revoke: false, .. } => {
+            let name = s("name");
+            token_note(Note::new(format!("New token for user '{name}'")), answer)
+                .detail("old token", "stops working now")
+                .detail("ended", sessions_ended(answer))
+                .text()
+        }
+        DbCommand::UserToken { revoke: true, .. } => {
+            let name = s("name");
+            Note::new(format!("Revoked the token of user '{name}'"))
+                .detail("ended", sessions_ended(answer))
+                .command(
+                    "give it a new one",
+                    format!("{BIN} user token {name} --dir {dir_arg}"),
+                )
+                .text()
+        }
+        DbCommand::UserRemove { .. } => Note::new(format!("Removed user '{}'", s("name")))
+            .detail(
+                "grants removed",
+                answer["grantsRemoved"].as_u64().unwrap_or(0).to_string(),
+            )
+            .detail("ended", sessions_ended(answer))
+            .text(),
+        DbCommand::UserAdmin { .. } => {
+            let name = s("name");
+            if answer["admin"] == Value::Bool(true) {
+                Note::new(format!("User '{name}' is an admin"))
+                    .detail("reaches", "every database and the admin API")
+                    .text()
+            } else {
+                Note::new(format!("User '{name}' is not an admin"))
+                    .detail("reaches", grants_text(answer))
+                    .text()
+            }
+        }
+        DbCommand::UserGrant { .. } => Note::new(format!(
+            "Granted {} on {} to {}",
+            s("level"),
+            database_word(&s("database")),
+            s("subject")
+        ))
+        .text(),
+        DbCommand::UserRevoke { .. } => {
+            let database = database_word(&s("database"));
+            if answer["revoked"] == Value::Bool(true) {
+                Note::new(format!(
+                    "Revoked the grant of {} on {database}",
+                    s("subject")
+                ))
+                .text()
+            } else {
+                Note::new(format!(
+                    "{} had no grant on {database}; nothing changed",
+                    s("subject")
+                ))
+                .command("see the grants", format!("{BIN} user list --dir {dir_arg}"))
+                .text()
+            }
+        }
         DbCommand::Export { .. } => {
             let snapshot = match s("snapshot").as_str() {
                 "layer" => "layer (loads only over its base)".to_string(),
@@ -229,6 +308,131 @@ fn render_with(command: &DbCommand, answer: &Value, dir: &Path, server: Option<&
                 .text()
         }
     }
+}
+
+/// `note` with the answer's new `token`, shown once.
+fn token_note(note: Note, answer: &Value) -> Note {
+    note.detail("token", answer["token"].as_str().unwrap_or_default())
+        .detail(
+            "shown once",
+            "copy it now: only its SHA-256 hash is kept (listings show its last 4 characters)",
+        )
+        .detail(
+            "use it",
+            "\"Authorization: Bearer <token>\", or paste it on the login page",
+        )
+}
+
+/// What a token change ended: the browser sessions (always) and the MCP sessions.
+fn sessions_ended(answer: &Value) -> String {
+    let mcp = answer["mcpSessionsEnded"].as_u64().unwrap_or(0) as usize;
+    format!(
+        "its browser sessions and {}",
+        text::count(mcp, "MCP session")
+    )
+}
+
+/// `'acme'`, or `every database` for `*`.
+fn database_word(database: &str) -> String {
+    if database == "*" {
+        "every database".to_string()
+    } else {
+        format!("'{database}'")
+    }
+}
+
+/// A user's grants of `row` (`acme read, * write`), `nothing` without one.
+fn grants_text(row: &Value) -> String {
+    let grants: Vec<String> = row["grants"]
+        .as_array()
+        .map(|grants| {
+            grants
+                .iter()
+                .map(|g| {
+                    format!(
+                        "{} {}",
+                        g["database"].as_str().unwrap_or_default(),
+                        g["level"].as_str().unwrap_or_default()
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if grants.is_empty() {
+        "nothing (no grant)".to_string()
+    } else {
+        grants.join(", ")
+    }
+}
+
+/// `user list`: the users (name, admin, token's last 4, grants), then the grants of other
+/// subjects (anonymous, roles, groups).
+fn render_users(answer: &Value, dir_arg: &str) -> String {
+    let rows = answer["users"].as_array().cloned().unwrap_or_default();
+    if rows.is_empty() {
+        return Note::new("No users")
+            .command(
+                "add one",
+                format!("{BIN} user add NAME [--admin] --dir {dir_arg}"),
+            )
+            .text();
+    }
+    let mut users = Section::new(format!("Users ({})", rows.len()));
+    let cells: Vec<Vec<String>> = rows
+        .iter()
+        .map(|row| {
+            let admin = row["admin"] == Value::Bool(true);
+            let token = match row["tokenLast4"].as_str() {
+                Some(last4) if row["hasToken"] == Value::Bool(true) => format!("…{last4}"),
+                _ if row["hasToken"] == Value::Bool(true) => "set".to_string(),
+                _ => "none (revoked)".to_string(),
+            };
+            let roles: Vec<&str> = row["roles"]
+                .as_array()
+                .map(|r| r.iter().filter_map(Value::as_str).collect())
+                .unwrap_or_default();
+            vec![
+                row["name"].as_str().unwrap_or_default().to_string(),
+                if roles.is_empty() {
+                    "-".to_string()
+                } else {
+                    roles.join(", ")
+                },
+                token,
+                if admin {
+                    "every database".to_string()
+                } else {
+                    grants_text(row)
+                },
+            ]
+        })
+        .collect();
+    users.lines(table(&["USER", "ROLES", "TOKEN", "REACHES"], &cells));
+    let others: Vec<Vec<String>> = answer["grants"]
+        .as_array()
+        .map(|grants| {
+            grants
+                .iter()
+                .filter(|g| {
+                    !g["subject"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .starts_with("user:")
+                })
+                .map(|g| {
+                    ["subject", "database", "level"]
+                        .iter()
+                        .map(|key| g[*key].as_str().unwrap_or_default().to_string())
+                        .collect()
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut grants = Section::new("Other grants");
+    if !others.is_empty() {
+        grants.lines(table(&["SUBJECT", "DATABASE", "LEVEL"], &others));
+    }
+    text::render(&[users, grants])
 }
 
 /// `1.2 KiB (1234 bytes)` of the answer's `bytes`.
