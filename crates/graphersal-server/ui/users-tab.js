@@ -10,7 +10,7 @@
 import { reactive, ref, computed, nextTick, onMounted } from 'vue';
 import {
   userRows, grantRows, userActions, addUserForm, grantForm, userConfirmText, userOutcomeText,
-  shownToken, realRows, GRANT_LEVELS, NAME_HINT,
+  shownToken, grantChoices, GRANT_LEVELS, NAME_HINT,
 } from './admin-api.js';
 import { admin, list, ensureLoaded, errorNotice, noticeClass } from './shared.js';
 
@@ -28,7 +28,7 @@ export default {
     const add = reactive(freshAdd());
     const grant = reactive({ subject: 'anonymous', database: '', level: 'read', problems: [], busy: false });
 
-    const databaseNames = computed(() => realRows(list.rows).map((r) => r.name));
+    const databaseChoices = computed(() => grantChoices(list.rows));
 
     async function refresh() {
       try {
@@ -130,13 +130,13 @@ export default {
 
     onMounted(async () => {
       await Promise.all([refresh(), ensureLoaded()]);
-      if (!grant.database && databaseNames.value.length) grant.database = databaseNames.value[0];
+      if (!grant.database && databaseChoices.value.length) grant.database = databaseChoices.value[0].value;
     });
 
     return {
-      s, busy, notice, token, copied, dlg, add, grant, databaseNames, GRANT_LEVELS, noticeClass, nameHint: NAME_HINT,
+      s, busy, notice, token, copied, dlg, add, grant, databaseChoices, GRANT_LEVELS, noticeClass, nameHint: NAME_HINT,
       acts: (u) => userActions(u, s.users, { busy: !!busy[u.name] }),
-      grantsText: (u) => u.grants.map((g) => `${g.database === '*' ? 'every database' : g.database}: ${g.level}`).join(', '),
+      grantsText: (u) => u.grants.map((g) => `${g.databaseText}: ${g.level}`).join(', '),
       newToken, revokeToken, toggleAdmin, removeUser, revokeGrant, openAdd, closeAdd, submitAdd, submitGrant, copyToken, refresh,
     };
   },
@@ -191,7 +191,7 @@ export default {
     </div>
 
     <div class="srv-head"><h2>Grants</h2></div>
-    <p class="muted">A grant gives read or write on one database (or every database) to a user, or to everyone: "everyone (anonymous)" also covers visitors who are not signed in.</p>
+    <p class="muted">A grant gives read or write on one database (or every database) to a user, or to everyone: "everyone (anonymous)" also covers visitors who are not signed in. A grant on an alias reaches the database the alias names now, only through the alias's name, and follows the alias when it is pointed elsewhere.</p>
     <form class="srv-inline-form srv-form" @submit.prevent="submitGrant">
       <label>Who
         <select v-model="grant.subject" name="subject">
@@ -200,7 +200,7 @@ export default {
         </select></label>
       <label>Database
         <select v-model="grant.database" name="database">
-          <option v-for="n in databaseNames" :key="n" :value="n">{{ n }}</option>
+          <option v-for="c in databaseChoices" :key="c.value" :value="c.value">{{ c.text }}</option>
           <option value="*">every database</option>
         </select></label>
       <label>Level

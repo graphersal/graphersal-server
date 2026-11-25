@@ -46,7 +46,7 @@ export default {
       <tbody>
         <tr v-for="row in s.rows" :key="row.name" :data-db="row.name">
           <td><a v-if="row.open" :href="href(row)" class="mono">{{ row.name }}</a><span v-else class="mono">{{ row.name }}</span>
-            <span v-if="row.aliasOf" class="muted"> → {{ row.aliasOf }}</span>
+            <span class="muted srv-kind" :data-kind="row.kind"> {{ row.kindText }}</span>
             <div v-if="row.description" class="muted srv-sub">{{ row.description }}</div></td>
           <td><span class="badge" :class="row.readOnly ? '' : 'ok'">{{ row.levelText }}</span></td>
           <td><span class="badge" :class="row.tone">{{ row.stateText }}</span>

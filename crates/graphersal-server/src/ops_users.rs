@@ -82,6 +82,35 @@ impl Admin {
         Ok(Arc::new(access))
     }
 
+    /// The access state whose grants follow an alias's rename or removal: the server's;
+    /// offline the directory's `access.toml`; `None` when there is none to change (offline
+    /// without `access.toml`, or an online admin without access state: the unit tests).
+    pub(crate) fn grants_state(&self) -> Result<Option<Arc<Access>>, ServerError> {
+        if let Some(access) = &self.access {
+            return Ok(Some(access.clone()));
+        }
+        if self.is_online() || AccessFile::read(self.registry().dir())?.is_none() {
+            return Ok(None);
+        }
+        self.access_state().map(Some)
+    }
+
+    /// Moves the grants on the alias `old` to `new` (renamed): how many moved.
+    pub(crate) fn move_alias_grants(&self, old: &str, new: &str) -> Result<usize, ServerError> {
+        match self.grants_state()? {
+            Some(access) => access.rename_grants(&self.principal, old, new),
+            None => Ok(0),
+        }
+    }
+
+    /// Removes the grants on the alias `alias` (removed): how many.
+    pub(crate) fn drop_alias_grants(&self, alias: &str) -> Result<usize, ServerError> {
+        match self.grants_state()? {
+            Some(access) => access.drop_grants(&self.principal, alias),
+            None => Ok(0),
+        }
+    }
+
     /// The users and grants as they are now.
     pub fn users(&self) -> Result<AccessFile, ServerError> {
         Ok(self.access_state()?.file())
@@ -162,9 +191,12 @@ impl Admin {
     }
 
     /// Sets the grant of `subject` (`user:<name>`, a bare user name, `anonymous`, `role:<r>`,
-    /// `group:<g>`) on `database` (a database's real name or `*`) to `level` (`read`, `write`).
-    /// A user subject must name a user; the database must exist (an alias is refused with its
-    /// target: a grant follows the database, not a name of it).
+    /// `group:<g>`) on `database` (a database's real name, an alias or `*`) to `level`
+    /// (`read`, `write`). A user subject must name a user; the database or alias must exist. A
+    /// grant on an alias reaches the alias's CURRENT target, only through the alias's name
+    /// (`/db/<alias>/`, MCP `use_graph <alias>`): the real name stays hidden without a grant
+    /// of its own; a flip moves the access along, a rename carries the grant to the new name,
+    /// a removal drops it.
     pub fn grant_set(
         &self,
         subject: &str,
@@ -210,20 +242,9 @@ impl Admin {
             .revoke(&self.principal, &subject, database)
     }
 
-    /// Checks that `database` is a database's real name (not an alias, not unknown).
+    /// Checks that `database` names a database or an alias (not unknown).
     fn grant_database(&self, database: &str) -> Result<(), ServerError> {
-        let registry = self.registry();
-        let key = fold(database);
-        if let Some(target) = registry.aliases().get(&key) {
-            return Err(ServerError::Refused {
-                name: key,
-                message: format!(
-                    "an alias of '{target}': grant on the database itself (a grant follows the \
-                     database, not one of its names)"
-                ),
-            });
-        }
-        registry.get(&key).map(|_| ())
+        self.registry().resolve(database).map(|_| ())
     }
 
     /// Ends the MCP sessions of the user `name`: through the running endpoint (written through

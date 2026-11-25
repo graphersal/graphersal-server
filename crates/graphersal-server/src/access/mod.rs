@@ -220,17 +220,81 @@ impl Access {
         self.read().clone()
     }
 
-    /// The effective level of `principal` on the database or alias `name` of `registry` (an
-    /// alias's level is its target's); [`Level::None`] for an unknown name.
+    /// The effective level of `principal` on the database or alias `name` of `registry`:
+    /// [`Access::reach`]'s granted level capped by the database's mode; [`Level::None`] for an
+    /// unknown name.
     pub fn level_in(&self, registry: &Registry, principal: &Principal, name: &str) -> Level {
-        match registry.resolve(name) {
-            Ok(entry) => self.read().level(principal, &entry),
-            Err(_) => Level::None,
+        match self.reach(registry, principal, name) {
+            Some((entry, granted)) => effective_level(granted, database_read_only(&entry)),
+            None => Level::None,
         }
     }
 
-    /// The level granted to `principal` on the database `name` (a real database name), before
-    /// the database's mode caps it: admin and operator [`Level::Write`], else the highest grant
+    /// The database `name` (a database's name or an alias, resolved NOW) names for
+    /// `principal`, with the level granted on it through that name before the database's mode
+    /// ([`AccessFile::granted_level_via`]: an alias's own grants count only when `name` is the
+    /// alias). `None`: unknown, or not granted (the name does not exist for `principal`).
+    pub fn reach(
+        &self,
+        registry: &Registry,
+        principal: &Principal,
+        name: &str,
+    ) -> Option<(crate::registry::DatabaseEntry, Level)> {
+        let entry = registry.resolve(name).ok()?;
+        let granted = self.granted_level_via(principal, name, &entry.name);
+        (granted != Level::None).then_some((entry, granted))
+    }
+
+    /// [`AccessFile::granted_level_via`] on the access file as it is now.
+    pub fn granted_level_via(&self, principal: &Principal, requested: &str, real: &str) -> Level {
+        self.read().granted_level_via(principal, requested, real)
+    }
+
+    /// Moves the grants on the alias `old` to its new name `new` (the alias was renamed): how
+    /// many moved.
+    pub fn rename_grants(
+        &self,
+        actor: &Principal,
+        old: &str,
+        new: &str,
+    ) -> Result<usize, ServerError> {
+        self.change(actor, |file| {
+            let grants = file.rename_grants(old, new);
+            let events = if grants == 0 {
+                Vec::new()
+            } else {
+                vec![AuditEvent::GrantsMoved {
+                    from: crate::names::fold(old),
+                    to: crate::names::fold(new),
+                    grants,
+                }]
+            };
+            Ok((grants, events))
+        })
+    }
+
+    /// Removes the grants on `name` itself (an alias removed): how many; each recorded as a
+    /// revoked grant.
+    pub fn drop_grants(&self, actor: &Principal, name: &str) -> Result<usize, ServerError> {
+        self.change(actor, |file| {
+            let key = crate::names::fold(name);
+            let events: Vec<AuditEvent> = file
+                .grants()
+                .iter()
+                .filter(|grant| grant.database == key)
+                .map(|grant| AuditEvent::GrantRevoked {
+                    subject: grant.subject.to_string(),
+                    database: key.clone(),
+                })
+                .collect();
+            let dropped = file.drop_grants(&key);
+            Ok((dropped, events))
+        })
+    }
+
+    /// The level granted to `principal` on the database `name` asked by that real name
+    /// (an alias's grants do not count: [`Access::reach`] for a name that may be an alias),
+    /// before the database's mode caps it: admin and operator [`Level::Write`], else the highest grant
     /// of any of its subjects. [`Level::None`]: the database does not exist for `principal`.
     pub fn granted_level(&self, principal: &Principal, name: &str) -> Level {
         self.read().granted_level(principal, name)

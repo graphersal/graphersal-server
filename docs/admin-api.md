@@ -40,16 +40,19 @@ the databases and aliases the caller may reach, sorted by name:
 
 ```json
 {"databases": [{"name": "acme", "state": "loaded", "level": "write", "readOnly": false,
-  "description": "", "playground": "/db/acme/"},
+  "description": "", "playground": "/db/acme/", "kind": "database"},
   {"name": "cur", "state": "loaded", "level": "read", "readOnly": true, "description": "",
-  "playground": "/db/cur/", "aliasOf": "acme-2026"}]}
+  "playground": "/db/cur/", "kind": "alias", "aliasOf": "acme-2026"}]}
 ```
 
 `level` is the caller's effective level (its highest grant, capped by the database's mode: a
 read-only database or a base is `read`; an admin: `write`), `readOnly` is `level == "read"`,
 `state` is the entry's state without the admin's `reason`, `playground` the path of its
-playground from the server root, `aliasOf` (alias rows) the database the alias names. A database
-the caller has no grant on is never listed, nor its aliases; anonymous without anonymous grants
+playground from the server root, `kind` `database` or `alias`, `aliasOf` (alias rows) the
+database the alias names now. A database the caller has no grant on is never listed; an alias is
+listed when the caller has a grant on its database or on the alias itself (a grant on an alias
+reaches the alias's current database only through the alias, see `docs/access.md` "Grants on
+aliases"); anonymous without anonymous grants
 gets an empty list (`200`). Wrong credentials are `401`; any method but `GET`/`HEAD` is `405`.
 
 ## Conventions
@@ -135,8 +138,8 @@ A `failed` database whose `database.toml` cannot be read has only `name`, `state
 | DELETE | `/api/admin/models/<repo or blob hash>` | | `200 {"model", "removed": [blob...], "bytes"}` |
 | GET | `/api/admin/aliases` | | `200 {"aliases": {alias: database}}` |
 | PUT | `/api/admin/aliases/<alias>` | `{"target"}` | `200 {"alias", "target"}` (new alias or flip) |
-| DELETE | `/api/admin/aliases/<alias>` | | `200 {"alias", "removed": true}` |
-| POST | `/api/admin/aliases/<alias>/rename` | `{"name"}` | `200 {"alias", "renamedFrom", "target", "mcpSessionsMoved"}` (see Aliases) |
+| DELETE | `/api/admin/aliases/<alias>` | | `200 {"alias", "removed": true, "grantsRemoved"}` (the grants on the alias go with it) |
+| POST | `/api/admin/aliases/<alias>/rename` | `{"name"}` | `200 {"alias", "renamedFrom", "target", "mcpSessionsMoved", "grantsMoved"}` (see Aliases) |
 | GET | `/api/admin/runs` | | `200 {"runs": [run...], "textHeadChars": 200}` (every loaded database) |
 | GET | `/api/admin/databases/<name>/runs` | | `200 {"database", "loaded": bool, "runs": [run...], "textHeadChars": 200}` |
 | POST | `/api/admin/databases/<name>/runs/cancel` | `{"id"}` | `200 {"database", "id", "cancelled": bool}` |
@@ -222,14 +225,16 @@ a running request finishes. A base refuses `false` (`409`). `auto-load` is persi
 ### Aliases
 
 `PUT aliases/<alias> {"target"}` creates an alias or points it at another database (a flip):
-`/db/<alias>/...` and MCP sessions that selected the alias follow at once. `DELETE` removes it.
-An alias names a database, never another alias.
+`/db/<alias>/...` and MCP sessions that selected the alias follow at once, and so do the grants
+on the alias. `DELETE` removes it and the grants on it (`{"alias", "removed": true,
+"grantsRemoved"}`). An alias names a database, never another alias.
 
 `POST aliases/<alias>/rename {"name"}` gives the alias a new name and keeps its database, in one
 atomic rewrite of `aliases.toml`. The answer: `alias` (the new name), `renamedFrom` (the old
 name), `target`, `mcpSessionsMoved` (the open MCP sessions on `/mcp` that had selected the old
 name: they move to the new one, and the next answer of each carries one note, see
-`docs/mcp.md`). Refused: an old name that is no alias (`404`; a database name is `409` with
+`docs/mcp.md`), `grantsMoved` (the grants on the old name, now on the new one in `access.toml`).
+Refused: an old name that is no alias (`404`; a database name is `409` with
 the help: databases have no rename, point an alias at it), an invalid new name (`400`), a new
 name a database, another alias or the alias itself holds (`409`, help naming the listing), a
 broken `aliases.toml` (`409`). After a rename `/db/<old name>/...` (also `/db/<old>/mcp`) is
@@ -498,12 +503,17 @@ The users and grants of `access.toml` (format: [`server-dir.md`](server-dir.md))
 | `admin` | bool | it has the `admin` role |
 | `hasToken` | bool | it can authenticate (`false` after a revoke) |
 | `tokenLast4` | string or null | the last four characters of its token (to tell tokens apart: the server keeps only a SHA-256 of the token) |
-| `grants` | [{`database`, `level`}] | its own `user:<name>` grants |
+| `grants` | [{`database`, `level`, `kind`, `target`}] | its own `user:<name>` grants (`kind`, `target` as for a grant below) |
 
 A grant: `subject` (`user:<name>`, `anonymous` = everyone, also a request without
-credentials, `role:<r>`, `group:<g>`), `database` (a database's real name, or `*` = every
-database), `level` (`read` or `write`). A principal reaches a database at the highest level of
-any of its grants, capped by the database's mode (read-only or a base: `read`).
+credentials, `role:<r>`, `group:<g>`), `database` (a database's real name, an alias, or `*` =
+every database), `level` (`read` or `write`), and in every answer what `database` names now:
+`kind` (`database`: a real database; `alias`: an alias, then `target` is the database it points
+at now; `all`: `*`; `missing`: no database or alias of that name, e.g. a deleted database's) and
+`target` (`null` unless an alias). A principal reaches a database at the highest level of any of
+its grants, capped by the database's mode (read-only or a base: `read`). A grant on an alias
+reaches the alias's current database only through the alias's name; the real name stays hidden
+without a grant of its own (`docs/access.md` "Grants on aliases").
 
 - `POST users` makes the user with a new token (256 random bits as 64 hex digits). The token is
   in this answer only (`token`), never again: copy it. `admin: true` gives the `admin` role.
@@ -514,8 +524,7 @@ any of its grants, capped by the database's mode (read-only or a base: `read`).
 - `PUT users/<name>/admin {"admin": bool}` gives or takes the `admin` role and keeps the
   other roles; `PUT users/<name>/roles {"roles"}` sets them all.
 - `POST grants`: `subject` may also be a bare user name (`bob` = `user:bob`); a user subject
-  must name a user (`404`), `database` an existing database (`404`), not an alias (`409`: grant
-  on its database; a grant follows the database, not a name of it). A second grant of the same
+  must name a user (`404`), `database` an existing database or alias (`404`). A second grant of the same
   subject and database replaces the level. `DELETE grants/<subject>/<database>` removes it
   (`revoked: false`: there was none); path segments may be percent-encoded (`user%3Abob`).
 - The last admin (the `admin` role and a token) is never removed, demoted or left without a

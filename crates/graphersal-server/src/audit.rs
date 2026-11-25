@@ -192,6 +192,16 @@ pub enum AuditEvent {
         /// The database or `*`.
         database: String,
     },
+    /// The grants on an alias moved with its rename to the new name.
+    #[non_exhaustive]
+    GrantsMoved {
+        /// The alias's old name.
+        from: String,
+        /// Its new name.
+        to: String,
+        /// How many grants moved.
+        grants: usize,
+    },
     /// A browser login succeeded.
     #[non_exhaustive]
     LoginSucceeded {
@@ -314,6 +324,9 @@ impl fmt::Display for AuditEvent {
             } => write!(f, "grant {subject} {level} on '{database}'"),
             AuditEvent::GrantRevoked { subject, database } => {
                 write!(f, "grant of {subject} on '{database}' revoked")
+            }
+            AuditEvent::GrantsMoved { from, to, grants } => {
+                write!(f, "{grants} grant(s) moved from alias '{from}' to '{to}'")
             }
             AuditEvent::LoginSucceeded { principal } => write!(f, "login of '{principal}'"),
             AuditEvent::LoginFailed { reason } => write!(f, "login refused: {reason}"),

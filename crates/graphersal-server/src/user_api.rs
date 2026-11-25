@@ -4,8 +4,9 @@
 //! grants open).
 //!
 //! The answer is `{"databases": [row]}`, sorted by name, a row being `{name, state, level,
-//! readOnly, description, playground, aliasOf?}`:
+//! readOnly, description, playground, kind, aliasOf?}`:
 //! - `name`: the database's name, or the alias's (then `aliasOf` names its database);
+//! - `kind`: `database` (a real database) or `alias` (with `aliasOf`, its current target);
 //! - `state`: `unloaded`, `loading`, `loaded`, `needs-model` or `failed` (no reason: that is
 //!   the admin's);
 //! - `level`: the principal's effective level, `read` or `write` (the granted level capped by
@@ -15,7 +16,9 @@
 //! - `playground`: the path of its playground from the server root, `/db/<name>/`.
 //!
 //! A database the principal has no grant on is never listed (it does not exist for the
-//! principal), nor an alias of it. Anonymous without anonymous grants gets an empty list.
+//! principal); an alias is listed when the principal has a grant on its target or on the alias
+//! itself (a grant on an alias reaches the alias's CURRENT target, through the alias only: the
+//! target's own row stays hidden without a grant of its own). Anonymous without anonymous grants gets an empty list.
 
 use graphersal_serve::Response;
 use serde_json::{Value, json};
@@ -30,24 +33,23 @@ pub(crate) const DATABASES: &str = "/api/databases";
 /// `GET /api/databases` for `principal` (module docs).
 pub(crate) fn databases(loader: &Loader, access: &Access, principal: &Principal) -> Response {
     let registry = loader.registry();
-    let visible: Vec<(DatabaseEntry, Level)> = registry
+    let mut rows: Vec<Value> = registry
         .list()
         .into_iter()
         .filter_map(|entry| {
             let granted = access.granted_level(principal, &entry.name);
             (granted != Level::None).then(|| {
                 let level = effective_level(granted, database_read_only(&entry));
-                (entry, level)
+                row(&entry.name, &entry, level, None)
             })
         })
         .collect();
-    let mut rows: Vec<Value> = visible
-        .iter()
-        .map(|(entry, level)| row(&entry.name, entry, *level, None))
-        .collect();
-    for (alias, target) in registry.aliases() {
-        if let Some((entry, level)) = visible.iter().find(|(e, _)| e.name == target) {
-            rows.push(row(&alias, entry, *level, Some(&target)));
+    // An alias is listed when it reaches its target for `principal`: a grant on the target,
+    // or one on the alias itself (which reaches the target only through the alias).
+    for (alias, _) in registry.aliases() {
+        if let Some((entry, granted)) = access.reach(registry, principal, &alias) {
+            let level = effective_level(granted, database_read_only(&entry));
+            rows.push(row(&alias, &entry, level, Some(&entry.name)));
         }
     }
     rows.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
@@ -69,6 +71,7 @@ fn row(name: &str, entry: &DatabaseEntry, level: Level, alias_of: Option<&str>) 
         "readOnly": level == Level::Read,
         "description": description,
         "playground": format!("/db/{name}/"),
+        "kind": if alias_of.is_some() { "alias" } else { "database" },
     });
     if let Some(target) = alias_of {
         row["aliasOf"] = Value::String(target.to_string());

@@ -130,7 +130,8 @@ export const LEVEL_TEXTS = Object.freeze({ read: 'read only', write: 'read and w
 
 /**
  * The rows of "my databases" from a `GET api/databases` answer: `[{name, href, state,
- * stateText, tone, level, levelText, readOnly, description, aliasOf, open}]`, sorted by name;
+ * stateText, tone, level, levelText, readOnly, description, aliasOf, open, kind, kindText}]`,
+ * sorted by name; `kind` `alias` (with `aliasOf`, its current database) or `database`;
  * `open` = loaded (its playground answers). A malformed entry is skipped. Throws an Error when
  * the answer has no `databases` list.
  */
@@ -156,9 +157,20 @@ export function mineRows(answer) {
       aliasOf: typeof d.aliasOf === 'string' && d.aliasOf ? d.aliasOf : null,
       open: d.state === 'loaded',
     });
+    const row = rows[rows.length - 1];
+    row.kind = row.aliasOf ? 'alias' : 'database';
+    row.kindText = mineKindText(row);
   }
   rows.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
   return rows;
+}
+
+/**
+ * What a row of "my databases" names: `alias → <database>` (the database it names now; a grant
+ * on the alias follows it) or `database`.
+ */
+export function mineKindText(row) {
+  return row && row.aliasOf ? `alias → ${row.aliasOf}` : 'database';
 }
 
 /** Why a row of "my databases" has no link (it is not loaded), or ''. */

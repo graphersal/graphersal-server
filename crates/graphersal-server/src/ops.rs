@@ -522,29 +522,49 @@ impl Admin {
         Ok(())
     }
 
-    /// Removes the alias `alias` ([`Registry::alias_remove`]).
-    pub fn alias_remove(&self, alias: &str) -> Result<(), ServerError> {
+    /// Removes the alias `alias` ([`Registry::alias_remove`]) and the grants on it (a grant on
+    /// an alias never outlives it, so a later alias or database of that name does not inherit
+    /// it): the number of grants removed.
+    ///
+    /// `Err` after the alias is gone: `access.toml` could not be rewritten (its grants on the
+    /// name stay, listed as `missing`; revoke them by hand).
+    pub fn alias_remove(&self, alias: &str) -> Result<usize, ServerError> {
         self.registry.alias_remove(alias)?;
         self.audit.record(AuditEvent::AliasRemoved {
             alias: crate::names::fold(alias),
         });
-        Ok(())
+        self.drop_alias_grants(alias)
     }
 
     /// Renames the alias `old` to `new` ([`Registry::alias_rename`]); online, every MCP session
     /// that selected `old` moves to `new` in the same step (its next answer carries one note):
-    /// [`Renamed::moved`] is the number of sessions moved (0 offline or with MCP off).
+    /// [`Renamed::moved`] is the number of sessions moved (0 offline or with MCP off). The
+    /// grants on `old` move to `new` in the same step too ([`Renamed::grants`]).
+    ///
+    /// `Err` after the alias is renamed: `access.toml` could not be rewritten (the grants stay
+    /// on the old name, listed as `missing`).
     pub fn alias_rename(&self, old: &str, new: &str) -> Result<Renamed<usize>, ServerError> {
         let mcp = self.loader.as_ref().and_then(|loader| loader.mcp());
+        // Under the registry's write lock: no request sees the new name without its grants.
         let renamed = self.registry.alias_rename(old, new, |old, new| {
-            mcp.map_or(0, |mcp| mcp.rename_selection(old, new))
+            let sessions = mcp.map_or(0, |mcp| mcp.rename_selection(old, new));
+            (sessions, self.move_alias_grants(old, new))
         })?;
+        let (sessions, grants) = renamed.moved;
+        let mut renamed = Renamed {
+            old: renamed.old,
+            new: renamed.new,
+            target: renamed.target,
+            moved: sessions,
+            grants: 0,
+        };
         self.audit.record(AuditEvent::AliasRenamed {
             old: renamed.old.clone(),
             new: renamed.new.clone(),
             target: renamed.target.clone(),
             moved: renamed.moved,
         });
+        renamed.grants = grants?;
         Ok(renamed)
     }
 

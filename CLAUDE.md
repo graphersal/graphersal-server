@@ -29,7 +29,12 @@ from published files). When this file disagrees with the code, the code wins: sa
   anonymous = `None`; `subjects()` incl. `anonymous` for everyone), `Level`
   (`None < Read < Write`; `granted_level` = admin/operator `Write`, else the highest grant of
   any subject; `effective_level` = min with the database mode (read-only flag or base);
-  `Access::level_in` resolves aliases), `Secret`/`TokenHash` (256-bit OS random via `ring`,
+  `Access::level_in` resolves aliases; round 3 B3: a grant may name an alias and counts only
+  when the request names the alias: `AccessFile::granted_level_via(principal, requested, real)`,
+  `Access::reach(registry, principal, name)` -> (entry, granted) is the one check of the router,
+  `user_api` and `mcp::Directory`; `rename_grants`/`drop_grants` (audited `GrantsMoved` /
+  `GrantRevoked`) called by `Admin::alias_rename` (under the registry's write lock) and
+  `Admin::alias_remove` via `Admin::grants_state`), `Secret`/`TokenHash` (256-bit OS random via `ring`,
   SHA-256, constant-time compare, redacted `Debug`), the authenticator chain
   (`Authenticator` trait: `OperatorToken` (per run, `server.run`), `UserTokens` (Bearer),
   `SessionCookie` (`gs_session`, `SessionTable` trait, `MemorySessions`; a session ends when
@@ -135,7 +140,8 @@ from published files). When this file disagrees with the code, the code wins: sa
   the node test, checked by `router::tests::the_node_tests_root_info_is_the_answer`, `uiProfile` = `ui_assets::profile_for(View::of(principal))`, `uploadBytes` = the upload limit, `mcp` =
   `Mcp::status()` or null), `/mcp` (every method) via `mcp::route` (404 when MCP is off),
   `GET /api/databases` via `user_api` (B4: "my databases" for every principal, anonymous
-  included: only the databases/aliases with a grant, effective `level`, `playground` path;
+  included: only the databases/aliases with a grant (an alias also by its own grant), effective
+  `level`, `playground` path, `kind` database|alias;
   tests `router_access_tests.rs` `my_databases_*`), `/api/admin/...` via `admin_api`, other
   `/api/*` 404, `GET /server-ui/<file>` the profile's
   files (`ui_assets::file`), every other GET a file of the embedded playground at the root (`/` =
@@ -179,9 +185,10 @@ from published files). When this file disagrees with the code, the code wins: sa
   users and grants (B5): `admin_api_users.rs` (`GET|POST users`, `GET|DELETE users/<n>`,
   `POST|DELETE users/<n>/token`, `PUT users/<n>/admin|roles`, `GET|POST grants`,
   `DELETE grants/<subject>/<database>` (segments percent-decoded); user row `{name, roles,
-  admin, hasToken, tokenLast4, grants}`; the token only in the add/token answer) over
+  admin, hasToken, tokenLast4, grants}`; every grant object (also a user's) carries `kind`
+  (`database`/`alias`/`all`/`missing`) and `target` (`add_kind`, the registry's aliases); the token only in the add/token answer) over
   `ops_users.rs` (`Admin::users`, `user_add`, `user_token`, `user_revoke_token`, `user_remove`,
-  `user_set_roles`, `user_set_admin`, `grant_set` (database must exist, alias refused),
+  `user_set_roles`, `user_set_admin`, `grant_set` (database or alias must exist),
   `grant_revoke`): online through the router's `Access` (`Admin::with_access(access,
   principal)`; token change/removal also `Mcp::forget_sessions_of(user:<n>)`), offline through
   an `Access::open_with_limits` over the directory's `access.toml` and its `FileSessions`
@@ -364,7 +371,8 @@ from published files). When this file disagrees with the code, the code wins: sa
   grant); `list` (databases +
   aliases; a session keeps the NAME it selected (alias or database) and graphersal-mcp resolves it per call: a flip moves it, a removed name errors, a rename moves it via `Admin::alias_rename`; kind plain/layer/base from `database.toml`, state, readOnly = `read_only` or base,
   description; an alias row carries its target's fields + `aliasOf`), `resolve` (alias -> real
-  name NOW; unknown -> `no database or alias 'x'`), `host` (loaded -> the context + its
+  name NOW, or the alias's own name when the caller reaches it only through an alias grant, so
+  `host` resolves it again; unknown -> `no database or alias 'x'`), `host` (loaded -> the context + its
   `mcp_profile()`; else `McpError::Unavailable` with the state's text, `...; ask an operator to
   load it`). `route` adapts the request (as graphersal-serve's `mcp.rs`) to
   `Mcp::handle_directory` (POST/DELETE; GET 405). `/db/<name>/mcp` is graphersal-serve's own

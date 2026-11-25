@@ -105,3 +105,36 @@ A server in the background without hunting for its pid:
   `names::validate_new_user_name`; `validate_new_name` checks the new rule; `validate_name`
   stays the rule of existing names; `Registry::prepare_tmp_former_name` (a restore under the
   deleted database's own name).
+
+## Grants on aliases
+
+0.2.0 refused a grant on an alias (`409`: grant the database). 0.3.0 takes it
+([`access.md`](access.md#grants-on-aliases)):
+
+- **Through the alias only:** a grant on an alias reaches the database the alias names NOW, but
+  only when the request names the alias: `/db/<alias>/...`, MCP `use_graph <alias>` (or
+  `"graph": "<alias>"`), the alias's row in the server-wide `/mcp` `list_graphs` and in "My
+  databases". The real name stays hidden without a grant of its own (`404`, `401` for
+  anonymous; not listed as a database). The level through the alias is the higher of the grants
+  on the alias and on its database, capped by the database's mode. `*` grants are unchanged.
+- **Flip:** pointing the alias at another database moves the access at once, also for open MCP
+  sessions that selected the alias.
+- **Rename:** `db alias rename OLD NEW` (and `POST /api/admin/aliases/<alias>/rename`) moves the
+  grants on OLD to NEW in `access.toml` (answer `grantsMoved`; the console prints `grants moved`
+  when there were any; audited as `GrantsMoved`).
+- **Remove:** `db alias remove ALIAS` (and `DELETE /api/admin/aliases/<alias>`) removes the
+  grants on the alias too (answer `grantsRemoved`; each audited as a revoked grant), so a later
+  alias or database of that name inherits nothing.
+- **Every grant listing marks the name:** the admin API's grant objects (in `GET users`, `GET
+  grants`, `POST grants` and each user's `grants`) gain `kind` (`database`, `alias`, `all` for
+  `*`, `missing` for a name that names nothing now) and `target` (the alias's current
+  database, else `null`); `GET /api/databases` rows gain `kind` (`database` or `alias`).
+  `graphersal-server user list` shows `prod → prod-2026-11 (alias)` and `gone (missing)`, and
+  `user grant` on an alias says which database it reaches now. Web UI: the Users tab's grant
+  tables show `prod → prod-2026-11 (alias)`, its database picker offers the aliases too (marked,
+  after the databases), and "My databases" shows `alias → <database>` or `database` beside each
+  name.
+- The library: `AccessFile::granted_level_via`, `grants_on`, `rename_grants`, `drop_grants`;
+  `Access::reach`, `granted_level_via`, `rename_grants`, `drop_grants` (`level_in` counts an
+  alias's own grants); `Admin::alias_remove` answers the number of grants removed;
+  `Renamed::grants`; `AuditEvent::GrantsMoved`.

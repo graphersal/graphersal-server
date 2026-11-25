@@ -12,7 +12,9 @@
 //!   again).
 //! - `/db/<name>/...`: the database `<name>` (or the database an alias names, resolved per
 //!   request), its playground, API and MCP endpoint, with the prefix stripped
-//!   ([`crate::mounts`]), for a principal granted at least `read` on it. Without a grant the
+//!   ([`crate::mounts`]), for a principal granted at least `read` on it: a grant on the
+//!   database's name (or `*`), or, when the request names an alias, a grant on the alias (it
+//!   reaches the alias's current target only through the alias name). Without a grant the
 //!   database does not exist for the principal: anonymous gets `401` (for EVERY name, so
 //!   nothing about existence leaks; a `GET` of a page or static file `303` to the login page
 //!   `/?next=<path>`), a logged-in principal the unknown-name `404`. A `read` grant marks the
@@ -431,11 +433,8 @@ impl Router {
         (name, rest): (&str, Option<&str>),
         (path, query, url): (&str, Option<&str>, &str),
     ) -> Response {
-        let entry = loader.registry().resolve(name).ok();
-        let granted = entry.as_ref().map_or(Level::None, |entry| {
-            access.granted_level(principal, &entry.name)
-        });
-        let Some(entry) = entry.filter(|_| granted != Level::None) else {
+        // An alias's own grants count only through the alias (`Access::reach`).
+        let Some((entry, granted)) = access.reach(loader.registry(), principal, name) else {
             if !principal.is_anonymous() {
                 return mounts::unknown_database(name);
             }

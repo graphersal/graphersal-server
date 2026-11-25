@@ -834,7 +834,10 @@ fn the_users_api_is_for_admins_and_manages_users_and_grants() {
     assert_eq!(bob_row["roles"], json!([]));
     assert_eq!(
         bob_row["grants"],
-        json!([{"database": "w", "level": "write"}, {"database": "r", "level": "read"}])
+        json!([
+            {"database": "w", "level": "write", "kind": "database", "target": null},
+            {"database": "r", "level": "read", "kind": "database", "target": null}
+        ])
     );
     assert!(!list.to_string().contains(&TokenHash::of(bob).to_hex()));
     assert_eq!(list["grants"].as_array().unwrap().len(), 2, "{list}");
@@ -891,7 +894,8 @@ fn the_users_api_is_for_admins_and_manages_users_and_grants() {
         400,
     );
 
-    // Grants: a bare user name, read; the alias and unknown names are refused.
+    // Grants: a bare user name, read; unknown names are refused (an alias is granted: see
+    // `a_grant_on_an_alias_*`).
     let grant = expect(
         post(
             &fx,
@@ -903,17 +907,14 @@ fn the_users_api_is_for_admins_and_manages_users_and_grants() {
     );
     assert_eq!(
         grant,
-        json!({"subject": "user:dave", "database": "w", "level": "read"})
+        json!({"subject": "user:dave", "database": "w", "level": "read", "kind": "database",
+               "target": null})
     );
     assert_eq!(
         get(&fx, Who::Bearer(&token), "/db/w/api/info").status(),
         200
     );
     for (body, status) in [
-        (
-            json!({"subject": "dave", "database": "cur", "level": "read"}),
-            409,
-        ),
         (
             json!({"subject": "dave", "database": "nope", "level": "read"}),
             404,
@@ -1706,4 +1707,294 @@ fn the_import_inbox_is_listed_and_imported_by_admins_only_and_stays_inside() {
         );
     }
     assert!(!fx.loader.registry().dir().databases().join("evil").exists());
+}
+
+// ---------------------------------------------------------------------------------------------
+// Grants on aliases (round 3 B3)
+// ---------------------------------------------------------------------------------------------
+
+/// The person count of the database `name` names, asked by `who` through that name.
+fn person_count_as(fx: &Fixture, who: Who<'_>, name: &str) -> i64 {
+    let execution = execute(fx, who, name, r#"g.v().has_label("person").count()"#);
+    execution["results"][0]
+        .as_i64()
+        .or_else(|| execution["results"][0]["value"].as_i64())
+        .unwrap_or_else(|| panic!("no count: {execution}"))
+}
+
+/// The person count an MCP call in `session` answers (on the session's graph): the result
+/// line of the answer (the first line carries the timing), and whether it is an error.
+fn mcp_person_count(fx: &Fixture, who: Who<'_>, session: &str) -> (String, bool) {
+    let (text, error) = mcp_tool(
+        fx,
+        who,
+        "/mcp",
+        session,
+        "query",
+        json!({"script": r#"g.v().has_label("person").count()"#}),
+    );
+    (result_line(&text), error)
+}
+
+/// The last line of a tool answer (the result, without the timing line).
+fn result_line(text: &str) -> String {
+    text.lines().last().unwrap_or_default().to_string()
+}
+
+#[test]
+fn a_grant_on_an_alias_reaches_its_current_target_only_through_the_alias() {
+    let fx = fixture("access-alias-grant");
+    let (alice, carol) = (fx.alice.as_str(), fx.carol.as_str());
+    // `w` gets one more person than `h`, so the two are told apart.
+    execute(&fx, Who::Bearer(OPERATOR), "w", WRITE);
+    let (in_h, in_w) = (person_count(&fx, "h"), person_count(&fx, "w"));
+    assert_eq!(in_w, in_h + 1);
+    // An admin grants carol `read` on the alias `hid` (-> `h`): taken, marked as an alias.
+    let grant = expect(
+        post(
+            &fx,
+            Who::Bearer(alice),
+            "/api/admin/grants",
+            json!({"subject": "carol", "database": "HID", "level": "read"}),
+        ),
+        200,
+    );
+    assert_eq!(
+        grant,
+        json!({"subject": "user:carol", "database": "hid", "level": "read", "kind": "alias",
+               "target": "h"})
+    );
+    // Through the alias: reachable at `read`; through the real name: the unknown-name 404,
+    // byte for byte the answer of a name that does not exist.
+    assert_eq!(person_count_as(&fx, Who::Bearer(carol), "hid"), in_h);
+    let refused = post(
+        &fx,
+        Who::Bearer(carol),
+        "/db/hid/api/execute",
+        json!({ "script": WRITE }),
+    );
+    let text = String::from_utf8_lossy(refused.body()).to_lowercase();
+    assert!(
+        refused.status() != 200 || text.contains("denied") || text.contains("read-only"),
+        "a read grant does not write: {text}"
+    );
+    assert_eq!(person_count(&fx, "h"), in_h);
+    let real = get(&fx, Who::Bearer(carol), "/db/h/api/info");
+    assert_eq!(real.status(), 404);
+    let unknown = get(&fx, Who::Bearer(carol), "/db/zz/api/info");
+    assert_eq!(
+        String::from_utf8_lossy(real.body()).replace("'h'", "'zz'"),
+        String::from_utf8_lossy(unknown.body())
+    );
+    // Anonymous has no grant on the alias: 401 as for every name.
+    assert_unauthorized(&get(&fx, Who::Anonymous, "/db/hid/api/info"), "no grant");
+    // "My databases": the alias only, marked, never the real database's own row.
+    assert_eq!(
+        listed(&fx, Who::Bearer(carol)),
+        [row("hid", "read", Some("h"))]
+    );
+    let mine = expect(get(&fx, Who::Bearer(carol), "/api/databases"), 200);
+    assert_eq!(mine["databases"][0]["kind"], "alias", "{mine}");
+    let bob_mine = expect(get(&fx, Who::Bearer(&fx.bob), "/api/databases"), 200);
+    let kinds: Vec<(&str, &str)> = bob_mine["databases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| (r["name"].as_str().unwrap(), r["kind"].as_str().unwrap()))
+        .collect();
+    assert_eq!(
+        kinds,
+        [("cur", "alias"), ("r", "database"), ("w", "database")]
+    );
+
+    // MCP: list_graphs shows the alias (not the real database as a graph of its own),
+    // use_graph takes the alias and refuses the real name like an unknown one.
+    let session = mcp_initialize(&fx, Who::Bearer(carol), "/mcp");
+    let (listing, error) = mcp_tool(
+        &fx,
+        Who::Bearer(carol),
+        "/mcp",
+        &session,
+        "list_graphs",
+        json!({}),
+    );
+    assert!(!error, "{listing}");
+    assert!(listing.contains("\"name\":\"hid\""), "{listing}");
+    for hidden in ["\"name\":\"h\"", "\"name\":\"w\"", "\"name\":\"r\""] {
+        assert!(!listing.contains(hidden), "{hidden}: {listing}");
+    }
+    let (used, error) = mcp_tool(
+        &fx,
+        Who::Bearer(carol),
+        "/mcp",
+        &session,
+        "use_graph",
+        json!({"name": "hid"}),
+    );
+    assert!(!error, "{used}");
+    assert!(
+        used.contains("\"graph\":\"hid\""),
+        "the real name stays out: {used}"
+    );
+    assert!(used.contains("\"readOnly\":true"), "{used}");
+    let (real, error) = mcp_tool(
+        &fx,
+        Who::Bearer(carol),
+        "/mcp",
+        &session,
+        "use_graph",
+        json!({"name": "h"}),
+    );
+    assert!(error, "{real}");
+    let (unknown, _) = mcp_tool(
+        &fx,
+        Who::Bearer(carol),
+        "/mcp",
+        &session,
+        "use_graph",
+        json!({"name": "zz"}),
+    );
+    assert_eq!(real.replace("'h'", "'zz'"), unknown);
+    let (before, error) = mcp_person_count(&fx, Who::Bearer(carol), &session);
+    assert!(!error, "{before}");
+    let (on_h, _) = mcp_tool(
+        &fx,
+        Who::Bearer(alice),
+        "/mcp",
+        &mcp_initialize(&fx, Who::Bearer(alice), "/mcp"),
+        "query",
+        json!({"script": r#"g.v().has_label("person").count()"#, "graph": "h"}),
+    );
+    assert_eq!(before, result_line(&on_h));
+    assert_eq!(before, format!("[{in_h}]"));
+
+    // A flip moves the access at once: HTTP and the open MCP session follow the alias; the
+    // old target is hidden again, the new one only through the alias.
+    expect(
+        put(
+            &fx,
+            Who::Bearer(alice),
+            "/api/admin/aliases/hid",
+            json!({"target": "w"}),
+        ),
+        200,
+    );
+    assert_eq!(person_count_as(&fx, Who::Bearer(carol), "hid"), in_w);
+    assert_eq!(get(&fx, Who::Bearer(carol), "/db/w/api/info").status(), 404);
+    assert_eq!(get(&fx, Who::Bearer(carol), "/db/h/api/info").status(), 404);
+    let (after, error) = mcp_person_count(&fx, Who::Bearer(carol), &session);
+    assert!(!error, "{after}");
+    assert_eq!(after, format!("[{in_w}]"), "the session follows the flip");
+    let users = expect(get(&fx, Who::Bearer(alice), "/api/admin/users"), 200);
+    let marked: Vec<&Value> = users["grants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|g| g["subject"] == "user:carol")
+        .collect();
+    assert_eq!(
+        marked,
+        [
+            &json!({"subject": "user:carol", "database": "hid", "level": "read",
+                 "kind": "alias", "target": "w"})
+        ]
+    );
+    let carol_row = users["users"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|u| u["name"] == "carol")
+        .unwrap()
+        .clone();
+    assert_eq!(
+        carol_row["grants"],
+        json!([{"database": "hid", "level": "read", "kind": "alias", "target": "w"}])
+    );
+    let bob_row = users["users"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|u| u["name"] == "bob")
+        .unwrap()
+        .clone();
+    assert_eq!(bob_row["grants"][0]["kind"], "database", "{bob_row}");
+    assert_eq!(bob_row["grants"][0]["target"], Value::Null, "{bob_row}");
+
+    // A rename carries the grant (and the MCP session) to the new name.
+    let renamed = expect(
+        post(
+            &fx,
+            Who::Bearer(alice),
+            "/api/admin/aliases/hid/rename",
+            json!({"name": "seen"}),
+        ),
+        200,
+    );
+    assert_eq!(renamed["grantsMoved"], 1, "{renamed}");
+    assert_eq!(person_count_as(&fx, Who::Bearer(carol), "seen"), in_w);
+    assert_eq!(
+        get(&fx, Who::Bearer(carol), "/db/hid/api/info").status(),
+        404
+    );
+    let (moved, error) = mcp_person_count(&fx, Who::Bearer(carol), &session);
+    assert!(!error, "{moved}");
+    assert_eq!(moved, after);
+
+    // A removal drops the grant: a later alias of that name gives carol nothing.
+    let removed = expect(
+        delete(&fx, Who::Bearer(alice), "/api/admin/aliases/seen"),
+        200,
+    );
+    assert_eq!(removed["grantsRemoved"], 1, "{removed}");
+    assert_eq!(fx.access.file().grants_on("seen"), 0);
+    expect(
+        put(
+            &fx,
+            Who::Bearer(alice),
+            "/api/admin/aliases/seen",
+            json!({"target": "w"}),
+        ),
+        200,
+    );
+    assert_eq!(
+        get(&fx, Who::Bearer(carol), "/db/seen/api/info").status(),
+        404
+    );
+    assert!(listed(&fx, Who::Bearer(carol)).is_empty());
+}
+
+#[test]
+fn an_alias_grant_and_a_real_grant_add_up_capped_by_the_database_mode() {
+    let fx = fixture("access-alias-levels");
+    let operator = Principal::operator();
+    // bob: `r` read (fixture); a write grant on its alias `cur` raises it through `cur` only.
+    let grant = Grant::new(Subject::parse("user:bob").unwrap(), "cur", Level::Write).unwrap();
+    fx.access.grant(&operator, grant).unwrap();
+    let registry = fx.loader.registry();
+    let bob = fx.access.file().principal_of("bob").unwrap();
+    assert_eq!(fx.access.level_in(registry, &bob, "cur"), Level::Write);
+    assert_eq!(fx.access.level_in(registry, &bob, "r"), Level::Read);
+    // The database's mode still caps it.
+    fx.loader.set_read_only("r", true).unwrap();
+    assert_eq!(fx.access.level_in(registry, &bob, "cur"), Level::Read);
+    // A `*` grant reaches every database by its name and through every alias, as before.
+    let carol = fx.access.file().principal_of("carol").unwrap();
+    let all = Grant::new(Subject::parse("user:carol").unwrap(), "*", Level::Read).unwrap();
+    fx.access.grant(&operator, all).unwrap();
+    for name in ["h", "hid", "w", "cur"] {
+        assert_eq!(
+            fx.access.level_in(registry, &carol, name),
+            Level::Read,
+            "{name}"
+        );
+    }
+    let users = expect(get(&fx, Who::Bearer(&fx.alice), "/api/admin/grants"), 200);
+    let star = users["grants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|g| g["database"] == "*")
+        .unwrap()
+        .clone();
+    assert_eq!(star["kind"], "all", "{star}");
 }

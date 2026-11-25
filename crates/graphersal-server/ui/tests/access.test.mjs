@@ -14,7 +14,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
 import {
   accessRequest, safeNext, nextFromSearch, afterLoginTarget, rootHref, tokenProblem, login, logout,
-  principalOf, headerModel, mineRows, mineNote, emptyMineText, fetchMine, refusalAction, loginHref,
+  principalOf, headerModel, mineRows, mineNote, mineKindText, emptyMineText, fetchMine, refusalAction, loginHref,
   LOGIN_HELP, MAX_NEXT_CHARS,
 } from '../access-api.js';
 import { createAdmin, sendAdmin, adminRequest } from '../admin-api.js';
@@ -245,6 +245,20 @@ test('my databases: rows, notes and the empty text', () => {
   assert.equal(mineNote({ open: true, state: 'loaded' }), '');
   assert.match(emptyMineText({ kind: 'user' }), /Ask an admin for a grant/);
   assert.match(emptyMineText({ kind: 'anonymous' }), /Sign in/);
+});
+
+test('my databases marks an alias with the database it names now, and a real database', () => {
+  const rows = mineRows({ databases: [
+    { name: 'prod', state: 'loaded', level: 'read', kind: 'alias', aliasOf: 'prod-2026-11' },
+    { name: 'acme', state: 'loaded', level: 'write', kind: 'database' },
+  ] });
+  assert.deepEqual(rows.map((r) => [r.name, r.kind, r.kindText, r.aliasOf]), [
+    ['acme', 'database', 'database', null],
+    ['prod', 'alias', 'alias → prod-2026-11', 'prod-2026-11'],
+  ]);
+  assert.equal(mineKindText(null), 'database');
+  const tab = readFileSync(new URL('../mine-tab.js', import.meta.url), 'utf8');
+  assert.ok(tab.includes('{{ row.kindText }}'), 'the tab shows the mark');
 });
 
 /** The engine's playground directory for the profile checks, or null (skipped): as

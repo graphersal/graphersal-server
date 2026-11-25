@@ -29,8 +29,8 @@
 //! | POST | `databases/<name>/runs/cancel` | `{"id"}` | `200 {"database", "id", "cancelled": bool}` (`false`: no such run now) |
 //! | GET | `aliases` | | `200 {"aliases": {alias: database}}` |
 //! | PUT | `aliases/<alias>` | `{"target"}` | `200 {"alias", "target"}` |
-//! | DELETE | `aliases/<alias>` | | `200 {"alias", "removed": true}` |
-//! | POST | `aliases/<alias>/rename` | `{"name"}` | `200 {"alias", "renamedFrom", "target", "mcpSessionsMoved"}` |
+//! | DELETE | `aliases/<alias>` | | `200 {"alias", "removed": true, "grantsRemoved"}` (its grants go with it) |
+//! | POST | `aliases/<alias>/rename` | `{"name"}` | `200 {"alias", "renamedFrom", "target", "mcpSessionsMoved", "grantsMoved"}` |
 //! | GET, POST, PUT, DELETE | `users...`, `grants...` | | the users and grants of `access.toml` (the `admin_api_users.rs` table) |
 //!
 //! The actions take real database names (not aliases). Errors are `{"error", "help"?}` with
@@ -375,7 +375,12 @@ pub(crate) fn route(
         }
         (Method::Delete, ["aliases", alias]) if !alias.is_empty() => admin
             .alias_remove(alias)
-            .map(|()| Response::json(200, &json!({ "alias": fold(alias), "removed": true })))
+            .map(|grants| {
+                Response::json(
+                    200,
+                    &json!({ "alias": fold(alias), "removed": true, "grantsRemoved": grants }),
+                )
+            })
             .map_err(|err| (err, None)),
         (Method::Post, ["aliases", alias, "rename"]) if !alias.is_empty() => {
             let body: RenameBody = body_of(request)?;
@@ -389,6 +394,7 @@ pub(crate) fn route(
                             "renamedFrom": renamed.old,
                             "target": renamed.target,
                             "mcpSessionsMoved": renamed.moved,
+                            "grantsMoved": renamed.grants,
                         }),
                     )
                 })

@@ -107,10 +107,12 @@ last four characters) and the grants. A grant has three parts:
 - `subject`: `user:<name>`, `role:<role>`, or `anonymous`. `anonymous` means everyone,
   including requests without a token, so a logged-in user always reaches at least what
   anonymous reaches.
-- `database`: the real name of a database, or `*` for every database. A grant cannot name an
-  alias: the grant follows the database, and an alias pointing at it is reached with the
-  database's level.
+- `database`: the real name of a database, an alias, or `*` for every database.
 - `level`: `read` or `write`.
+
+A grant on a database's real name also reaches the database through every alias that points at
+it. A grant on an **alias** works the other way round
+([Grants on aliases](#grants-on-aliases)).
 
 A principal's level on a database is computed in two steps:
 
@@ -121,9 +123,40 @@ A principal's level on a database is computed in two steps:
 
 | Level | What the principal gets on `/db/<name>/...` and over MCP |
 |---|---|
-| none | the database is **hidden**: `404` like an unknown name, never listed (`GET /api/databases`, MCP `list_graphs`), and no alias leads to it |
+| none | the database is **hidden**: `404` like an unknown name, never listed (`GET /api/databases`, MCP `list_graphs`), and no alias leads to it unless the alias itself is granted |
 | `read` | every request is read-only: queries run under the reading authorizer, write routes answer `409`, MCP offers the read-only tools |
 | `write` | everything the database's own mode allows |
+
+### Grants on aliases
+
+A grant may name an alias (`graphersal-server user grant bob prod read` with `prod` an alias of
+`prod-2026-11`). Such a grant:
+
+- reaches the alias's **current** target, but only when the request names the alias:
+  `/db/prod/...`, MCP `use_graph prod` or `"graph": "prod"`, the alias's row in the server-wide
+  `/mcp` `list_graphs` and in "My databases";
+- keeps the real name hidden: `/db/prod-2026-11/...` answers like an unknown name (`404`, or `401`
+  for anonymous), and `prod-2026-11` is not listed as a database of its own, unless the
+  principal holds a grant on it too. The alias's row still shows the database it points at
+  (`aliasOf`), as every alias row does;
+- **moves with the alias**: a flip (`db alias set prod prod-2026-12`) moves the access at once, for
+  new requests and for open MCP sessions that selected `prod`;
+- **follows a rename**: `db alias rename prod live` moves the alias's grants to `live` in
+  `access.toml` (the answer says how many: `grantsMoved`);
+- **goes with the alias**: `db alias remove prod` removes the grants on `prod` too
+  (`grantsRemoved`), so a later alias or database named `prod` inherits nothing.
+
+Through an alias the granted level is the higher of the grants on the alias and on its target;
+the database's mode still caps it (a read-only target gives `read` at most). A `*` grant works
+as before: every database, by its own name and through every alias.
+
+Grants name names. A grant left on the name of a deleted database stays in `access.toml` and
+applies again to whatever takes that name later; the listings mark such a grant as missing.
+
+Every grant listing says what the name is now: the Users tab, `graphersal-server user list`
+(`prod → prod-2026-11 (alias)`, a name that names nothing `gone (missing)`), "My databases"
+(`alias → prod-2026-11` or `database`) and the admin API's grant objects (`kind`: `database`,
+`alias`, `all` for `*`, `missing`; `target`: the alias's current database).
 
 `admin` is the only role with built-in meaning: write on every database, plus the admin API
 (`/api/admin/...`, which includes Runs and Users). Other roles get access only through

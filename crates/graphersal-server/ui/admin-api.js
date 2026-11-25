@@ -1033,7 +1033,8 @@ export function tokenText(user) {
 
 /**
  * The users of a `GET api/admin/users` answer as sorted rows `[{name, roles, admin, hasToken,
- * tokenLast4, tokenText, grants: [{database, level}]}]`; a malformed entry is skipped. Throws an
+ * tokenLast4, tokenText, grants: [{database, level, kind, target, databaseText}]}]`; a malformed
+ * entry is skipped. Throws an
  * Error when the answer has no `users` list.
  */
 export function userRows(answer) {
@@ -1063,7 +1064,56 @@ function grantList(grants) {
   if (!Array.isArray(grants)) return [];
   return grants
     .filter((g) => g && typeof g.database === 'string' && g.database && GRANT_LEVELS.includes(g.level))
-    .map((g) => ({ database: g.database, level: g.level }));
+    .map((g) => {
+      const mark = grantKind(g);
+      return { database: g.database, level: g.level, ...mark, databaseText: grantDatabaseText({ database: g.database, ...mark }) };
+    });
+}
+
+/** The kinds of name a grant's `database` can be now (the server's `kind`). */
+export const GRANT_KINDS = Object.freeze(['database', 'alias', 'all', 'missing']);
+
+/**
+ * What a grant's `database` names now, from the server's `kind` and `target`: `{kind, target}`,
+ * `kind` one of GRANT_KINDS (`*` is `all`; an older server without `kind`: `database`), `target`
+ * the alias's current database (else null).
+ */
+export function grantKind(g) {
+  const database = g && typeof g.database === 'string' ? g.database : '';
+  if (database === '*') return { kind: 'all', target: null };
+  const kind = g && GRANT_KINDS.includes(g.kind) ? g.kind : 'database';
+  const target = kind === 'alias' && typeof g.target === 'string' && g.target ? g.target : null;
+  return { kind, target };
+}
+
+/**
+ * The words of a grant's database: `every database` for `*`, `prod → prod-2026-11 (alias)` for
+ * an alias (its current target), `old (no such database)` for a name that names nothing now,
+ * else the database's name.
+ */
+export function grantDatabaseText(g) {
+  const { kind, target } = grantKind(g);
+  const database = g && typeof g.database === 'string' ? g.database : '';
+  switch (kind) {
+    case 'all': return 'every database';
+    case 'alias': return `${database} → ${target || '?'} (alias)`;
+    case 'missing': return `${database} (no such database)`;
+    default: return database;
+  }
+}
+
+/**
+ * The choices of the grant form's database picker from `databaseRows`' rows: the real databases
+ * by name, then the aliases marked with their current target, `[{value, text, kind}]`, each part
+ * sorted by name ("every database" is the form's own last choice).
+ */
+export function grantChoices(rows) {
+  const list = Array.isArray(rows) ? rows : [];
+  const byName = (a, b) => (a.value < b.value ? -1 : a.value > b.value ? 1 : 0);
+  const real = realRows(list).map((r) => ({ value: r.name, text: r.name, kind: 'database' })).sort(byName);
+  const aliases = list.filter((r) => r.aliasOf)
+    .map((r) => ({ value: r.name, text: `${r.name} → ${r.aliasOf} (alias)`, kind: 'alias' })).sort(byName);
+  return [...real, ...aliases];
 }
 
 /** The words of a grant subject: `everyone (anonymous)`, `<user>`, or the subject as it is. */
@@ -1075,20 +1125,26 @@ export function subjectText(subject) {
 
 /**
  * The grants of a `GET api/admin/users` (or `GET api/admin/grants`) answer as rows
- * `[{subject, subjectText, database, databaseText, level}]`: anonymous first, then by subject
- * and database. `*` reads "every database".
+ * `[{subject, subjectText, database, databaseText, kind, target, level}]`: anonymous first, then
+ * by subject and database. `databaseText` is grantDatabaseText's (an alias with its current
+ * target).
  */
 export function grantRows(answer) {
   const grants = answer && Array.isArray(answer.grants) ? answer.grants : [];
   const rows = grants
     .filter((g) => g && typeof g.subject === 'string' && g.subject && typeof g.database === 'string' && g.database && GRANT_LEVELS.includes(g.level))
-    .map((g) => ({
-      subject: g.subject,
-      subjectText: subjectText(g.subject),
-      database: g.database,
-      databaseText: g.database === '*' ? 'every database' : g.database,
-      level: g.level,
-    }));
+    .map((g) => {
+      const mark = grantKind(g);
+      return {
+        subject: g.subject,
+        subjectText: subjectText(g.subject),
+        database: g.database,
+        databaseText: grantDatabaseText({ database: g.database, ...mark }),
+        kind: mark.kind,
+        target: mark.target,
+        level: g.level,
+      };
+    });
   const rank = (g) => (g.subject === 'anonymous' ? 0 : 1);
   rows.sort((a, b) => rank(a) - rank(b)
     || (a.subject < b.subject ? -1 : a.subject > b.subject ? 1 : 0)
@@ -1199,7 +1255,7 @@ export function userOutcomeText(action, name, answer = {}) {
       const g = typeof answer.grantsRemoved === 'number' ? answer.grantsRemoved : 0;
       return `Removed the user "${answer.name || name}"${g ? ` and ${g} grant${g === 1 ? '' : 's'}` : ''}${sessionsTail(answer)}.`;
     }
-    case 'grant': return `${subjectText(answer.subject || name)} can ${answer.level === 'write' ? 'read and write' : 'read'} ${answer.database === '*' ? 'every database' : `"${answer.database}"`}.`;
+    case 'grant': return `${subjectText(answer.subject || name)} can ${answer.level === 'write' ? 'read and write' : 'read'} ${answer.database === '*' ? 'every database' : `"${answer.database}"`}${answer.kind === 'alias' && answer.target ? ` (an alias of "${answer.target}" now: reachable only through "${answer.database}")` : ''}.`;
     case 'revokeGrant': return answer.revoked === false
       ? `${subjectText(answer.subject || name)} had no grant on "${answer.database}".`
       : `Revoked the grant of ${subjectText(answer.subject || name)} on ${answer.database === '*' ? 'every database' : `"${answer.database}"`}.`;

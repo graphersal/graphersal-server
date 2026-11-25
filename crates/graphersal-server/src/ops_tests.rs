@@ -666,7 +666,8 @@ fn an_alias_is_renamed_over_http() {
     assert_eq!(status, 200, "{answer}");
     assert_eq!(
         answer,
-        json!({"alias": "live", "renamedFrom": "current", "target": "acme", "mcpSessionsMoved": 0})
+        json!({"alias": "live", "renamedFrom": "current", "target": "acme", "mcpSessionsMoved": 0,
+               "grantsMoved": 0})
     );
     let (_, aliases) = call(address, "GET", "/api/admin/aliases", None);
     assert_eq!(aliases, json!({"aliases": {"live": "acme"}}));
