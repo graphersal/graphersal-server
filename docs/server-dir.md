@@ -147,8 +147,10 @@ applies at the database's next load (unload + load; a server restart loads the `
 ones again); a file that does not parse then fails the load (`failed` with the reason). The
 key names are the graphersal command line's flags; the limits are the session presets of the
 loaded database (`GET /db/<name>/api/statistics` shows them under `limits.presets`). Nothing
-set: no limit at all, as in the graphersal playground. A query can still raise a traversal
-option for itself (`g.with("evaluationTimeout", ..)`), as with the graphersal dev server.
+set: no limit at all, as in the graphersal playground. A configured limit is a ceiling: a
+query may lower it for itself (`g.with("evaluationTimeout", 1000)`) but never raise or remove
+it (above the ceiling, or `0`, the query fails with `OptionAboveCeiling`); a key left unset is
+no ceiling.
 The start block shows a `query limits` row (and a `memory ceiling` row) when `server.toml`
 sets them.
 

@@ -60,7 +60,7 @@ from published files). When this file disagrees with the code, the code wins: sa
   (B8: `QueryLimits` (keys = the graphersal CLI flags: `timeout_ms`, `max_operations`,
   `max_string_size`, `max_array_size`, `max_map_size`, `max_traversers`,
   `max_materialized_bytes`, `max_value_depth`; 0 = no limit, depth 0 = default), `over` (a
-  database key wins), `presets()` -> `SessionPresets` (nothing set = `SessionPresets::new()`),
+  database key wins), `presets()` -> `SessionPresets` (nothing set = `SessionPresets::new()`; else `with_ceilings(true)`: a query may lower a set limit with `g.with`, never raise it, A7),
   `summary` (start-block row `query limits`, plus `memory ceiling` when set);
   `DatabaseLimits` = `database.toml` `[limits]` (only `query`; memory keys refused with a
   hint); `Loader::query_presets` reads `server.toml` and `database.toml` again at EVERY load
