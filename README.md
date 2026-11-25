@@ -129,7 +129,9 @@ the usage), `141` stdout closed before the result was written (`| head`).
 |---|---|
 | `GET /healthz`, `GET /readyz` | liveness `200`; readiness `200` or `503` while starting or stopping |
 | `GET /api/info` | the server's identity (`server: "graphersal-server"`, `protocol: "graphersal/1"`, `dev: false`), its UI profile `uiProfile`, `uploadBytes`, the MCP endpoint |
-| `GET /` | the server's web UI (the playground showing the `server` UI profile) |
+| `GET /` | the server's web UI (the playground showing the `server` UI profile: the login page, "My databases" or the admin tabs, by who asks) |
+| `POST /api/login`, `POST /api/logout` | the browser login with a user token (a `gs_session` cookie) and its logout |
+| `GET /api/databases` | the databases and aliases the caller may reach, with its level and the playground path of each ("My databases") |
 | `GET /server-ui/<file>` | the `server` UI profile's files (its modules and style sheet) |
 | `/db/<name>/...` | the playground and its HTTP API (`POST /db/<name>/api/execute {"script"}`, ...) on the database or alias `<name>`, resolved per request; `409` with help when it is not loaded (never loaded implicitly), `404` when unknown |
 | `/api/admin/...` | the admin API: [`docs/admin-api.md`](docs/admin-api.md); also the run administration (`GET /api/admin/runs`, `GET /api/admin/databases/<name>/runs`, `POST /api/admin/databases/<name>/runs/cancel {"id"}`: every client's queued and running queries, stop one) |
@@ -147,12 +149,21 @@ unload, clone, promote, delete, read-only and auto-load, create, aliases), `back
 uploading a `.gsnap` or a `.tar` of a model directory with progress, or from a path on the
 server) and `runs-tab.js` (the run administration: the queries that wait or run on the loaded
 databases, whatever their client, refreshed every 2 s, with a Stop button per run; a loaded
-database's row opens it filtered by "Runs…"), the pure model
-`admin-api.js` and `databases.js`, the tabs' shared state `shared.js` and the style sheet
+database's row opens it filtered by "Runs…") and `users-tab.js` (users with the token
+shown once and as `…last4` after, new token, revoke, admin role, remove; grants, anonymous
+included), the views of non-admins `login-tab.js` (paste a token; then the page's `?next=`
+path, only a path from the server root, or the root) and `mine-tab.js` ("My databases"), the
+top bar's `header.js` (who is signed in, "Log out"), the pure models
+`admin-api.js`, `databases.js` and `access-api.js`, the tabs' shared state `shared.js` and the style sheet
 `server-ui.css` (on the playground's theme tokens; the profile names it in `styles`, so the
 playground links it itself and `/` serves the playground's `index.html` unchanged). Every module imports only `vue` and the
 profile's own files and calls the admin API itself, sending the host's request headers
-(`window.GRAPHERSAL_ENGINE.headers`) when a page sets them. The root has no graph: the profile
+(`window.GRAPHERSAL_ENGINE.headers`) when a page sets them. The root `GET /api/info` answers
+each principal its own profile (`profile.json` for an admin; `profile-views.json` replaces the
+tabs for a user, "My databases", and for anonymous, "Sign in"), so a page shows only what its
+principal may use; after a login or logout the page loads the root again. A refused admin
+request sends the page to the login page (`401`) or, when the principal lost the admin role
+(`404`), to the root. The root has no graph: the profile
 has no workspace tab, so the page only reads `GET /api/info` and the admin API (the modules get
 the root info, e.g. `uploadBytes`, from the playground as `api.info.host`). Each loaded
 database keeps the ordinary playground under `/db/<name>/`; its `/api/info` carries `home: "/"`

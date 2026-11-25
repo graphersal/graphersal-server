@@ -99,10 +99,11 @@ export function anyLoading(rows) {
 /**
  * Fetches the database list: `GET <base>api/admin/databases` with the host's headers; resolves
  * to `databaseRows`' answer, rejects with the server's error text (an Error whose `help` is the
- * server's `help`, when it sent one).
- * @param {{base: URL|string, fetch: Function, headers?: Object<string,string>}} options
+ * server's `help`, when it sent one, with `status` and the `login` page of a 401);
+ * `onRefusal(err)` sees the error first (as in ./admin-api.js `sendAdmin`).
+ * @param {{base: URL|string, fetch: Function, headers?: Object<string,string>, onRefusal?: Function}} options
  */
-export async function fetchDatabases({ base, fetch, headers = {} }) {
+export async function fetchDatabases({ base, fetch, headers = {}, onRefusal = null }) {
   const r = await fetch(new URL('api/admin/databases', base), {
     cache: 'no-store',
     headers: { ...headers, Accept: 'application/json' },
@@ -117,6 +118,15 @@ export async function fetchDatabases({ base, fetch, headers = {} }) {
   if (!r.ok) {
     const err = new Error((data && data.error) || `HTTP ${r.status}`);
     err.help = data && typeof data.help === 'string' ? data.help : '';
+    err.status = r.status;
+    err.login = data && typeof data.login === 'string' ? data.login : '';
+    if (typeof onRefusal === 'function') {
+      try {
+        onRefusal(err);
+      } catch {
+        // The hook only reacts; the caller gets the error.
+      }
+    }
     throw err;
   }
   return databaseRows(data);

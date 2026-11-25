@@ -21,6 +21,9 @@
 //! - `GET /api/info`: the server's identity, its UI profile (`uiProfile`) and the principal
 //!   (`principal {id, kind, admin}`); for anonymous only what the login page needs (`server`,
 //!   `protocol`, `dev`, `experimental`, `uiProfile`, `principal`, `login: "/"`).
+//! - `GET /api/databases`: the databases and aliases the principal may reach, with its level
+//!   and the playground path of each ([`crate::user_api`]; anonymous: the ones its anonymous
+//!   grants open, often none), the web UI's "my databases" page.
 //! - `/api/admin/...` (the admin API, Runs included; [`crate::admin_api`]): admins only;
 //!   anonymous gets `401`, a logged-in principal without the admin role `404` as if the API did
 //!   not exist. The admin core records its events with the principal as the actor.
@@ -29,8 +32,8 @@
 //! - any other `/api/...` path: `404`;
 //! - `GET /server-ui/<file>`: a file of the `server` UI profile ([`crate::ui_assets`]);
 //! - every other `GET`: a file of the embedded playground at the root (`/` = its `index.html`,
-//!   unchanged; the page shows the `server` profile: the database list and the admin tabs, no
-//!   graph), `404` when there is no such file. These files are public (the login page is one).
+//!   unchanged; the page shows the `server` profile of the principal: the admin tabs, a user's
+//!   "My databases" or anonymous's "Sign in"; no graph), `404` when there is no such file. These files are public (the login page is one).
 //!
 //! A `401` is `{"error", "login": "/"}` with `WWW-Authenticate: Bearer`; a refused session
 //! cookie is cleared with it.
@@ -200,6 +203,12 @@ impl Router {
             } else {
                 Err(not_allowed(&method, path))
             }
+        } else if path == crate::user_api::DATABASES {
+            if read {
+                Ok(crate::user_api::databases(loader, access, &principal))
+            } else {
+                Err(not_allowed(&method, path))
+            }
         } else if let Some(endpoint) = path.strip_prefix("/api/admin/") {
             if !principal.is_admin() {
                 return Answer::Response(admin_refused(&principal, path));
@@ -278,10 +287,15 @@ impl Router {
 
     /// `GET /api/info` for `principal` (module docs).
     fn info_for(&self, loader: &Loader, principal: &Principal) -> Result<Response, HttpError> {
+        let view = crate::ui_assets::View::of(principal);
         let mut answer = if principal.is_anonymous() {
             anonymous_info()?
         } else {
-            info_value(self.upload_limit(), loader.mcp().map(|mcp| mcp.status()))?
+            info_value(
+                self.upload_limit(),
+                loader.mcp().map(|mcp| mcp.status()),
+                view,
+            )?
         };
         answer["principal"] = json!({
             "id": principal.id,
@@ -456,19 +470,24 @@ fn error_response(error: HttpError) -> Response {
 /// host-neutral protocol marker of a Graphersal host (`protocol: "graphersal/1"`,
 /// [`graphersal_serve::PROTOCOL`]), `dev: false` (not a dev server) and its UI. The playground
 /// served at `/` takes the answer as its engine's because it carries the protocol marker; it
-/// shows `uiProfile`, the `server` profile ([`crate::ui_assets::profile`]: the database
-/// list and the admin tabs, no workspace, so the page never asks the root for a graph).
+/// shows `uiProfile`, the `server` profile of the principal's view
+/// ([`crate::ui_assets::profile_for`]: the admin tabs, a user's "My databases", anonymous's
+/// "Sign in"; no workspace, so the page never asks the root for a graph).
 /// `uploadBytes` is the largest import upload (a client checks a file's size before it sends
 /// it; the profile's modules read it from `api.info.host`); `mcp` is the MCP endpoint's status
 /// (`{endpoint: "/mcp", readOnly, client}`), null when MCP is off.
 #[cfg(test)]
 fn info(upload_bytes: u64, mcp: Option<serde_json::Value>) -> Result<Response, HttpError> {
-    Ok(Response::json(200, &info_value(upload_bytes, mcp)?))
+    Ok(Response::json(
+        200,
+        &info_value(upload_bytes, mcp, crate::ui_assets::View::Admin)?,
+    ))
 }
 
-/// The server's UI profile ([`crate::ui_assets::profile`]); `500` when it cannot be built.
-fn ui_profile() -> Result<serde_json::Value, HttpError> {
-    crate::ui_assets::profile().map_err(|err| {
+/// The server's UI profile for `view` ([`crate::ui_assets::profile_for`]: an admin's tabs, a
+/// user's "My databases", anonymous's "Sign in"); `500` when it cannot be built.
+fn ui_profile(view: crate::ui_assets::View) -> Result<serde_json::Value, HttpError> {
+    crate::ui_assets::profile_for(view).map_err(|err| {
         tracing::error!("{err}");
         HttpError::new(500, err)
     })
@@ -478,8 +497,9 @@ fn ui_profile() -> Result<serde_json::Value, HttpError> {
 fn info_value(
     upload_bytes: u64,
     mcp: Option<serde_json::Value>,
+    view: crate::ui_assets::View,
 ) -> Result<serde_json::Value, HttpError> {
-    let profile = ui_profile()?;
+    let profile = ui_profile(view)?;
     Ok(json!({
             "server": SERVER_NAME,
             "protocol": graphersal_serve::PROTOCOL,
@@ -501,7 +521,7 @@ fn anonymous_info() -> Result<serde_json::Value, HttpError> {
         "protocol": graphersal_serve::PROTOCOL,
         "dev": false,
         "experimental": true,
-        "uiProfile": ui_profile()?,
+        "uiProfile": ui_profile(crate::ui_assets::View::Anonymous)?,
         "login": LOGIN_PAGE,
     }))
 }

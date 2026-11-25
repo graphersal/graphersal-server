@@ -22,7 +22,30 @@ Browser login (beside the admin API): `POST /api/login {"token": "<user token>"}
 SameSite=Strict; Path=/`), `401` for a token nobody holds; `POST /api/logout` ends the session
 of the request's cookie and clears it (`200 {"loggedOut": bool}`). `GET /api/info` names the
 request's `principal` (`{id, kind, admin}`); for anonymous it answers only `server`,
-`protocol`, `dev`, `experimental`, `uiProfile`, `principal` and `login: "/"`.
+`protocol`, `dev`, `experimental`, `uiProfile`, `principal` and `login: "/"`. Its `uiProfile`
+follows the principal: an admin gets the management tabs and Users, a user without the admin
+role only "My databases" (`mine`), anonymous only "Sign in" (`login`). The login page follows
+the `next` of its address after a login only when it is a path from the server root (starts
+with `/`, not `//`, no backslash, space or control character); otherwise it loads `/`.
+
+### My databases (any principal)
+
+`GET /api/databases` (beside the admin API, for every principal, anonymous included) answers
+the databases and aliases the caller may reach, sorted by name:
+
+```json
+{"databases": [{"name": "acme", "state": "loaded", "level": "write", "readOnly": false,
+  "description": "", "playground": "/db/acme/"},
+  {"name": "cur", "state": "loaded", "level": "read", "readOnly": true, "description": "",
+  "playground": "/db/cur/", "aliasOf": "acme-2026"}]}
+```
+
+`level` is the caller's effective level (its highest grant, capped by the database's mode: a
+read-only database or a base is `read`; an admin: `write`), `readOnly` is `level == "read"`,
+`state` is the entry's state without the admin's `reason`, `playground` the path of its
+playground from the server root, `aliasOf` (alias rows) the database the alias names. A database
+the caller has no grant on is never listed, nor its aliases; anonymous without anonymous grants
+gets an empty list (`200`). Wrong credentials are `401`; any method but `GET`/`HEAD` is `405`.
 
 ## Conventions
 

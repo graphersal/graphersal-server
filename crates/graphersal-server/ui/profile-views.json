@@ -1,0 +1,10 @@
+{
+  "user": {
+    "startTab": "mine",
+    "tabs": [{ "id": "mine", "title": "My databases", "module": "mine-tab.js" }]
+  },
+  "anonymous": {
+    "startTab": "login",
+    "tabs": [{ "id": "login", "title": "Sign in", "module": "login-tab.js" }]
+  }
+}

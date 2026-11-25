@@ -19,14 +19,18 @@ export const LOAD_POLL_MS = 1000;
 /** How long a load is polled before the panel stops watching it (it keeps running). */
 export const LOAD_POLL_LIMIT_MS = 10 * 60 * 1000;
 
-/** An admin API refusal or failure: `message` = the server's `error`, `help` its `help`. */
+/**
+ * An admin API refusal or failure: `message` = the server's `error`, `help` its `help`, `login`
+ * the login page a `401` names (`{"error", "login": "/"}`), else ''.
+ */
 export class AdminError extends Error {
-  constructor(message, { status = 0, help = '', state = '' } = {}) {
+  constructor(message, { status = 0, help = '', state = '', login = '' } = {}) {
     super(message);
     this.name = 'AdminError';
     this.status = status;
     this.help = help;
     this.state = state;
+    this.login = login;
   }
 }
 
@@ -44,7 +48,8 @@ export function parseAdminError(status, text) {
   const error = data && typeof data.error === 'string' && data.error ? data.error : `HTTP ${status}`;
   const help = data && typeof data.help === 'string' ? data.help : '';
   const state = data && typeof data.state === 'string' ? data.state : '';
-  return new AdminError(error, { status, help, state });
+  const login = data && typeof data.login === 'string' ? data.login : '';
+  return new AdminError(error, { status, help, state, login });
 }
 
 const seg = (name) => encodeURIComponent(String(name));
@@ -59,7 +64,10 @@ const seg = (name) => encodeURIComponent(String(name));
  * addModel({path?, repo?, license?}), removeModel(repo or blob hash), promote(name) (no body;
  * one way: a base is frozen forever), runs(name?) (one loaded database's queued and running runs,
  * or every loaded database's without a name), cancelRun(name, id) (the run administration: a
- * run id is unique within its database only). The transfers that are not JSON requests are
+ * run id is unique within its database only), the users and grants: users, addUser(name,
+ * admin?) (its answer carries the new token, shown once), removeUser(name), newToken(name),
+ * revokeToken(name), setAdmin(name, value), grant(subject, database, level), revokeGrant(subject,
+ * database). The transfers that are not JSON requests are
  * `exportPath` (a download) and `uploadImport` (the file as the body: an import, or a model
  * from `modelUploadRequest`).
  */
@@ -89,6 +97,14 @@ export const adminRequest = Object.freeze({
   addModel: (body) => ({ method: 'POST', path: 'api/admin/models', body }),
   removeModel: (id) => ({ method: 'DELETE', path: `api/admin/models/${modelSegs(id)}` }),
   promote: (name) => ({ method: 'POST', path: `api/admin/databases/${seg(name)}/promote` }),
+  users: () => ({ method: 'GET', path: 'api/admin/users' }),
+  addUser: (name, isAdmin = false) => ({ method: 'POST', path: 'api/admin/users', body: isAdmin ? { name, admin: true } : { name } }),
+  removeUser: (name) => ({ method: 'DELETE', path: `api/admin/users/${seg(name)}` }),
+  newToken: (name) => ({ method: 'POST', path: `api/admin/users/${seg(name)}/token` }),
+  revokeToken: (name) => ({ method: 'DELETE', path: `api/admin/users/${seg(name)}/token` }),
+  setAdmin: (name, value) => ({ method: 'PUT', path: `api/admin/users/${seg(name)}/admin`, body: { admin: !!value } }),
+  grant: (subject, database, level) => ({ method: 'POST', path: 'api/admin/grants', body: { subject, database, level } }),
+  revokeGrant: (subject, database) => ({ method: 'DELETE', path: `api/admin/grants/${seg(subject)}/${seg(database)}` }),
   runs: (name) => ({ method: 'GET', path: name ? `api/admin/databases/${seg(name)}/runs` : 'api/admin/runs' }),
   cancelRun: (name, id) => ({ method: 'POST', path: `api/admin/databases/${seg(name)}/runs/cancel`, body: { id } }),
 });
@@ -101,9 +117,11 @@ function modelSegs(id) {
 /**
  * Sends one request (`adminRequest.*`) and resolves to the parsed answer; rejects with an
  * AdminError (the server's `error`/`help`, or the network failure). A body is sent as JSON.
- * @param {{base: URL|string, fetch: Function, headers?: Object<string,string>}} options
+ * `onRefusal(err)` (optional) sees every AdminError of a refused answer before it is thrown
+ * (the profile sends a 401 to the login page: ./access-api.js `refusalAction`).
+ * @param {{base: URL|string, fetch: Function, headers?: Object<string,string>, onRefusal?: Function}} options
  */
-export async function sendAdmin({ base, fetch, headers = {} }, request) {
+export async function sendAdmin({ base, fetch, headers = {}, onRefusal = null }, request) {
   const init = {
     method: request.method,
     cache: 'no-store',
@@ -120,7 +138,17 @@ export async function sendAdmin({ base, fetch, headers = {} }, request) {
     throw new AdminError(`The server could not be reached: ${err && err.message ? err.message : err}`);
   }
   const text = await r.text();
-  if (!r.ok) throw parseAdminError(r.status, text);
+  if (!r.ok) {
+    const err = parseAdminError(r.status, text);
+    if (typeof onRefusal === 'function') {
+      try {
+        onRefusal(err);
+      } catch {
+        // The hook only reacts; the request's own error is what the caller gets.
+      }
+    }
+    throw err;
+  }
   try {
     return text ? JSON.parse(text) : {};
   } catch (e) {
@@ -814,4 +842,206 @@ export function cancelRunAction(run, { busy = false } = {}) {
   if (busy) return { enabled: false, title: 'Wait until the running action ends' };
   if (run.cancelled) return { enabled: false, title: 'Already stopping: it ends at its next check' };
   return { enabled: true, title: 'Stop this run, whatever its client (its changes roll back)' };
+}
+
+// ---------------------------------------------------------------------------------------------
+// Users and grants (the Users tab, ./users-tab.js; docs/admin-api.md "Users and grants")
+// ---------------------------------------------------------------------------------------------
+
+/** The user names the server reserves (grant subjects and the console's principal). */
+export const RESERVED_USER_NAMES = Object.freeze(['anonymous', 'operator']);
+
+/** The levels of a grant. */
+export const GRANT_LEVELS = Object.freeze(['read', 'write']);
+
+/**
+ * How a user's token is shown: `…<last4>` (the server keeps only its hash and its last four
+ * characters, so an admin can tell tokens apart), "set" for a token without them (an older
+ * file), "none" after a revoke.
+ */
+export function tokenText(user) {
+  if (!user || !user.hasToken) return 'none';
+  return typeof user.tokenLast4 === 'string' && user.tokenLast4 ? `…${user.tokenLast4}` : 'set';
+}
+
+/**
+ * The users of a `GET api/admin/users` answer as sorted rows `[{name, roles, admin, hasToken,
+ * tokenLast4, tokenText, grants: [{database, level}]}]`; a malformed entry is skipped. Throws an
+ * Error when the answer has no `users` list.
+ */
+export function userRows(answer) {
+  if (!answer || typeof answer !== 'object' || !Array.isArray(answer.users)) {
+    throw new Error('the server answered no user list');
+  }
+  const rows = [];
+  for (const u of answer.users) {
+    if (!u || typeof u !== 'object' || typeof u.name !== 'string' || !u.name) continue;
+    const roles = Array.isArray(u.roles) ? u.roles.filter((r) => typeof r === 'string' && r) : [];
+    const user = {
+      name: u.name,
+      roles,
+      admin: u.admin === true || roles.includes('admin'),
+      hasToken: u.hasToken === true,
+      tokenLast4: typeof u.tokenLast4 === 'string' && u.tokenLast4 ? u.tokenLast4 : null,
+      grants: grantList(u.grants),
+    };
+    user.tokenText = tokenText(user);
+    rows.push(user);
+  }
+  rows.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  return rows;
+}
+
+function grantList(grants) {
+  if (!Array.isArray(grants)) return [];
+  return grants
+    .filter((g) => g && typeof g.database === 'string' && g.database && GRANT_LEVELS.includes(g.level))
+    .map((g) => ({ database: g.database, level: g.level }));
+}
+
+/** The words of a grant subject: `everyone (anonymous)`, `<user>`, or the subject as it is. */
+export function subjectText(subject) {
+  if (subject === 'anonymous') return 'everyone (anonymous)';
+  if (typeof subject === 'string' && subject.startsWith('user:')) return subject.slice(5);
+  return String(subject || '');
+}
+
+/**
+ * The grants of a `GET api/admin/users` (or `GET api/admin/grants`) answer as rows
+ * `[{subject, subjectText, database, databaseText, level}]`: anonymous first, then by subject
+ * and database. `*` reads "every database".
+ */
+export function grantRows(answer) {
+  const grants = answer && Array.isArray(answer.grants) ? answer.grants : [];
+  const rows = grants
+    .filter((g) => g && typeof g.subject === 'string' && g.subject && typeof g.database === 'string' && g.database && GRANT_LEVELS.includes(g.level))
+    .map((g) => ({
+      subject: g.subject,
+      subjectText: subjectText(g.subject),
+      database: g.database,
+      databaseText: g.database === '*' ? 'every database' : g.database,
+      level: g.level,
+    }));
+  const rank = (g) => (g.subject === 'anonymous' ? 0 : 1);
+  rows.sort((a, b) => rank(a) - rank(b)
+    || (a.subject < b.subject ? -1 : a.subject > b.subject ? 1 : 0)
+    || (a.database < b.database ? -1 : a.database > b.database ? 1 : 0));
+  return rows;
+}
+
+/** How many users can act as an admin (the admin role and a token): the server's last-admin rule. */
+export function usableAdmins(rows) {
+  return rows.filter((u) => u.admin && u.hasToken).length;
+}
+
+/** The title of an action the last admin cannot take. */
+export const LAST_ADMIN_TITLE = 'The last admin: make another user an admin first';
+
+/**
+ * What a user row offers, each `{enabled, title}`: newToken, revokeToken, admin (the toggle:
+ * give or take the role), remove. The last usable admin can get a new token but cannot be
+ * removed, demoted or left without a token (the server refuses it too, with help). `busy` = an
+ * action of this row is running.
+ */
+export function userActions(user, rows, { busy = false } = {}) {
+  const off = (title) => ({ enabled: false, title });
+  const on = (title) => ({ enabled: true, title });
+  if (busy) {
+    const why = 'Wait until the running action ends';
+    return { newToken: off(why), revokeToken: off(why), admin: off(why), remove: off(why) };
+  }
+  const last = user.admin && user.hasToken && usableAdmins(rows) <= 1;
+  return {
+    newToken: on(user.hasToken ? 'Replace the token: the old one stops working at once' : 'Give the user a token'),
+    revokeToken: !user.hasToken ? off('The user has no token') : last ? off(LAST_ADMIN_TITLE)
+      : on('Take the token away: the user cannot log in until it gets a new one'),
+    admin: last ? off(LAST_ADMIN_TITLE)
+      : on(user.admin ? 'Take the admin role: only its grants stay' : 'Every database (write), the admin API and these tabs'),
+    remove: last ? off(LAST_ADMIN_TITLE) : on('Remove the user and its grants; its sessions end at once'),
+  };
+}
+
+/** The problem with a new user's name, or null. */
+export function userNameProblem(name) {
+  const n = typeof name === 'string' ? name.trim().toLowerCase() : '';
+  if (!n) return 'Enter a user name.';
+  if (!NAME_RULE.test(n)) return "A user name starts with a letter or digit and has at most 63 of a-z, 0-9, '.', '_', '-'.";
+  if (RESERVED_USER_NAMES.includes(n)) return `"${n}" is reserved: choose another name.`;
+  return null;
+}
+
+/** The new user's request from the form `{name, admin}`, or the problems: `{name, admin}` | `{problems}`. */
+export function addUserForm(form) {
+  const f = form || {};
+  const problem = userNameProblem(f.name);
+  if (problem) return { problems: [problem] };
+  return { name: f.name.trim().toLowerCase(), admin: f.admin === true };
+}
+
+/**
+ * The grant from the form `{subject, database, level}` (subject `anonymous` or a user name), or
+ * the problems: `{subject, database, level}` (subject as the server takes it: `anonymous` or
+ * `user:<name>`) | `{problems}`.
+ */
+export function grantForm(form) {
+  const f = form || {};
+  const problems = [];
+  const who = typeof f.subject === 'string' ? f.subject.trim() : '';
+  const database = typeof f.database === 'string' ? f.database.trim() : '';
+  if (!who) problems.push('Choose who gets the grant.');
+  if (!database) problems.push('Choose a database.');
+  if (!GRANT_LEVELS.includes(f.level)) problems.push('Choose read or write.');
+  if (problems.length) return { problems };
+  const subject = who === 'anonymous' || who.includes(':') ? who : `user:${who}`;
+  return { subject, database, level: f.level };
+}
+
+/** The confirmation text of a user action, or null. */
+export function userConfirmText(action, name, extra = '') {
+  switch (action) {
+    case 'removeUser':
+      return `Remove the user "${name}" and its grants? Its browser and MCP sessions end at once.`;
+    case 'newToken':
+      return `Give "${name}" a new token? The old one stops working at once and its sessions end.`;
+    case 'revokeToken':
+      return `Take the token of "${name}" away? It cannot log in until it gets a new one; its sessions end at once.`;
+    case 'demote':
+      return `Take the admin role from "${name}"? It keeps only its own grants.`;
+    case 'revokeGrant':
+      return `Revoke the grant of ${subjectText(name)} on ${extra === '*' ? 'every database' : `"${extra}"`}?`;
+    default:
+      return null;
+  }
+}
+
+/** How many MCP sessions an answer says ended, as a sentence tail ('' for none). */
+function sessionsTail(answer) {
+  const n = answer && typeof answer.mcpSessionsEnded === 'number' ? answer.mcpSessionsEnded : 0;
+  return n > 0 ? `; ${n} MCP session${n === 1 ? '' : 's'} ended` : '';
+}
+
+/** The one-line outcome of a finished user or grant action. */
+export function userOutcomeText(action, name, answer = {}) {
+  switch (action) {
+    case 'addUser': return `Added the user "${answer.name || name}"${answer.admin ? ' (admin)' : ''}. Copy its token now: it is shown only once.`;
+    case 'newToken': return `"${answer.name || name}" has a new token${sessionsTail(answer)}. Copy it now: it is shown only once.`;
+    case 'revokeToken': return `"${answer.name || name}" has no token now${sessionsTail(answer)}.`;
+    case 'setAdmin': return answer.admin ? `"${answer.name || name}" is an admin.` : `"${answer.name || name}" is no longer an admin.`;
+    case 'removeUser': {
+      const g = typeof answer.grantsRemoved === 'number' ? answer.grantsRemoved : 0;
+      return `Removed the user "${answer.name || name}"${g ? ` and ${g} grant${g === 1 ? '' : 's'}` : ''}${sessionsTail(answer)}.`;
+    }
+    case 'grant': return `${subjectText(answer.subject || name)} can ${answer.level === 'write' ? 'read and write' : 'read'} ${answer.database === '*' ? 'every database' : `"${answer.database}"`}.`;
+    case 'revokeGrant': return answer.revoked === false
+      ? `${subjectText(answer.subject || name)} had no grant on "${answer.database}".`
+      : `Revoked the grant of ${subjectText(answer.subject || name)} on ${answer.database === '*' ? 'every database' : `"${answer.database}"`}.`;
+    default: return '';
+  }
+}
+
+/** The token an answer carries (add, new token) with its user, or null: `{name, token}`. */
+export function shownToken(answer) {
+  return answer && typeof answer.token === 'string' && answer.token
+    ? { name: typeof answer.name === 'string' ? answer.name : '', token: answer.token }
+    : null;
 }

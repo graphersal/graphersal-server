@@ -60,6 +60,7 @@ pub(crate) mod test_models;
 pub(crate) mod test_support;
 pub(crate) mod text;
 mod ui_assets;
+mod user_api;
 
 pub use access::{Access, FirstAdmin, Level, Principal, PrincipalKind};
 pub use admin::{Renamed, TmpBuild};
