@@ -23,8 +23,59 @@ use crate::error::ServerError;
 pub const SESSION_COOKIE: &str = "gs_session";
 
 /// How stale a session's `last_seen` may get before a request updates it (coarse, so a
-/// persisted table is not rewritten on every request).
+/// persisted table is not rewritten on every request); shorter with a short idle timeout
+/// ([`SessionLimits::touch_step`]).
 const LAST_SEEN_STEP: Duration = Duration::from_secs(60);
+
+/// How long a browser session lasts (`server.toml` `[sessions]`): unlimited by default.
+///
+/// `#[non_exhaustive]`: build one with [`SessionLimits::unlimited`] and the `with_*` methods.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub struct SessionLimits {
+    /// The longest a session lasts after its login (`None`: no limit).
+    pub lifetime: Option<Duration>,
+    /// The longest a session lasts after its last request (`None`: no limit). Counted from
+    /// `last_seen`, which is updated coarsely (at most every minute, more often for a short
+    /// timeout), so a session may end up to that step early.
+    pub idle_timeout: Option<Duration>,
+}
+
+impl SessionLimits {
+    /// No limits: a session lasts until its logout, its user's token changes or the user goes.
+    pub fn unlimited() -> Self {
+        Self::default()
+    }
+
+    /// With the lifetime `lifetime` (`None`: no limit).
+    pub fn with_lifetime(mut self, lifetime: Option<Duration>) -> Self {
+        self.lifetime = lifetime;
+        self
+    }
+
+    /// With the idle timeout `idle_timeout` (`None`: no limit).
+    pub fn with_idle_timeout(mut self, idle_timeout: Option<Duration>) -> Self {
+        self.idle_timeout = idle_timeout;
+        self
+    }
+
+    /// Whether `session` has expired at `now` (a clock that went back expires nothing).
+    pub fn expired(&self, session: &BrowserSession, now: SystemTime) -> bool {
+        let past = |since: SystemTime, limit: Option<Duration>| {
+            limit.is_some_and(|limit| now.duration_since(since).is_ok_and(|age| age >= limit))
+        };
+        past(session.created, self.lifetime) || past(session.last_seen, self.idle_timeout)
+    }
+
+    /// How stale `last_seen` may get before a request updates it: [`LAST_SEEN_STEP`], or a
+    /// quarter of a shorter idle timeout.
+    fn touch_step(&self) -> Duration {
+        match self.idle_timeout {
+            Some(idle) => LAST_SEEN_STEP.min(idle / 4),
+            None => LAST_SEEN_STEP,
+        }
+    }
+}
 
 /// Why a request's credentials were refused.
 ///
@@ -34,8 +85,8 @@ const LAST_SEEN_STEP: Duration = Duration::from_secs(60);
 pub enum AuthError {
     /// A bearer token (or a login's token) that no user (nor the operator) holds.
     InvalidToken,
-    /// A session cookie naming no live session (unknown, logged out, or its user's token was
-    /// revoked or reissued, or the user removed).
+    /// A session cookie naming no live session (unknown, logged out, expired, or its user's
+    /// token was revoked or reissued, or the user removed).
     InvalidSession,
     /// A session cannot be made (the OS's random generator, the session table).
     Unavailable(String),
@@ -45,9 +96,9 @@ impl fmt::Display for AuthError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             AuthError::InvalidToken => f.write_str("the token is not valid"),
-            AuthError::InvalidSession => {
-                f.write_str("the session has ended (logged out, or the token changed): log in")
-            }
+            AuthError::InvalidSession => f.write_str(
+                "the session has ended (logged out, expired, or the token changed): log in",
+            ),
             AuthError::Unavailable(message) => write!(f, "cannot start a session: {message}"),
         }
     }
@@ -191,7 +242,8 @@ impl BrowserSession {
 }
 
 /// The browser sessions, keyed by the SHA-256 of the session id (the id itself is never
-/// kept). In memory today ([`MemorySessions`]); a persisted table implements the same trait.
+/// kept): in memory ([`MemorySessions`]), or in the server directory so they survive a restart
+/// (`crate::sessions::FileSessions`, what `serve` uses).
 pub trait SessionTable: Send + Sync {
     /// Adds a session.
     fn insert(&self, id: TokenHash, session: BrowserSession) -> Result<(), ServerError>;
@@ -256,12 +308,23 @@ impl SessionTable for MemorySessions {
 pub struct SessionCookie {
     file: Arc<RwLock<AccessFile>>,
     sessions: Arc<dyn SessionTable>,
+    limits: SessionLimits,
 }
 
 impl SessionCookie {
-    /// The link over the access file and the session table.
+    /// The link over the access file and the session table (sessions without limits).
     pub fn new(file: Arc<RwLock<AccessFile>>, sessions: Arc<dyn SessionTable>) -> Self {
-        Self { file, sessions }
+        Self {
+            file,
+            sessions,
+            limits: SessionLimits::unlimited(),
+        }
+    }
+
+    /// With the session limits `limits`: an expired session is removed and refused.
+    pub fn with_limits(mut self, limits: SessionLimits) -> Self {
+        self.limits = limits;
+        self
     }
 }
 
@@ -282,6 +345,13 @@ impl Authenticator for SessionCookie {
         let Some(session) = self.sessions.get(&id) else {
             return AuthStep::Rejected(AuthError::InvalidSession);
         };
+        let now = SystemTime::now();
+        if self.limits.expired(&session, now) {
+            if let Err(err) = self.sessions.remove(&id) {
+                tracing::warn!(target: "graphersal_server", "browser sessions: {err}");
+            }
+            return AuthStep::Rejected(AuthError::InvalidSession);
+        }
         let principal = {
             let file = self.file.read().unwrap_or_else(|p| p.into_inner());
             session_principal(&file, &session)
@@ -291,10 +361,9 @@ impl Authenticator for SessionCookie {
             let _ = self.sessions.remove(&id);
             return AuthStep::Rejected(AuthError::InvalidSession);
         };
-        let now = SystemTime::now();
         let stale = now
             .duration_since(session.last_seen)
-            .is_ok_and(|age| age >= LAST_SEEN_STEP);
+            .is_ok_and(|age| age >= self.limits.touch_step());
         if stale && let Err(err) = self.sessions.touch(&id, now) {
             tracing::warn!(target: "graphersal_server", "browser sessions: {err}");
         }
@@ -347,5 +416,24 @@ mod tests {
         assert_eq!(table.retain(&|s| s.user != "bob").unwrap(), 1);
         assert_eq!(table.get(&id), None);
         assert_eq!(table.remove(&id).unwrap(), None);
+    }
+
+    #[test]
+    fn session_limits_expire_and_set_the_touch_step() {
+        let now = SystemTime::now();
+        let minute = Duration::from_secs(60);
+        let mut session = BrowserSession::new("a", TokenHash::of("t"), now - 10 * minute);
+        session.last_seen = now - 2 * minute;
+        assert!(!SessionLimits::unlimited().expired(&session, now));
+        let lifetime = SessionLimits::unlimited().with_lifetime(Some(10 * minute));
+        assert!(lifetime.expired(&session, now));
+        assert!(!lifetime.expired(&session, now - Duration::from_secs(1)));
+        let idle = SessionLimits::unlimited().with_idle_timeout(Some(3 * minute));
+        assert!(!idle.expired(&session, now));
+        assert!(idle.expired(&session, now + minute));
+        assert_eq!(SessionLimits::unlimited().touch_step(), LAST_SEEN_STEP);
+        assert_eq!(idle.touch_step(), Duration::from_secs(45));
+        let long = SessionLimits::unlimited().with_idle_timeout(Some(60 * minute));
+        assert_eq!(long.touch_step(), LAST_SEEN_STEP);
     }
 }

@@ -9,6 +9,7 @@
 //!   access.toml      users (token hashes), roles, grants (crate::access); mode 0600
 //!   databases/       one directory per database: database.toml + store/ (crate::registry)
 //!   models/          the shared embedding models: blobs/<2 hex>/<sha256>, models.toml (crate::models)
+//!   sessions/        browser.json, mcp.json: the sessions that survive a restart (crate::sessions)
 //!   backups/  trash/  tmp/
 //! ```
 //!
@@ -44,6 +45,7 @@ const SUBDIRS: &[&[&str]] = &[
     &["backups"],
     &["trash"],
     &["tmp"],
+    &["sessions"],
 ];
 
 /// A server directory (its root path; nothing is checked until it is opened).
@@ -224,6 +226,11 @@ impl ServerDir {
         self.root.join("tmp")
     }
 
+    /// `sessions/` (the browser and MCP sessions: [`crate::sessions`]).
+    pub fn sessions(&self) -> PathBuf {
+        self.root.join(crate::sessions::SESSIONS_DIR)
+    }
+
     /// Reads and checks `server.toml`.
     pub fn load_config(&self) -> Result<ServerConfig, ServerError> {
         let path = self.config_path();
@@ -341,6 +348,17 @@ mod tests {
         assert_eq!(completed.created, vec![dir.tmp()]);
         // No log directory: the server logs to stderr.
         assert!(!root.join("logs").exists());
+    }
+
+    #[test]
+    fn init_creates_the_sessions_directory_also_in_an_older_server_directory() {
+        let temp = TempDir::new("layout-sessions");
+        let dir = ServerDir::init(temp.path()).unwrap().dir;
+        assert!(dir.sessions().is_dir());
+        // A directory from before the sessions were kept: `init` adds `sessions/`.
+        fs::remove_dir(dir.sessions()).unwrap();
+        let report = ServerDir::init(temp.path()).unwrap();
+        assert_eq!(report.created, vec![dir.sessions()]);
     }
 
     #[test]

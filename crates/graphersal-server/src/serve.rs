@@ -6,7 +6,8 @@
 //! `server.run` (with a new operator token for this run, [`crate::access`]), scans the database
 //! registry ([`Registry::scan`]; `/readyz` answers `503 loading` until it is done), opens the
 //! access state ([`Access::open`]: a directory without `access.toml` gets its first admin
-//! here, its token handed out once by [`Running::take_first_admin`]), starts loading the `auto_load` databases in the background
+//! here, its token handed out once by [`Running::take_first_admin`]; the browser and MCP
+//! sessions of the last run restored from `sessions/`, [`crate::sessions`]), starts loading the `auto_load` databases in the background
 //! ([`Loader::auto_load`]), shares the model blobs of every idle database through `models/`
 //! on a background thread ([`crate::ops::Admin::adopt_all`]), and serves HTTP/1.1 and h2c
 //! (HTTP/2 over plain TCP with prior knowledge: a connection that starts with the HTTP/2
@@ -88,6 +89,7 @@ use crate::ops::ExportFile;
 use crate::registry::Registry;
 use crate::router::{Answer, Router};
 use crate::run_file::RunInfo;
+use crate::sessions::FileSessions;
 
 /// Largest declared body (`Content-Length`) a request may name (as the graphersal CLI's dev
 /// server), except an upload (`POST /api/admin/import` or `POST /api/admin/models` with a body
@@ -328,7 +330,8 @@ pub fn start(
         .write(&dir)?;
     let (stop, stop_rx) = watch::channel(false);
     let accept = runtime.spawn(accept(socket, shared.clone(), stop_rx));
-    let mcp = crate::mcp::endpoint(&config.mcp);
+    // MCP sessions survive a restart: restored from `sessions/mcp.json` now.
+    let mcp = crate::mcp::persistent_endpoint(&config.mcp, &dir);
     let registry = Registry::empty(&dir);
     let loader = Loader::with_mcp(registry.clone(), host_check.clone(), mcp.clone());
     let mut running = Running {
@@ -360,7 +363,15 @@ pub fn start(
         }
     }
     // The access state: a directory without `access.toml` is closed and gets its first admin.
-    match Access::open(&running.dir, Some(operator_hash), Audit::default()) {
+    // Browser sessions survive a restart too: `sessions/browser.json`.
+    let browser = Arc::new(FileSessions::open(&running.dir));
+    match Access::open_with_limits(
+        &running.dir,
+        Some(operator_hash),
+        browser,
+        config.sessions.limits(),
+        Audit::default(),
+    ) {
         Ok((access, first_admin)) => {
             running.access = Some(Arc::new(access));
             running.first_admin = first_admin;

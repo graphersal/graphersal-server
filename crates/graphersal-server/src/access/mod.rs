@@ -31,8 +31,8 @@ use graphersal_serve::Request;
 
 pub use auth::{
     AuthError, AuthStep, Authenticator, BrowserSession, MemorySessions, OperatorToken,
-    SESSION_COOKIE, SessionCookie, SessionTable, UserTokens, authenticate_with, bearer_token,
-    cookie,
+    SESSION_COOKIE, SessionCookie, SessionLimits, SessionTable, UserTokens, authenticate_with,
+    bearer_token, cookie,
 };
 pub use model::{
     AccessFile, FIRST_ADMIN, Grant, Level, RESERVED_USER_NAMES, Subject, User, database_read_only,
@@ -86,6 +86,7 @@ pub struct Access {
     dir: ServerDir,
     file: Arc<RwLock<AccessFile>>,
     sessions: Arc<dyn SessionTable>,
+    limits: SessionLimits,
     chain: Vec<Box<dyn Authenticator>>,
     audit: Audit,
 }
@@ -113,11 +114,25 @@ impl Access {
         Self::open_with(dir, operator, Arc::new(MemorySessions::new()), audit)
     }
 
-    /// [`Access::open`] with the session table `sessions`.
+    /// [`Access::open`] with the session table `sessions` (sessions without limits).
     pub fn open_with(
         dir: &ServerDir,
         operator: Option<TokenHash>,
         sessions: Arc<dyn SessionTable>,
+        audit: Audit,
+    ) -> Result<(Self, Option<FirstAdmin>), ServerError> {
+        Self::open_with_limits(dir, operator, sessions, SessionLimits::unlimited(), audit)
+    }
+
+    /// [`Access::open_with`] with the session limits `limits`. The sessions `sessions` already
+    /// holds (a table restored from the server directory) are checked first: an expired one, or
+    /// one whose user is gone or holds another token now, is removed (a failing table is a
+    /// warning: the request path checks every session again anyway).
+    pub fn open_with_limits(
+        dir: &ServerDir,
+        operator: Option<TokenHash>,
+        sessions: Arc<dyn SessionTable>,
+        limits: SessionLimits,
         audit: Audit,
     ) -> Result<(Self, Option<FirstAdmin>), ServerError> {
         let first = ensure_first_admin(dir, &audit)?;
@@ -125,17 +140,27 @@ impl Access {
             path: dir.access_path(),
             message: "the file disappeared while the server started".to_string(),
         })?;
+        let now = SystemTime::now();
+        let ended = sessions.retain(&|session| {
+            auth::session_principal(&file, session).is_some() && !limits.expired(session, now)
+        });
+        if let Err(err) = ended {
+            tracing::warn!(target: "graphersal_server", "browser sessions: {err}");
+        }
         let file = Arc::new(RwLock::new(file));
         let mut chain: Vec<Box<dyn Authenticator>> = Vec::new();
         if let Some(hash) = operator {
             chain.push(Box::new(OperatorToken::new(hash)));
         }
         chain.push(Box::new(UserTokens::new(file.clone())));
-        chain.push(Box::new(SessionCookie::new(file.clone(), sessions.clone())));
+        chain.push(Box::new(
+            SessionCookie::new(file.clone(), sessions.clone()).with_limits(limits),
+        ));
         let access = Self {
             dir: dir.clone(),
             file,
             sessions,
+            limits,
             chain,
             audit,
         };
@@ -315,7 +340,7 @@ impl Access {
     }
 
     /// Applies `change` to a copy of the file, writes it, then makes it live; browser sessions
-    /// that are no longer live end; the events are recorded as `actor`.
+    /// that are no longer live (or expired) end, in memory and in a persisted table at once; the events are recorded as `actor`.
     fn change<T>(
         &self,
         actor: &Principal,
@@ -329,9 +354,10 @@ impl Access {
         }
         next.write(&self.dir)?;
         *live = next;
-        let ended = self
-            .sessions
-            .retain(&|session| auth::session_principal(&live, session).is_some());
+        let now = SystemTime::now();
+        let ended = self.sessions.retain(&|session| {
+            auth::session_principal(&live, session).is_some() && !self.limits.expired(session, now)
+        });
         drop(live);
         if let Err(err) = ended {
             tracing::warn!(target: "graphersal_server", "browser sessions: {err}");

@@ -34,7 +34,10 @@ from published files). When this file disagrees with the code, the code wins: sa
   SHA-256, constant-time compare, redacted `Debug`), the authenticator chain
   (`Authenticator` trait: `OperatorToken` (per run, `server.run`), `UserTokens` (Bearer),
   `SessionCookie` (`gs_session`, `SessionTable` trait, `MemorySessions`; a session ends when
-  its user's token changes); wrong credentials are `AuthError`, never anonymous), `Access`
+  its user's token changes or it expires: `SessionLimits` (lifetime, idle timeout, default
+  unlimited; `last_seen` touched at most every 60 s or a quarter of the idle timeout));
+  wrong credentials are `AuthError`, never anonymous), `Access` (`open_with_limits` prunes a
+  restored table: dead or expired sessions)
   (open/authenticate/login/logout, user and grant changes audited), the first admin
   (`ensure_first_admin`: `init` (`InitReport::first_admin`) and `serve::start`
   (`Running::take_first_admin`) on a directory without `access.toml`; `console::first_admin_text`
@@ -44,8 +47,17 @@ from published files). When this file disagrees with the code, the code wins: sa
   `graphersal_server::audit`; `Admin::with_audit` records create/delete/clone/import/restore/
   promote/backup, read-only, auto-load, aliases), `config` (`server.toml`, `ServerConfig`, `parse_listen`, `[limits]
   upload_bytes` (default 4 GiB), `max_connections`, `header_timeout_secs`, `idle_timeout_secs`
-  = `Limits`), `layout`
-  (`ServerDir`, `init`, file names, `write_atomic`), `lock` (`ServerLock`, fd-lock on
+  = `Limits`; `[sessions] lifetime_secs`, `idle_timeout_secs` = `SessionsConfig` (optional, >= 1,
+  missing = no limit) -> `SessionLimits`, read at start), `sessions` (B9: sessions survive a
+  restart, ALWAYS on, no setting: `sessions/browser.json` = `FileSessions` (a `SessionTable`,
+  write-through on insert/touch/remove/retain, a failed insert rolled back) and
+  `sessions/mcp.json` = `McpSessionFile` (graphersal-mcp `SessionStore`; `keeping(identity
+  filter)` drops at load the MCP sessions of users gone or without a token, rewriting the file;
+  `forget_identity` for the offline console / MCP off); JSON `{version: 1, sessions: [...]}`,
+  hashes only, `write_atomic_private`, `sessions/` created on the first write; a missing file =
+  empty, an unreadable/broken one (or another version) = a warning + empty, overwritten by the
+  next change), `layout`
+  (`ServerDir`, `init` (creates `sessions/` too), file names, `write_atomic`), `lock` (`ServerLock`, fd-lock on
   `server.lock`), `run_file` (`RunInfo`, `server.run`, mode 0600: it carries the per-run `operator_token`), `serve` (`start` -> `Running`, the
   listener: hyper 1.x `http1` server connections, and `http2` ones for h2c with prior
   knowledge (`sniff` peeks the preface; the HTTP/1 path is unchanged otherwise), on a tokio
@@ -126,8 +138,10 @@ from published files). When this file disagrees with the code, the code wins: sa
   `user_set_roles`, `user_set_admin`, `grant_set` (database must exist, alias refused),
   `grant_revoke`): online through the router's `Access` (`Admin::with_access(access,
   principal)`; token change/removal also `Mcp::forget_sessions_of(user:<n>)`), offline through
-  an `Access::open` over the directory's `access.toml` (missing file refused; actor = the
-  operator, as the console holds the lock); the last usable admin (role + token) is refused in
+  an `Access::open_with_limits` over the directory's `access.toml` and its `FileSessions`
+  (missing file refused; actor = the operator, as the console holds the lock; a token change or
+  removal also drops the user's rows of `sessions/mcp.json` via `McpSessionFile::forget_identity`,
+  as does an online server with MCP off); the last usable admin (role + token) is refused in
   `Access` (`refuse_last_admin`, `ServerError::LastAdmin` 409); `anonymous`/`operator` are
   reserved user names (`RESERVED_USER_NAMES`);
   `POST .../<name>/backup`, `GET .../<name>/backups`, `POST .../<name>/restore {"backup",
@@ -260,8 +274,10 @@ from published files). When this file disagrees with the code, the code wins: sa
   holds a blob, waits for it or names it in `Store::models_dir`)). An import resolves
   a missing model from `models/` when it holds it (V12); `models add <repo>` resolves the rest. Tests in
   `models_tests.rs`.
-- `mcp` (private): ONE `graphersal_mcp::Mcp` per process, built at start by `mcp::endpoint`
-  from `server.toml` `[mcp]` (`enabled`, `max_sessions` default 256 =
+- `mcp` (private): ONE `graphersal_mcp::Mcp` per process, built at start by
+  `mcp::persistent_endpoint` (`with_session_store(McpSessionFile)` after `with_max_sessions`;
+  a store load error = a warning and an in-memory endpoint; `mcp::endpoint` = in memory, tests
+  only) from `server.toml` `[mcp]` (`enabled`, `max_sessions` default 256 =
   `DEFAULT_MCP_SESSIONS`; read at start only), `with_endpoint("/mcp")`, never signed sessions
   (directory mode keeps the selection in the session table); held by the loader
   (`Loader::with_mcp`, `Loader::mcp()`; `Loader::new` = no MCP, the unit tests); no token (the
@@ -345,7 +361,8 @@ from published files). When this file disagrees with the code, the code wins: sa
   against `admin_api.rs`), `docs/mcp.md` (endpoints, request headers, flow).
 - `scripts/smoke.sh`: the end-to-end smoke test (bash + curl + python3 only): builds, inits a
   temp server dir, serves on `127.0.0.1:0` (URL from `server.run`), walks create/load/execute/
-  alias/read-only/backup/restore/export/upload import/promote + layer/models/MCP/unload/delete, SIGTERM stop;
+  alias/read-only/backup/restore/export/upload import/promote + layer/models/MCP/unload/delete, SIGTERM stop,
+  a restart (a browser cookie and an MCP session with its selection survive);
   `ok <step>` / `FAIL <step>: why` lines, exit 1 on failure, the server killed in a trap
   (`SMOKE_BIN` skips the build, `SMOKE_KEEP=1` keeps the temp dir). Extend it with a new
   user-visible feature.

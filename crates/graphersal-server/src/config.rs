@@ -16,6 +16,10 @@
 //! max_connections = 256       # open connections served at once (more: 503 + Retry-After)
 //! header_timeout_secs = 30    # a request's head must arrive within this (slow clients)
 //! idle_timeout_secs = 60      # a connection without a running request is closed after this
+//!
+//! [sessions]                  # browser sessions (they survive a restart); unlimited by default
+//! lifetime_secs = 2592000     # the longest a session lasts after its login
+//! idle_timeout_secs = 604800  # the longest a session lasts after its last request
 //! ```
 //!
 //! Every key is optional (its default applies); an unknown key is an error (a typo must not be
@@ -23,10 +27,12 @@
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::Path;
+use std::time::Duration;
 
 use graphersal::persist::{DEFAULT_CHUNK_BYTES, DamagePolicy};
 use serde::Deserialize;
 
+use crate::access::SessionLimits;
 use crate::error::ServerError;
 
 /// The default listen address (loopback only: tokens travel in clear text over plain HTTP).
@@ -51,6 +57,37 @@ pub struct ServerConfig {
     /// The request limits.
     #[serde(default)]
     pub limits: Limits,
+    /// How long browser sessions last.
+    #[serde(default)]
+    pub sessions: SessionsConfig,
+}
+
+/// How long browser sessions last (`[sessions]` of `server.toml`), read at start. Both keys
+/// are optional: a missing key is no limit (the default). Sessions survive a restart either
+/// way (there is no setting for that: `crate::sessions`).
+///
+/// `#[non_exhaustive]`: further settings may be added.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct SessionsConfig {
+    /// The longest a browser session lasts after its login, in seconds (at least 1; missing:
+    /// no limit). The browser logs in again afterwards.
+    #[serde(default)]
+    pub lifetime_secs: Option<u64>,
+    /// The longest a browser session lasts after its last request, in seconds (at least 1;
+    /// missing: no limit). Counted coarsely: the last request is recorded at most every minute.
+    #[serde(default)]
+    pub idle_timeout_secs: Option<u64>,
+}
+
+impl SessionsConfig {
+    /// The limits the browser sessions run with.
+    pub fn limits(&self) -> SessionLimits {
+        SessionLimits::unlimited()
+            .with_lifetime(self.lifetime_secs.map(Duration::from_secs))
+            .with_idle_timeout(self.idle_timeout_secs.map(Duration::from_secs))
+    }
 }
 
 /// The default largest import upload: 4 GiB.
@@ -189,6 +226,7 @@ impl Default for ServerConfig {
             mcp: McpConfig::default(),
             defaults: DatabaseDefaults::default(),
             limits: Limits::default(),
+            sessions: SessionsConfig::default(),
         }
     }
 }
@@ -260,6 +298,16 @@ impl ServerConfig {
             if value == 0 {
                 return Err(invalid(format!(
                     "limits.{key}: must be at least 1 (default {default})"
+                )));
+            }
+        }
+        for (key, value) in [
+            ("lifetime_secs", config.sessions.lifetime_secs),
+            ("idle_timeout_secs", config.sessions.idle_timeout_secs),
+        ] {
+            if value == Some(0) {
+                return Err(invalid(format!(
+                    "sessions.{key}: must be at least 1 (leave it out for no limit)"
                 )));
             }
         }
@@ -338,7 +386,16 @@ pub fn default_config_text() -> String {
          # Seconds a request's head (request line and headers) may take to arrive.\n\
          header_timeout_secs = {}\n\
          # Seconds a connection without a running request stays open.\n\
-         idle_timeout_secs = {}\n",
+         idle_timeout_secs = {}\n\
+         \n\
+         [sessions]\n\
+         # Browser sessions (the login cookie) and MCP sessions survive a restart (kept in\n\
+         # sessions/, hashes only). How long a browser session lasts, in seconds; no limit\n\
+         # when left out. Read when the server starts.\n\
+         # Since its login (30 days here):\n\
+         # lifetime_secs = 2592000\n\
+         # Since its last request (7 days here; counted coarsely, up to a minute):\n\
+         # idle_timeout_secs = 604800\n",
         DEFAULT_MCP_SESSIONS,
         defaults.chunk_bytes,
         defaults.damage_policy,
@@ -471,5 +528,30 @@ mod tests {
         for bad in ["", "127.0.0.1", "localhost:x", "localhost:70000", "::1:80"] {
             assert!(parse_listen(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn session_limits_are_unlimited_by_default_and_at_least_1() {
+        let config = parse(&default_config_text()).unwrap();
+        assert_eq!(config.sessions, SessionsConfig::default());
+        assert_eq!(config.sessions.limits(), SessionLimits::unlimited());
+        assert!(default_config_text().contains("[sessions]"));
+        let limits = parse("[sessions]\nlifetime_secs = 3600\nidle_timeout_secs = 60")
+            .unwrap()
+            .sessions
+            .limits();
+        assert_eq!(limits.lifetime, Some(Duration::from_secs(3600)));
+        assert_eq!(limits.idle_timeout, Some(Duration::from_secs(60)));
+        for (text, key) in [
+            ("[sessions]\nlifetime_secs = 0", "sessions.lifetime_secs"),
+            (
+                "[sessions]\nidle_timeout_secs = 0",
+                "sessions.idle_timeout_secs",
+            ),
+        ] {
+            let err = parse(text).unwrap_err().to_string();
+            assert!(err.contains(key) && err.contains("no limit"), "{err}");
+        }
+        assert!(parse("[sessions]\nenabled = false").is_err());
     }
 }

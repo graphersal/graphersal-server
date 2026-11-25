@@ -27,7 +27,8 @@
 //! and the UI files: the admin API (Runs included) for admins only, each database by the
 //! principal's level (none = it does not exist for them, read = read-only requests), `/mcp`
 //! per principal; `POST /api/login` / `POST /api/logout` for browsers (the `gs_session`
-//! cookie). The server listens on the loopback by default and warns when it listens on any
+//! cookie). Browser and MCP sessions survive a restart ([`sessions`]: hashes only, in the
+//! server directory's `sessions/`). The server listens on the loopback by default and warns when it listens on any
 //! other address (tokens travel in clear text over plain HTTP).
 
 #![warn(missing_docs)]
@@ -54,6 +55,7 @@ pub mod registry;
 mod router;
 pub mod run_file;
 pub mod serve;
+pub mod sessions;
 #[cfg(test)]
 pub(crate) mod test_models;
 #[cfg(test)]
@@ -68,7 +70,7 @@ pub use audit::{Audit, AuditEvent, AuditSink};
 pub use config::{
     DEFAULT_HEADER_TIMEOUT_SECS, DEFAULT_IDLE_TIMEOUT_SECS, DEFAULT_LISTEN,
     DEFAULT_MAX_CONNECTIONS, DEFAULT_MCP_SESSIONS, DatabaseDefaults, Limits, McpConfig,
-    ServerConfig,
+    ServerConfig, SessionsConfig,
 };
 pub use database::{DatabaseConfig, DatabaseKind, DatabaseRole};
 pub use error::ServerError;

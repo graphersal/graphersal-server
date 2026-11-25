@@ -22,6 +22,9 @@ holds `server.toml`.
   backups/<name>/      <UTC time>.zip + <UTC time>.toml per backup
   trash/               deleted and replaced databases: <name>-<UTC time>/
   tmp/                 builds and uploads in progress (emptied at start)
+  sessions/
+    browser.json       browser sessions (hashes only, mode 0600): they survive a restart
+    mcp.json           MCP sessions (hashes only, mode 0600): they survive a restart
 ```
 
 There is no log directory: the server logs to stderr (redirect it to keep a log file). A
@@ -75,6 +78,10 @@ upload_bytes = 4294967296   # the largest import upload (POST /api/admin/import)
 max_connections = 256       # open connections served at once (one more: 503 + Retry-After)
 header_timeout_secs = 30    # a request's head must arrive within this
 idle_timeout_secs = 60      # a connection without a running request is closed after this
+
+[sessions]                  # how long a browser session lasts; no limit when left out
+# lifetime_secs = 2592000   # since its login
+# idle_timeout_secs = 604800   # since its last request
 ```
 
 | Key | Default | Read | Meaning |
@@ -88,6 +95,8 @@ idle_timeout_secs = 60      # a connection without a running request is closed a
 | `[limits] max_connections` | `256` | at start | open connections served at once (at least 1); one more is accepted, answered `503` (`Retry-After: 1`, JSON `error` and `help`, in its own protocol) and closed; beyond 64 such refusals at once a connection is closed unanswered. `serve --max-connections N` overrides it |
 | `[limits] header_timeout_secs` | `30` | at start | seconds a request's head may take to arrive, counted from the moment the connection waits for it (a new connection, or after the previous answer); a slower or silent client is disconnected. Never cuts a body. `serve --header-timeout SECS` overrides it |
 | `[limits] idle_timeout_secs` | `60` | at start | seconds a connection without a running request stays open (HTTP/1.1: at most the shorter of this and `header_timeout_secs`). `serve --idle-timeout SECS` overrides it |
+| `[sessions] lifetime_secs` | none (no limit) | at start | the longest a browser session lasts after its login, in seconds (at least 1); the browser logs in again afterwards |
+| `[sessions] idle_timeout_secs` | none (no limit) | at start | the longest a browser session lasts after its last request, in seconds (at least 1); counted coarsely (the last request is recorded at most every minute, every quarter of a shorter timeout) |
 
 The `[defaults]` apply to databases created empty (`db create`) and to snapshot (`.gsnap`),
 GraphSON and GraphML imports. A clone, a restore and a Store (`.gstore`, Store directory) import
@@ -221,6 +230,43 @@ A deleted database, and the database a restore replaced, move to `trash/<name>-<
 New databases, backups, exports, upload bodies (imports and models) and unpacked model archives
 are written in `tmp/` and renamed into place (or streamed or read, then removed). The server empties it at every start; leave it alone while a server
 runs.
+
+## `sessions/`
+
+The sessions that survive a restart (always on: there is no setting to turn it off), so a
+release or a restart does not log browsers out or make MCP clients initialize again.
+
+- `browser.json`: one row per browser session (`gs_session` cookie): the SHA-256 of the session
+  id, the user, the SHA-256 of the token it logged in with, created and last seen (seconds since
+  the Unix epoch; last seen is updated coarsely, at most every minute).
+- `mcp.json`: one row per MCP session: the SHA-256 of its `Mcp-Session-Id`, the identity of its
+  `initialize` (`user:<name>`, `operator`, or none for anonymous), the selected database or
+  alias, a pending alias rename note, the protocol revision, the client's name and version, and
+  when it was created.
+
+```json
+{
+  "version": 1,
+  "sessions": [
+    { "id_sha256": "<64 hex>", "user": "alice", "token_sha256": "<64 hex>",
+      "created_unix_s": 1795000000, "last_seen_unix_s": 1795003600 }
+  ]
+}
+```
+
+Neither file holds a usable id or token, only their hashes. Every change is written at once
+(login, logout, a new MCP session, `use_graph`, a rename note taken, an end), the whole file
+atomically, mode `0600` on unix. At start both are read back: a browser session whose user is
+gone, whose user holds another token now, or that expired (`[sessions]` above) is dropped, and
+so is an MCP session of a user that is gone or has no token. A missing file is no sessions; a
+file that cannot be read or parsed is a warning on stderr and no sessions (the server starts;
+browsers log in again, MCP clients initialize again) and is overwritten by the next change.
+
+Revoking or reissuing a user's token, or removing the user, ends its browser and MCP sessions at
+once, in memory and in these files, through the running server or with the console on the
+directory (`graphersal-server user ...`). Deleting the files (while no server runs) logs every
+browser out and ends every MCP session. The MCP endpoint keeps at most `[mcp] max_sessions`
+sessions, the oldest forgotten first, restarts included.
 
 ## External backups of the whole directory
 
