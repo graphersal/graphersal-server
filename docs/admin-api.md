@@ -7,7 +7,8 @@ below are also what `graphersal-server db ... --json` (and `user ... --json`) pr
 
 The MCP endpoints (`/mcp`, `/db/<name>/mcp`) are documented in [`mcp.md`](mcp.md), the server
 directory and its files (`server.toml`, `database.toml`, `models/`, `backups/`) in
-[`server-dir.md`](server-dir.md).
+[`server-dir.md`](server-dir.md), the access model (principals, grants, levels, tokens, the
+401/404/303 rules) in [`access.md`](access.md).
 
 The admin API is for admins only (a user with the `admin` role in `access.toml`, or the
 console with the run's operator token from `server.run`): send `Authorization: Bearer
@@ -61,7 +62,10 @@ gets an empty list (`200`). Wrong credentials are `401`; any method but `GET`/`H
 - The actions take **real database names**; an alias is not followed (`404`). Only
   `GET /api/admin/databases/<name>` also answers an alias. Names are case-insensitive and
   answered in lower case; the name rule is `[a-z0-9][a-z0-9._-]{0,62}` (no Windows device
-  names); databases and aliases share one namespace.
+  names); databases and aliases share one namespace. A new database or alias (create, clone,
+  import, restore under a new name, alias set, alias rename) cannot take the reserved name
+  `jobs`: `400` with help (the default backup root `backups/jobs/` would collide with that
+  database's admin backups).
 - Status codes: `200`/`201`/`202` success; `400` invalid name, body or schema; `404` no such
   database, alias, model or endpoint; `405` method not allowed on an existing endpoint; `409` a rule
   refuses it (name taken, database loaded, named by an alias, base of layers, a base's

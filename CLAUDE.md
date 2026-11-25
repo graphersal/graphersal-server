@@ -259,7 +259,12 @@ from published files). When this file disagrees with the code, the code wins: sa
   Content-Length/chunked/close bodies, timeouts; `download` streams a `200` body into a writer:
   `db export` through a server), `error`
   (`ServerError`), `names` (name rule `[a-z0-9][a-z0-9._-]{0,62}`, Windows device names refused,
-  `fold` = lower case for case-insensitive lookups), `database` (`database.toml`:
+  `fold` = lower case for case-insensitive lookups; B7: `validate_new_name` also refuses the
+  `RESERVED` names (`jobs`: the default backup root `backups/jobs/`), used by
+  `Registry::prepare_tmp` (create/clone/import/restore as new), `alias_set` (a new alias only),
+  `alias_rename` and the upload import's quick check; `validate_name` alone for existing
+  directories and user names, so an old `jobs` database stays served; the admin API's help is
+  `RESERVED_HELP`), `database` (`database.toml`:
   `DatabaseConfig`, `DatabaseKind`, `DatabaseRole`, `deny_unknown_fields`, `utc_now`),
   `registry` (`Registry`: NO registry file, the registry IS `databases/*/database.toml`; `scan`
   at start with the lock held: cleans `tmp/`, broken entries -> `DbState::Failed`, broken aliases
@@ -390,10 +395,16 @@ from published files). When this file disagrees with the code, the code wins: sa
 - Docs (the contract for readers who did not follow the code; keep them in sync with it):
   `README.md` (what it is, run, console, HTTP, known limitations), `docs/server-dir.md` (every
   file and key of the server directory), `docs/admin-api.md` (every admin route, checked
-  against `admin_api.rs`), `docs/mcp.md` (endpoints, request headers, flow).
+  against `admin_api.rs`), `docs/mcp.md` (endpoints, request headers, flow), `docs/access.md`
+  (the access model: principals, grants/levels, 401/404/303, tokens, login and sessions, MCP
+  with a token, modes, limits as ceilings, backup root, inbox, audit), and the release notes
+  `docs/release-notes-<version>.md` (release.yml uses the file of the tagged version as the
+  release text; 0.2.0 = the access series, not yet released).
 - `scripts/smoke.sh`: the end-to-end smoke test (bash + curl + python3 only): builds, inits a
   temp server dir, serves on `127.0.0.1:0` (URL from `server.run`), walks create/load/execute/
-  alias/read-only/backup/restore/export/upload import/promote + layer/models/MCP/unload/delete, SIGTERM stop,
+  alias/read-only/backup/restore/export/upload import/promote + layer/models/MCP/unload/delete,
+  access (anonymous refused, login/logout), users and a read-only user (reads, cannot write, does
+  not see another database, "my databases"), the reserved name `jobs`, the inbox, SIGTERM stop,
   a restart (a browser cookie and an MCP session with its selection survive);
   `ok <step>` / `FAIL <step>: why` lines, exit 1 on failure, the server killed in a trap
   (`SMOKE_BIN` skips the build, `SMOKE_KEEP=1` keeps the temp dir). Extend it with a new
