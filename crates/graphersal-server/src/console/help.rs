@@ -6,7 +6,7 @@
 //! Mapped routes: `GET databases`, `DELETE databases/<n>`, `POST databases` (a layer:
 //! `{"name", "base"}`), `POST databases/<n>/load|unload`, `GET databases/<n>/backups`,
 //! `GET databases/<n>/export?...`, `PUT|DELETE aliases/<a>`, `GET models`, `POST models`
-//! (`{"path"}` or `{"repo"}`), `POST import?name=&role=`, `GET users`, `POST users`
+//! (`{"path"}` or `{"repo"}`), `POST import?name=&role=`, `GET imports`, `GET users`, `POST users`
 //! (`{"name", "admin"}`), `POST|DELETE users/<n>/token`, `PUT users/<n>/admin` (`{"admin"}`).
 
 use serde_json::Value;
@@ -140,6 +140,7 @@ fn command(method: &str, path: &str, body: Option<&Value>, dir_arg: &str) -> Opt
             };
             user(format!("admin {} {on}", word(name)))
         }
+        ("GET", ["imports"]) => Some(format!("{BIN} import {dir_arg} --list")),
         ("POST", ["import"]) => {
             let name = param("name")
                 .map(word)
@@ -166,6 +167,14 @@ fn word(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_inbox_listing_becomes_import_list() {
+        assert_eq!(
+            console_help("GET /api/admin/imports lists the import inbox", "srv"),
+            "graphersal-server import srv --list lists the import inbox"
+        );
+    }
 
     /// Every help the admin API gives that names a route (`admin_api.rs`, `error_answer` and
     /// the `*_help` functions), as the console shows it.

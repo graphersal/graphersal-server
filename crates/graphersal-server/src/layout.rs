@@ -10,6 +10,7 @@
 //!   databases/       one directory per database: database.toml + store/ (crate::registry)
 //!   models/          the shared embedding models: blobs/<2 hex>/<sha256>, models.toml (crate::models)
 //!   sessions/        browser.json, mcp.json: the sessions that survive a restart (crate::sessions)
+//!   imports/         the import inbox: files an admin imports by name (crate::ops::InboxFile)
 //!   backups/  trash/  tmp/
 //! ```
 //!
@@ -46,7 +47,11 @@ const SUBDIRS: &[&[&str]] = &[
     &["trash"],
     &["tmp"],
     &["sessions"],
+    &[IMPORTS_DIR],
 ];
+
+/// The import inbox's directory name (`imports/`).
+pub const IMPORTS_DIR: &str = "imports";
 
 /// A server directory (its root path; nothing is checked until it is opened).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -231,6 +236,11 @@ impl ServerDir {
         self.root.join(crate::sessions::SESSIONS_DIR)
     }
 
+    /// `imports/` (the import inbox: [`crate::ops::Admin::inbox`]).
+    pub fn imports(&self) -> PathBuf {
+        self.root.join(IMPORTS_DIR)
+    }
+
     /// Reads and checks `server.toml`.
     pub fn load_config(&self) -> Result<ServerConfig, ServerError> {
         let path = self.config_path();
@@ -359,6 +369,17 @@ mod tests {
         fs::remove_dir(dir.sessions()).unwrap();
         let report = ServerDir::init(temp.path()).unwrap();
         assert_eq!(report.created, vec![dir.sessions()]);
+    }
+
+    #[test]
+    fn init_creates_the_imports_inbox_also_in_an_older_server_directory() {
+        let temp = TempDir::new("layout-imports");
+        let dir = ServerDir::init(temp.path()).unwrap().dir;
+        assert!(dir.imports().is_dir());
+        // A directory from before the inbox: `init` adds `imports/`.
+        fs::remove_dir(dir.imports()).unwrap();
+        let report = ServerDir::init(temp.path()).unwrap();
+        assert_eq!(report.created, vec![dir.imports()]);
     }
 
     #[test]

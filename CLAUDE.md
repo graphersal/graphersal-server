@@ -75,7 +75,7 @@ from published files). When this file disagrees with the code, the code wins: sa
   hashes only, `write_atomic_private`, `sessions/` created on the first write; a missing file =
   empty, an unreadable/broken one (or another version) = a warning + empty, overwritten by the
   next change), `layout`
-  (`ServerDir`, `init` (creates `sessions/` too), file names, `write_atomic`), `lock` (`ServerLock`, fd-lock on
+  (`ServerDir`, `init` (creates `sessions/` and the import inbox `imports/` too), file names, `write_atomic`), `lock` (`ServerLock`, fd-lock on
   `server.lock`), `run_file` (`RunInfo`, `server.run`, mode 0600: it carries the per-run `operator_token`), `serve` (`start` -> `Running`, the
   listener: hyper 1.x `http1` server connections, and `http2` ones for h2c with prior
   knowledge (`sniff` peeks the preface; the HTTP/1 path is unchanged otherwise), on a tokio
@@ -165,8 +165,9 @@ from published files). When this file disagrees with the code, the code wins: sa
   `POST .../<name>/backup`, `GET .../<name>/backups`, `POST .../<name>/restore {"backup",
   "name"?}`, `GET .../<name>/export?models=&materialize=`; `POST import?name=&base=&format=&description=&role=`
   with the raw file as the body (streamed by `copy_body_to` into `tmp/upload-*.bin` = `TmpFile`,
-  quick 400/409 refusals before reading) or `POST import {"path", "name", "role"?, ...}` (JSON, absolute
-  path read server-side; the console's form), both answered by `import_answer` (`201` entry +
+  quick 400/409 refusals before reading) or `POST import {"path" | "inbox", "name", "role"?, ...}` (JSON, absolute
+  path read server-side, or one entry of the import inbox `imports/` (B11,
+  `Admin::inbox_source`); the console's form), both answered by `import_answer` (`201` entry +
   `"import": {format, layerBase?, modelsMissing, modelsResolved, skipped, notes}`, 415 for an unknown format);
   the export is NOT answered by
   `route`: the router asks `export_target` first and answers `Answer::Download` (the `.gsnap`
@@ -198,7 +199,16 @@ from published files). When this file disagrees with the code, the code wins: sa
   commit_seq, last_commit_at)`); export = `write_graph_snapshot` of the open graph, or of
   `Store::open_read_only` / `open_layer_read_only(...).into_graph()` for an unloaded one,
   `WriteOptions::with_materialize` for a materialized layer, `ModelCopy` from the spec (a
-  layer snapshot never carries models)); `import` in `ops_import.rs`
+  layer snapshot never carries models)); the import inbox in `ops_inbox.rs` (B11: `Admin::inbox`
+  lists `imports/` (`InboxFile`: name, kind guessed from the name or a Store dir, directory,
+  bytes, modified; hidden and escaping-link entries left out; a missing `imports/` created),
+  `Admin::inbox_source(name)` = ONE flat entry name (empty, leading `.`, `/` `\` `:` NUL ->
+  `InvalidInput` 400), missing -> `SourceNotFound` 404, canonical path outside `imports/` ->
+  `Refused` 409; returns the canonical path; admin API `GET imports` `{dir, imports}`, console
+  `import DIR --list` / `import DIR --inbox FILE --name N` (`DbCommand::InboxList` /
+  `ImportInbox`), UI Import tab source "inbox" (`admin-api.js` `inboxRows`,
+  `inboxNameProblem`); the file stays in the inbox; tests beside it, HTTP in
+  `router_access_tests.rs`, console in `server_tests.rs`); `import` in `ops_import.rs`
   (`ImportSource`/`ImportFormat`/`Imported`; detection: dir with a Store, `read_snapshot_info`
   head, single-file Store, extension, first character; full `.gsnap` =
   `Store::create_from_packed_dir` + `models_missing` + `models_dir` Missing -> `needs_model`
@@ -338,7 +348,8 @@ from published files). When this file disagrees with the code, the code wins: sa
 - `src/main.rs`: the hand-parsed command line (no parser crate, like graphersal's CLI): `init`,
   `serve`, `db list|create|delete|clone|load|unload|promote|read-only|auto-load|alias|backup|
   backups|restore|export ... --dir DIR [--json]`, `import DIR SOURCE --name N [--base B] [--format F]
-  [--description D] [--role normal|base] [--json]`, `models list|add SOURCE [--repo R] [--license L]|remove REPO
+  [--description D] [--role normal|base] [--json]` (or `--inbox FILE` instead of SOURCE; `import DIR
+  --list`), `models list|add SOURCE [--repo R] [--license L]|remove REPO
   --dir DIR [--json]` (`DbCommand::Models*`; SOURCE absolute when it exists, else a repo),
   `user list|add NAME [--admin]|token NAME [--revoke]|remove NAME|admin NAME on|off|grant SUBJECT
   DATABASE read|write|revoke SUBJECT DATABASE --dir DIR [--json]` (`DbCommand::User*`; tests in

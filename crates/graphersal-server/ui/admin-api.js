@@ -60,7 +60,8 @@ const seg = (name) => encodeURIComponent(String(name));
  * readOnly(value), autoLoad(value), aliases, setAlias(alias, target), removeAlias(alias),
  * renameAlias(alias, newName) (atomic; open MCP sessions that selected the alias move with it),
  * backup(name), backups(name), restore(name, backup, newName?) (no `name` field when restoring
- * over the database itself), importPath({path, name, base?, format?, description?, role?}), models,
+ * over the database itself), importPath({path | inbox, name, base?, format?, description?, role?}),
+ * imports (the import inbox `imports/` of the server directory), models,
  * addModel({path?, repo?, license?}), removeModel(repo or blob hash), promote(name) (no body;
  * one way: a base is frozen forever), runs(name?) (one loaded database's queued and running runs,
  * or every loaded database's without a name), cancelRun(name, id) (the run administration: a
@@ -93,6 +94,7 @@ export const adminRequest = Object.freeze({
     body: newName && newName !== name ? { backup, name: newName } : { backup },
   }),
   importPath: (body) => ({ method: 'POST', path: 'api/admin/import', body }),
+  imports: () => ({ method: 'GET', path: 'api/admin/imports' }),
   models: () => ({ method: 'GET', path: 'api/admin/models' }),
   addModel: (body) => ({ method: 'POST', path: 'api/admin/models', body }),
   removeModel: (id) => ({ method: 'DELETE', path: `api/admin/models/${modelSegs(id)}` }),
@@ -504,8 +506,10 @@ export const IMPORT_FORMATS = Object.freeze(['', 'snapshot', 'store', 'graphson'
 /**
  * The import request from the import form, or the problems: `{upload: {path, size}}` (the file
  * as the body of `POST api/admin/import?<query>`), `{request}` (the JSON path form) or
- * `{problems: [text]}`. Form: `{source: 'upload'|'path', file ({size}), path, name, base,
- * format, description, role: 'normal'|'base'}`; `limit` = `uploadLimit(info)`. Only documented
+ * `{problems: [text]}`. Form: `{source: 'upload'|'path'|'inbox', file ({size}), path, inbox,
+ * name, base, format, description, role: 'normal'|'base'}`; `limit` = `uploadLimit(info)`.
+ * `inbox` is one entry name of the server's import inbox (`inboxRows`): the JSON form with
+ * `{inbox}` instead of `{path}` (the server refuses anything but one entry of `imports/`). Only documented
  * parameters are sent, and only when set: `role` only as `base` (the server's default is
  * `normal`), and then without `base` (a base is made only from a plain source, for which the
  * server refuses `base`; a layer source or a missing model is the server's refusal, shown as sent).
@@ -528,6 +532,13 @@ export function importRequest(form, limit = null) {
   const description = typeof f.description === 'string' ? f.description.trim() : '';
   if (description) fields.description = description;
   if (asBase) fields.role = 'base';
+  if (f.source === 'inbox') {
+    const inbox = typeof f.inbox === 'string' ? f.inbox : '';
+    if (!inbox) problems.push('Pick a file of the import inbox.');
+    else if (inboxNameProblem(inbox)) problems.push(inboxNameProblem(inbox));
+    if (problems.length) return { problems };
+    return { request: adminRequest.importPath({ inbox, ...fields }) };
+  }
   if (f.source === 'path') {
     const path = typeof f.path === 'string' ? f.path.trim() : '';
     if (!path) problems.push("Enter the source's path on the server.");
@@ -541,6 +552,51 @@ export function importRequest(form, limit = null) {
   if (problems.length) return { problems };
   const query = Object.entries(fields).map(([k, v]) => `${k}=${encodeURIComponent(v)}`).join('&');
   return { upload: { path: `api/admin/import?${query}`, size } };
+}
+
+/** The problem with an inbox entry name (one name in `imports/`, the server's rule), or null. */
+export function inboxNameProblem(name) {
+  if (typeof name !== 'string' || !name) return 'Pick a file of the import inbox.';
+  if (name.startsWith('.') || /[\/\\:\0]/.test(name)) return `"${name}" is not a file of the import inbox.`;
+  return null;
+}
+
+/** The names of the import kinds an inbox listing guesses (`kind`). */
+const INBOX_KINDS = Object.freeze({
+  snapshot: 'snapshot (.gsnap)',
+  store: 'Store',
+  graphson: 'GraphSON',
+  graphml: 'GraphML',
+});
+
+/**
+ * The rows of the import inbox from `GET api/admin/imports` (`{dir, imports: [{name, kind,
+ * directory, bytes, modified}]}`): `{dir, rows: [{name, label, kind, kindText, sizeText,
+ * modified, directory, importable}]}`, sorted by name; `label` adds `/` to a directory, a
+ * missing kind reads "unknown (detected on import)" (the server still detects the content);
+ * malformed entries are left out. A file name suggests the database name (`suggestName`).
+ */
+export function inboxRows(answer) {
+  const a = answer && typeof answer === 'object' ? answer : {};
+  const list = Array.isArray(a.imports) ? a.imports : [];
+  const rows = list
+    .filter((e) => e && typeof e.name === 'string' && !inboxNameProblem(e.name))
+    .map((e) => {
+      const kind = typeof e.kind === 'string' ? e.kind : null;
+      const directory = e.directory === true;
+      return {
+        name: e.name,
+        label: directory ? `${e.name}/` : e.name,
+        kind,
+        kindText: kind ? (INBOX_KINDS[kind] || kind) : (directory ? 'directory (no Store)' : 'unknown (detected on import)'),
+        sizeText: typeof e.bytes === 'number' ? bytesText(e.bytes) || '0 B' : '',
+        modified: typeof e.modified === 'string' ? e.modified : '',
+        directory,
+        importable: !(directory && !kind),
+      };
+    })
+    .sort((x, y) => (x.name < y.name ? -1 : x.name > y.name ? 1 : 0));
+  return { dir: typeof a.dir === 'string' ? a.dir : '', rows };
 }
 
 /** Whether a server path is absolute (unix `/...`, Windows `C:\...`, `C:/...` or `\\server\...`). */

@@ -1,22 +1,24 @@
 // The Import tab of the `server` profile: a new database from a file uploaded from this browser
 // (`POST api/admin/import?name=...` with the file as the raw body, through XMLHttpRequest for the
 // progress bar; the size is checked against the root `/api/info` `uploadBytes`, which the
-// playground passes as `api.info.host`, before anything is sent) or from a path on the server's machine (the JSON form). Sources: a packed snapshot
+// playground passes as `api.info.host`, before anything is sent), from the server's import inbox
+// (`imports/` of the server directory, listed by `GET api/admin/imports`: pick one entry, sent as
+// `{inbox}`; ./admin-api.js `inboxRows`) or from a path on the server's machine (the JSON form). Sources: a packed snapshot
 // (full or layer), a Store, GraphSON or GraphML; the format is detected unless chosen. Request
 // and rules: ./admin-api.js `importRequest`, `uploadImport`. The server's `error`/`help` (a `413`
 // included) stay shown; Cancel aborts a running upload. "Import as a base" sends `role=base`
 // (only a plain source becomes a base: the server refuses a layer source with `400` and a source
 // missing its model with `409` + help).
 
-import { reactive, ref, computed, onMounted } from 'vue';
+import { reactive, ref, computed, watch, onMounted } from 'vue';
 import {
   importRequest, uploadImport, uploadLimit, uploadSizeProblem, progressText, suggestName,
-  outcomeText, needsModelHint, bytesText, baseNames, IMPORT_FORMATS, BASE_IS_FROZEN,
+  outcomeText, needsModelHint, bytesText, baseNames, inboxRows, IMPORT_FORMATS, BASE_IS_FROZEN,
 } from './admin-api.js';
 import { admin, ROOT, headers, list, ensureLoaded, reload, noticeClass } from './shared.js';
 import { hostInfo } from './databases.js';
 
-const freshForm = () => ({ source: 'upload', file: null, path: '', name: '', base: '', format: '', description: '', role: 'normal' });
+const freshForm = (source = 'upload') => ({ source, file: null, path: '', inbox: '', name: '', base: '', format: '', description: '', role: 'normal' });
 
 export default {
   props: { api: { type: Object, required: true }, params: { type: Object, default: () => ({}) } },
@@ -24,6 +26,7 @@ export default {
     const form = reactive(freshForm());
     const s = reactive({ busy: false, problems: [], error: null, loaded: 0, total: 0, sent: false });
     const notice = ref(null);
+    const inbox = reactive({ dir: '', rows: [], loading: false, error: null, loaded: false });
     const fileInput = ref(null);
     let running = null;
     let nameTouched = false;
@@ -33,8 +36,31 @@ export default {
     const fileProblem = computed(() => (form.source === 'upload' && form.file ? uploadSizeProblem(form.file.size, limit.value) : null));
     const percent = computed(() => (s.total > 0 ? Math.min(100, (s.loaded / s.total) * 100) : 0));
 
+    async function loadInbox() {
+      if (inbox.loading) return;
+      inbox.loading = true;
+      inbox.error = null;
+      try {
+        const listed = inboxRows(await admin.imports());
+        inbox.dir = listed.dir;
+        inbox.rows = listed.rows;
+        if (form.inbox && !listed.rows.some((r) => r.name === form.inbox)) form.inbox = '';
+      } catch (err) {
+        inbox.error = { text: err && err.message ? err.message : String(err), help: err && err.help ? err.help : '' };
+      } finally {
+        inbox.loading = false;
+        inbox.loaded = true;
+      }
+    }
+    function pickInbox(row) {
+      form.inbox = row.name;
+      if (!nameTouched) form.name = suggestName(row.name);
+    }
+    watch(() => form.source, (source) => { if (source === 'inbox') loadInbox(); });
+
     function reset() {
-      Object.assign(form, freshForm());
+      // The source stays chosen: an admin importing from the inbox picks the next file.
+      Object.assign(form, freshForm(form.source));
       Object.assign(s, { busy: false, problems: [], error: null, loaded: 0, total: 0, sent: false });
       nameTouched = false;
       if (fileInput.value) fileInput.value.value = '';
@@ -84,6 +110,7 @@ export default {
         finished(answer || {}, subject);
         reset();
         await reload();
+        if (form.source === 'inbox') await loadInbox();
       } catch (err) {
         s.error = { text: err && err.message ? err.message : String(err), help: err && err.help ? err.help : '' };
       } finally {
@@ -102,7 +129,7 @@ export default {
     onMounted(ensureLoaded);
 
     return {
-      form, s, notice, fileInput, bases, limit, fileProblem, percent, cancel, submit, pickFile, pathChanged, noticeClass,
+      form, s, notice, inbox, loadInbox, pickInbox, fileInput, bases, limit, fileProblem, percent, cancel, submit, pickFile, pathChanged, noticeClass,
       progressText, bytesText, formats: IMPORT_FORMATS, frozen: BASE_IS_FROZEN,
       touchName: () => { nameTouched = true; },
       openDatabases: () => props.api.navigate('databases'),
@@ -122,12 +149,29 @@ export default {
       <fieldset :disabled="s.busy">
         <legend>Source</legend>
         <label class="inline"><input type="radio" value="upload" v-model="form.source"> A file from this computer (uploaded)</label>
+        <label class="inline"><input type="radio" value="inbox" v-model="form.source"> A file of the server's import inbox (imports/)</label>
         <label class="inline"><input type="radio" value="path" v-model="form.source"> A file or Store directory on the server's machine</label>
       </fieldset>
       <label v-if="form.source === 'upload'">File (.gsnap, .gstore, GraphSON, GraphML)
         <input ref="fileInput" type="file" name="file" @change="pickFile" :disabled="s.busy">
         <span class="muted srv-sub">{{ limit ? 'Up to ' + bytesText(limit) + ' per upload.' : '' }}<template v-if="form.file"> This file: {{ bytesText(form.file.size) }}.</template></span></label>
       <p v-if="fileProblem" class="srv-problems" role="alert">{{ fileProblem }}</p>
+      <fieldset v-if="form.source === 'inbox'" class="srv-inbox" :disabled="s.busy">
+        <legend>Import inbox</legend>
+        <p class="muted srv-sub">Files put into <span class="mono">{{ inbox.dir || 'imports/' }}</span> on the server (a .gsnap, a .gstore or Store directory, GraphSON, GraphML).
+          <button type="button" class="btn" @click="loadInbox" :disabled="inbox.loading">{{ inbox.loading ? 'Reading…' : 'Refresh' }}</button></p>
+        <p v-if="inbox.error" class="srv-problems" role="alert">{{ inbox.error.text }}<template v-if="inbox.error.help"> {{ inbox.error.help }}</template></p>
+        <p v-else-if="inbox.loaded && !inbox.rows.length" class="muted">The inbox is empty.</p>
+        <div v-else-if="inbox.rows.length" class="srv-table-wrap"><table class="data-table srv-table">
+          <thead><tr><th></th><th>File</th><th>Kind</th><th>Size</th><th>Modified</th></tr></thead>
+          <tbody>
+            <tr v-for="r in inbox.rows" :key="r.name">
+              <td><input type="radio" name="inbox" :value="r.name" :checked="form.inbox === r.name" :disabled="!r.importable" @change="pickInbox(r)" :aria-label="'Import ' + r.name"></td>
+              <td class="mono">{{ r.label }}</td><td>{{ r.kindText }}</td><td>{{ r.sizeText }}</td><td class="muted">{{ r.modified }}</td>
+            </tr>
+          </tbody>
+        </table></div>
+      </fieldset>
       <label v-if="form.source === 'path'">Absolute path on the server
         <input v-model="form.path" name="path" class="mono" autocomplete="off" spellcheck="false" placeholder="/data/acme.gsnap" @change="pathChanged" :disabled="s.busy"></label>
       <label>Name of the new database

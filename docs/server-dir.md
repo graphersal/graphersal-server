@@ -22,6 +22,7 @@ holds `server.toml`.
   backups/<name>/      <UTC time>.zip + <UTC time>.toml per backup
   trash/               deleted and replaced databases: <name>-<UTC time>/
   tmp/                 builds and uploads in progress (emptied at start)
+  imports/             the import inbox: files and Store directories an admin imports by name
   sessions/
     browser.json       browser sessions (hashes only, mode 0600): they survive a restart
     mcp.json           MCP sessions (hashes only, mode 0600): they survive a restart
@@ -284,6 +285,24 @@ A deleted database, and the database a restore replaced, move to `trash/<name>-<
 New databases, backups, exports, upload bodies (imports and models) and unpacked model archives
 are written in `tmp/` and renamed into place (or streamed or read, then removed). The server empties it at every start; leave it alone while a server
 runs.
+
+## `imports/`
+
+The import inbox: put a `.gsnap`, a `.gstore`, a Store directory, a GraphSON or a GraphML file
+here by any means (scp, a mounted volume, a shared folder), and an admin imports it by its NAME:
+the web UI's Import tab lists the inbox ("A file of the server's import inbox"), the admin API
+lists it (`GET /api/admin/imports`) and imports one entry (`POST /api/admin/import {"inbox":
+"<file>", "name", ...}`), the console as `graphersal-server import DIR --list` and
+`graphersal-server import DIR --inbox FILE --name NAME`. The import copies what it needs: the
+file stays in the inbox (remove it yourself when done); the import runs within the request, as
+every import does.
+
+The inbox is flat: an inbox name is ONE entry of `imports/` (no subdirectory paths; a name with
+`/`, `\`, `:` or a leading `.`, `..` included, is refused). Entries starting with `.` (such as
+`.DS_Store`, or a copy in progress named `.acme.gsnap.part`) are not listed. A symbolic link in
+the inbox is followed only when it resolves inside `imports/`; one leading outside is neither
+listed nor imported. `init` creates `imports/`; an older server directory gets it at its next
+`init` or at the first listing.
 
 ## `sessions/`
 
