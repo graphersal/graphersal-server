@@ -7,6 +7,11 @@
 //! A name is also a directory name under `databases/`, so the names Windows reserves for
 //! devices (`con`, `nul`, `com1`, ... also with an extension such as `con.db`) and names ending
 //! in a dot (Windows drops it) are refused on every platform: a server directory stays portable.
+//!
+//! A few names are reserved for NEW databases and aliases ([`validate_new_name`], [`RESERVED`]):
+//! `jobs`, because the default backup root of backup jobs is `backups/jobs/`, the directory the
+//! admin backups of a database named `jobs` would use. An existing database of a reserved name
+//! (made before the reservation) is still served; only creating one is refused.
 
 use crate::error::ServerError;
 
@@ -18,6 +23,34 @@ const WINDOWS_RESERVED: &[&str] = &[
     "con", "prn", "aux", "nul", "com0", "com1", "com2", "com3", "com4", "com5", "com6", "com7",
     "com8", "com9", "lpt0", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
 ];
+
+/// The names a new database or alias cannot take ([`validate_new_name`]).
+pub const RESERVED: &[&str] = &["jobs"];
+
+/// Whether `name` (folded) is a reserved name ([`RESERVED`]).
+pub fn is_reserved(name: &str) -> bool {
+    RESERVED.contains(&fold(name).as_str())
+}
+
+/// The help of a refused reserved name.
+pub const RESERVED_HELP: &str = "pick another name, such as 'jobs-db'";
+
+/// Checks the name of a NEW database or alias: [`validate_name`], and not a reserved name
+/// ([`RESERVED`]; `Err(`[`ServerError::InvalidName`]`)` whose message names the reason and
+/// another name).
+pub fn validate_new_name(name: &str) -> Result<(), ServerError> {
+    validate_name(name)?;
+    if is_reserved(name) {
+        return Err(ServerError::InvalidName {
+            name: name.to_string(),
+            message: format!(
+                "the name is reserved: backup jobs write into backups/jobs/ by default, where \
+                 the admin backups of a database named 'jobs' would go; {RESERVED_HELP}"
+            ),
+        });
+    }
+    Ok(())
+}
 
 /// Checks a database or alias name: `Err(`[`ServerError::InvalidName`]`)` says why it is not
 /// one.
@@ -106,6 +139,20 @@ mod tests {
                 "{name}: {err}"
             );
             assert!(err.to_string().contains("invalid name"), "{err}");
+        }
+    }
+
+    #[test]
+    fn reserved_names_are_refused_only_for_new_databases_and_aliases() {
+        assert!(validate_name("jobs").is_ok());
+        let err = validate_new_name("jobs").unwrap_err();
+        assert!(matches!(err, ServerError::InvalidName { .. }), "{err}");
+        let text = err.to_string();
+        assert!(text.contains("reserved"), "{text}");
+        assert!(text.contains("backups/jobs/"), "{text}");
+        assert!(is_reserved("JOBS"));
+        for name in ["jobs-db", "jobs.1", "myjobs", "acme"] {
+            assert!(validate_new_name(name).is_ok(), "{name}");
         }
     }
 

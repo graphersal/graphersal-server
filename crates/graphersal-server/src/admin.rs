@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use crate::database::{DatabaseConfig, DatabaseKind, DatabaseRole, STORE_DIR};
 use crate::error::ServerError;
 use crate::limits::DatabaseLimits;
-use crate::names::{fold, validate_name};
+use crate::names::{fold, validate_name, validate_new_name};
 use crate::registry::{DatabaseEntry, DbState, Inner, Registry, write_aliases};
 
 impl Registry {
@@ -65,7 +65,10 @@ impl Registry {
         let mut inner = self.write();
         refuse_broken_aliases(&inner)?;
         match inner.holder_of(alias) {
-            None | Some("alias") => {}
+            // A new alias may not take a reserved name; an existing one (made before the
+            // reservation) may still be flipped.
+            None => validate_new_name(alias)?,
+            Some("alias") => {}
             Some(holder) => {
                 return Err(ServerError::NameInUse {
                     name: alias.to_string(),
@@ -132,7 +135,7 @@ impl Registry {
             }
             return Err(not_found(old));
         };
-        validate_name(new)?;
+        validate_new_name(new)?;
         if let Some(holder) = inner.holder_of(new) {
             return Err(ServerError::NameInUse {
                 name: new.to_string(),
@@ -265,7 +268,7 @@ impl Registry {
         name: &str,
         mut config: DatabaseConfig,
     ) -> Result<TmpBuild, ServerError> {
-        validate_name(name)?;
+        validate_new_name(name)?;
         config.check().map_err(|message| ServerError::Refused {
             name: name.to_string(),
             message,
@@ -998,6 +1001,20 @@ mod tests {
         assert_eq!(fs::read_dir(dir.tmp()).unwrap().count(), 0);
         assert!(rescanned.get("crashed").is_err());
         assert_eq!(rescanned.list().len(), 1);
+    }
+
+    #[test]
+    fn an_existing_database_of_a_reserved_name_is_still_served_and_flipped_to() {
+        // Made before `jobs` was reserved: it stays listed, loadable and an alias target;
+        // only a new database or alias of that name is refused.
+        let temp = TempDir::new("admin-reserved-existing");
+        let registry = registry_with(&temp, &[("jobs", ""), ("a", "")]);
+        assert_eq!(registry.get("jobs").unwrap().name, "jobs");
+        registry.alias_set("cur", "jobs").unwrap();
+        assert!(registry.alias_set("jobs", "a").is_err());
+        let err = registry.alias_rename("cur", "jobs", |_, _| ()).unwrap_err();
+        assert!(matches!(err, ServerError::InvalidName { .. }), "{err}");
+        assert_eq!(registry.aliases()["cur"], "jobs");
     }
 
     #[test]
