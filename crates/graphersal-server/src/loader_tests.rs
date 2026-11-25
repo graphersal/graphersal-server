@@ -446,3 +446,174 @@ fn the_server_auto_loads_at_start_and_unloads_at_stop() {
         Err(ServerError::Refused { .. })
     ));
 }
+
+/// A loop of `n` Rhai operations at least: stopped by a small `max_operations`.
+const HEAVY_SCRIPT: &str = "let n = 0; while n < 20000 { n += 1; } n";
+
+/// Replaces `server.toml` with `text`.
+fn server_toml(dir: &ServerDir, text: &str) {
+    std::fs::write(dir.config_path(), text).unwrap();
+}
+
+/// The host presets of the loaded database `name` (`statistics().limits.presets`).
+fn presets_of(loader: &Loader, name: &str) -> Value {
+    loader
+        .context(name)
+        .expect("served")
+        .call(|session| session.statistics().map_err(String::from))
+        .expect("the session answers")
+        .expect("the statistics")["limits"]["presets"]
+        .clone()
+}
+
+#[test]
+fn query_limits_stop_a_heavy_query_of_a_limited_database_only() {
+    let temp = TempDir::new("loader-limits");
+    let dir = server(&temp);
+    server_toml(
+        &dir,
+        "[limits.query]\nmax_operations = 1000\nmax_traversers = 2\ntimeout_ms = 60000",
+    );
+    // Takes the global limits.
+    store_db(&dir, "limited", "", TraversalGraph::tinkerpop_modern());
+    // Lifts every global limit (0 is no limit).
+    store_db(
+        &dir,
+        "free",
+        "[limits.query]\nmax_operations = 0\nmax_traversers = 0\ntimeout_ms = 0",
+        TraversalGraph::tinkerpop_modern(),
+    );
+    // Lifts one key only: the global max_operations still holds.
+    store_db(
+        &dir,
+        "partial",
+        "[limits.query]\nmax_traversers = 0",
+        TraversalGraph::tinkerpop_modern(),
+    );
+    let loader = loader_of(&dir);
+    for name in ["limited", "free", "partial"] {
+        assert_eq!(load(&loader, name), DbState::Loaded, "{name}");
+    }
+    let limited = loader.context("limited").unwrap();
+    let err = run(&limited, HEAVY_SCRIPT).expect_err("stopped by max_operations");
+    assert!(err.contains("operations"), "{err}");
+    let err = run(&limited, "g.v().out().to_list()").expect_err("stopped by max_traversers");
+    assert!(err.contains("max_traversers"), "{err}");
+    let presets = presets_of(&loader, "limited");
+    assert_eq!(presets["scriptLimits"]["max_operations"], 1000, "{presets}");
+    assert_eq!(
+        presets["options"]["traversal.max_traversers"], 2,
+        "{presets}"
+    );
+    assert_eq!(presets["options"]["evaluationTimeout"], 60000, "{presets}");
+    assert_eq!(presets["scriptTimeoutMs"], 60000, "{presets}");
+
+    let free = loader.context("free").unwrap();
+    assert_eq!(
+        run(&free, HEAVY_SCRIPT).expect("not limited")["execution"]["results"][0],
+        20000
+    );
+    run(&free, "g.v().out().to_list()").expect("not limited");
+    let presets = presets_of(&loader, "free");
+    assert!(
+        presets["scriptLimits"].as_object().unwrap().is_empty(),
+        "{presets}"
+    );
+    assert!(
+        presets["options"].get("evaluationTimeout").is_none(),
+        "{presets}"
+    );
+    assert_eq!(presets["scriptTimeoutMs"], Value::Null, "{presets}");
+
+    let partial = loader.context("partial").unwrap();
+    run(&partial, "g.v().out().to_list()").expect("max_traversers lifted");
+    let err = run(&partial, HEAVY_SCRIPT).expect_err("the global max_operations holds");
+    assert!(err.contains("operations"), "{err}");
+}
+
+#[test]
+fn no_query_limit_by_default() {
+    let temp = TempDir::new("loader-no-limits");
+    let dir = server(&temp);
+    store_db(&dir, "acme", "", TraversalGraph::tinkerpop_modern());
+    let loader = loader_of(&dir);
+    assert_eq!(load(&loader, "acme"), DbState::Loaded);
+    let context = loader.context("acme").unwrap();
+    run(&context, HEAVY_SCRIPT).expect("not limited");
+    let presets = presets_of(&loader, "acme");
+    assert!(
+        presets["options"].as_object().unwrap().is_empty(),
+        "{presets}"
+    );
+    assert!(
+        presets["scriptLimits"].as_object().unwrap().is_empty(),
+        "{presets}"
+    );
+    assert_eq!(presets["scriptTimeoutMs"], Value::Null, "{presets}");
+}
+
+#[test]
+fn query_limits_apply_at_the_next_load_and_bad_ones_fail_it() {
+    let temp = TempDir::new("loader-limits-reload");
+    let dir = server(&temp);
+    store_db(&dir, "acme", "", TraversalGraph::tinkerpop_modern());
+    let loader = loader_of(&dir);
+    assert_eq!(load(&loader, "acme"), DbState::Loaded);
+    run(&loader.context("acme").unwrap(), HEAVY_SCRIPT).expect("not limited");
+
+    // Edited by hand while loaded: nothing changes until the next load.
+    let file = dir.databases().join("acme").join(DATABASE_FILE);
+    std::fs::write(&file, "[limits.query]\nmax_operations = 1000\n").unwrap();
+    run(&loader.context("acme").unwrap(), HEAVY_SCRIPT).expect("still not limited");
+    // An admin change rewrites database.toml but keeps the limits edited by hand.
+    loader.registry().set_auto_load("acme", true).unwrap();
+    let text = std::fs::read_to_string(&file).unwrap();
+    assert!(
+        text.contains("auto_load = true") && text.contains("max_operations = 1000"),
+        "{text}"
+    );
+    assert!(loader.unload("acme").unwrap());
+    assert_eq!(load(&loader, "acme"), DbState::Loaded);
+    let err = run(&loader.context("acme").unwrap(), HEAVY_SCRIPT).expect_err("limited now");
+    assert!(err.contains("operations"), "{err}");
+    let entry = loader.registry().get("acme").unwrap();
+    assert_eq!(
+        entry.config.unwrap().limits.query.max_operations,
+        Some(1000),
+        "the registry's copy is refreshed"
+    );
+
+    // A bad database limit fails the load with its reason.
+    assert!(loader.unload("acme").unwrap());
+    std::fs::write(&file, "[limits.query]\nmax_operations = -1\n").unwrap();
+    let state = load(&loader, "acme");
+    assert_eq!(state.as_str(), "failed", "{state}");
+    assert!(state.to_string().contains("max_operations"), "{state}");
+    // So does a bad global one.
+    std::fs::write(&file, "").unwrap();
+    server_toml(&dir, "[limits.query]\ntimeout_ms = \"soon\"\n");
+    let state = load(&loader, "acme");
+    assert_eq!(state.as_str(), "failed", "{state}");
+    assert!(state.to_string().contains("server.toml"), "{state}");
+    // Fixed: loads again.
+    server_toml(&dir, "[limits.query]\ntimeout_ms = 60000\n");
+    assert_eq!(load(&loader, "acme"), DbState::Loaded);
+    assert_eq!(presets_of(&loader, "acme")["scriptTimeoutMs"], 60000);
+    assert!(loader.unload("acme").unwrap());
+}
+
+#[test]
+fn a_bad_database_limit_fails_the_database_at_the_scan() {
+    let temp = TempDir::new("loader-limits-scan");
+    let dir = server(&temp);
+    store_db(
+        &dir,
+        "acme",
+        "[limits.query]\nmax_traversers = \"many\"",
+        TraversalGraph::tinkerpop_modern(),
+    );
+    let loader = loader_of(&dir);
+    let state = state(&loader, "acme");
+    assert_eq!(state.as_str(), "failed", "{state}");
+    assert!(state.to_string().contains("max_traversers"), "{state}");
+}

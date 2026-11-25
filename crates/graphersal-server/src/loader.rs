@@ -601,6 +601,7 @@ impl Loader {
         config: &DatabaseConfig,
     ) -> Result<LoadedDb, LoadFailure> {
         let key = entry.name.clone();
+        let presets = self.query_presets(entry)?;
         let kind = if config.role == DatabaseRole::Base {
             Kind::Base
         } else if config.kind == DatabaseKind::Layer {
@@ -655,12 +656,8 @@ impl Loader {
                 )
             }
         };
-        let (launched, ()) = graphersal_serve::launch(
-            source,
-            SessionPresets::new(),
-            |_: &mut Session| Ok::<_, String>(()),
-            None,
-        )?;
+        let (launched, ()) =
+            graphersal_serve::launch(source, presets, |_: &mut Session| Ok::<_, String>(()), None)?;
         for warning in &launched.warnings {
             tracing::warn!(target: "graphersal_server", "database '{key}': {warning}");
         }
@@ -726,6 +723,34 @@ impl Loader {
             served_layer,
             base,
         })
+    }
+
+    /// The session presets of the database of `entry`: `server.toml`'s `[limits.query]` with
+    /// its `database.toml`'s over it, both read now (`crate::limits`: a change applies at the
+    /// next load); the registry's copy of the database's limits is refreshed. A file that does
+    /// not parse fails the load with its reason.
+    fn query_presets(&self, entry: &DatabaseEntry) -> Result<SessionPresets, LoadFailure> {
+        let global = self
+            .registry
+            .dir()
+            .load_config()
+            .map_err(|err| LoadFailure::Failed(err.to_string()))?
+            .limits
+            .query;
+        let own = DatabaseConfig::read(&entry.dir)
+            .map_err(|err| LoadFailure::Failed(err.to_string()))?
+            .limits;
+        let limits = own.query.over(&global);
+        if !limits.is_empty() {
+            tracing::info!(
+                target: "graphersal_server",
+                "database '{}': query limits {}",
+                entry.name,
+                limits.summary()
+            );
+        }
+        self.registry.refresh_limits(&entry.name, own);
+        Ok(limits.presets())
     }
 
     /// The pooled base `base` for the database `user`: from the pool, or read from the base

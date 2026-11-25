@@ -52,7 +52,21 @@ from published files). When this file disagrees with the code, the code wins: sa
   missing = no limit) -> `SessionLimits`, read at start; B6: `[access] enabled` = `AccessConfig`
   (default true), `[http] public_scheme` (`PublicScheme` http|https) and `allowed_hosts`
   (normalized by `parse`: lower case, port dropped, IPv6 in brackets) = `HttpConfig`, read at
-  start; `Running::config()` = the config the server started with), `sessions` (B9: sessions survive a
+  start; `Running::config()` = the config the server started with; B8: `[limits] memory_limit`
+  (bytes, 0 = none, "auto", "none"; `limits::memory_limit` deserializer) and `memory_headroom`
+  = the process memory ceiling, set once in `serve::start` after the lock
+  (`limits::apply_memory_ceiling`, only what is set), server-wide only; `[limits.query]` =
+  `limits::QueryLimits`; `toml_error_message` adds the line a TOML error points at), `limits`
+  (B8: `QueryLimits` (keys = the graphersal CLI flags: `timeout_ms`, `max_operations`,
+  `max_string_size`, `max_array_size`, `max_map_size`, `max_traversers`,
+  `max_materialized_bytes`, `max_value_depth`; 0 = no limit, depth 0 = default), `over` (a
+  database key wins), `presets()` -> `SessionPresets` (nothing set = `SessionPresets::new()`),
+  `summary` (start-block row `query limits`, plus `memory ceiling` when set);
+  `DatabaseLimits` = `database.toml` `[limits]` (only `query`; memory keys refused with a
+  hint); `Loader::query_presets` reads `server.toml` and `database.toml` again at EVERY load
+  (a bad file fails the load), refreshes the registry's copy (`Registry::refresh_limits`);
+  `update_config` keeps the file's limits when it rewrites `database.toml`, so a hand edit of
+  `[limits.query]` survives admin changes; tests `loader_tests.rs` `query_limits_*`), `sessions` (B9: sessions survive a
   restart, ALWAYS on, no setting: `sessions/browser.json` = `FileSessions` (a `SessionTable`,
   write-through on insert/touch/remove/retain, a failed insert rolled back) and
   `sessions/mcp.json` = `McpSessionFile` (graphersal-mcp `SessionStore`; `keeping(identity

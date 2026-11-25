@@ -78,6 +78,18 @@ upload_bytes = 4294967296   # the largest import upload (POST /api/admin/import)
 max_connections = 256       # open connections served at once (one more: 503 + Retry-After)
 header_timeout_secs = 30    # a request's head must arrive within this
 idle_timeout_secs = 60      # a connection without a running request is closed after this
+# memory_limit = "auto"     # the process memory ceiling: bytes, "auto" or "none"
+# memory_headroom = 268435456   # what "auto" keeps free below a cgroup limit
+
+[limits.query]              # query limits of every database; none when left out
+# timeout_ms = 30000        # evaluationTimeout of every traversal, budget of a run
+# max_operations = 10000000 # Rhai operations one script may run
+# max_string_size = 16777216
+# max_array_size = 100000
+# max_map_size = 100000
+# max_traversers = 10000000
+# max_materialized_bytes = 524288000
+# max_value_depth = 128
 
 [sessions]                  # how long a browser session lasts; no limit when left out
 # lifetime_secs = 2592000   # since its login
@@ -102,6 +114,16 @@ public_scheme = "http"      # "https" when a reverse proxy ends TLS (Secure logi
 | `[limits] max_connections` | `256` | at start | open connections served at once (at least 1); one more is accepted, answered `503` (`Retry-After: 1`, JSON `error` and `help`, in its own protocol) and closed; beyond 64 such refusals at once a connection is closed unanswered. `serve --max-connections N` overrides it |
 | `[limits] header_timeout_secs` | `30` | at start | seconds a request's head may take to arrive, counted from the moment the connection waits for it (a new connection, or after the previous answer); a slower or silent client is disconnected. Never cuts a body. `serve --header-timeout SECS` overrides it |
 | `[limits] idle_timeout_secs` | `60` | at start | seconds a connection without a running request stays open (HTTP/1.1: at most the shorter of this and `header_timeout_secs`). `serve --idle-timeout SECS` overrides it |
+| `[limits] memory_limit` | none (the library's `auto`) | at start | the process memory ceiling, one setting for every database (`graphersal::exec::set_memory_limit`; the graphersal command line's `--memory-limit`): a number of bytes (`0` = none), `"auto"` (the cgroup limit minus the headroom, else 80 % of the physical memory) or `"none"`. A query, import or write that would take the process over it fails with a `memory.limit` diagnostic and rolls back. Only in `server.toml` (a `database.toml` refuses it). The start block shows the ceiling in effect when it is set |
+| `[limits] memory_headroom` | none (a tenth of the cgroup limit, at least 64 MiB) | at start | what `memory_limit = "auto"` keeps free below a cgroup memory limit, in bytes (at least 1; `--memory-headroom`) |
+| `[limits.query] timeout_ms` | none | at every load | the default `evaluationTimeout` of every traversal and the budget of a whole run (the Rhai code between traversals), in milliseconds (`--timeout`); `0` = no timeout |
+| `[limits.query] max_operations` | none | at every load | Rhai operations one script may run (`--max-operations`); `0` = unlimited |
+| `[limits.query] max_string_size` | none | at every load | the longest string a script or a step may build, in bytes: the script limit and the `traversal.max_string_bytes` default (`--max-string-size`); `0` = unlimited |
+| `[limits.query] max_array_size` | none | at every load | the largest array a script may build, in items (`--max-array-size`); `0` = unlimited |
+| `[limits.query] max_map_size` | none | at every load | the largest map a script may build, in entries (`--max-map-size`); `0` = unlimited |
+| `[limits.query] max_traversers` | none (engine default 10M) | at every load | the `traversal.max_traversers` default: traversers one step may leave alive (`--max-traversers`); `0` = unlimited |
+| `[limits.query] max_materialized_bytes` | none (engine default 1 GiB) | at every load | the `traversal.max_materialized_bytes` default: the memory one query holds at once (`--max-materialized-bytes`); `0` = unlimited |
+| `[limits.query] max_value_depth` | none (128) | at every load | the deepest nesting of arrays and maps in one value, script and engine values (`--max-value-depth`); `0` = the default, never unlimited |
 | `[sessions] lifetime_secs` | none (no limit) | at start | the longest a browser session lasts after its login, in seconds (at least 1); the browser logs in again afterwards |
 | `[sessions] idle_timeout_secs` | none (no limit) | at start | the longest a browser session lasts after its last request, in seconds (at least 1); counted coarsely (the last request is recorded at most every minute, every quarter of a shorter timeout) |
 | `[access] enabled` | `true` | at start | `false` turns access control off: nothing is refused, every request is an admin. Valid admin credentials keep their identity (the console's operator, an admin user); every other request (none, a user without the admin role, wrong credentials) runs as the admin principal `everyone`, which the audit names. Login still works but is not needed. The `serve` start block warns loudly, and louder (in the banner too) when the address is not a loopback address. `access.toml` is still read and its first admin created, so turning access back on needs no other change |
@@ -111,6 +133,18 @@ public_scheme = "http"      # "https" when a reverse proxy ends TLS (Secure logi
 The login cookie (`gs_session`) carries `Max-Age` = `[sessions] lifetime_secs` when set, else
 400 days (the longest a browser keeps a cookie), so a browser restart keeps the login; the
 server still ends the session by its own limits. The logout clears it with `Max-Age=0`.
+
+Query limits: `[limits.query]` here applies to every database; a database's `database.toml`
+may carry its own `[limits.query]`, whose keys win one by one (`0` there lifts a global limit
+for that database). Both files are read again whenever a database is loaded, so a change
+applies at the database's next load (unload + load; a server restart loads the `auto_load`
+ones again); a file that does not parse then fails the load (`failed` with the reason). The
+key names are the graphersal command line's flags; the limits are the session presets of the
+loaded database (`GET /db/<name>/api/statistics` shows them under `limits.presets`). Nothing
+set: no limit at all, as in the graphersal playground. A query can still raise a traversal
+option for itself (`g.with("evaluationTimeout", ..)`), as with the graphersal dev server.
+The start block shows a `query limits` row (and a `memory ceiling` row) when `server.toml`
+sets them.
 
 The `[defaults]` apply to databases created empty (`db create`) and to snapshot (`.gsnap`),
 GraphSON and GraphML imports. A clone, a restore and a Store (`.gstore`, Store directory) import
@@ -171,6 +205,10 @@ read_only = false                # serve read-only
 created = "2026-11-22T10:00:00Z" # UTC, set at creation
 description = "Acme's graph"
 needs_model = "org/model"        # set by an import naming a model neither it nor models/ carries
+
+[limits.query]                   # this database's query limits, key by key over server.toml's
+timeout_ms = 5000
+max_traversers = 0               # 0: no limit here, whatever server.toml says
 ```
 
 | Key | Default | Meaning |
@@ -182,10 +220,12 @@ needs_model = "org/model"        # set by an import naming a model neither it no
 | `read_only` | `false` | writes through the database's API and MCP endpoint are refused; a base is always read-only |
 | `created` | none | the creation time (UTC, RFC 3339) |
 | `description` | `""` | free text |
+| `[limits.query] ...` | none (`server.toml`'s) | the database's own query limits, the same keys as `server.toml`'s `[limits.query]`; each key set here wins over the global one. Read at every load; may be edited while the server runs (the server keeps the file's limits when it rewrites it) and applies at the next load. `[limits]` holds only `query`: the memory ceiling is server-wide |
 | `needs_model` | none | the repository of an embedding model the database's Store names but does not hold, set by an import whose source names a model that `models/` lacks too (one `models/` holds is taken from there at the import): the database is listed as `needs-model` and cannot load until `models add <repo>` (the marker is removed then, or by the first successful load) |
 
 Unknown keys are an error (the database is listed `failed`). The server writes the file
-atomically (temporary file + rename); edit it by hand only while no server runs.
+atomically (temporary file + rename); edit it by hand only while no server runs, except its
+`[limits.query]` (read again at every load).
 
 The base pool: loading a layer loads its base once into memory, shared by every loaded layer
 over it (and by the base itself when it is loaded for reading); the base leaves memory with its

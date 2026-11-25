@@ -293,6 +293,13 @@ pub fn start(
     check_limits(&limits)?;
     // The lock before the bind: a second server is refused for what it is, not for its port.
     let lock = ServerLock::acquire(&dir)?;
+    // The process memory ceiling: one setting of the whole process, only when server.toml sets
+    // it (after the lock: a refused second server changes nothing).
+    crate::limits::apply_memory_ceiling(config.limits.memory_limit, config.limits.memory_headroom)
+        .map_err(|message| ServerError::Config {
+            path: dir.config_path(),
+            message,
+        })?;
     let bind_error = |message: String| ServerError::Bind {
         address: listen.to_string(),
         message,

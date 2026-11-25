@@ -16,6 +16,11 @@
 //! max_connections = 256       # open connections served at once (more: 503 + Retry-After)
 //! header_timeout_secs = 30    # a request's head must arrive within this (slow clients)
 //! idle_timeout_secs = 60      # a connection without a running request is closed after this
+//! memory_limit = "auto"       # the process memory ceiling: bytes, "auto" or "none" (at start)
+//! memory_headroom = 67108864  # what "auto" keeps free below a cgroup limit, in bytes
+//!
+//! [limits.query]              # query limits of every database (crate::limits); none by default
+//! timeout_ms = 30000          # a database.toml's [limits.query] overrides single keys
 //!
 //! [sessions]                  # browser sessions (they survive a restart); unlimited by default
 //! lifetime_secs = 2592000     # the longest a session lasts after its login
@@ -36,11 +41,13 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::Path;
 use std::time::Duration;
 
+use graphersal::exec::MemoryLimit;
 use graphersal::persist::{DEFAULT_CHUNK_BYTES, DamagePolicy};
 use serde::Deserialize;
 
 use crate::access::SessionLimits;
 use crate::error::ServerError;
+use crate::limits::QueryLimits;
 
 /// The default listen address (loopback only: tokens travel in clear text over plain HTTP).
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:8484";
@@ -210,6 +217,22 @@ pub struct Limits {
     /// `serve --idle-timeout SECS` overrides it.
     #[serde(default = "default_idle_timeout_secs")]
     pub idle_timeout_secs: u64,
+    /// The process memory ceiling (`graphersal::exec::set_memory_limit`): a number of bytes
+    /// (`0` is no ceiling), `"auto"` or `"none"`, as the graphersal command line's
+    /// `--memory-limit`. One setting for the whole process (every database), set at start;
+    /// missing: the library's default (`auto`: the cgroup limit minus the headroom, else 80 %
+    /// of the physical memory). A query, import or write that would take the process over it
+    /// fails and rolls back.
+    #[serde(default, deserialize_with = "crate::limits::memory_limit")]
+    pub memory_limit: Option<MemoryLimit>,
+    /// What `memory_limit = "auto"` keeps free below a cgroup memory limit, in bytes (at least
+    /// 1), as `--memory-headroom`; missing: a tenth of the limit, at least 64 MiB. Set at start.
+    #[serde(default)]
+    pub memory_headroom: Option<u64>,
+    /// The query limits of every database (`[limits.query]`, [`crate::limits`]); a database's
+    /// `database.toml` overrides single keys. Read at every load; default: no limit.
+    #[serde(default)]
+    pub query: QueryLimits,
 }
 
 impl Default for Limits {
@@ -219,6 +242,9 @@ impl Default for Limits {
             max_connections: DEFAULT_MAX_CONNECTIONS,
             header_timeout_secs: DEFAULT_HEADER_TIMEOUT_SECS,
             idle_timeout_secs: DEFAULT_IDLE_TIMEOUT_SECS,
+            memory_limit: None,
+            memory_headroom: None,
+            query: QueryLimits::default(),
         }
     }
 }
@@ -333,7 +359,7 @@ impl ServerConfig {
     pub fn parse(text: &str, path: &Path) -> Result<Self, ServerError> {
         let mut config: ServerConfig = toml::from_str(text).map_err(|err| ServerError::Config {
             path: path.to_path_buf(),
-            message: err.message().to_string(),
+            message: toml_error_message(&err, text),
         })?;
         let invalid = |message: String| ServerError::Config {
             path: path.to_path_buf(),
@@ -380,6 +406,13 @@ impl ServerConfig {
                 )));
             }
         }
+        if config.limits.memory_headroom == Some(0) {
+            return Err(invalid(
+                "limits.memory_headroom: must be at least 1 byte (leave it out for the default, \
+                 a tenth of the cgroup limit)"
+                    .to_string(),
+            ));
+        }
         for (key, value) in [
             ("lifetime_secs", config.sessions.lifetime_secs),
             ("idle_timeout_secs", config.sessions.idle_timeout_secs),
@@ -407,6 +440,29 @@ impl ServerConfig {
             message,
         })
     }
+}
+
+/// The message of a TOML error in `text`, with the line it points at (`at line 3: timeout_ms
+/// = -1`): the parser's own message does not always name the key.
+pub(crate) fn toml_error_message(err: &toml::de::Error, text: &str) -> String {
+    let message = err.message().trim_end().to_string();
+    let Some(span) = err.span() else {
+        return message;
+    };
+    let start = span.start.min(text.len());
+    if !text.is_char_boundary(start) {
+        return message;
+    }
+    let line_start = text[..start].rfind('\n').map_or(0, |i| i + 1);
+    let line_end = text[line_start..]
+        .find('\n')
+        .map_or(text.len(), |i| line_start + i);
+    let line = text[line_start..line_end].trim();
+    if line.is_empty() {
+        return message;
+    }
+    let number = text[..line_start].matches('\n').count() + 1;
+    format!("{message} (at line {number}: {line})")
 }
 
 /// Parses a listen address: `IP:PORT` (IPv6 in brackets) or `localhost:PORT` (the IPv4
@@ -524,6 +580,34 @@ pub fn default_config_text() -> String {
          header_timeout_secs = {}\n\
          # Seconds a connection without a running request stays open.\n\
          idle_timeout_secs = {}\n\
+         # The process memory ceiling, one setting for every database: a number of bytes,\n\
+         # \"auto\" (the default: the cgroup limit minus memory_headroom, else 80 % of the\n\
+         # physical memory) or \"none\". A query, import or write that would take the process\n\
+         # over it fails and rolls back. Read when the server starts.\n\
+         # memory_limit = \"auto\"\n\
+         # What \"auto\" keeps free below a cgroup limit, in bytes (default a tenth of it).\n\
+         # memory_headroom = 268435456\n\
+         \n\
+         [limits.query]\n\
+         # Query limits of every database; none when left out. A database's database.toml\n\
+         # overrides single keys in its own [limits.query] (0 lifts a limit there). Read at\n\
+         # every load: unload and load a database to apply a change. 0 is no limit\n\
+         # (max_value_depth: 0 is the default, 128).\n\
+         # evaluationTimeout of every traversal and the budget of a run, in milliseconds:\n\
+         # timeout_ms = 30000\n\
+         # Rhai operations one script may run:\n\
+         # max_operations = 10000000\n\
+         # Longest string a script or a step may build, in bytes:\n\
+         # max_string_size = 16777216\n\
+         # Largest array (items) and map (entries) a script may build:\n\
+         # max_array_size = 100000\n\
+         # max_map_size = 100000\n\
+         # Traversers one step may leave alive (engine default 10000000):\n\
+         # max_traversers = 10000000\n\
+         # Memory one query holds at once, in bytes (engine default 1 GiB):\n\
+         # max_materialized_bytes = 524288000\n\
+         # Deepest nesting of arrays and maps in one value:\n\
+         # max_value_depth = 128\n\
          \n\
          [sessions]\n\
          # Browser sessions (the login cookie) and MCP sessions survive a restart (kept in\n\
@@ -754,6 +838,45 @@ mod tests {
             ("[http]\nallowed_hosts = [\"a b\"]", "allowed_hosts"),
             ("[http]\nallowed_host = []", "allowed_host"),
             ("[access]\nenable = false", "enable"),
+        ] {
+            let err = parse(text).unwrap_err().to_string();
+            assert!(err.contains(needle), "{text:?}: {err}");
+        }
+    }
+
+    #[test]
+    fn query_limits_and_the_memory_ceiling_default_to_none_and_parse() {
+        let limits = parse(&default_config_text()).unwrap().limits;
+        assert!(limits.query.is_empty());
+        assert_eq!(limits.memory_limit, None);
+        assert_eq!(limits.memory_headroom, None);
+        assert!(default_config_text().contains("\n[limits.query]\n"));
+        let limits = parse(
+            "[limits]\nmemory_limit = \"none\"\nmemory_headroom = 1024\n\
+             [limits.query]\ntimeout_ms = 5\nmax_operations = 0",
+        )
+        .unwrap()
+        .limits;
+        assert_eq!(limits.memory_limit, Some(MemoryLimit::Unlimited));
+        assert_eq!(limits.memory_headroom, Some(1024));
+        assert_eq!(limits.query.timeout_ms, Some(5));
+        assert_eq!(limits.query.max_operations, Some(0));
+        assert_eq!(
+            parse("[limits]\nmemory_limit = 4096")
+                .unwrap()
+                .limits
+                .memory_limit,
+            Some(MemoryLimit::Bytes(4096))
+        );
+        for (text, needle) in [
+            ("[limits]\nmemory_limit = \"lots\"", "\"auto\" or \"none\""),
+            ("[limits]\nmemory_limit = -1", "memory_limit"),
+            ("[limits]\nmemory_headroom = 0", "limits.memory_headroom"),
+            ("[limits]\nmemory_headroom = -1", "memory_headroom"),
+            ("[limits.query]\ntimeout_ms = -1", "timeout_ms"),
+            ("[limits.query]\nmax_traversers = \"x\"", "max_traversers"),
+            ("[limits.query]\nmemory_limit = 1", "unknown field"),
+            ("[limits.query]\ntimeout = 1", "unknown field"),
         ] {
             let err = parse(text).unwrap_err().to_string();
             assert!(err.contains(needle), "{text:?}: {err}");

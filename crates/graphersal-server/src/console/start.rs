@@ -175,6 +175,11 @@ fn sections(running: &Running, config: Option<&ServerConfig>) -> Vec<Section> {
             ),
         );
     }
+    if let Some(config) = config {
+        for (key, value) in limit_rows(config) {
+            server.row(key, value);
+        }
+    }
     let limits = running.connection_limits();
     server.row(
         "connections",
@@ -300,6 +305,49 @@ fn mode_rows(config: &ServerConfig) -> Vec<(&'static str, String)> {
         ("scheme", scheme),
         ("allowed hosts", hosts),
     ]
+}
+
+/// The start-block rows of the query limits and the process memory ceiling of `config`, each
+/// only when `server.toml` sets it.
+fn limit_rows(config: &ServerConfig) -> Vec<(&'static str, String)> {
+    let mut rows = Vec::new();
+    let query = &config.limits.query;
+    if !query.is_empty() {
+        rows.push((
+            "query limits",
+            format!(
+                "{} ([limits.query]; a database's database.toml overrides single keys; applied \
+                 at each load)",
+                query.summary()
+            ),
+        ));
+    }
+    let limits = &config.limits;
+    if limits.memory_limit.is_some() || limits.memory_headroom.is_some() {
+        let setting = limits
+            .memory_limit
+            .map(|limit| format!("memory_limit = {limit}"))
+            .into_iter()
+            .chain(
+                limits
+                    .memory_headroom
+                    .map(|bytes| format!("memory_headroom = {}", text::bytes(bytes))),
+            )
+            .collect::<Vec<_>>()
+            .join(", ");
+        let effective = match graphersal::exec::memory_limit() {
+            Ok(limit) => match limit.bytes() {
+                Some(bytes) => format!("{} ({})", text::bytes(bytes), limit.source()),
+                None => format!("none ({})", limit.source()),
+            },
+            Err(err) => format!("unknown ({err})"),
+        };
+        rows.push((
+            "memory ceiling",
+            format!("{effective} for the whole process ([limits] {setting})"),
+        ));
+    }
+    rows
 }
 
 /// How many blobs `models/blobs/<2 hex>/` holds (0 when it cannot be read).
@@ -479,5 +527,35 @@ mod tests {
             "{rows:?}"
         );
         assert_eq!(rows[2].1, "db.example.com, proxy (any port)");
+    }
+
+    #[test]
+    fn limit_rows_only_when_server_toml_sets_limits() {
+        assert!(limit_rows(&config("")).is_empty());
+        assert!(limit_rows(&config(&crate::config::default_config_text())).is_empty());
+        let rows = limit_rows(&config(
+            "[limits]\nmemory_limit = 8589934592\nmemory_headroom = 1048576\n\
+             [limits.query]\ntimeout_ms = 30000\nmax_traversers = 100",
+        ));
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert_eq!(rows[0].0, "query limits");
+        assert!(
+            rows[0]
+                .1
+                .starts_with("timeout_ms=30000, max_traversers=100 ([limits.query]"),
+            "{rows:?}"
+        );
+        assert_eq!(rows[1].0, "memory ceiling");
+        assert!(
+            rows[1]
+                .1
+                .contains("for the whole process ([limits] memory_limit = 8589934592, memory_headroom = 1.0 MiB)"),
+            "{rows:?}"
+        );
+        let mut section = Section::new("Server");
+        for (key, value) in rows {
+            section.row(key, value);
+        }
+        assert_fits(&text::render(&[section]));
     }
 }
