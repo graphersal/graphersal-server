@@ -118,7 +118,7 @@ A `failed` database whose `database.toml` cannot be read has only `name`, `state
 | GET | `/api/admin/databases` | | `200 {"databases": [entry...], "aliases": {alias: database}, "problems": [string...]}` (rows sorted by name, alias rows included) |
 | POST | `/api/admin/databases` | `{"name", "kind"?, "role"?, "base"?, "schema"?, "description"?, "autoLoad"?, "readOnly"?}` | `201` entry (state `unloaded`) |
 | GET | `/api/admin/databases/<name>` | | `200` entry (`<name>` may be an alias: an alias row) |
-| DELETE | `/api/admin/databases/<name>` | | `200 {"name", "trash": "trash/<name>-<UTC time>"}` |
+| DELETE | `/api/admin/databases/<name>` | | `200 {"name", "trash": "trash/<name>-<UTC time>", "grantsRemoved"}` (every grant on the database goes with it; a restore does not bring them back) |
 | POST | `/api/admin/databases/<name>/clone` | `{"name"}` | `201` entry of the new database |
 | POST | `/api/admin/databases/<name>/load` | | `202` entry + `"load": "started"` or `"already-loading"`; `200` entry + `"load": "already-loaded"` |
 | POST | `/api/admin/databases/<name>/unload` | | `200` entry + `"unloaded": true` (was loaded) or `false` (was not) |
@@ -137,9 +137,9 @@ A `failed` database whose `database.toml` cannot be read has only `name`, `state
 | POST | `/api/admin/models?repo=<r>&license=<l>&format=<gsnap\|tar>` | the file itself (anything but JSON): a `.gsnap` carrying model blobs or a `.tar` (or gzip-compressed `.tar.gz`/`.tgz`) of a Model2Vec model directory | `201`, the same answer |
 | DELETE | `/api/admin/models/<repo or blob hash>` | | `200 {"model", "removed": [blob...], "bytes"}` |
 | GET | `/api/admin/aliases` | | `200 {"aliases": {alias: database}}` |
-| PUT | `/api/admin/aliases/<alias>` | `{"target"}` | `200 {"alias", "target"}` (new alias or flip) |
+| PUT | `/api/admin/aliases/<alias>` | `{"target"}` | `200 {"alias", "target", "leftoverGrantsRemoved"?}` (new alias or flip) |
 | DELETE | `/api/admin/aliases/<alias>` | | `200 {"alias", "removed": true, "grantsRemoved"}` (the grants on the alias go with it) |
-| POST | `/api/admin/aliases/<alias>/rename` | `{"name"}` | `200 {"alias", "renamedFrom", "target", "mcpSessionsMoved", "grantsMoved"}` (see Aliases) |
+| POST | `/api/admin/aliases/<alias>/rename` | `{"name"}` | `200 {"alias", "renamedFrom", "target", "mcpSessionsMoved", "grantsMoved", "leftoverGrantsRemoved"?}` (see Aliases) |
 | GET | `/api/admin/runs` | | `200 {"runs": [run...], "textHeadChars": 200}` (every loaded database) |
 | GET | `/api/admin/databases/<name>/runs` | | `200 {"database", "loaded": bool, "runs": [run...], "textHeadChars": 200}` |
 | POST | `/api/admin/databases/<name>/runs/cancel` | `{"id"}` | `200 {"database", "id", "cancelled": bool}` |
@@ -179,6 +179,24 @@ Store is written; the database is `unloaded`.
 Only an UNLOADED database (`409` with help `POST .../unload` otherwise). The directory moves to
 `trash/<name>-<UTC time>/` (recoverable by hand). Refused (`409`) while an alias names the
 database (help: remove or flip the alias) and for a base database that layers name.
+
+Every grant on the database goes with it: `grantsRemoved` in the answer, each audited as a
+revoked grant. A later database or alias of that name inherits nothing, and a restore of its
+backup does not bring the grants back. If `access.toml` cannot be rewritten after the database
+is gone, the answer is an error (`500`) and the grants stay, listed as `missing`, until revoked
+or until the name is taken again (below).
+
+### Grants left on a name
+
+A grant on a name nothing holds (`kind: missing` in the grant listings: written by 0.2.0 or an
+earlier 0.3.0 build, which kept a deleted database's grants, or left by a failed rewrite of
+`access.toml`) never reaches what takes the name later. Create, clone, import, a restore into a
+new or a deleted database's name, a new alias (`PUT aliases/<alias>`) and the new name of an
+alias rename remove those grants first, before the name becomes reachable, each audited as a
+revoked grant; the answer then carries `"leftoverGrantsRemoved": N` (absent when there were
+none), the console prints a warning and the web UI shows a warning notice. When `access.toml`
+cannot be rewritten then, the operation is refused and nothing changes. Until then such a grant
+is listed and can be revoked (`DELETE grants/<subject>/<name>`).
 
 ### Clone
 
@@ -228,6 +246,9 @@ a running request finishes. A base refuses `false` (`409`). `auto-load` is persi
 `/db/<alias>/...` and MCP sessions that selected the alias follow at once, and so do the grants
 on the alias. `DELETE` removes it and the grants on it (`{"alias", "removed": true,
 "grantsRemoved"}`). An alias names a database, never another alias.
+
+A NEW alias never inherits grants left on its name ([Grants left on a name](#grants-left-on-a-name));
+a flip keeps the alias's grants.
 
 `POST aliases/<alias>/rename {"name"}` gives the alias a new name and keeps its database, in one
 atomic rewrite of `aliases.toml`. The answer: `alias` (the new name), `renamedFrom` (the old
@@ -282,6 +303,10 @@ A backup object:
   layers name is not replaced (`409`: restore it into a new name).
 - with another `name`: a new database (`409` when the name is taken), `autoLoad` off, built in
   `tmp/` like a create.
+
+A restore never brings grants back: a deleted database's grants were removed with it, and a
+restore into a new name starts without any (grant access again). A restore over the existing
+database keeps its grants.
 
 A layer's backup is checked against its base: the base database the sidecar names (without a
 sidecar: any base database) must be a `role = "base"` database whose identity is the one the
@@ -509,7 +534,7 @@ A grant: `subject` (`user:<name>`, `anonymous` = everyone, also a request withou
 credentials, `role:<r>`, `group:<g>`), `database` (a database's real name, an alias, or `*` =
 every database), `level` (`read` or `write`), and in every answer what `database` names now:
 `kind` (`database`: a real database; `alias`: an alias, then `target` is the database it points
-at now; `all`: `*`; `missing`: no database or alias of that name, e.g. a deleted database's) and
+at now; `all`: `*`; `missing`: no database or alias of that name, e.g. one left by 0.2.0 on a deleted database's name; see [Grants left on a name](#grants-left-on-a-name)) and
 `target` (`null` unless an alias). A principal reaches a database at the highest level of any of
 its grants, capped by the database's mode (read-only or a base: `read`). A grant on an alias
 reaches the alias's current database only through the alias's name; the real name stays hidden

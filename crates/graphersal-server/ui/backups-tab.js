@@ -7,7 +7,7 @@
 
 import { reactive, ref, computed, watch, onMounted } from 'vue';
 import {
-  backupRows, restoreOverAction, nameProblem, existingNameProblem, restoredName, NAME_HINT, confirmText, outcomeText, bytesText, realRows,
+  backupRows, restoreOverAction, nameProblem, existingNameProblem, restoredName, NAME_HINT, RESTORE_GRANTS_NOTE, confirmText, outcomeText, outcomeTone, bytesText, realRows,
 } from './admin-api.js';
 import { admin, list, ensureLoaded, reload, errorNotice, noticeClass } from './shared.js';
 
@@ -93,7 +93,7 @@ export default {
       notice.value = null;
       try {
         const answer = await admin.restore(s.name, backup, newName || undefined);
-        notice.value = { tone: 'ok', text: outcomeText('restore', newName || s.name, answer), help: '' };
+        notice.value = { tone: outcomeTone(answer), text: outcomeText('restore', newName || s.name, answer), help: '' };
         s.restoring = null;
         await reload();
       } catch (err) {
@@ -109,7 +109,7 @@ export default {
       await choose(props.params.db || '');
     });
 
-    return { s, notice, names, row, over, show, backupNow, startRestore, restore, bytesText, refresh, noticeClass, nameHint: NAME_HINT };
+    return { s, notice, names, row, over, show, backupNow, startRestore, restore, bytesText, refresh, noticeClass, nameHint: NAME_HINT, grantsNote: RESTORE_GRANTS_NOTE };
   },
   template: `
   <div class="srv-tab">
@@ -153,6 +153,7 @@ export default {
         <p v-if="!over.enabled" class="muted srv-sub">{{ over.title }}</p>
         <label class="inline"><input type="radio" value="new" v-model="s.target"> Into a new database</label>
         <label v-if="s.target === 'new'">Name <input v-model="s.newName" name="newName" class="mono" autocomplete="off" spellcheck="false"><small class="srv-field-hint">{{ nameHint }}</small></label>
+        <p class="muted srv-sub srv-grants-note">{{ grantsNote }}</p>
       </fieldset>
       <div class="store-dialog-buttons">
         <button type="submit" class="btn primary" :disabled="!!s.busy">{{ s.busy === 'restore' ? 'Restoring…' : 'Restore' }}</button>

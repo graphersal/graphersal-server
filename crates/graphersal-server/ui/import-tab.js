@@ -13,7 +13,7 @@
 import { reactive, ref, computed, watch, onMounted } from 'vue';
 import {
   importRequest, uploadImport, uploadLimit, uploadSizeProblem, progressText, suggestName, NAME_HINT,
-  outcomeText, needsModelHint, bytesText, baseNames, inboxRows, IMPORT_FORMATS, BASE_IS_FROZEN,
+  outcomeText, outcomeTone, needsModelHint, bytesText, baseNames, inboxRows, IMPORT_FORMATS, BASE_IS_FROZEN,
 } from './admin-api.js';
 import { admin, ROOT, headers, list, ensureLoaded, reload, noticeClass } from './shared.js';
 import { hostInfo } from './databases.js';
@@ -79,7 +79,7 @@ export default {
       const notes = Array.isArray(imp.notes) ? imp.notes.filter((n) => typeof n === 'string') : [];
       const hint = needsModelHint(answer);
       notice.value = {
-        tone: answer.state === 'needs-model' ? 'warn' : 'ok',
+        tone: answer.state === 'needs-model' ? 'warn' : outcomeTone(answer),
         text: outcomeText('import', subject, answer),
         help: [hint, ...notes].filter(Boolean).join('\n'),
       };

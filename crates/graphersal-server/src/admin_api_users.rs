@@ -23,7 +23,8 @@
 //! `user:<name>`), `database` (a database's name, an alias or `*`), `level` (`read` |
 //! `write`), and in answers what `database` names NOW: `kind` (`database`: a real database;
 //! `alias`: an alias, `target` its current database; `all`: `*`; `missing`: no database or
-//! alias of that name, e.g. a deleted database's) and `target` (`null` unless an alias). A grant
+//! alias of that name, e.g. one left by 0.2.0 on a deleted database's name; removed when a new
+//! database or alias takes the name) and `target` (`null` unless an alias). A grant
 //! on an alias reaches its current target only through the alias's name. Path segments may be
 //! percent-encoded (`user%3Abob`).
 //!

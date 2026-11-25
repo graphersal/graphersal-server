@@ -11,7 +11,7 @@
 
 import { reactive, ref, computed, nextTick, onMounted } from 'vue';
 import {
-  createBody, nameProblem, existingNameProblem, renameProblem, NAME_HINT, rowActions, confirmText, outcomeText, loadAndWatch, baseNames, realRows,
+  createBody, nameProblem, existingNameProblem, renameProblem, NAME_HINT, rowActions, confirmText, outcomeText, outcomeTone, loadAndWatch, baseNames, realRows,
   bytesText, transferActions, needsModelHint, poolText, promoteAction,
 } from './admin-api.js';
 import { admin, list, reload, patchRow, errorNotice, noticeClass, pageHref } from './shared.js';
@@ -34,7 +34,7 @@ export default {
       try {
         const answer = (await fn()) || {};
         const failed = action === 'load' && (answer.state === 'failed' || answer.state === 'needs-model');
-        notice.value = { tone: failed ? 'error' : 'ok', text: outcomeText(action, subject, answer), help: '' };
+        notice.value = { tone: failed ? 'error' : outcomeTone(answer), text: outcomeText(action, subject, answer), help: '' };
         return true;
       } catch (err) {
         notice.value = errorNotice(err);
@@ -139,7 +139,7 @@ export default {
       notice.value = null;
       try {
         const answer = (await req.send()) || {};
-        notice.value = { tone: 'ok', text: outcomeText(req.action, req.subject, answer), help: '' };
+        notice.value = { tone: outcomeTone(answer), text: outcomeText(req.action, req.subject, answer), help: '' };
       } catch (err) {
         // The dialog stays open with the server's words, so the input can be fixed.
         dialog.error = errorNotice(err);

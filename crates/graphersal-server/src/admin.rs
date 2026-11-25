@@ -60,10 +60,26 @@ impl Registry {
     /// that is not a database (an alias cannot name an alias: no chains, no cycles), a broken
     /// `aliases.toml`.
     pub fn alias_set(&self, alias: &str, target: &str) -> Result<(), ServerError> {
+        self.alias_set_with(alias, target, |_| Ok(0)).map(drop)
+    }
+
+    /// [`Registry::alias_set`] with `claim`, run under the registry's write lock for a NEW
+    /// alias only, after every check and before `aliases.toml` is written, with the alias name:
+    /// the server removes the grants left on that name there
+    /// ([`crate::ops::Admin::alias_set`]), so no request sees the new alias with them. An
+    /// `Err` of `claim` refuses the alias (nothing changed). Answers what `claim` returned (0
+    /// for a flip of an existing alias).
+    pub fn alias_set_with(
+        &self,
+        alias: &str,
+        target: &str,
+        claim: impl FnOnce(&str) -> Result<usize, ServerError>,
+    ) -> Result<usize, ServerError> {
         validate_name(alias)?;
         let target_key = fold(target);
         let mut inner = self.write();
         refuse_broken_aliases(&inner)?;
+        let new_alias = inner.holder_of(alias).is_none();
         match inner.holder_of(alias) {
             // A new alias may not take a reserved name; an existing one (made before the
             // reservation) may still be flipped.
@@ -87,11 +103,12 @@ impl Registry {
             }
             return Err(not_found(target));
         }
+        let claimed = if new_alias { claim(alias)? } else { 0 };
         let mut aliases = inner.aliases.clone();
         aliases.insert(alias.to_string(), target_key);
         write_aliases(&self.dir.aliases_path(), &aliases)?;
         inner.aliases = aliases;
-        Ok(())
+        Ok(claimed)
     }
 
     /// Removes the alias `alias` (case-insensitive).
@@ -122,6 +139,21 @@ impl Registry {
         new: &str,
         moved: impl FnOnce(&str, &str) -> T,
     ) -> Result<Renamed<T>, ServerError> {
+        self.alias_rename_with(old, new, |_| Ok(0), moved)
+    }
+
+    /// [`Registry::alias_rename`] with `claim`, run under the registry's write lock after
+    /// every check and before `aliases.toml` is written, with the new name: the server removes
+    /// the grants left on that name there ([`crate::ops::Admin::alias_rename`]), so the renamed
+    /// alias never inherits them. An `Err` of `claim` refuses the rename (nothing changed);
+    /// its count is [`Renamed::leftover`].
+    pub fn alias_rename_with<T>(
+        &self,
+        old: &str,
+        new: &str,
+        claim: impl FnOnce(&str) -> Result<usize, ServerError>,
+        moved: impl FnOnce(&str, &str) -> T,
+    ) -> Result<Renamed<T>, ServerError> {
         let old_key = fold(old);
         let mut inner = self.write();
         refuse_broken_aliases(&inner)?;
@@ -142,6 +174,7 @@ impl Registry {
                 holder,
             });
         }
+        let leftover = claim(new)?;
         let mut aliases = inner.aliases.clone();
         aliases.remove(&old_key);
         aliases.insert(new.to_string(), target.clone());
@@ -154,6 +187,7 @@ impl Registry {
             target,
             moved,
             grants: 0,
+            leftover,
         })
     }
 
@@ -629,6 +663,9 @@ pub struct Renamed<T> {
     /// The grants on the alias that moved to the new name with it ([`crate::ops::Admin::alias_rename`];
     /// 0 from the registry itself).
     pub grants: usize,
+    /// The grants left on the new name (from a deleted database or alias) removed before the
+    /// alias took it (the `claim` of [`Registry::alias_rename_with`]).
+    pub leftover: usize,
 }
 
 fn refuse_broken_aliases(inner: &Inner) -> Result<(), ServerError> {

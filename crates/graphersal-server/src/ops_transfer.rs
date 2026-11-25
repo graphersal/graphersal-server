@@ -93,6 +93,10 @@ pub struct Restored {
     /// Where the replaced database went (`trash/<name>-<UTC time>/`), when the restore replaced
     /// an existing database.
     pub replaced: Option<PathBuf>,
+    /// How many grants left on the name were removed before the restored database took it
+    /// (a restore into a new name or a deleted database's name; `Admin::commit_new`). A
+    /// restore never brings back the grants a deleted database had: they went with it.
+    pub leftover_grants: usize,
 }
 
 /// What [`Admin::export`] writes.
@@ -372,7 +376,8 @@ impl Admin {
     /// database (`auto_load` off; an existing other database is [`ServerError::NameInUse`];
     /// the name takes the rule of new names, `crate::names`). Under the name `source` of a
     /// deleted database: that database again, its name checked as an existing one (a name made
-    /// before the rule of new names comes back).
+    /// before the rule of new names comes back); its grants do NOT come back (they went with
+    /// the deleted database; any still left on the name are removed: [`Restored::leftover_grants`]).
     /// Over the existing database `source` itself: it must be unloaded; it keeps its flags and
     /// description, takes the backup's kind and base, and the old directory moves to `trash/`.
     ///
@@ -474,15 +479,16 @@ impl Admin {
             }
             None => {}
         }
-        let (entry, replaced) = if build.is_replacement() {
+        let (entry, replaced, leftover_grants) = if build.is_replacement() {
             let swap = || self.registry.commit_replace(build);
             let (entry, trash) = match &self.loader {
                 Some(loader) => loader.while_idle(&target, swap)?,
                 None => swap()?,
             };
-            (entry, Some(trash))
+            (entry, Some(trash), 0)
         } else {
-            (self.registry.commit(build)?, None)
+            let (entry, leftover) = self.commit_new(build)?;
+            (entry, None, leftover)
         };
         self.audit().record(AuditEvent::DatabaseRestored {
             source: source.clone(),
@@ -495,6 +501,7 @@ impl Admin {
             from_database: source,
             backup,
             replaced,
+            leftover_grants,
         })
     }
 

@@ -134,6 +134,27 @@ A server in the background without hunting for its pid:
   tables show `prod → prod-2026-11 (alias)`, its database picker offers the aliases too (marked,
   after the databases), and "My databases" shows `alias → <database>` or `database` beside each
   name.
+- **Grants never outlive their name** ([`access.md`](access.md#grants-never-outlive-their-name)).
+  0.2.0 (and the first 0.3.0 builds) kept the grants of a deleted database in `access.toml`, so
+  they applied again to whatever took the name later: a new database, an alias, a rename onto
+  it. Now:
+  - `db delete` (and `DELETE /api/admin/databases/<name>`, the Databases tab) removes every
+    grant on the database, each audited as a revoked grant; the answer gains `grantsRemoved`,
+    the console prints `grants removed: N (a restore does not bring them back)` when there were
+    any, and the web UI's notice names them (its delete confirmation says so too).
+  - A restore does not bring grants back (the Backups tab's restore form and the console's
+    restore note say so); a restore over an existing database keeps its grants.
+  - Grants still left on a name (from 0.2.0 or a failed rewrite of `access.toml`) are removed
+    first when a new database or alias takes the name (create, clone, import, a restore into a
+    new or a deleted database's name, a new alias, the new name of an alias rename), audited
+    each; the answer gains `leftoverGrantsRemoved` (only when > 0), the console prints a
+    `warning:` line and the web UI a warning notice. A failure to rewrite `access.toml` there
+    refuses the operation. Until then such grants stay listed as `missing` and revocable.
+  - The library: `Deleted::grants`, `Imported::leftover_grants`, `Restored::leftover_grants`,
+    `Renamed::leftover`; `Admin::create_reported`, `Admin::clone_reported` (the entry and the
+    leftover count); `Admin::alias_set` answers the leftover count (was `()`);
+    `Registry::alias_set_with`, `Registry::alias_rename_with` (a `claim` run under the
+    registry's write lock).
 - The library: `AccessFile::granted_level_via`, `grants_on`, `rename_grants`, `drop_grants`;
   `Access::reach`, `granted_level_via`, `rename_grants`, `drop_grants` (`level_in` counts an
   alias's own grants); `Admin::alias_remove` answers the number of grants removed;

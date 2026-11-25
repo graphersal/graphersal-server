@@ -154,6 +154,9 @@ pub struct Imported {
     pub skipped: usize,
     /// What the import noted (skipped or converted data, missing models), as sentences.
     pub notes: Vec<String>,
+    /// How many grants left on the name (from a deleted database or alias) were removed
+    /// before the new database took it (`Admin::commit_new`).
+    pub leftover_grants: usize,
 }
 
 /// What a build learned besides the Store.
@@ -313,7 +316,7 @@ impl Admin {
             }
             None => {}
         }
-        let entry = self.registry.commit(build)?;
+        let (entry, leftover_grants) = self.commit_new(build)?;
         self.audit().record(AuditEvent::DatabaseImported {
             name: entry.name.clone(),
             source: path.to_path_buf(),
@@ -334,6 +337,7 @@ impl Admin {
             ),
             skipped: built.skipped,
             notes: built.notes,
+            leftover_grants,
         })
     }
 

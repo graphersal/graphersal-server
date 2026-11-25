@@ -41,6 +41,15 @@
 //! - [`Admin::alias_rename`]: [`Registry::alias_rename`], and online the MCP sessions that
 //!   selected the old name move to the new one (`Mcp::rename_selection`).
 //!
+//!
+//! Grants never outlive their name (round 3 B3-FIX): [`Admin::delete`] and
+//! [`Admin::alias_remove`] remove the grants on the name; every operation that gives a name to a
+//! new database or alias (create, clone, import, restore into a new name or a deleted
+//! database's name, a new alias, an alias rename's new name) first removes the grants still
+//! left on that name (`Admin::commit_new`, [`Registry::alias_set_with`],
+//! [`Registry::alias_rename_with`]), each audited as a revoked grant, and reports how many.
+//! A restore therefore never brings a deleted database's grants back.
+//!
 //! Database names are real names here (an alias is not followed): an operation on an alias's
 //! name answers [`ServerError::NotFound`].
 
@@ -158,6 +167,10 @@ pub struct Deleted {
     pub name: String,
     /// Where its directory went: `trash/<name>-<UTC time>/`.
     pub trash: PathBuf,
+    /// How many grants on its name were removed with it (a grant never outlives its database,
+    /// so a later database or alias of that name does not inherit it; a restore does not bring
+    /// them back).
+    pub grants: usize,
 }
 
 /// A test hook of [`Admin::create`] and [`Admin::restore`]: fail after the Store was written
@@ -273,6 +286,17 @@ impl Admin {
     /// data), [`ServerError::Store`] (the Store could not be written), [`ServerError::Config`]
     /// (`server.toml`), [`ServerError::Io`].
     pub fn create(&self, name: &str, spec: &CreateSpec) -> Result<DatabaseEntry, ServerError> {
+        self.create_reported(name, spec).map(|(entry, _)| entry)
+    }
+
+    /// [`Admin::create`] answering also how many grants left on the name (from a deleted
+    /// database or alias) were removed before the new database took it
+    /// (`Admin::commit_new`).
+    pub fn create_reported(
+        &self,
+        name: &str,
+        spec: &CreateSpec,
+    ) -> Result<(DatabaseEntry, usize), ServerError> {
         let schema = match &spec.schema {
             Some(json) => Some(GraphSchema::from_json(&json.to_string()).map_err(|err| {
                 ServerError::InvalidInput {
@@ -305,29 +329,49 @@ impl Admin {
             None => {}
         }
         self.adopt_build(name, &store_dir);
-        let entry = self.registry.commit(build)?;
+        let (entry, leftover) = self.commit_new(build)?;
         self.audit.record(AuditEvent::DatabaseCreated {
             name: entry.name.clone(),
             detail: describe(entry.config.as_ref()),
         });
-        Ok(entry)
+        Ok((entry, leftover))
     }
 
-    /// Deletes the unloaded database `name` into `trash/` (module docs).
+    /// Registers the new database `build` ([`Registry::commit`]) after removing the grants left
+    /// on its name ([`Admin::drop_leftover_grants`]): the name is reserved by the build, so no
+    /// request reaches it meanwhile, and the new database never inherits a deleted one's
+    /// grants. Answers the entry and how many grants were removed. A failure to rewrite
+    /// `access.toml` refuses the commit (the build is discarded).
+    pub(crate) fn commit_new(
+        &self,
+        build: crate::admin::TmpBuild,
+    ) -> Result<(DatabaseEntry, usize), ServerError> {
+        let leftover = self.drop_leftover_grants(build.name())?;
+        Ok((self.registry.commit(build)?, leftover))
+    }
+
+    /// Deletes the unloaded database `name` into `trash/` (module docs) and removes every
+    /// grant on its name ([`Deleted::grants`], each audited as a revoked grant).
     ///
     /// `Err`: [`ServerError::NotFound`]; [`ServerError::Refused`] while it is loaded, being
     /// loaded or unloaded, named by an alias, or the base of layers; [`ServerError::Io`].
+    /// After the database is gone: `access.toml` could not be rewritten (its grants stay,
+    /// listed as `missing`; a new database or alias of that name removes them first).
     pub fn delete(&self, name: &str) -> Result<Deleted, ServerError> {
         let (name, trash) = match &self.loader {
             Some(loader) => loader.while_idle(name, || self.registry.delete(name))?,
             None => self.registry.delete(name)?,
         };
-        let deleted = Deleted { name, trash };
         self.audit.record(AuditEvent::DatabaseDeleted {
-            name: deleted.name.clone(),
-            trash: deleted.trash.clone(),
+            name: name.clone(),
+            trash: trash.clone(),
         });
-        Ok(deleted)
+        let grants = self.drop_grants_on(&name)?;
+        Ok(Deleted {
+            name,
+            trash,
+            grants,
+        })
     }
 
     /// Clones the database `source` into the new database `new_name` (module docs): the same
@@ -341,6 +385,17 @@ impl Admin {
         source: &str,
         new_name: &str,
     ) -> Result<DatabaseEntry, ServerError> {
+        self.clone_reported(source, new_name)
+            .map(|(entry, _)| entry)
+    }
+
+    /// [`Admin::clone_database`] answering also how many grants left on the new name were
+    /// removed before the clone took it (`Admin::commit_new`).
+    pub fn clone_reported(
+        &self,
+        source: &str,
+        new_name: &str,
+    ) -> Result<(DatabaseEntry, usize), ServerError> {
         let entry = self.registry.get(source)?;
         let Some(config) = entry.config.clone() else {
             return Err(ServerError::DatabaseFailed {
@@ -394,12 +449,12 @@ impl Admin {
         };
         forked?;
         self.adopt_build(new_name, &target);
-        let cloned = self.registry.commit(build)?;
+        let (cloned, leftover) = self.commit_new(build)?;
         self.audit.record(AuditEvent::DatabaseCloned {
             source: entry.name.clone(),
             name: cloned.name.clone(),
         });
-        Ok(cloned)
+        Ok((cloned, leftover))
     }
 
     /// Starts loading the database `name` ([`Loader::load`]). Offline: refused (nothing
@@ -513,13 +568,21 @@ impl Admin {
     }
 
     /// Sets (or flips) the alias `alias` to the database `target` ([`Registry::alias_set`]).
-    pub fn alias_set(&self, alias: &str, target: &str) -> Result<(), ServerError> {
-        self.registry.alias_set(alias, target)?;
+    /// A NEW alias first removes the grants left on its name (from a deleted database or
+    /// alias, each audited as a revoked grant), under the registry's write lock: the number
+    /// removed (0 for a flip).
+    ///
+    /// `Err`: as [`Registry::alias_set`]; `access.toml` could not be rewritten (nothing
+    /// changed).
+    pub fn alias_set(&self, alias: &str, target: &str) -> Result<usize, ServerError> {
+        let leftover = self
+            .registry
+            .alias_set_with(alias, target, |name| self.drop_leftover_grants(name))?;
         self.audit.record(AuditEvent::AliasSet {
             alias: crate::names::fold(alias),
             target: crate::names::fold(target),
         });
-        Ok(())
+        Ok(leftover)
     }
 
     /// Removes the alias `alias` ([`Registry::alias_remove`]) and the grants on it (a grant on
@@ -527,29 +590,38 @@ impl Admin {
     /// it): the number of grants removed.
     ///
     /// `Err` after the alias is gone: `access.toml` could not be rewritten (its grants on the
-    /// name stay, listed as `missing`; revoke them by hand).
+    /// name stay, listed as `missing`; revoke them by hand, or a new database or alias of that
+    /// name removes them first).
     pub fn alias_remove(&self, alias: &str) -> Result<usize, ServerError> {
         self.registry.alias_remove(alias)?;
         self.audit.record(AuditEvent::AliasRemoved {
             alias: crate::names::fold(alias),
         });
-        self.drop_alias_grants(alias)
+        self.drop_grants_on(alias)
     }
 
     /// Renames the alias `old` to `new` ([`Registry::alias_rename`]); online, every MCP session
     /// that selected `old` moves to `new` in the same step (its next answer carries one note):
     /// [`Renamed::moved`] is the number of sessions moved (0 offline or with MCP off). The
-    /// grants on `old` move to `new` in the same step too ([`Renamed::grants`]).
+    /// grants on `old` move to `new` in the same step too ([`Renamed::grants`]); grants left on
+    /// `new` (from a deleted database or alias) are removed before, each audited as a revoked
+    /// grant ([`Renamed::leftover`]; failing to rewrite `access.toml` there refuses the rename).
     ///
     /// `Err` after the alias is renamed: `access.toml` could not be rewritten (the grants stay
     /// on the old name, listed as `missing`).
     pub fn alias_rename(&self, old: &str, new: &str) -> Result<Renamed<usize>, ServerError> {
         let mcp = self.loader.as_ref().and_then(|loader| loader.mcp());
         // Under the registry's write lock: no request sees the new name without its grants.
-        let renamed = self.registry.alias_rename(old, new, |old, new| {
-            let sessions = mcp.map_or(0, |mcp| mcp.rename_selection(old, new));
-            (sessions, self.move_alias_grants(old, new))
-        })?;
+        // The grants left on the new name go first (a refusal there changes nothing).
+        let renamed = self.registry.alias_rename_with(
+            old,
+            new,
+            |new| self.drop_leftover_grants(new),
+            |old, new| {
+                let sessions = mcp.map_or(0, |mcp| mcp.rename_selection(old, new));
+                (sessions, self.move_alias_grants(old, new))
+            },
+        )?;
         let (sessions, grants) = renamed.moved;
         let mut renamed = Renamed {
             old: renamed.old,
@@ -557,6 +629,7 @@ impl Admin {
             target: renamed.target,
             moved: sessions,
             grants: 0,
+            leftover: renamed.leftover,
         };
         self.audit.record(AuditEvent::AliasRenamed {
             old: renamed.old.clone(),

@@ -10,7 +10,7 @@ import http from 'node:http';
 import {
   adminRequest, sendAdmin, createAdmin, parseAdminError, AdminError, createBody, nameProblem,
   aliasRows, baseNames, realRows, rowActions, confirmText, outcomeText, loadAndWatch, bytesText,
-  renameProblem,
+  renameProblem, outcomeTone, leftoverGrants, RESTORE_GRANTS_NOTE,
 } from '../admin-api.js';
 import { databaseRows, fetchDatabases } from '../databases.js';
 
@@ -465,4 +465,31 @@ test('renameAlias: the request, the mock round trip, the form check and the outc
   } finally {
     mock.server.close();
   }
+});
+
+test('grants: a delete names the grants it removed, a name taken over leftovers warns', () => {
+  assert.match(confirmText('delete', 'acme'), /every grant on it is removed \(a restore does not bring them back\)/);
+  assert.equal(
+    outcomeText('delete', 'acme', { trash: 'trash/acme-1', grantsRemoved: 2 }),
+    'Deleted "acme"; it was moved to trash/acme-1; 2 grants on it removed (a restore does not bring them back).',
+  );
+  assert.equal(outcomeText('delete', 'acme', { trash: 'trash/acme-1', grantsRemoved: 0 }), 'Deleted "acme"; it was moved to trash/acme-1.');
+  const warned = ' Removed 1 grant left on this name from a deleted database or alias; it does not inherit them.';
+  for (const [action, answer, text] of [
+    ['create', {}, 'Created "acme" (unloaded).'],
+    ['clone', {}, 'Cloned into "acme" (unloaded).'],
+    ['setAlias', { alias: 'acme', target: 'w' }, 'The alias "acme" names "w".'],
+  ]) {
+    assert.equal(outcomeText(action, 'acme', answer), text, action);
+    assert.equal(outcomeTone(answer), 'ok', action);
+    const left = { ...answer, leftoverGrantsRemoved: 1 };
+    assert.equal(outcomeText(action, 'acme', left), text + warned, action);
+    assert.equal(outcomeTone(left), 'warn', action);
+  }
+  assert.match(outcomeText('renameAlias', 'b', { renamedFrom: 'a', alias: 'b', target: 'w', leftoverGrantsRemoved: 3 }), /Removed 3 grants left on this name/);
+  assert.match(outcomeText('restore', 'acme', { name: 'acme', leftoverGrantsRemoved: 1 }), /Removed 1 grant left/);
+  assert.match(outcomeText('import', 'acme', { name: 'acme', leftoverGrantsRemoved: 1 }), /Removed 1 grant left/);
+  assert.equal(outcomeTone({ leftoverGrantsRemoved: 0 }, 'error'), 'error');
+  assert.equal(leftoverGrants({ leftoverGrantsRemoved: 'x' }), 0);
+  assert.match(RESTORE_GRANTS_NOTE, /Grants do not come back with a restore/);
 });
