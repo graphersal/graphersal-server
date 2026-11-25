@@ -55,6 +55,7 @@ pub mod ops;
 pub mod registry;
 mod router;
 pub mod run_file;
+pub mod security;
 pub mod serve;
 pub mod sessions;
 #[cfg(test)]

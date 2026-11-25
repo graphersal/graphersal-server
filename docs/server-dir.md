@@ -5,12 +5,17 @@ the shared embedding models, backups and deleted databases. `graphersal-server i
 it; `graphersal-server serve --dir DIR` serves it. A directory is a server directory when it
 holds `server.toml`.
 
+The directory is private to the OS user that owns it, the operator: `init` creates it with mode
+`0700` (unix), `sessions/` `0700` and the secret files (`access.toml`, `server.run`,
+`sessions/*.json`) `0600`; `serve` and the console refuse a directory or secret owned by
+another user or open to group or others ([`access.md`](access.md#the-security-model)).
+
 ```
 <server-dir>/
   server.toml          configuration
   access.toml          users (token hashes), roles and grants (mode 0600)
   server.lock          one running server per directory (an OS file lock)
-  server.run           the running server's address (only while it runs)
+  server.run           the running server's address and operator token (mode 0600, only while it runs)
   aliases.toml         alias -> database
   databases/
     <name>/
@@ -24,7 +29,7 @@ holds `server.toml`.
   trash/               deleted and replaced databases: <name>-<UTC time>/
   tmp/                 builds and uploads in progress (emptied at start)
   imports/             the import inbox: files and Store directories an admin imports by name
-  sessions/
+  sessions/            (mode 0700)
     browser.json       browser sessions (hashes only, mode 0600): they survive a restart
     mcp.json           MCP sessions (hashes only, mode 0600): they survive a restart
 ```

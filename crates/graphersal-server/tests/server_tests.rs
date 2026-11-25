@@ -32,6 +32,14 @@ impl TempDir {
         ));
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).unwrap();
+        // Owner only, whatever the umask: a server directory in it must be private to its owner
+        // (`serve` and the console refuse a group-writable one).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
+                .expect("make the test directory private");
+        }
         DIRS.lock()
             .unwrap_or_else(|p| p.into_inner())
             .push(path.clone());
@@ -3270,4 +3278,290 @@ fn a_configured_backup_root_is_created_at_start() {
     .unwrap();
     assert!(root.is_dir());
     running.stop().unwrap();
+}
+
+/// The mode bits of `path` (unix).
+#[cfg(unix)]
+fn mode_of(path: &Path) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+}
+
+/// Sets the mode bits of `path` (unix).
+#[cfg(unix)]
+fn set_mode(path: &Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+}
+
+/// A console command of the binary with extra environment: (exit code, stdout, stderr).
+fn console(args: &[&str], env: &[(&str, &str)]) -> (i32, String, String) {
+    let mut command = Command::new(BIN);
+    command.args(args).env_remove("GRAPHERSAL_SERVER_TOKEN");
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    let out = command.output().unwrap();
+    (
+        out.status.code().unwrap_or(-1),
+        text(&out.stdout),
+        text(&out.stderr),
+    )
+}
+
+#[cfg(unix)]
+#[test]
+fn init_makes_the_server_directory_private_to_its_owner() {
+    let temp = TempDir::new("security-init");
+    let root = temp.path().join("srv");
+    let root_text = root.to_str().unwrap();
+    let out = run(&["init", root_text]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let dir = ServerDir::new(&root);
+    assert_eq!(mode_of(&root), 0o700);
+    assert_eq!(mode_of(&dir.sessions()), 0o700);
+    assert_eq!(mode_of(&dir.access_path()), 0o600);
+    // A server keeps the modes of what it writes: server.run and the session files.
+    let mut server = ServerProcess::spawn(
+        Command::new(BIN)
+            .args(["serve", "--dir", root_text, "--listen", "127.0.0.1:0"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped()),
+    );
+    let info = wait_for_run_file(&dir);
+    assert_eq!(mode_of(&dir.run_path()), 0o600);
+    let (code, _, err) = console(&["user", "add", "bob", "--dir", root_text], &[]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(mode_of(&dir.access_path()), 0o600);
+    let _ = stop_and_wait(&mut server);
+    drop(info);
+
+    // An older directory with open modes: init makes it private and says so.
+    set_mode(&root, 0o755);
+    set_mode(&dir.access_path(), 0o644);
+    set_mode(&dir.sessions(), 0o755);
+    let out = run(&["init", root_text]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let stdout = text(&out.stdout);
+    assert!(
+        stdout.starts_with(&format!(
+            "{root_text} is already a server directory: made it private to its owner\n"
+        )),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(&dir.access_path().display().to_string()),
+        "{stdout}"
+    );
+    assert_eq!(mode_of(&root), 0o700);
+    assert_eq!(mode_of(&dir.access_path()), 0o600);
+    assert_eq!(mode_of(&dir.sessions()), 0o700);
+}
+
+#[cfg(unix)]
+#[test]
+fn serve_and_the_console_refuse_a_directory_others_could_change() {
+    let temp = TempDir::new("security-refuse");
+    let root = temp.path().join("srv");
+    let root_text = root.to_str().unwrap();
+    let dir = ServerDir::init(&root).unwrap().dir;
+
+    // The directory writable by its group: every console command and serve refuse.
+    set_mode(&root, 0o770);
+    for args in [
+        &["db", "list", "--dir", root_text][..],
+        &["user", "add", "mallory", "--admin", "--dir", root_text],
+        &["models", "list", "--dir", root_text],
+        &["import", root_text, "--list"],
+        &["serve", "--dir", root_text, "--listen", "127.0.0.1:0"],
+    ] {
+        let (code, out, err) = console(args, &[]);
+        assert_eq!(code, 1, "{args:?}: {out}{err}");
+        assert!(out.is_empty(), "{args:?}: {out}");
+        assert!(
+            err.contains("is not private to its owner")
+                && err.contains("writable by group or others (mode 0770)"),
+            "{args:?}: {err}"
+        );
+        assert!(
+            err.contains(&format!("\n  chmod 700 {root_text}\n")),
+            "{err}"
+        );
+        assert!(
+            err.contains(&format!("graphersal-server init {root_text}")),
+            "{err}"
+        );
+    }
+    // Nothing was added.
+    let file = graphersal_server::access::AccessFile::read(&dir)
+        .unwrap()
+        .unwrap();
+    assert!(!file.users().contains_key("mallory"));
+    set_mode(&root, 0o700);
+
+    // A secret readable by others: refused, naming its chmod.
+    for (path, fix) in [
+        (dir.access_path(), "chmod 600"),
+        (dir.sessions(), "chmod 700"),
+    ] {
+        let good = mode_of(&path);
+        set_mode(&path, if path.is_dir() { 0o755 } else { 0o644 });
+        let (code, _, err) = console(&["user", "list", "--dir", root_text], &[]);
+        assert_eq!(code, 1, "{err}");
+        assert!(err.contains("open to group or others"), "{err}");
+        assert!(err.contains(&format!("{fix} {}", path.display())), "{err}");
+        let (code, _, err) = console(&["serve", "--dir", root_text], &[]);
+        assert_eq!(code, 1, "{err}");
+        assert!(err.contains(&format!("{fix} {}", path.display())), "{err}");
+        set_mode(&path, good);
+    }
+    // A server.run left behind readable by others (it carries the operator token).
+    std::fs::write(dir.run_path(), "address = \"127.0.0.1:1\"\n").unwrap();
+    set_mode(&dir.run_path(), 0o644);
+    let (code, _, err) = console(&["db", "list", "--dir", root_text], &[]);
+    assert_eq!(code, 1, "{err}");
+    assert!(
+        err.contains(&format!("chmod 600 {}", dir.run_path().display())),
+        "{err}"
+    );
+    std::fs::remove_file(dir.run_path()).unwrap();
+    let (code, _, err) = console(&["db", "list", "--dir", root_text], &[]);
+    assert_eq!(code, 0, "{err}");
+}
+
+#[test]
+fn console_actions_are_audited_with_the_os_user() {
+    let temp = TempDir::new("security-audit");
+    let root = temp.path().join("srv");
+    let root_text = root.to_str().unwrap();
+    let dir = ServerDir::init(&root).unwrap().dir;
+    let os_user = graphersal_server::security::os_user().unwrap();
+    let actor = format!("operator (os:{os_user})");
+
+    // Offline: the record names the operator and this OS user (shown with RUST_LOG).
+    let (code, _, err) = console(
+        &["user", "add", "bob", "--dir", root_text],
+        &[("RUST_LOG", "graphersal_server::audit=info")],
+    );
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        err.contains(&actor) && err.contains("user 'bob' added"),
+        "{err}"
+    );
+
+    // Through the server with the operator token: the server's log names the OS user it runs
+    // as (only the directory's owner reads the operator token).
+    let mut server = ServerProcess::spawn(
+        Command::new(BIN)
+            .args(["serve", "--dir", root_text, "--listen", "127.0.0.1:0"])
+            .env("RUST_LOG", "info")
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped()),
+    );
+    let _info = wait_for_run_file(&dir);
+    let (code, _, err) = console(&["db", "create", "acme", "--dir", root_text], &[]);
+    assert_eq!(code, 0, "{err}");
+    let (_, log) = stop_and_wait(&mut server);
+    let line = log
+        .lines()
+        .find(|line| line.contains("database 'acme' created"))
+        .unwrap_or_else(|| panic!("no audit line: {log}"));
+    assert!(line.contains(&actor), "{line}");
+}
+
+#[test]
+fn console_commands_with_a_token_go_through_the_running_server() {
+    let temp = TempDir::new("security-token");
+    let root = temp.path().join("srv");
+    let root_text = root.to_str().unwrap();
+    let dir = ServerDir::init(&root).unwrap().dir;
+    // An admin user and a plain user, made offline by the operator.
+    let (code, out, err) = console(
+        &[
+            "user", "add", "carol", "--admin", "--dir", root_text, "--json",
+        ],
+        &[],
+    );
+    assert_eq!(code, 0, "{err}");
+    let carol = json(&out)["token"].as_str().unwrap().to_string();
+    let (code, out, err) = console(&["user", "add", "dave", "--dir", root_text, "--json"], &[]);
+    assert_eq!(code, 0, "{err}");
+    let dave = json(&out)["token"].as_str().unwrap().to_string();
+
+    // No running server: a token does not act on the directory offline.
+    let (code, out, err) = console(&["db", "list", "--dir", root_text, "--token", &carol], &[]);
+    assert_eq!(code, 1, "{out}{err}");
+    assert!(err.contains("no server runs on this directory"), "{err}");
+    assert!(err.contains("--server ADDRESS"), "{err}");
+    // --server without a token is a usage error.
+    let (code, _, err) = console(
+        &["db", "list", "--dir", root_text, "--server", "127.0.0.1:1"],
+        &[],
+    );
+    assert_eq!(code, 2, "{err}");
+    assert!(err.contains("--server needs --token"), "{err}");
+
+    let mut server = ServerProcess::spawn(
+        Command::new(BIN)
+            .args(["serve", "--dir", root_text, "--listen", "127.0.0.1:0"])
+            .env("RUST_LOG", "info")
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped()),
+    );
+    let info = wait_for_run_file(&dir);
+    let address = info.address.to_string();
+    let note = format!("sent to its admin API at {address}");
+
+    // The address from server.run, the token from --token: the audit names carol.
+    let (code, out, err) = console(
+        &[
+            "db", "create", "acme", "--dir", root_text, "--token", &carol,
+        ],
+        &[],
+    );
+    assert_eq!(code, 0, "{err}");
+    assert!(out.starts_with("Created database 'acme'\n"), "{out}");
+    assert!(err.contains(&note), "{err}");
+    // The token from the environment, the address named: no file of the directory is touched,
+    // so even a directory this user could not read works (here: one that does not exist).
+    let elsewhere = temp.path().join("not-here");
+    let (code, out, err) = console(
+        &[
+            "user",
+            "list",
+            "--dir",
+            elsewhere.to_str().unwrap(),
+            "--server",
+            &format!("http://{address}/"),
+        ],
+        &[("GRAPHERSAL_SERVER_TOKEN", &carol)],
+    );
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("carol") && out.contains("dave"), "{out}");
+    // The permission checks do not apply on the token path: the directory is group-writable
+    // now, the operator's console refuses, the token goes through.
+    #[cfg(unix)]
+    {
+        set_mode(&root, 0o770);
+        let (code, _, err) = console(&["db", "list", "--dir", root_text], &[]);
+        assert_eq!(code, 1, "{err}");
+        let (code, out, err) = console(&["db", "list", "--dir", root_text, "--token", &carol], &[]);
+        assert_eq!(code, 0, "{err}");
+        assert!(out.contains("acme"), "{out}");
+        set_mode(&root, 0o700);
+    }
+    // A wrong token: 401; a user without the admin role: the admin API does not exist for it.
+    let (code, _, err) = console(&["db", "list", "--dir", root_text, "--token", "wrong"], &[]);
+    assert_eq!(code, 1, "{err}");
+    let (code, _, err) = console(&["db", "list", "--dir", root_text, "--token", &dave], &[]);
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains("unknown endpoint"), "{err}");
+
+    let (_, log) = stop_and_wait(&mut server);
+    let line = log
+        .lines()
+        .find(|line| line.contains("database 'acme' created"))
+        .unwrap_or_else(|| panic!("no audit line: {log}"));
+    assert!(line.contains("user:carol"), "{line}");
+    assert!(!line.contains("(os:"), "{line}");
 }

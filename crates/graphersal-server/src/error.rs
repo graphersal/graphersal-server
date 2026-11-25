@@ -216,6 +216,18 @@ pub enum ServerError {
         /// The reason.
         message: String,
     },
+    /// The server directory is not private to the current OS user (`crate::security`): it, a
+    /// secret file in it or `sessions/` is owned by another user, or open to group or others.
+    /// `serve` and the console refuse to act on it.
+    #[non_exhaustive]
+    InsecureDir {
+        /// The server directory.
+        dir: PathBuf,
+        /// Every problem found, one sentence each.
+        problems: Vec<String>,
+        /// The commands fixing them: (what it does, the command).
+        fixes: Vec<(String, String)>,
+    },
     /// The running server refused an admin request (the console's admin client): its answer.
     #[non_exhaustive]
     Remote {
@@ -361,6 +373,12 @@ impl fmt::Display for ServerError {
             ServerError::Random { message } => {
                 write!(f, "cannot make a secret token: {message}")
             }
+            ServerError::InsecureDir { dir, problems, .. } => write!(
+                f,
+                "refused: the server directory {} is not private to its owner: {}",
+                dir.display(),
+                problems.join("; ")
+            ),
             ServerError::Remote { message, .. } => f.write_str(message),
         }
     }

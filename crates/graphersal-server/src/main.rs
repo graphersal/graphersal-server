@@ -8,6 +8,8 @@
 //! graphersal-server import DIR SOURCE --name NAME [--base BASE] [--format F] [--description TEXT] [--role normal|base] [--json]
 //! graphersal-server import DIR --inbox FILE --name NAME [...] | import DIR --list [--json]
 //! graphersal-server models list|add|remove ... --dir DIR [--json]
+//! graphersal-server user ... --dir DIR [--json]
+//!     (db, import, models, user also: [--token TOKEN [--server ADDRESS]])
 //! ```
 //!
 //! stdout carries only results, stderr diagnostics and the log. Exit codes: `0` ok, `1` the
@@ -75,7 +77,9 @@ Usage:
       tmp/). DIR must be missing, empty, or a server directory (then only missing
       parts are created; server.toml is kept). A directory without access.toml gets its
       first admin (user admin): its token is printed ONCE on stderr (the first serve of
-      such a directory does the same).
+      such a directory does the same). DIR becomes private to its owner (mode 0700; the
+      secrets access.toml, server.run, sessions/ owner only); on an existing directory
+      init tightens the modes it finds too open.
   graphersal-server serve --dir DIR [--listen ADDR] [--max-connections N]
                          [--header-timeout SECS] [--idle-timeout SECS]
       Serve the server directory DIR (HTTP/1.1 and h2c). ADDR (IP:PORT, port 0 = a free
@@ -162,6 +166,16 @@ Usage:
         user revoke SUBJECT DATABASE
       The last admin (admin role and a token) cannot be removed, demoted or revoked.
   graphersal-server --help | --version
+
+The OS user owning DIR is its operator: serve and the db, import, models and user commands
+refuse a DIR (or access.toml, server.run, sessions/) owned by another user or open to group
+or others, naming the chmod/chown that fixes it (unix; on Windows DIR's ACL is the boundary).
+Other administrators send an admin token instead:
+  ... --token TOKEN [--server ADDRESS]
+      db, import, models and user go to the running server with this user's admin token
+      (or the environment variable GRAPHERSAL_SERVER_TOKEN), at ADDRESS (IP:PORT) or the
+      address in DIR/server.run; no file of DIR is written and its permissions are not
+      checked. Refused when no server runs.
 
 stdout carries only results, stderr diagnostics and the log (level: RUST_LOG, default
 info). Exit codes: 0 ok, 1 the command failed, 2 invalid invocation.";
@@ -362,7 +376,7 @@ fn db_command(args: &[String]) -> ExitCode {
         };
         match flag.as_str() {
             "--dir" | "--kind" | "--role" | "--base" | "--schema" | "--description" | "--out"
-            | "--name" => {
+            | "--name" | "--token" | "--server" => {
                 let Some(value) = inline.or_else(|| rest.next().cloned()) else {
                     return usage_error(&format!("db: {flag} needs a value"));
                 };
@@ -395,16 +409,94 @@ fn db_command(args: &[String]) -> ExitCode {
         Err(Problem::Usage(message)) => return usage_error(&format!("db: {message}")),
         Err(Problem::Failed(message)) => return failure_text(&message),
     };
-    let dir = match ServerDir::open(&dir) {
-        Ok(dir) => dir,
-        Err(error) => return failure(&error),
+    let remote = match Remote::of(value("--token"), value("--server")) {
+        Ok(remote) => remote,
+        Err(code) => return code,
     };
-    print_outcome(&dir, &command, switch("--json"))
+    print_outcome(&dir, &command, switch("--json"), remote)
 }
 
-/// Runs `command` on `dir` and prints its answer (text, or JSON with `json`).
-fn print_outcome(dir: &ServerDir, command: &DbCommand, json: bool) -> ExitCode {
-    match console::run(dir, command) {
+/// The environment variable holding an admin token for the console (as `--token`).
+const TOKEN_ENV: &str = "GRAPHERSAL_SERVER_TOKEN";
+
+/// How a console command reaches the server directory: `None` = as the operator (offline on
+/// the directory, or through its running server with the operator token of `server.run`),
+/// else through the running server with a user's admin token (`--token`, or
+/// `GRAPHERSAL_SERVER_TOKEN`) at `--server ADDRESS` or the address in `server.run`.
+struct Remote {
+    token: String,
+    address: Option<std::net::SocketAddr>,
+}
+
+impl Remote {
+    /// The remote of the `--token` and `--server` values (the token falls back to
+    /// [`TOKEN_ENV`]); `Err`: the usage error's exit code.
+    fn of(token: Option<String>, server: Option<String>) -> Result<Option<Remote>, ExitCode> {
+        let token = token.or_else(|| std::env::var(TOKEN_ENV).ok());
+        let token = match token {
+            Some(token) if token.trim().is_empty() => {
+                return Err(usage_error("--token needs a token (it is empty)"));
+            }
+            other => other,
+        };
+        let address = match server {
+            None => None,
+            Some(text) => {
+                let trimmed = text
+                    .trim()
+                    .trim_start_matches("http://")
+                    .trim_end_matches('/');
+                match parse_listen(trimmed) {
+                    Ok(address) => Some(address),
+                    Err(err) => return Err(usage_error(&format!("--server: {err}"))),
+                }
+            }
+        };
+        match (token, address) {
+            (Some(token), address) => Ok(Some(Remote {
+                token: token.trim().to_string(),
+                address,
+            })),
+            (None, Some(_)) => Err(usage_error(&format!(
+                "--server needs --token TOKEN (or {TOKEN_ENV}): without a token the console \
+                 acts as the directory's operator"
+            ))),
+            (None, None) => Ok(None),
+        }
+    }
+}
+
+/// Runs `command` on the server directory `dir` (or, with `remote`, through its running
+/// server with a token) and prints its answer (text, or JSON with `json`).
+fn print_outcome(dir: &str, command: &DbCommand, json: bool, remote: Option<Remote>) -> ExitCode {
+    // The console's log only when RUST_LOG asks for it (the audit records of offline actions:
+    // `RUST_LOG=graphersal_server::audit=info`); stderr stays the result's diagnostics else.
+    if std::env::var_os("RUST_LOG").is_some() {
+        init_logging();
+    }
+    let (dir, result) = match remote {
+        Some(remote) => {
+            // No file of the directory is opened: it may not even be readable to this user.
+            let dir = ServerDir::new(dir);
+            let result = console::run_with_token(&dir, command, &remote.token, remote.address);
+            (dir, result)
+        }
+        None => {
+            // The permission check before the open: a directory of another user is refused
+            // for that, not for a file it cannot read.
+            let unchecked = ServerDir::new(dir);
+            if let Err(error) = graphersal_server::security::check(&unchecked) {
+                return failure(&error);
+            }
+            let dir = match ServerDir::open(dir) {
+                Ok(dir) => dir,
+                Err(error) => return failure(&error),
+            };
+            let result = console::run(&dir, command);
+            (dir, result)
+        }
+    };
+    match result {
         Ok(outcome) => {
             if let Via::Server(address) = outcome.via {
                 err(&format!(
@@ -448,7 +540,8 @@ fn import_command(args: &[String]) -> ExitCode {
             None => (arg.clone(), None),
         };
         match flag.as_str() {
-            "--name" | "--base" | "--format" | "--description" | "--role" | "--inbox" => {
+            "--name" | "--base" | "--format" | "--description" | "--role" | "--inbox"
+            | "--token" | "--server" => {
                 let Some(value) = inline.or_else(|| rest.next().cloned()) else {
                     return usage_error(&format!("import: {flag} needs a value"));
                 };
@@ -472,7 +565,10 @@ fn import_command(args: &[String]) -> ExitCode {
         let [dir] = positional.as_slice() else {
             return usage_error("import --list takes one argument: the server directory");
         };
-        if !values.is_empty() {
+        if values
+            .iter()
+            .any(|(flag, _)| flag != "--token" && flag != "--server")
+        {
             return usage_error("import --list takes no other option than --json");
         }
         (dir, DbCommand::InboxList)
@@ -528,11 +624,11 @@ fn import_command(args: &[String]) -> ExitCode {
         };
         (dir, command)
     };
-    let dir = match ServerDir::open(dir) {
-        Ok(dir) => dir,
-        Err(error) => return failure(&error),
+    let remote = match Remote::of(value("--token"), value("--server")) {
+        Ok(remote) => remote,
+        Err(code) => return code,
     };
-    print_outcome(&dir, &command, json)
+    print_outcome(dir, &command, json, remote)
 }
 
 /// `models list|add|remove ... --dir DIR`.
@@ -551,7 +647,7 @@ fn models_command(args: &[String]) -> ExitCode {
             None => (arg.clone(), None),
         };
         match flag.as_str() {
-            "--dir" | "--repo" | "--license" => {
+            "--dir" | "--repo" | "--license" | "--token" | "--server" => {
                 let Some(value) = inline.or_else(|| rest.next().cloned()) else {
                     return usage_error(&format!("models: {flag} needs a value"));
                 };
@@ -613,17 +709,19 @@ fn models_command(args: &[String]) -> ExitCode {
             ));
         }
     };
-    let dir = match ServerDir::open(&dir) {
-        Ok(dir) => dir,
-        Err(error) => return failure(&error),
+    let remote = match Remote::of(value("--token"), value("--server")) {
+        Ok(remote) => remote,
+        Err(code) => return code,
     };
-    print_outcome(&dir, &command, json)
+    print_outcome(&dir, &command, json, remote)
 }
 
 /// `user COMMAND ... --dir DIR [--json]`.
 fn user_command(args: &[String]) -> ExitCode {
     let mut positional: Vec<&str> = Vec::new();
     let mut dir: Option<String> = None;
+    let mut token: Option<String> = None;
+    let mut server: Option<String> = None;
     let (mut json, mut admin, mut revoke) = (false, false, false);
     let mut rest = args.iter();
     while let Some(arg) = rest.next() {
@@ -636,12 +734,17 @@ fn user_command(args: &[String]) -> ExitCode {
             None => (arg.as_str(), None),
         };
         match flag {
-            "--dir" => {
+            "--dir" | "--token" | "--server" => {
                 let Some(value) = inline.or_else(|| rest.next().cloned()) else {
-                    return usage_error("user: --dir needs a value");
+                    return usage_error(&format!("user: {flag} needs a value"));
                 };
-                if dir.replace(value).is_some() {
-                    return usage_error("user: --dir given twice");
+                let slot = match flag {
+                    "--dir" => &mut dir,
+                    "--token" => &mut token,
+                    _ => &mut server,
+                };
+                if slot.replace(value).is_some() {
+                    return usage_error(&format!("user: {flag} given twice"));
                 }
             }
             "--json" if inline.is_none() => json = true,
@@ -690,11 +793,11 @@ fn user_command(args: &[String]) -> ExitCode {
             ));
         }
     };
-    let dir = match ServerDir::open(&dir) {
-        Ok(dir) => dir,
-        Err(error) => return failure(&error),
+    let remote = match Remote::of(token, server) {
+        Ok(remote) => remote,
+        Err(code) => return code,
     };
-    print_outcome(&dir, &command, json)
+    print_outcome(&dir, &command, json, remote)
 }
 
 /// Why a `db` command line was refused.

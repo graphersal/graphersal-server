@@ -22,6 +22,12 @@
 //! console acts as the operator on the file (it holds the server lock); through a server with
 //! the run's operator token, so the server's sessions of a changed token end at once.
 //!
+//! The console needs no credentials on the directory because the directory's OS permissions
+//! are the boundary ([`crate::security`]): [`run`] refuses a directory that is not private to
+//! the current OS user, and its audit records name that user (`operator (os:<name>)`).
+//! [`run_with_token`] (`--token`) goes through the running server with a user's admin token
+//! instead, touching no file of the directory.
+//!
 //! `models add` sends an absolute path too (`POST /api/admin/models {"path"}`).
 //!
 //! `db export` is a download: offline the admin core writes the file itself
@@ -49,6 +55,8 @@ mod render;
 mod start;
 
 pub use first_admin::first_admin_text;
+#[cfg(unix)]
+pub(crate) use render::shell_word;
 pub use render::{
     command_error_text, error_text, failed, init_text, render, render_outcome, usage_error_text,
 };
@@ -469,48 +477,102 @@ pub struct Outcome {
 
 /// Runs `command` on the server directory `dir` (module docs).
 ///
-/// `Err`: [`ServerError::Remote`] for a refusal (the admin API's status, `error`, `help`);
+/// The directory must be private to the current OS user first ([`crate::security::check`]):
+/// the console acts as the operator without a token because only the directory's owner can
+/// use it. Offline, the audit records name the operator and this OS user.
+///
+/// `Err`: [`ServerError::InsecureDir`] for a directory others could change or read;
+/// [`ServerError::Remote`] for a refusal (the admin API's status, `error`, `help`);
 /// [`ServerError::Connect`] when the running server cannot be reached; the errors of opening
 /// the directory ([`ServerError::NotServerDir`], ...).
 pub fn run(dir: &ServerDir, command: &DbCommand) -> Result<Outcome, ServerError> {
+    crate::security::check(dir)?;
     let (method, path, body) = command.request();
+    let audit = crate::audit::Audit::default()
+        .with_actor(Some(crate::access::OPERATOR.to_string()))
+        .with_os_user(crate::security::os_user());
     match Admin::open_offline(dir) {
         Ok((admin, _lock)) if matches!(command, DbCommand::Export { .. }) => Ok(Outcome {
-            body: export_offline(&admin, command)?,
+            body: export_offline(&admin.with_audit(audit), command)?,
             via: Via::Directory,
             server_url: None,
         }),
-        Err(ServerError::Locked { .. }) if matches!(command, DbCommand::Export { .. }) => {
-            let server = server_info(dir)?;
-            Ok(Outcome {
-                body: export_remote(&server, &path, command)?,
-                via: Via::Server(server.address),
-                server_url: Some(server.url),
-            })
-        }
         Ok((admin, _lock)) => {
-            let body = offline(&admin, &method, &path, body.as_ref())?;
+            let body = offline(&admin.with_audit(audit), &method, &path, body.as_ref())?;
             Ok(Outcome {
                 body,
                 via: Via::Directory,
                 server_url: None,
             })
         }
-        Err(ServerError::Locked { .. }) => {
-            let server = server_info(dir)?;
-            let address = server.address;
-            let mut answer = remote(&server, &method, &path, body.as_ref())?;
-            if let DbCommand::Load { name, wait: true } = command {
-                answer = wait_for_load(&server, name, answer)?;
-            }
-            Ok(Outcome {
-                body: answer,
-                via: Via::Server(address),
-                server_url: Some(server.url),
-            })
-        }
+        Err(ServerError::Locked { .. }) => through_server(server_info(dir)?, command),
         Err(err) => Err(err),
     }
+}
+
+/// Runs `command` through the running server of `dir` with the admin token `token` (a user's,
+/// `--token`), instead of the operator token of `server.run`: the server's address is
+/// `address`, else the one `dir`'s `server.run` names. No file of the directory is written and
+/// its permissions are not checked (the token is the credential; the audit records name its
+/// user). Without a running server it is refused: nothing acts on the directory offline with
+/// a token.
+///
+/// `Err`: [`ServerError::Connect`] when no server runs (no `server.run`, or it cannot be read:
+/// name the address) or it cannot be reached; [`ServerError::Remote`] for a refusal (a wrong
+/// token is `401`, a user without the admin role `404`).
+pub fn run_with_token(
+    dir: &ServerDir,
+    command: &DbCommand,
+    token: &str,
+    address: Option<SocketAddr>,
+) -> Result<Outcome, ServerError> {
+    let server = match address {
+        Some(address) => RunInfo::new(address, format!("http://{address}/")),
+        None => match RunInfo::read(dir) {
+            Ok(Some(info)) => RunInfo::new(info.address, info.url),
+            Ok(None) => {
+                return Err(ServerError::Connect {
+                    address: dir.run_path().display().to_string(),
+                    message: "--token sends the command to a running server, and no server \
+                              runs on this directory (no server.run); start it, or name its \
+                              address with --server ADDRESS"
+                        .to_string(),
+                });
+            }
+            Err(err) => {
+                return Err(ServerError::Connect {
+                    address: dir.run_path().display().to_string(),
+                    message: format!(
+                        "{err}; name the running server's address with --server ADDRESS"
+                    ),
+                });
+            }
+        },
+    };
+    through_server(
+        server.with_operator_token(crate::access::Secret::from_text(token)),
+        command,
+    )
+}
+
+/// `command` sent to the admin API of `server` with its token (`operator_token`).
+fn through_server(server: RunInfo, command: &DbCommand) -> Result<Outcome, ServerError> {
+    let (method, path, body) = command.request();
+    let address = server.address;
+    let answer = if matches!(command, DbCommand::Export { .. }) {
+        export_remote(&server, &path, command)?
+    } else {
+        let mut answer = remote(&server, &method, &path, body.as_ref())?;
+        if let DbCommand::Load { name, wait: true } = command {
+            answer = wait_for_load(&server, name, answer)?;
+        }
+        answer
+    };
+    Ok(Outcome {
+        body: answer,
+        via: Via::Server(address),
+        server_url: Some(server.url),
+    })
 }
 
 /// The request answered by the admin route over the offline `admin`.
