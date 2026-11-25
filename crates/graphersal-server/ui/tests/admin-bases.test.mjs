@@ -6,10 +6,11 @@
 // Run: node --test crates/graphersal-server/ui/tests/*.test.mjs
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import http from 'node:http';
 import {
   adminRequest, createAdmin, AdminError, promoteAction, confirmText, outcomeText, importRequest,
-  uploadImport, BASE_IS_FROZEN,
+  uploadImport, BASE_IS_FROZEN, BASE_HELP, PROMOTE_HELP, KIND_HELP, kindHelp,
 } from '../admin-api.js';
 import { databaseRows } from '../databases.js';
 
@@ -119,8 +120,28 @@ const rowOf = async (admin, name) => databaseRows(await admin.list()).rows.find(
 test('promote: the request has no body; the confirmation says it is one way', () => {
   assert.deepEqual(adminRequest.promote('a b'), { method: 'POST', path: 'api/admin/databases/a%20b/promote' });
   assert.equal(BASE_IS_FROZEN, 'A base is frozen forever: it cannot be written or turned back; layers are built over it.');
-  assert.equal(confirmText('promote', 'acme'), `Promote "acme" to a base? ${BASE_IS_FROZEN}`);
+  assert.equal(confirmText('promote', 'acme'), `Promote "acme" to a base? ${BASE_IS_FROZEN}\n\n${BASE_HELP}\n\n${PROMOTE_HELP}`);
   assert.equal(outcomeText('promote', 'acme', { name: 'acme', role: 'base' }), '"acme" is now a base (read-only, frozen); create layers over it with "New database…".');
+});
+
+test('the help on bases and layers: what a base is, that promotion is forever, when to use it; the kind tooltips', () => {
+  assert.match(BASE_HELP, /frozen, read-only database that layers are built over/);
+  assert.match(BASE_HELP, /Each layer stores only its own changes/);
+  assert.match(PROMOTE_HELP, /one way and forever/);
+  assert.match(PROMOTE_HELP, /Use it when/);
+  assert.match(PROMOTE_HELP, /Layer over a base/, 'names the dialog choice that uses a base');
+  const text = confirmText('promote', 'acme');
+  for (const part of [BASE_IS_FROZEN, BASE_HELP, PROMOTE_HELP]) assert.ok(text.includes(part), part);
+  const ok = promoteAction({ name: 'a', state: 'unloaded', kind: 'plain', role: 'normal' });
+  assert.ok(ok.title.includes(BASE_HELP), 'the button\'s tooltip explains a base before the click');
+  assert.equal(kindHelp({ kind: 'plain', role: 'normal' }), KIND_HELP.plain);
+  assert.equal(kindHelp({ kind: 'layer', role: 'normal' }), KIND_HELP.layer);
+  assert.equal(kindHelp({ kind: 'plain', role: 'base' }), `${KIND_HELP.plain}\n${KIND_HELP.base}`);
+  assert.equal(kindHelp({ kind: 'mystery' }), '');
+  assert.equal(kindHelp(null), '');
+  const tab = readFileSync(new URL('../databases-tab.js', import.meta.url), 'utf8');
+  assert.ok(tab.includes('<summary>Bases and layers</summary>'), 'the Databases tab has the help box');
+  assert.ok(tab.includes(':title="kindHelp(row) || null"'), 'the Kind cells explain the kind');
 });
 
 test('promoteAction: only an unloaded plain normal database; every other row says why not', () => {

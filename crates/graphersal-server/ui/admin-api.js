@@ -438,7 +438,7 @@ export function confirmText(action, subject, extra = '') {
     case 'removeModel':
       return `Remove the model "${subject}" from the server's models/ directory? Its blob files are deleted.`;
     case 'promote':
-      return `Promote "${subject}" to a base? ${BASE_IS_FROZEN}`;
+      return `Promote "${subject}" to a base? ${BASE_IS_FROZEN}\n\n${BASE_HELP}\n\n${PROMOTE_HELP}`;
     case 'cancelRun':
       return `Stop run ${extra} of "${subject}"? Its query ends at its next check and its changes roll back; its client gets an error.`;
     default:
@@ -734,7 +734,7 @@ const INBOX_KINDS = Object.freeze({
 
 /**
  * The rows of the import inbox from `GET api/admin/imports` (`{dir, imports: [{name, kind,
- * directory, bytes, modified}]}`): `{dir, rows: [{name, label, kind, kindText, sizeText,
+ * directory, bytes, modified}]}`): `{dir, rows: [{name, label, kind, kindText, bytes, sizeText,
  * modified, directory, importable}]}`, sorted by name; `label` adds `/` to a directory, a
  * missing kind reads "unknown (detected on import)" (the server still detects the content);
  * malformed entries are left out. A file name suggests the database name (`suggestName`).
@@ -752,6 +752,7 @@ export function inboxRows(answer) {
         label: directory ? `${e.name}/` : e.name,
         kind,
         kindText: kind ? (INBOX_KINDS[kind] || kind) : (directory ? 'directory (no Store)' : 'unknown (detected on import)'),
+        bytes: typeof e.bytes === 'number' && Number.isFinite(e.bytes) && e.bytes >= 0 ? e.bytes : null,
         sizeText: typeof e.bytes === 'number' ? bytesText(e.bytes) || '0 B' : '',
         modified: typeof e.modified === 'string' ? e.modified : '',
         directory,
@@ -1003,6 +1004,31 @@ export function suggestName(fileName) {
 /** What promotion means, said in every confirmation of it (one way: no route turns a base back). */
 export const BASE_IS_FROZEN = 'A base is frozen forever: it cannot be written or turned back; layers are built over it.';
 
+/** What a base and its layers are (the Databases tab's help, the promote confirmation). */
+export const BASE_HELP = 'A base is a frozen, read-only database that layers are built over. Each layer stores only its own changes; '
+  + "the base's data shows through, so many layers share one copy of it (on disk and, while they are loaded, in memory).";
+
+/** When to promote, said in the confirmation and the Databases tab's help. */
+export const PROMOTE_HELP = 'Promotion is one way and forever: no action turns a base back into an ordinary database, and nothing writes to it again. '
+  + 'Use it when this database is a finished starting point that several databases should build on (reference data, a release, a template): '
+  + 'then create them with "New database…", kind "Layer over a base". Clone it first if you still need a copy you can change.';
+
+/** The tooltip of each kind and role the tables show. */
+export const KIND_HELP = Object.freeze({
+  plain: 'Plain: an ordinary database that stores all its data itself.',
+  layer: "Layer: a database over a base; it stores only its own changes, the base's data shows through.",
+  base: `Base: ${BASE_HELP}`,
+});
+
+/** The tooltip of a row's kind (`kind`, `role`; a database row, a backup or an import), '' when unknown. */
+export function kindHelp(row) {
+  if (!row || typeof row !== 'object') return '';
+  const parts = [];
+  if (Object.prototype.hasOwnProperty.call(KIND_HELP, row.kind)) parts.push(KIND_HELP[row.kind]);
+  if (row.role === 'base') parts.push(KIND_HELP.base);
+  return parts.join('\n');
+}
+
 /**
  * Whether a row may be promoted to a base (`POST .../promote`): `{enabled, title}`. Only an
  * UNLOADED plain normal database whose config is readable; every other row is disabled with the
@@ -1019,7 +1045,7 @@ export function promoteAction(row, { busy = false } = {}) {
   if (row.state === 'loading') return off('Loading…: unload it once loaded, then promote it');
   if (row.state === 'needs-model') return off('Add its model first: a base cannot get a model later');
   if (row.state !== 'unloaded') return off(`Only an unloaded database can be promoted (it is ${row.state})`);
-  return { enabled: true, title: `Turn it into a base. ${BASE_IS_FROZEN}` };
+  return { enabled: true, title: `Turn it into a base. ${BASE_HELP} ${BASE_IS_FROZEN}` };
 }
 
 // ------------------------------------------------------------------ the run administration

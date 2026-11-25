@@ -61,6 +61,8 @@ gets an empty list (`200`). Wrong credentials are `401`; any method but `GET`/`H
   16 MiB (else `413`); the one exception is an import upload (the file itself as the body, see
   Import). Unknown fields are refused (`400`), so a typo is never ignored.
 - Answers are JSON. An error is `{"error": "<sentence>", "help": "<what to do>"?}`.
+- Every answer carries `Cache-Control: no-store` (exactly once; the export download too): no
+  browser or proxy keeps an answer, so a client always reads the current state.
 - Shared objects carry a `revision` (users and grants, aliases, each database's settings): a
   change may name the revision it was based on and is then refused with `409` when someone else
   changed the object since ([Revisions](#revisions-concurrent-changes)). Without a revision a

@@ -53,7 +53,8 @@ pub(crate) fn databases(loader: &Loader, access: &Access, principal: &Principal)
         }
     }
     rows.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
-    Response::json(200, &json!({ "databases": rows })).with_header("Cache-Control", "no-store")
+    // `Response::json` says `Cache-Control: no-store` itself.
+    Response::json(200, &json!({ "databases": rows }))
 }
 
 /// One row (module docs): `name` is the database's name or an alias of it (`alias_of`: the

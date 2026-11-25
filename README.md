@@ -205,7 +205,7 @@ shown once and as `…last4` after, new token, revoke, admin role, remove; grant
 included, on databases and aliases, each alias marked with its current database), the views of non-admins `login-tab.js` (paste a token; then the page's `?next=`
 path, only a path from the server root, or the root) and `mine-tab.js` ("My databases"), the
 top bar's `header.js` (who is signed in, "Log out"), the pure models
-`admin-api.js`, `databases.js` and `access-api.js`, the tabs' shared state `shared.js` and the style sheet
+`admin-api.js`, `databases.js`, `access-api.js`, `fresh.js` (fresh data per visit) and `sort.js` (sortable columns), the tabs' shared state `shared.js` and the style sheet
 `server-ui.css` (on the playground's theme tokens; the profile names it in `styles`, so the
 playground links it itself and `/` serves the playground's `index.html` unchanged). Every module imports only `vue` and the
 profile's own files and calls the admin API itself, sending the host's request headers
@@ -216,7 +216,27 @@ principal may use; after a login or logout the page loads the root again. A refu
 request sends the page to the login page (`401`) or, when the principal lost the admin role
 (`404`), to the root. The root has no graph: the profile
 has no workspace tab, so the page only reads `GET /api/info` and the admin API (the modules get
-the root info, e.g. `uploadBytes`, from the playground as `api.info.host`). Each loaded
+the root info, e.g. `uploadBytes`, from the playground as `api.info.host`).
+
+Every tab shows the current state on every visit, whatever changed it (another browser, a
+script, a console command such as `graphersal-server user add`): the playground keeps its tabs
+alive, so each tab reads its data again each time it is shown and when the window gets the
+focus back or the page becomes visible while it is shown (`fresh.js`; at most one such read per
+second). A refresh replaces only the shown data: an open dialog or form keeps what was typed.
+The Runs tab polls only while it is shown. Every answer of the server carries
+`Cache-Control: no-store`, so no browser or proxy shows a kept copy.
+
+Every table (databases, aliases, users, grants, backups, the import inbox, models, databases
+waiting for a model, runs, "My databases") sorts by a click on a column header (`sort.js`):
+ascending, a second click descending; natural text order (`db2` before `db10`), sizes,
+durations and ids by number, dates by time, missing values last; the sort is stable, and each
+table keeps its choice in the browser's localStorage. Until the first click a table keeps the
+server's order.
+
+The Databases tab explains bases and layers: the Kind column's tooltips, a "Bases and layers"
+box under the table, and the confirmation of "Promote to base…" say what a base is (a frozen,
+read-only database that layers are built over; each layer stores only its own changes), that
+promotion is one way and forever, and when to use it. Each loaded
 database keeps the ordinary playground under `/db/<name>/`; its `/api/info` carries `home: "/"`
 (the link back to the server's UI), `database`, and the same `server: "graphersal-server"`,
 `protocol: "graphersal/1"` and `dev: false` as the root.

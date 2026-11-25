@@ -43,6 +43,11 @@
 //! A `401` is `{"error", "login": "/"}` with `WWW-Authenticate: Bearer`; a refused session
 //! cookie is cleared with it.
 //!
+//! Every answer the server sends carries `Cache-Control: no-store` exactly once ([`no_store`]):
+//! the API answers (root, admin and each database's), the UI files, the errors and redirects.
+//! A browser never shows an answer it kept from an earlier visit (the web UI reads every tab's
+//! data again on each visit).
+//!
 //! Access control off (`server.toml [access] enabled = false`): nothing is refused for its
 //! principal. Valid admin credentials keep their identity (the operator, an admin user); every
 //! other request (none, a user without the admin role, wrong credentials) runs as the admin
@@ -293,7 +298,17 @@ impl Router {
     }
 
     /// Answers one request: an in-memory answer, or a file to stream (an export download).
-    pub(crate) fn answer(&self, mut request: Request<'_>) -> Answer {
+    /// Every in-memory answer carries `Cache-Control: no-store` ([`no_store`]; a download sets
+    /// it itself).
+    pub(crate) fn answer(&self, request: Request<'_>) -> Answer {
+        match self.answer_uncached(request) {
+            Answer::Response(response) => Answer::Response(no_store(response)),
+            download @ Answer::Download(_) => download,
+        }
+    }
+
+    /// [`Self::answer`] before [`no_store`].
+    fn answer_uncached(&self, mut request: Request<'_>) -> Answer {
         // Probes first: no Host check (a Kubernetes probe names the pod IP), no lock.
         if let Some(answer) = self.lifecycle.probe(request.method(), request.url()) {
             return Answer::Response(answer);
@@ -541,8 +556,7 @@ fn is_page_request(method: &Method, path: &str) -> bool {
 /// `Set-Cookie` value that clears the session cookie too.
 fn unauthorized(message: &str, clear: Option<String>) -> Response {
     let response = Response::json(401, &json!({ "error": message, "login": LOGIN_PAGE }))
-        .with_header("WWW-Authenticate", "Bearer")
-        .with_header("Cache-Control", "no-store");
+        .with_header("WWW-Authenticate", "Bearer");
     match clear {
         Some(cookie) => response.with_header("Set-Cookie", &cookie),
         None => response,
@@ -614,8 +628,7 @@ fn login(access: &Access, modes: &Modes, request: &mut Request<'_>) -> Result<Re
                     "admin": principal.is_admin(),
                 }}),
             )
-            .with_header("Set-Cookie", &cookie)
-            .with_header("Cache-Control", "no-store"))
+            .with_header("Set-Cookie", &cookie))
         }
         Err(AuthError::Unavailable(message)) => {
             tracing::error!(target: "graphersal_server", "login: {message}");
@@ -639,8 +652,22 @@ fn logout(access: &Access, modes: &Modes, request: &Request<'_>) -> Result<Respo
         None => false,
     };
     Ok(Response::json(200, &json!({ "loggedOut": ended }))
-        .with_header("Set-Cookie", &modes.cleared_session_cookie())
-        .with_header("Cache-Control", "no-store"))
+        .with_header("Set-Cookie", &modes.cleared_session_cookie()))
+}
+
+/// `response` with `Cache-Control: no-store`, unless it names a `Cache-Control` already (the
+/// JSON answers of `Response::json` and the files do): no browser or proxy keeps an answer of
+/// this server, so every visit of a tab shows the current state.
+pub(crate) fn no_store(response: Response) -> Response {
+    let named = response
+        .headers()
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case("cache-control"));
+    if named {
+        response
+    } else {
+        response.with_header("Cache-Control", "no-store")
+    }
 }
 
 /// `405` for `method` on `path`.

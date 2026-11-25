@@ -3,13 +3,16 @@
 // to the return path `next` of its address (only a path from the server root: ./access-api.js
 // `safeNext`, no open redirect) or loads the root again, where the server answers the signed-in
 // principal's tabs. Below the form: the databases open to everyone (anonymous grants), when
-// there are any. Model: ./access-api.js.
+// there are any, read again on every visit and when the window gets the focus back (./shared.js
+// `useFreshData`; the token field keeps its input). Model: ./access-api.js.
 
-import { reactive, onMounted } from 'vue';
+import { reactive } from 'vue';
 import {
   login, tokenProblem, afterLoginTarget, nextFromSearch, fetchMine, mineNote, emptyMineText,
 } from './access-api.js';
-import { ROOT, headers, errorNotice, pageHref } from './shared.js';
+import {
+  ROOT, headers, errorNotice, pageHref, useFreshData,
+} from './shared.js';
 
 export default {
   props: { api: { type: Object, required: true }, params: { type: Object, default: () => ({}) } },
@@ -33,7 +36,7 @@ export default {
       }
     }
 
-    onMounted(async () => {
+    useFreshData(async () => {
       try {
         s.open = await fetchMine(options);
       } catch {

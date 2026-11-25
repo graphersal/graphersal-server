@@ -2,9 +2,15 @@
 // this file): the server root, the host's request headers, the admin client and the database
 // list with its reload (polled while a database is loading), and what a refused request does
 // (401: the login page; 404 of the admin API: the root again when the principal lost the admin
-// role). Imports only `vue` and the profile's own files.
+// role), the fresh data of every tab on every visit (`useFreshData`, model ./fresh.js) and the
+// sortable table columns (`useSort`, `SortTh`, model ./sort.js). Imports only `vue` and the
+// profile's own files.
 
-import { reactive } from 'vue';
+import { reactive, onMounted, onActivated, onDeactivated, onUnmounted } from 'vue';
+import { createFreshness, listenForReturn } from './fresh.js';
+import {
+  sortRows, toggleSort, sortMark, ariaSort, loadSort, saveSort,
+} from './sort.js';
 import { createAdmin, sendAdmin, refusalNotice } from './admin-api.js';
 import {
   accessRequest, loginHref, principalOf, refusalAction, rootHref,
@@ -121,3 +127,68 @@ export function patchRow(entry) {
 
 /** The link to the playground of a list row (`db/<name>/` on the server root). */
 export const pageHref = (row) => new URL(row.href, ROOT).href;
+
+/**
+ * Makes the calling tab component (in `setup`) read its data with `refresh` when it is set up,
+ * each time it is shown again (the playground keeps tabs alive) and when the window gets the
+ * focus back or the page becomes visible while it is shown (./fresh.js). `refresh` replaces
+ * only the shown data, never the input of an open form. Returns the freshness state (`active`:
+ * whether the tab is shown; a poll stops while it is not).
+ */
+export function useFreshData(refresh) {
+  const freshness = createFreshness(refresh);
+  let unlisten = () => {};
+  onMounted(() => {
+    freshness.mounted();
+    unlisten = listenForReturn(freshness, globalThis.window, globalThis.document);
+  });
+  onActivated(() => freshness.activated());
+  onDeactivated(() => freshness.deactivated());
+  onUnmounted(() => {
+    freshness.unmounted();
+    unlisten();
+  });
+  return freshness;
+}
+
+/** The page's localStorage, or null (blocked: the accessor itself may throw). */
+function localStore() {
+  try {
+    return globalThis.localStorage || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The sort of the table `table` (a name unique in the UI, the localStorage key) over the
+ * column definitions `columns` = `{key: {type: 'text'|'number'|'date'|'bool', value?(row)}}`
+ * (./sort.js): `rows(list)` the list sorted, `toggle(key)` a header click, `mark(key)` the
+ * indicator, `aria(key)` the header's `aria-sort`. The choice is kept per table in localStorage.
+ */
+export function useSort(table, columns) {
+  const state = reactive({ sort: loadSort(localStore(), table, columns) });
+  return {
+    state,
+    columns,
+    rows: (list) => sortRows(list, state.sort, columns),
+    toggle(key) {
+      state.sort = toggleSort(state.sort, key);
+      saveSort(localStore(), table, state.sort);
+    },
+    mark: (key) => sortMark(state.sort, key),
+    aria: (key) => ariaSort(state.sort, key),
+  };
+}
+
+/** A sortable column header: `<sort-th :s="sorter" k="name">Name</sort-th>` (`s` from
+ * `useSort`, `k` the column's key; `title` its tooltip; `num` right-aligned). */
+export const SortTh = {
+  props: {
+    s: { type: Object, required: true },
+    k: { type: String, required: true },
+    title: { type: String, default: '' },
+    num: { type: Boolean, default: false },
+  },
+  template: `<th :aria-sort="s.aria(k)" :title="title || null" :class="{ num }"><button type="button" class="srv-sort" :data-sort="k" @click="s.toggle(k)"><slot></slot><span class="srv-sort-mark" :class="{ on: !!s.mark(k) }" aria-hidden="true">{{ s.mark(k) || '↕' }}</span></button></th>`,
+};

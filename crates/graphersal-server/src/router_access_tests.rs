@@ -2260,3 +2260,86 @@ fn grants_left_on_a_name_are_listed_revocable_and_removed_when_the_name_is_taken
     }
     let _ = fx.loader.unload("gone");
 }
+
+/// Every answer says `Cache-Control: no-store` exactly once (round 3 #1: a tab shows the
+/// current state on every visit, never an answer a browser kept): the root, user and admin API
+/// (reads, writes, refusals, unknown routes), each database's API, the UI files, a redirect.
+#[test]
+fn every_answer_says_no_store_exactly_once() {
+    let fx = fixture("no-store");
+    let alice = fx.alice.clone();
+    let bob = fx.bob.clone();
+    let mut answers: Vec<(String, Response)> = Vec::new();
+    for (who, url) in [
+        (Who::Bearer(OPERATOR), "/api/info"),
+        (Who::Anonymous, "/api/info"),
+        (Who::Bearer(&bob), "/api/databases"),
+        (Who::Anonymous, "/api/databases"),
+        (Who::Bearer(&alice), "/api/admin/databases"),
+        (Who::Bearer(&alice), "/api/admin/databases/w"),
+        (Who::Bearer(&alice), "/api/admin/aliases"),
+        (Who::Bearer(&alice), "/api/admin/users"),
+        (Who::Bearer(&alice), "/api/admin/grants"),
+        (Who::Bearer(&alice), "/api/admin/models"),
+        (Who::Bearer(&alice), "/api/admin/imports"),
+        (Who::Bearer(&alice), "/api/admin/runs"),
+        (Who::Bearer(&alice), "/api/admin/databases/w/backups"),
+        (Who::Bearer(&alice), "/api/admin/nope"),
+        (Who::Bearer(&bob), "/api/admin/users"),
+        (Who::Anonymous, "/api/admin/users"),
+        (Who::Bearer(&bob), "/db/w/api/info"),
+        (Who::Bearer(&bob), "/db/cur/api/info"),
+        (Who::Anonymous, "/db/w/api/info"),
+        (Who::Bearer(&bob), "/db/w"),
+        (Who::Bearer(&bob), "/api/nope"),
+        (Who::Anonymous, "/"),
+        (Who::Anonymous, "/server-ui/users-tab.js"),
+    ] {
+        answers.push((format!("GET {url}"), get(&fx, who, url)));
+    }
+    answers.push((
+        "POST /api/admin/users".to_string(),
+        post(
+            &fx,
+            Who::Bearer(&alice),
+            "/api/admin/users",
+            json!({ "name": "dave" }),
+        ),
+    ));
+    answers.push((
+        "POST /api/info".to_string(),
+        post(&fx, Who::Bearer(&alice), "/api/info", json!({})),
+    ));
+    answers.push((
+        "POST /api/login (wrong token)".to_string(),
+        post(
+            &fx,
+            Who::Anonymous,
+            "/api/login",
+            json!({ "token": "nope" }),
+        ),
+    ));
+    answers.push((
+        "PUT /db/w/ (bad credentials)".to_string(),
+        send(
+            &fx,
+            Who::Bearer("wrong"),
+            Method::Put,
+            "/db/w/api/info",
+            None,
+            &[],
+        ),
+    ));
+    for (what, answer) in &answers {
+        let values: Vec<&str> = answer
+            .headers()
+            .iter()
+            .filter(|(name, _)| name.eq_ignore_ascii_case("cache-control"))
+            .map(|(_, value)| value.as_str())
+            .collect();
+        assert_eq!(values, ["no-store"], "{what} ({})", answer.status());
+    }
+    // The answers above are what the UI reads: a user added meanwhile shows on the next read.
+    let users = json_of(&get(&fx, Who::Bearer(&alice), "/api/admin/users"));
+    assert!(users.to_string().contains("\"dave\""), "{users}");
+}

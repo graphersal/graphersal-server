@@ -9,19 +9,34 @@
 // the server, or a repository models/ already holds; every add also resolves the waiting
 // databases) and remove (`DELETE api/admin/models/<repo>`; refused with help while a database
 // uses it). Rules and texts: ./admin-api.js (`modelUploadRequest`, `addModelBody`). The models
-// are read again whenever the database list was reloaded.
+// are read again whenever the database list was reloaded, and with the database list on every
+// visit of the tab and when the window gets the focus back (./shared.js `useFreshData`; the Add
+// dialog keeps its input); both tables sort by any column.
 
-import { reactive, ref, computed, nextTick, onMounted, watch } from 'vue';
+import { reactive, ref, computed, nextTick, watch } from 'vue';
 import {
   modelRows, missingRows, removeModelAction, addModelBody, modelUploadRequest, uploadImport,
   uploadLimit, uploadSizeProblem, progressText, confirmText, outcomeText, bytesText,
 } from './admin-api.js';
-import { admin, ROOT, headers, list, reload, errorNotice, noticeClass } from './shared.js';
+import {
+  admin, ROOT, headers, list, reload, errorNotice, noticeClass, useFreshData, useSort, SortTh,
+} from './shared.js';
+
+/** The sortable columns of the model table. */
+const MODEL_COLUMNS = Object.freeze({
+  model: { type: 'text', value: (m) => m.repo },
+  size: { type: 'number', value: (m) => m.bytes },
+  users: { type: 'text', value: (m) => m.users },
+});
+
+/** The sortable columns of the table of databases waiting for a model. */
+const MISSING_COLUMNS = Object.freeze({ database: { type: 'text' }, model: { type: 'text' } });
 import { hostInfo } from './databases.js';
 
 const freshForm = () => ({ source: 'upload', file: null, path: '', repo: '', license: '' });
 
 export default {
+  components: { SortTh },
   props: { api: { type: Object, required: true }, params: { type: Object, default: () => ({}) } },
   setup(props) {
     const models = ref([]);
@@ -148,10 +163,14 @@ export default {
       }
     }
 
-    onMounted(load);
+    useFreshData(() => Promise.all([load(), reload()]));
+    const modelSort = useSort('models', MODEL_COLUMNS);
+    const missingSort = useSort('missing-models', MISSING_COLUMNS);
+    const modelList = computed(() => modelSort.rows(models.value));
+    const missingList = computed(() => missingSort.rows(missing.value));
     watch(() => list.version, load);
     return {
-      models, missing, error, loaded, busy, notice, dlg, dialog, load, remove, addByRepo, openAdd, closeAdd, cancelAdd, submitAdd,
+      models, missing, modelSort, missingSort, modelList, missingList, error, loaded, busy, notice, dlg, dialog, load, remove, addByRepo, openAdd, closeAdd, cancelAdd, submitAdd,
       fileInput, pickFile, limit, fileProblem, percent, progressText,
       bytesText, noticeClass, removeAct: removeModelAction,
       held: (repo) => models.value.some((m) => m.repo === repo),
@@ -178,9 +197,9 @@ export default {
     <p v-else-if="loaded && !models.length" class="muted">No embedding models. The server keeps one copy of each model in its models/ directory and hard-links it into every database that uses it.</p>
     <div v-if="models.length" class="srv-table-wrap">
     <table class="data-table srv-table srv-model-table">
-      <thead><tr><th>Model</th><th>Size</th><th>Used by</th><th><span class="sr-only">Actions</span></th></tr></thead>
+      <thead><tr><sort-th :s="modelSort" k="model">Model</sort-th><sort-th :s="modelSort" k="size" num>Size</sort-th><sort-th :s="modelSort" k="users">Used by</sort-th><th><span class="sr-only">Actions</span></th></tr></thead>
       <tbody>
-        <tr v-for="m in models" :key="m.blob" :data-model="m.id">
+        <tr v-for="m in modelList" :key="m.blob" :data-model="m.id">
           <td><span class="mono">{{ m.repo || '(not a model archive)' }}</span>
             <div class="muted srv-sub mono" :title="m.blob">{{ shortHash(m.blob) }}<template v-if="m.license"> · {{ m.license }}</template></div>
             <div v-if="m.copied" class="srv-sub srv-warn" :title="m.linkWarning">Copied, not linked, in {{ m.copiedIn.join(', ') }}<template v-if="m.linkWarning">: {{ m.linkWarning }}</template></div></td>
@@ -199,9 +218,9 @@ export default {
       <h2 class="srv-sub-head">Databases waiting for a model</h2>
       <div class="srv-table-wrap">
       <table class="data-table srv-table srv-missing-table">
-        <thead><tr><th>Database</th><th>Missing model</th><th><span class="sr-only">Actions</span></th></tr></thead>
+        <thead><tr><sort-th :s="missingSort" k="database">Database</sort-th><sort-th :s="missingSort" k="model">Missing model</sort-th><th><span class="sr-only">Actions</span></th></tr></thead>
         <tbody>
-          <tr v-for="m in missing" :key="m.database" :data-missing="m.database">
+          <tr v-for="m in missingList" :key="m.database" :data-missing="m.database">
             <td class="mono">{{ m.database }}</td>
             <td class="mono">{{ m.model }}</td>
             <td class="srv-actions">

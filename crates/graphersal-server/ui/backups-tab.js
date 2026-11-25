@@ -3,15 +3,30 @@
 // restore of a backup over the database itself (unloaded only) or into a new database (`POST
 // .../restore`). The database comes from the tab's address parameter `db` (the Databases tab's
 // row button "Backups…") or the form. Rules and texts: ./admin-api.js. The server's
-// `error`/`help` stay shown; a finished action reloads the database list.
+// `error`/`help` stay shown; a finished action reloads the database list. The backups and the
+// database list are read again on every visit of the tab and when the window gets the focus back
+// (./shared.js `useFreshData`; an open restore form keeps its input); the table sorts by any column.
 
-import { reactive, ref, computed, watch, onMounted } from 'vue';
+import { reactive, ref, computed, watch } from 'vue';
 import {
-  backupRows, restoreOverAction, nameProblem, existingNameProblem, restoredName, NAME_HINT, RESTORE_GRANTS_NOTE, confirmText, outcomeText, outcomeTone, bytesText, realRows,
+  backupRows, restoreOverAction, nameProblem, existingNameProblem, restoredName, NAME_HINT, RESTORE_GRANTS_NOTE, confirmText, outcomeText, outcomeTone, bytesText, realRows, kindHelp,
 } from './admin-api.js';
-import { admin, list, ensureLoaded, reload, errorNotice, noticeClass } from './shared.js';
+import {
+  admin, list, reload, errorNotice, noticeClass, useFreshData, useSort, SortTh,
+} from './shared.js';
+
+/** The kind cell's text of a backup. */
+const kindText = (b) => [b.kind, b.role === 'base' ? 'base' : ''].filter(Boolean).join(' · ');
+
+/** The sortable columns of the backup table (a backup's name is its time: text order is time order). */
+const BACKUP_COLUMNS = Object.freeze({
+  backup: { type: 'text' },
+  size: { type: 'number', value: (b) => b.bytes },
+  kind: { type: 'text', value: kindText },
+});
 
 export default {
+  components: { SortTh },
   props: { api: { type: Object, required: true }, params: { type: Object, default: () => ({}) } },
   setup(props) {
     const s = reactive({
@@ -22,6 +37,8 @@ export default {
     const names = computed(() => realRows(list.rows).map((r) => r.name));
     const row = computed(() => list.rows.find((r) => r.name === s.name && !r.aliasOf) || null);
     const over = computed(() => restoreOverAction(row.value));
+    const backupSort = useSort('backups', BACKUP_COLUMNS);
+    const backups = computed(() => backupSort.rows(s.list));
 
     async function refresh() {
       if (!s.name) return;
@@ -104,12 +121,20 @@ export default {
     }
 
     watch(() => props.params.db, (db) => choose(db || ''));
-    onMounted(async () => {
-      await ensureLoaded();
-      await choose(props.params.db || '');
+    // The first visit chooses the address's database; every later one reads its backups again
+    // (the restore form and the typed name stay).
+    let chosen = false;
+    useFreshData(async () => {
+      await reload();
+      if (!chosen) {
+        chosen = true;
+        await choose(props.params.db || '');
+      } else {
+        await refresh();
+      }
     });
 
-    return { s, notice, names, row, over, show, backupNow, startRestore, restore, bytesText, refresh, noticeClass, nameHint: NAME_HINT, grantsNote: RESTORE_GRANTS_NOTE };
+    return { s, backups, backupSort, kindText, kindHelp, notice, names, row, over, show, backupNow, startRestore, restore, bytesText, refresh, noticeClass, nameHint: NAME_HINT, grantsNote: RESTORE_GRANTS_NOTE };
   },
   template: `
   <div class="srv-tab">
@@ -135,12 +160,12 @@ export default {
     <p v-if="s.listed && !s.list.length" class="muted">No backups yet.</p>
     <div v-if="s.list.length" class="srv-table-wrap">
     <table class="data-table srv-table srv-backups">
-      <thead><tr><th>Backup</th><th>Size</th><th>Kind</th><th><span class="sr-only">Actions</span></th></tr></thead>
+      <thead><tr><sort-th :s="backupSort" k="backup">Backup</sort-th><sort-th :s="backupSort" k="size" num>Size</sort-th><sort-th :s="backupSort" k="kind">Kind</sort-th><th><span class="sr-only">Actions</span></th></tr></thead>
       <tbody>
-        <tr v-for="b in s.list" :key="b.backup" :data-backup="b.backup">
+        <tr v-for="b in backups" :key="b.backup" :data-backup="b.backup">
           <td class="mono">{{ b.backup }}<div v-if="b.file" class="muted srv-sub">{{ b.file }}</div></td>
           <td class="num">{{ bytesText(b.bytes) }}</td>
-          <td>{{ [b.kind, b.role === 'base' ? 'base' : ''].filter(Boolean).join(' · ') }}<div v-if="b.base" class="muted srv-sub">over {{ b.base }}</div></td>
+          <td :title="kindHelp(b) || null">{{ kindText(b) }}<div v-if="b.base" class="muted srv-sub">over {{ b.base }}</div></td>
           <td class="srv-actions"><button type="button" class="btn small" :disabled="!!s.busy" @click="startRestore(b)">Restore…</button></td>
         </tr>
       </tbody>

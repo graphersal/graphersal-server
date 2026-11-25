@@ -2,14 +2,26 @@
 // role gets at the server root. `GET api/databases` lists only the databases (and aliases) the
 // user may reach, with its level (read only, read and write) and a link to each loaded one's
 // playground `db/<name>/`; a database without a grant is never listed. A 401 (the session
-// ended) loads the login page (./shared.js `handleRefusal`). Model: ./access-api.js.
+// ended) loads the login page (./shared.js `handleRefusal`). The list is read again on every visit
+// and when the window gets the focus back (./shared.js `useFreshData`: a grant given meanwhile
+// shows up); the table sorts by any column. Model: ./access-api.js.
 
-import { reactive, onMounted } from 'vue';
+import { reactive, computed } from 'vue';
 import { fetchMine, mineNote, emptyMineText, principalOf } from './access-api.js';
 import { hostInfo } from './databases.js';
-import { requestOptions, errorNotice, pageHref } from './shared.js';
+import {
+  requestOptions, errorNotice, pageHref, useFreshData, useSort, SortTh,
+} from './shared.js';
+
+/** The sortable columns of the table. */
+const MINE_COLUMNS = Object.freeze({
+  name: { type: 'text' },
+  level: { type: 'text', value: (r) => r.levelText },
+  state: { type: 'text', value: (r) => r.stateText },
+});
 
 export default {
+  components: { SortTh },
   props: { api: { type: Object, required: true }, params: { type: Object, default: () => ({}) } },
   setup(props) {
     const s = reactive({ rows: [], read: false, loading: false, error: null });
@@ -28,8 +40,10 @@ export default {
       }
     }
 
-    onMounted(refresh);
-    return { s, principal, refresh, mineNote, empty: emptyMineText(principal), href: pageHref };
+    useFreshData(refresh);
+    const mineSort = useSort('mine', MINE_COLUMNS);
+    const rows = computed(() => mineSort.rows(s.rows));
+    return { s, rows, mineSort, principal, refresh, mineNote, empty: emptyMineText(principal), href: pageHref };
   },
   template: `
   <div class="srv-tab srv-mine">
@@ -42,9 +56,9 @@ export default {
     <p v-if="s.read && !s.error && !s.rows.length" class="muted srv-empty">{{ empty }}</p>
     <div v-if="s.rows.length" class="srv-table-wrap">
     <table class="data-table srv-table">
-      <thead><tr><th>Name</th><th>Access</th><th>State</th></tr></thead>
+      <thead><tr><sort-th :s="mineSort" k="name">Name</sort-th><sort-th :s="mineSort" k="level">Access</sort-th><sort-th :s="mineSort" k="state">State</sort-th></tr></thead>
       <tbody>
-        <tr v-for="row in s.rows" :key="row.name" :data-db="row.name">
+        <tr v-for="row in rows" :key="row.name" :data-db="row.name">
           <td><a v-if="row.open" :href="href(row)" class="mono">{{ row.name }}</a><span v-else class="mono">{{ row.name }}</span>
             <span class="muted srv-kind" :data-kind="row.kind"> {{ row.kindText }}</span>
             <div v-if="row.description" class="muted srv-sub">{{ row.description }}</div></td>

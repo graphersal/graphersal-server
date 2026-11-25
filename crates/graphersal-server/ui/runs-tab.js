@@ -2,17 +2,31 @@
 // on a loaded database, whatever its client (a browser page under db/<name>/, an MCP agent, a
 // script), from `GET api/admin/runs` (all loaded databases) or `GET api/admin/databases/<name>/runs`
 // (the tab's address parameter `db`, the Databases tab's row button "Runs…", or the filter),
-// read again every RUNS_POLL_MS while the tab is shown; "Stop" cancels one run by its id
+// read again every RUNS_POLL_MS while the tab is shown (the poll stops while another tab is
+// shown and starts again, with a read at once, on the next visit: ./shared.js `useFreshData`); "Stop" cancels one run by its id
 // (`POST api/admin/databases/<name>/runs/cancel`). Rules and texts: ./admin-api.js. The server's
 // `error`/`help` stay shown.
 
-import { reactive, ref, computed, watch, onMounted, onUnmounted } from 'vue';
+import { reactive, ref, computed, watch, onDeactivated, onUnmounted } from 'vue';
 import {
   runRows, durationText, runTextHead, cancelRunAction, confirmText, outcomeText, realRows, RUNS_POLL_MS,
 } from './admin-api.js';
-import { admin, list, ensureLoaded, errorNotice, noticeClass } from './shared.js';
+import {
+  admin, list, reload, errorNotice, noticeClass, useFreshData, useSort, SortTh,
+} from './shared.js';
+
+/** The sortable columns of the run table. */
+const RUN_COLUMNS = Object.freeze({
+  database: { type: 'text' },
+  id: { type: 'number' },
+  client: { type: 'text' },
+  state: { type: 'text', value: (r) => (r.cancelled ? 'stopping' : r.state) },
+  duration: { type: 'number', value: (r) => r.durationMs },
+  text: { type: 'text' },
+});
 
 export default {
+  components: { SortTh },
   props: { api: { type: Object, required: true }, params: { type: Object, default: () => ({}) } },
   setup(props) {
     const s = reactive({
@@ -36,7 +50,8 @@ export default {
       } catch (err) {
         s.error = errorNotice(err);
       }
-      if (alive) timer = setTimeout(refresh, RUNS_POLL_MS);
+      clearTimeout(timer);
+      if (alive && fresh.active) timer = setTimeout(refresh, RUNS_POLL_MS);
     }
 
     function choose(db) {
@@ -68,17 +83,28 @@ export default {
     }
 
     watch(() => props.params.db, (db) => choose(db || ''));
-    onMounted(async () => {
-      await ensureLoaded();
-      choose(props.params.db || '');
+    // The first visit chooses the address's database; every later one reads the runs (and the
+    // loaded databases of the filter) again and starts the poll.
+    let chosen = false;
+    const fresh = useFreshData(async () => {
+      await reload();
+      if (!chosen) {
+        chosen = true;
+        choose(props.params.db || '');
+      } else {
+        await refresh();
+      }
     });
+    onDeactivated(() => clearTimeout(timer));
+    const runSort = useSort('runs', RUN_COLUMNS);
+    const runs = computed(() => runSort.rows(s.runs));
     onUnmounted(() => {
       alive = false;
       clearTimeout(timer);
     });
 
     return {
-      s, notice, loadedNames, refresh, filter, stop, noticeClass, durationText,
+      s, runs, runSort, notice, loadedNames, refresh, filter, stop, noticeClass, durationText,
       textOf: (run) => runTextHead(run, s.textHeadChars),
       stopAction: (run) => cancelRunAction(run, { busy: !!s.busy }),
       openDb: (db) => props.api.navigate('runs', { db }),
@@ -106,9 +132,9 @@ export default {
     <p v-else-if="s.read && !s.runs.length" class="muted">Nothing runs now.</p>
     <div v-if="s.runs.length" class="srv-table-wrap">
     <table class="data-table srv-table srv-runs">
-      <thead><tr><th>Database</th><th>Run</th><th>Client</th><th>State</th><th>Duration</th><th>Query</th><th><span class="sr-only">Actions</span></th></tr></thead>
+      <thead><tr><sort-th :s="runSort" k="database">Database</sort-th><sort-th :s="runSort" k="id" num>Run</sort-th><sort-th :s="runSort" k="client">Client</sort-th><sort-th :s="runSort" k="state">State</sort-th><sort-th :s="runSort" k="duration" num>Duration</sort-th><sort-th :s="runSort" k="text">Query</sort-th><th><span class="sr-only">Actions</span></th></tr></thead>
       <tbody>
-        <tr v-for="r in s.runs" :key="r.database + '/' + r.id" :data-run="r.database + '/' + r.id">
+        <tr v-for="r in runs" :key="r.database + '/' + r.id" :data-run="r.database + '/' + r.id">
           <td><a href="#" @click.prevent="openDb(r.database)">{{ r.database }}</a></td>
           <td class="num mono">{{ r.id }}<div v-if="r.alias" class="muted srv-sub">{{ r.alias }}</div></td>
           <td class="mono">{{ r.client }}<div class="muted srv-sub">{{ r.kind }}</div></td>
