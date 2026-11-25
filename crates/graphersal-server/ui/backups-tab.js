@@ -7,7 +7,7 @@
 
 import { reactive, ref, computed, watch, onMounted } from 'vue';
 import {
-  backupRows, restoreOverAction, nameProblem, confirmText, outcomeText, bytesText, realRows,
+  backupRows, restoreOverAction, nameProblem, existingNameProblem, restoredName, NAME_HINT, confirmText, outcomeText, bytesText, realRows,
 } from './admin-api.js';
 import { admin, list, ensureLoaded, reload, errorNotice, noticeClass } from './shared.js';
 
@@ -43,7 +43,8 @@ export default {
     }
     /** The form: a database of the list or any name (a deleted database's backups). */
     function show() {
-      const problem = nameProblem(s.typed, 'database name');
+      // Any name a database had (one made before 0.3.0 may break the rule of new names).
+      const problem = existingNameProblem(s.typed, 'database name');
       if (problem) {
         s.error = { tone: 'error', text: problem, help: '' };
         return;
@@ -71,7 +72,7 @@ export default {
     function startRestore(b) {
       s.restoring = b.backup;
       s.target = over.value.enabled ? 'over' : 'new';
-      s.newName = `${s.name}-restored`;
+      s.newName = restoredName(s.name);
       s.error = null;
     }
     async function restore() {
@@ -108,7 +109,7 @@ export default {
       await choose(props.params.db || '');
     });
 
-    return { s, notice, names, row, over, show, backupNow, startRestore, restore, bytesText, refresh, noticeClass };
+    return { s, notice, names, row, over, show, backupNow, startRestore, restore, bytesText, refresh, noticeClass, nameHint: NAME_HINT };
   },
   template: `
   <div class="srv-tab">
@@ -151,7 +152,7 @@ export default {
         <label class="inline" :title="over.title"><input type="radio" value="over" v-model="s.target" :disabled="!over.enabled"> Over "{{ s.name }}" itself</label>
         <p v-if="!over.enabled" class="muted srv-sub">{{ over.title }}</p>
         <label class="inline"><input type="radio" value="new" v-model="s.target"> Into a new database</label>
-        <label v-if="s.target === 'new'">Name <input v-model="s.newName" name="newName" class="mono" autocomplete="off" spellcheck="false"></label>
+        <label v-if="s.target === 'new'">Name <input v-model="s.newName" name="newName" class="mono" autocomplete="off" spellcheck="false"><small class="srv-field-hint">{{ nameHint }}</small></label>
       </fieldset>
       <div class="store-dialog-buttons">
         <button type="submit" class="btn primary" :disabled="!!s.busy">{{ s.busy === 'restore' ? 'Restoring…' : 'Restore' }}</button>

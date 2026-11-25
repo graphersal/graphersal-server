@@ -165,7 +165,7 @@ test('the last usable admin cannot be removed, demoted or left without a token',
 
 test('the forms', () => {
   assert.equal(userNameProblem(''), 'Enter a user name.');
-  assert.match(userNameProblem('-x'), /starts with a letter or digit/);
+  assert.match(userNameProblem('-x'), /starts with a lower-case letter or a digit/);
   for (const name of RESERVED_USER_NAMES) assert.match(userNameProblem(name.toUpperCase()), /reserved/);
   assert.deepEqual(addUserForm({ name: ' Carol ', admin: true }), { name: 'carol', admin: true });
   assert.deepEqual(addUserForm({ name: 'carol' }), { name: 'carol', admin: false });

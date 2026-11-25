@@ -1691,6 +1691,132 @@ mod tests {
         assert_eq!(created.status(), 201);
     }
 
+    /// The rule of NEW names (0.3.0: at most 32 characters, a letter or digit last, no `..`):
+    /// create, clone, import, alias and alias rename refuse a name breaking it with `400`
+    /// naming the reason; nothing is made. Databases named before (longer, a trailing '-')
+    /// stay listed, looked up and aliased.
+    #[test]
+    fn new_names_follow_the_stricter_rule_and_old_names_keep_working() {
+        let temp = TempDir::new("admin-api-new-names");
+        let dir = server(&temp);
+        let long = "a-database-name-of-forty-characters-0040";
+        assert_eq!(long.len(), 40);
+        add_db(&dir, "acme", Some(""), true);
+        add_db(&dir, long, Some(""), true);
+        add_db(&dir, "legacy-", Some(""), true);
+        let registry = Registry::scan(&dir).unwrap();
+        registry.alias_set("cur", "acme").unwrap();
+        let too_long = "x".repeat(33);
+        for (bad, reason) in [
+            (too_long.as_str(), "at most 32 characters"),
+            ("acme-", "ends with a lower-case letter or a digit"),
+            ("acme_", "ends with a lower-case letter or a digit"),
+            ("a..b", "cannot hold '..'"),
+        ] {
+            let body = serde_json::json!({ "name": bad }).to_string();
+            let alias_url = format!("/api/admin/aliases/{bad}");
+            let import_url = format!("/api/admin/import?name={bad}");
+            let cases: [(Method, String, &str, &str, &[u8]); 5] = [
+                (
+                    Method::Post,
+                    "databases".into(),
+                    "/api/admin/databases",
+                    "application/json",
+                    body.as_bytes(),
+                ),
+                (
+                    Method::Post,
+                    "databases/acme/clone".into(),
+                    "/api/admin/databases/acme/clone",
+                    "application/json",
+                    body.as_bytes(),
+                ),
+                (
+                    Method::Post,
+                    "import".into(),
+                    &import_url,
+                    "application/octet-stream",
+                    b"not read",
+                ),
+                (
+                    Method::Put,
+                    format!("aliases/{bad}"),
+                    &alias_url,
+                    "application/json",
+                    br#"{"target": "acme"}"#,
+                ),
+                (
+                    Method::Post,
+                    "aliases/cur/rename".into(),
+                    "/api/admin/aliases/cur/rename",
+                    "application/json",
+                    body.as_bytes(),
+                ),
+            ];
+            for (method, endpoint, url, content_type, body) in cases {
+                let answer = route_with(&registry, &method, &endpoint, url, content_type, body)
+                    .unwrap_or_else(|err| panic!("{endpoint}: {}", err.message()));
+                assert_eq!(answer.status(), 400, "{endpoint} {bad}");
+                let answer = json_of(&answer);
+                let error = answer["error"].as_str().unwrap();
+                assert!(error.contains("invalid name"), "{endpoint}: {error}");
+                assert!(error.contains(reason), "{endpoint}: {error}");
+            }
+        }
+        let mut names: Vec<String> = registry.list().into_iter().map(|e| e.name).collect();
+        names.sort();
+        assert_eq!(
+            names,
+            [
+                "a-database-name-of-forty-characters-0040",
+                "acme",
+                "legacy-"
+            ]
+        );
+        assert_eq!(registry.aliases().len(), 1);
+        assert_eq!(registry.aliases()["cur"], "acme");
+
+        // The old names: looked up (also folded) and aliased.
+        for name in [long, "legacy-", "LEGACY-"] {
+            let answer = route(&registry, &Method::Get, &format!("databases/{name}")).unwrap();
+            assert_eq!(answer.status(), 200, "{name}");
+        }
+        let answer = route_with(
+            &registry,
+            &Method::Put,
+            "aliases/old",
+            "/api/admin/aliases/old",
+            "application/json",
+            format!(r#"{{"target": "{long}"}}"#).as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(answer.status(), 200, "{}", json_of(&answer));
+        assert_eq!(registry.aliases()["old"], long);
+        let answer = route_with(
+            &registry,
+            &Method::Put,
+            "aliases/old",
+            "/api/admin/aliases/old",
+            "application/json",
+            br#"{"target": "legacy-"}"#,
+        )
+        .unwrap();
+        assert_eq!(answer.status(), 200, "{}", json_of(&answer));
+        assert_eq!(registry.aliases()["old"], "legacy-");
+        // A 32-character new name is the longest.
+        let longest = "y".repeat(32);
+        let created = route_with(
+            &registry,
+            &Method::Post,
+            "databases",
+            "/api/admin/databases",
+            "application/json",
+            format!(r#"{{"name": "{longest}"}}"#).as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(created.status(), 201, "{}", json_of(&created));
+    }
+
     #[test]
     fn the_listing_shows_databases_aliases_and_states() {
         let temp = TempDir::new("admin-api-list");

@@ -31,7 +31,7 @@ use super::token::{Secret, TokenHash};
 use crate::database::DatabaseRole;
 use crate::error::ServerError;
 use crate::layout::ServerDir;
-use crate::names::{fold, validate_name};
+use crate::names::{fold, validate_name, validate_new_user_name};
 use crate::registry::DatabaseEntry;
 
 /// The name of the first admin a server directory gets.
@@ -436,12 +436,14 @@ impl AccessFile {
 
     /// Adds the user `name` with `roles` and a new token (returned: show it once).
     ///
-    /// `Err`: an invalid name ([`ServerError::InvalidName`]), a reserved name
+    /// `Err`: an invalid new name ([`ServerError::InvalidName`]; the new rule of
+    /// [`crate::names::validate_new_user_name`]), a reserved name
     /// ([`RESERVED_USER_NAMES`]) or a user of that name ([`ServerError::Refused`]), the OS's
     /// random generator failing.
     pub fn add_user(&mut self, name: &str, roles: Vec<String>) -> Result<Secret, ServerError> {
         let key = fold(name);
-        validate_name(&key)?;
+        // A new user takes the new name rule; existing users keep the old one (`names`).
+        validate_new_user_name(&key)?;
         if RESERVED_USER_NAMES.contains(&key.as_str()) {
             return Err(ServerError::Refused {
                 name: key,

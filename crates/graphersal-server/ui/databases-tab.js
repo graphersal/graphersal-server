@@ -11,7 +11,7 @@
 
 import { reactive, ref, computed, nextTick, onMounted } from 'vue';
 import {
-  createBody, nameProblem, renameProblem, rowActions, confirmText, outcomeText, loadAndWatch, baseNames, realRows,
+  createBody, nameProblem, existingNameProblem, renameProblem, NAME_HINT, rowActions, confirmText, outcomeText, loadAndWatch, baseNames, realRows,
   bytesText, transferActions, needsModelHint, poolText, promoteAction,
 } from './admin-api.js';
 import { admin, list, reload, patchRow, errorNotice, noticeClass, pageHref } from './shared.js';
@@ -109,7 +109,9 @@ export default {
         return { subject, action: 'clone', send: () => admin.clone(source, subject) };
       }
       if (dialog.mode === 'alias') {
-        const problem = nameProblem(dialog.alias, 'alias name') || (dialog.target ? null : 'Choose the database the alias names.');
+        // A flip keeps an existing alias's name (one made before 0.3.0 may break the new rule).
+        const aliasProblem = dialog.existing ? existingNameProblem(dialog.alias, 'alias name') : nameProblem(dialog.alias, 'alias name');
+        const problem = aliasProblem || (dialog.target ? null : 'Choose the database the alias names.');
         if (problem) return { problems: [problem] };
         const subject = dialog.alias.trim().toLowerCase();
         const target = dialog.target;
@@ -157,7 +159,7 @@ export default {
 
     return {
       list, rows, aliases, busy, notice, dlg, dialog, acts, more, promo, bases, databaseNames, showSize, showMemory,
-      bytesText, needsModelHint, poolText, noticeClass, href: pageHref, reload,
+      bytesText, needsModelHint, poolText, noticeClass, href: pageHref, reload, nameHint: NAME_HINT,
       loadDb, unloadDb, deleteDb, promoteDb, setFlag, openCreate, openClone, openAlias, openRename, closeDialog, submitDialog, removeAlias,
       openBackups: (name) => props.api.navigate('backups', name ? { db: name } : {}),
       openExport: (row) => props.api.navigate('export', { db: row.name }),
@@ -271,7 +273,7 @@ export default {
         </div>
         <div class="dialog-body srv-form">
           <template v-if="dialog.mode === 'create'">
-            <label>Name <input v-model="dialog.form.name" class="mono" name="name" autocomplete="off" spellcheck="false"></label>
+            <label>Name <input v-model="dialog.form.name" class="mono" name="name" autocomplete="off" spellcheck="false"><small class="srv-field-hint">{{ nameHint }}</small></label>
             <fieldset>
               <legend>Kind</legend>
               <label class="inline"><input type="radio" value="plain" v-model="dialog.form.kind"> Plain</label>
@@ -289,16 +291,16 @@ export default {
           </template>
           <template v-else-if="dialog.mode === 'clone'">
             <p>A copy of the latest state of "{{ dialog.source }}" with the same kind, base, description and read-only flag; auto-load off. It is independent afterwards.</p>
-            <label>Name of the clone <input v-model="dialog.form.name" name="name" class="mono" autocomplete="off" spellcheck="false"></label>
+            <label>Name of the clone <input v-model="dialog.form.name" name="name" class="mono" autocomplete="off" spellcheck="false"><small class="srv-field-hint">{{ nameHint }}</small></label>
           </template>
           <template v-else-if="dialog.mode === 'alias'">
-            <label>Alias <input v-model="dialog.alias" name="alias" class="mono" autocomplete="off" spellcheck="false" :readonly="dialog.existing"></label>
+            <label>Alias <input v-model="dialog.alias" name="alias" class="mono" autocomplete="off" spellcheck="false" :readonly="dialog.existing"><small v-if="!dialog.existing" class="srv-field-hint">{{ nameHint }}</small></label>
             <label>Database
               <select v-model="dialog.target" name="target"><option v-for="n in databaseNames" :key="n" :value="n">{{ n }}</option></select></label>
           </template>
           <template v-else-if="dialog.mode === 'rename'">
             <p>The alias "{{ dialog.alias }}" (database "{{ dialog.target }}") gets a new name. Links to db/{{ dialog.alias }}/ stop working; open MCP sessions that selected it move to the new name.</p>
-            <label>New name <input v-model="dialog.newName" name="newName" class="mono" autocomplete="off" spellcheck="false"></label>
+            <label>New name <input v-model="dialog.newName" name="newName" class="mono" autocomplete="off" spellcheck="false"><small class="srv-field-hint">{{ nameHint }}</small></label>
           </template>
           <ul v-if="dialog.problems.length" class="srv-problems" role="alert"><li v-for="p in dialog.problems" :key="p">{{ p }}</li></ul>
           <div v-if="dialog.error" class="notice srv-notice srv-error" role="alert">

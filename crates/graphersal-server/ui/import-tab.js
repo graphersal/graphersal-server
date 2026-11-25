@@ -12,7 +12,7 @@
 
 import { reactive, ref, computed, watch, onMounted } from 'vue';
 import {
-  importRequest, uploadImport, uploadLimit, uploadSizeProblem, progressText, suggestName,
+  importRequest, uploadImport, uploadLimit, uploadSizeProblem, progressText, suggestName, NAME_HINT,
   outcomeText, needsModelHint, bytesText, baseNames, inboxRows, IMPORT_FORMATS, BASE_IS_FROZEN,
 } from './admin-api.js';
 import { admin, ROOT, headers, list, ensureLoaded, reload, noticeClass } from './shared.js';
@@ -130,7 +130,7 @@ export default {
 
     return {
       form, s, notice, inbox, loadInbox, pickInbox, fileInput, bases, limit, fileProblem, percent, cancel, submit, pickFile, pathChanged, noticeClass,
-      progressText, bytesText, formats: IMPORT_FORMATS, frozen: BASE_IS_FROZEN,
+      progressText, bytesText, formats: IMPORT_FORMATS, frozen: BASE_IS_FROZEN, nameHint: NAME_HINT,
       touchName: () => { nameTouched = true; },
       openDatabases: () => props.api.navigate('databases'),
       openModels: () => props.api.navigate('models'),
@@ -175,7 +175,8 @@ export default {
       <label v-if="form.source === 'path'">Absolute path on the server
         <input v-model="form.path" name="path" class="mono" autocomplete="off" spellcheck="false" placeholder="/data/acme.gsnap" @change="pathChanged" :disabled="s.busy"></label>
       <label>Name of the new database
-        <input v-model="form.name" name="name" class="mono" autocomplete="off" spellcheck="false" @input="touchName" :disabled="s.busy"></label>
+        <input v-model="form.name" name="name" class="mono" autocomplete="off" spellcheck="false" @input="touchName" :disabled="s.busy">
+        <small class="srv-field-hint">{{ nameHint }}</small></label>
       <label>Format
         <select v-model="form.format" name="format" :disabled="s.busy">
           <option v-for="f in formats" :key="f" :value="f">{{ f || 'detected from the content' }}</option>

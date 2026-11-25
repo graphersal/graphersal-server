@@ -266,9 +266,31 @@ impl Registry {
     pub fn prepare_tmp(
         self: &Arc<Self>,
         name: &str,
-        mut config: DatabaseConfig,
+        config: DatabaseConfig,
     ) -> Result<TmpBuild, ServerError> {
         validate_new_name(name)?;
+        self.prepare_tmp_checked(name, config)
+    }
+
+    /// [`Registry::prepare_tmp`] for a name that a database had before (a backup restored
+    /// under its own database's name after that database was deleted): the name takes the rule
+    /// of an EXISTING name ([`validate_name`]), so a database named before the stricter rule of
+    /// new names (`crate::names`) can come back from its backup under that name.
+    pub fn prepare_tmp_former_name(
+        self: &Arc<Self>,
+        name: &str,
+        config: DatabaseConfig,
+    ) -> Result<TmpBuild, ServerError> {
+        validate_name(name)?;
+        self.prepare_tmp_checked(name, config)
+    }
+
+    /// The rest of [`Registry::prepare_tmp`] after the name check.
+    fn prepare_tmp_checked(
+        self: &Arc<Self>,
+        name: &str,
+        mut config: DatabaseConfig,
+    ) -> Result<TmpBuild, ServerError> {
         config.check().map_err(|message| ServerError::Refused {
             name: name.to_string(),
             message,

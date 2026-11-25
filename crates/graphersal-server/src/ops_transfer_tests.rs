@@ -632,3 +632,43 @@ fn backup_restore_and_export_over_http() {
     assert_eq!(tmp_count(&dir), 0);
     running.stop().unwrap();
 }
+
+/// A database named before the rule of new names (here 40 characters) backs up, restores over
+/// itself and, deleted, comes back from its backup under its own name; a restore into another
+/// name takes the rule of new names.
+#[test]
+fn an_old_long_name_restores_under_its_own_name_only() {
+    let temp = TempDir::new("xfer-old-name");
+    let dir = server(&temp);
+    let long = "a-database-name-of-forty-characters-0040";
+    assert_eq!(long.len(), 40);
+    // Made as a valid name, then renamed on disk as a 0.2.0 server could have named it.
+    offline(&dir).create("acme", &CreateSpec::plain()).unwrap();
+    add_plain(&dir, "acme", 2);
+    fs::rename(dir.databases().join("acme"), dir.databases().join(long)).unwrap();
+    let admin = offline(&dir);
+    assert_eq!(admin.registry().get(long).unwrap().name, long);
+    let backup = admin.backup(long).expect("a backup");
+    admin
+        .restore(long, &backup.backup, None)
+        .expect("over itself");
+    for (target, reason) in [
+        (
+            "a-database-name-of-forty-characters-0041",
+            "at most 32 characters",
+        ),
+        ("acme-", "ends with a lower-case letter or a digit"),
+        ("a..b", "cannot hold '..'"),
+    ] {
+        let err = admin
+            .restore(long, &backup.backup, Some(target))
+            .unwrap_err();
+        assert!(matches!(err, ServerError::InvalidName { .. }), "{err}");
+        assert!(err.to_string().contains(reason), "{target}: {err}");
+    }
+    admin.delete(long).unwrap();
+    let restored = admin.restore(long, &backup.backup, None).expect("back");
+    assert_eq!(restored.entry.name, long);
+    assert_eq!(plain_count(&dir, long), 2);
+    assert_eq!(tmp_count(&dir), 0);
+}

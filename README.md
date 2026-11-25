@@ -264,6 +264,16 @@ owner only; `init DIR` on an older directory tightens them. There is no registry
 databases are the directories under `databases/`. Details of
 every file and key: [`docs/server-dir.md`](docs/server-dir.md).
 
+**Names.** A new database, alias or user name has up to 32 characters: lower-case letters,
+digits, `.`, `_` and `-`; it starts and ends with a letter or digit, holds no `..` and is no
+Windows device name (`con`, `nul`, `com1`, ...); `jobs` is reserved for databases and aliases.
+Names are case-insensitive (`ACME` finds `acme`). Names made by 0.2.0 or earlier under the
+older rule (up to 63 characters, a trailing `-` or `_`, `..` inside) keep working everywhere
+(served, granted, aliased, restored under their own name); only new ones are refused. On
+Windows keep the server directory itself short (e.g. `C:\gs\srv`): a Store adds its own
+directories and file names below `databases/<name>/`, and a path over 260 characters
+(`MAX_PATH`) fails unless long paths are enabled in Windows.
+
 ## Documentation
 
 - [`docs/access.md`](docs/access.md): access control: principals, grants and levels, tokens,

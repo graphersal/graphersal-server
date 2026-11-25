@@ -129,7 +129,9 @@ A principal's level on a database is computed in two steps:
 (`/api/admin/...`, which includes Runs and Users). Other roles get access only through
 `role:<role>` grants.
 
-User names follow the database name rule. `anonymous` and `operator` are reserved. The last
+User names follow the database name rule: a new user name has at most 32 characters,
+starts and ends with a lower-case letter or digit and holds no `..` (a user named under the
+older rule by 0.2.0 still logs in and is granted). `anonymous` and `operator` are reserved. The last
 admin (a user with the `admin` role and a token) cannot be removed, demoted or left without a
 token.
 

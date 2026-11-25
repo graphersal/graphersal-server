@@ -61,11 +61,16 @@ gets an empty list (`200`). Wrong credentials are `401`; any method but `GET`/`H
 - Every `GET` route but the export also answers `HEAD`.
 - The actions take **real database names**; an alias is not followed (`404`). Only
   `GET /api/admin/databases/<name>` also answers an alias. Names are case-insensitive and
-  answered in lower case; the name rule is `[a-z0-9][a-z0-9._-]{0,62}` (no Windows device
-  names); databases and aliases share one namespace. A new database or alias (create, clone,
-  import, restore under a new name, alias set, alias rename) cannot take the reserved name
-  `jobs`: `400` with help (the default backup root `backups/jobs/` would collide with that
-  database's admin backups).
+  answered in lower case; databases and aliases share one namespace. A NEW name (create,
+  clone, import, restore under a new name, alias set of a new alias, alias rename, user add)
+  has at most 32 characters, `[a-z0-9]` first, `[a-z0-9._-]` inside, a letter or digit last,
+  no `..` and no Windows device name; otherwise `400` `invalid name "<name>": <reason>` (the
+  web UI checks the same rule with the same texts before sending). A new database or alias
+  cannot take the reserved name `jobs` either: `400` with help (the default backup root
+  `backups/jobs/` would collide with that database's admin backups). A name made before 0.3.0
+  under the older rule `[a-z0-9][a-z0-9._-]{0,62}` (not ending in `.`) keeps working in every
+  route: lookups, `/db/<name>/`, grants, flipping its alias, restoring a backup under its own
+  name.
 - Status codes: `200`/`201`/`202` success; `400` invalid name, body or schema; `404` no such
   database, alias, model or endpoint; `405` method not allowed on an existing endpoint; `409` a rule
   refuses it (name taken, database loaded, named by an alias, base of layers, a base's

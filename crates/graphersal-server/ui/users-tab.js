@@ -10,7 +10,7 @@
 import { reactive, ref, computed, nextTick, onMounted } from 'vue';
 import {
   userRows, grantRows, userActions, addUserForm, grantForm, userConfirmText, userOutcomeText,
-  shownToken, realRows, GRANT_LEVELS,
+  shownToken, realRows, GRANT_LEVELS, NAME_HINT,
 } from './admin-api.js';
 import { admin, list, ensureLoaded, errorNotice, noticeClass } from './shared.js';
 
@@ -134,7 +134,7 @@ export default {
     });
 
     return {
-      s, busy, notice, token, copied, dlg, add, grant, databaseNames, GRANT_LEVELS, noticeClass,
+      s, busy, notice, token, copied, dlg, add, grant, databaseNames, GRANT_LEVELS, noticeClass, nameHint: NAME_HINT,
       acts: (u) => userActions(u, s.users, { busy: !!busy[u.name] }),
       grantsText: (u) => u.grants.map((g) => `${g.database === '*' ? 'every database' : g.database}: ${g.level}`).join(', '),
       newToken, revokeToken, toggleAdmin, removeUser, revokeGrant, openAdd, closeAdd, submitAdd, submitGrant, copyToken, refresh,
@@ -232,7 +232,7 @@ export default {
           <button type="button" class="icon-btn" @click="closeAdd" aria-label="Close">×</button>
         </div>
         <div class="dialog-body srv-form">
-          <label>Name <input v-model="add.name" class="mono" name="name" autocomplete="off" spellcheck="false"></label>
+          <label>Name <input v-model="add.name" class="mono" name="name" autocomplete="off" spellcheck="false"><small class="srv-field-hint">{{ nameHint }}</small></label>
           <label class="inline"><input type="checkbox" name="admin" v-model="add.admin"> Admin (every database, the admin API and these tabs)</label>
           <p class="muted">The server makes a token for the user and shows it once.</p>
           <ul v-if="add.problems.length" class="srv-problems" role="alert"><li v-for="p in add.problems" :key="p">{{ p }}</li></ul>

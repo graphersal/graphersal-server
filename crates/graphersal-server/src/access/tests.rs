@@ -458,3 +458,48 @@ fn browser_sessions_expire_by_lifetime_and_idle_time() {
         "the expired session is removed"
     );
 }
+
+/// A NEW user takes the rule of new names (0.3.0); a user and a database named before it
+/// (a trailing '_', 40 characters) still log in and are granted.
+#[test]
+fn new_user_names_follow_the_new_rule_and_old_ones_keep_working() {
+    let f = fixture("access-new-names");
+    let operator = Principal::operator();
+    let too_long = "u".repeat(33);
+    for (name, reason) in [
+        (too_long.as_str(), "at most 32 characters"),
+        ("bob-", "ends with a lower-case letter or a digit"),
+        ("bob_", "ends with a lower-case letter or a digit"),
+        ("b..b", "cannot hold '..'"),
+    ] {
+        let err = f.access.add_user(&operator, name, Vec::new()).unwrap_err();
+        assert!(matches!(err, ServerError::InvalidName { .. }), "{err}");
+        assert!(err.to_string().contains(reason), "{name}: {err}");
+    }
+    // `jobs` is reserved for databases only.
+    f.access.add_user(&operator, "jobs", Vec::new()).unwrap();
+    // A user made by an older server: `bob` renamed to `bob_` in access.toml.
+    let token = f.access.add_user(&operator, "bob", Vec::new()).unwrap();
+    let path = f.dir.access_path();
+    let text = fs::read_to_string(&path).unwrap();
+    assert!(text.contains("[users.bob]"), "{text}");
+    fs::write(&path, text.replace("[users.bob]", "[users.bob_]")).unwrap();
+    let (access, _) = Access::open(&f.dir, None, Audit::default()).unwrap();
+    let bob = access.authenticate(&bearer(token.expose())).unwrap();
+    assert_eq!(bob.identity().as_deref(), Some("user:bob_"));
+    let long = "a-database-name-of-forty-characters-0040";
+    add_db(&f.dir, long, Some(""), true);
+    add_db(&f.dir, "legacy-", Some(""), true);
+    for database in [long, "legacy-"] {
+        let grant =
+            Grant::new(Subject::parse("user:bob_").unwrap(), database, Level::Read).unwrap();
+        access.grant(&operator, grant).unwrap();
+        assert_eq!(
+            access.granted_level(&bob, database),
+            Level::Read,
+            "{database}"
+        );
+    }
+    // The file with these names reads back.
+    assert_eq!(AccessFile::read(&f.dir).unwrap().unwrap(), access.file());
+}

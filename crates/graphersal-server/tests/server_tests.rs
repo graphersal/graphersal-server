@@ -3894,3 +3894,102 @@ fn the_shutdown_route_needs_real_credentials_with_access_off_and_a_hook() {
     assert!(body.contains("no stop hook"), "{body}");
     running.stop().unwrap();
 }
+
+/// Names made before 0.3.0 that break the rule of new names (40 characters, a trailing '-' or
+/// '_', a `..`) are still served under `/db/<name>/`, granted by the console and reached by an
+/// old user's token; only NEW names are refused (console and admin API).
+#[test]
+fn names_made_before_the_new_rule_are_still_served_and_grantable() {
+    let temp = TempDir::new("old-names");
+    let root = temp.path().join("srv");
+    let out = run(&["init", root.to_str().unwrap()]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let dir = ServerDir::new(&root);
+    let long = "a-database-name-of-forty-characters-0040";
+    assert_eq!(long.len(), 40);
+    for name in [long, "trailing-", "two..dots"] {
+        modern_db(&dir, name);
+    }
+    // A user of an older server: made as `reader`, renamed to `reader_` in access.toml.
+    let (code, out, err) = user(&root, &["add", "reader"]);
+    assert_eq!(code, 0, "{err}");
+    let token = printed_token(&out);
+    let access = root.join("access.toml");
+    let file = std::fs::read_to_string(&access).unwrap();
+    assert!(file.contains("[users.reader]"), "{file}");
+    std::fs::write(&access, file.replace("[users.reader]", "[users.reader_]")).unwrap();
+    for database in [long, "trailing-", "two..dots"] {
+        let (code, _, err) = user(&root, &["grant", "reader_", database, "read"]);
+        assert_eq!(code, 0, "{database}: {err}");
+    }
+    // A new user or database breaking the rule is refused by the console.
+    let (code, _, err) = user(&root, &["add", "reader-"]);
+    assert_ne!(code, 0);
+    assert!(
+        err.contains("ends with a lower-case letter or a digit"),
+        "{err}"
+    );
+    let (code, _, err) = db(&root, &["create", &"x".repeat(33)]);
+    assert_ne!(code, 0);
+    assert!(err.contains("at most 32 characters"), "{err}");
+
+    let running = serve::start(
+        &root,
+        ServeOptions::new().with_listen("127.0.0.1:0".parse().unwrap()),
+    )
+    .unwrap();
+    let address = running.address();
+    let loader = running.loader();
+    for name in [long, "trailing-", "two..dots"] {
+        loader.load(name).unwrap();
+        assert_eq!(
+            loader.wait(name, Duration::from_secs(120)).unwrap(),
+            DbState::Loaded
+        );
+    }
+    let bearer = format!("Authorization: Bearer {token}\r\n");
+    let count = serde_json::json!({ "script": "g.v().count().next()" }).to_string();
+    for name in [long, "trailing-", "two..dots"] {
+        let (status, _, body) = send(
+            address,
+            "GET",
+            &format!("/db/{name}/api/info"),
+            &[],
+            &bearer,
+            "",
+        );
+        assert_eq!(status, 200, "{name}: {body}");
+        assert_eq!(json(&body)["database"], name);
+        let (status, _, body) = send(
+            address,
+            "POST",
+            &format!("/db/{name}/api/execute"),
+            &[("Content-Type", "application/json")],
+            &bearer,
+            &count,
+        );
+        assert_eq!(status, 200, "{name}: {body}");
+        assert_eq!(json(&body)["execution"]["results"][0], 6, "{name}: {body}");
+    }
+    // An alias may name an old database; a new database may not take such a name.
+    let (status, answer) = admin_json(
+        address,
+        "PUT",
+        "aliases/current",
+        serde_json::json!({ "target": long }),
+    );
+    assert!(status < 300, "{answer}");
+    assert_eq!(execute(address, "current", "g.v().count().next()"), 6);
+    let (status, answer) = admin_json(
+        address,
+        "POST",
+        &format!("databases/{long}/clone"),
+        serde_json::json!({ "name": "copy-" }),
+    );
+    assert_eq!(status, 400, "{answer}");
+    assert!(
+        answer["error"].as_str().unwrap().contains("ends with"),
+        "{answer}"
+    );
+    running.stop().unwrap();
+}

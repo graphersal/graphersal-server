@@ -369,7 +369,10 @@ impl Admin {
 
     /// Restores the backup `backup` (its name, or `<name>.zip`) of the database name `source`
     /// into the database `target` (default: `source`), module docs. Into a new name: a new
-    /// database (`auto_load` off; an existing other database is [`ServerError::NameInUse`]).
+    /// database (`auto_load` off; an existing other database is [`ServerError::NameInUse`];
+    /// the name takes the rule of new names, `crate::names`). Under the name `source` of a
+    /// deleted database: that database again, its name checked as an existing one (a name made
+    /// before the rule of new names comes back).
     /// Over the existing database `source` itself: it must be unloaded; it keeps its flags and
     /// description, takes the backup's kind and base, and the old directory moves to `trash/`.
     ///
@@ -429,7 +432,12 @@ impl Admin {
                 if let Some(sidecar) = &sidecar {
                     config.description = sidecar.description.clone();
                 }
-                self.registry.prepare_tmp(&target, config)?
+                if target == source {
+                    // The deleted database's own name: it was valid then, so it is now.
+                    self.registry.prepare_tmp_former_name(&target, config)?
+                } else {
+                    self.registry.prepare_tmp(&target, config)?
+                }
             }
         };
         let reader = File::open(&archive).map_err(|err| ServerError::io("read", &archive, err))?;

@@ -112,6 +112,30 @@ fn a_full_snapshot_becomes_a_plain_database_whatever_its_file_name() {
     assert!(!dir.databases().join("other").exists());
 }
 
+/// An import into a name breaking the rule of new names is refused before anything is made.
+#[test]
+fn an_import_refuses_a_name_breaking_the_new_rule() {
+    let temp = TempDir::new("import-new-names");
+    let dir = server(&temp);
+    let admin = offline(&dir);
+    let file = temp.path().join("modern.gsnap");
+    modern_snapshot(&file);
+    let too_long = "x".repeat(33);
+    for (name, reason) in [
+        (too_long.as_str(), "at most 32 characters"),
+        ("modern-", "ends with a lower-case letter or a digit"),
+        ("a..b", "cannot hold '..'"),
+    ] {
+        let err = admin
+            .import(&ImportSource::new(&file), name, None, None)
+            .unwrap_err();
+        assert!(matches!(err, ServerError::InvalidName { .. }), "{err}");
+        assert!(err.to_string().contains(reason), "{name}: {err}");
+    }
+    assert!(admin.registry().list().is_empty());
+    assert_eq!(tmp_count(&dir), 0);
+}
+
 #[test]
 fn snapshots_with_and_without_models() {
     let temp = TempDir::new("import-models");
