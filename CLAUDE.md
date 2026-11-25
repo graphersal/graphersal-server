@@ -74,14 +74,19 @@ from published files). When this file disagrees with the code, the code wins: sa
   `ContextBuilder::server_name`, never `.dev(true)`), `protocol: graphersal_serve::PROTOCOL`
   ("graphersal/1", the only thing the playground's `isEngineInfo` checks; every mount answers it
   too), `dev: false`, no `product`, no `admin`; `ui/tests/root-info.json` = its fixed fields for
-  the node test, checked by `router::tests::the_node_tests_root_info_is_the_answer`, `uiProfile` = `ui_assets::profile()`, `uploadBytes` = the upload limit, `mcp` =
+  the node test, checked by `router::tests::the_node_tests_root_info_is_the_answer`, `uiProfile` = `ui_assets::profile_for(View::of(principal))`, `uploadBytes` = the upload limit, `mcp` =
   `Mcp::status()` or null), `/mcp` (every method) via `mcp::route` (404 when MCP is off),
-  `/api/admin/...` via `admin_api`, other `/api/*` 404, `GET /server-ui/<file>` the profile's
+  `GET /api/databases` via `user_api` (B4: "my databases" for every principal, anonymous
+  included: only the databases/aliases with a grant, effective `level`, `playground` path;
+  tests `router_access_tests.rs` `my_databases_*`), `/api/admin/...` via `admin_api`, other
+  `/api/*` 404, `GET /server-ui/<file>` the profile's
   files (`ui_assets::file`), every other GET a file of the embedded playground at the root (`/` =
   its `index.html` unchanged: the profile names its style sheet in `styles`); `ready(loader)` installs
   the resolver), `ui_assets` (the `server` UI profile built into the binary: `include_bytes!`
   table of `crates/graphersal-server/ui/` (the tests excluded), `FILES_PREFIX` `/server-ui/`,
-  `profile()` adds the binary's version; a unit test checks every file in `ui/` and every
+  `profile_for(View)` adds the binary's version and, for `View::User`/`View::Anonymous`,
+  replaces the keys `ui/profile-views.json` names (tabs `mine` / `login`; `View::of(principal)`:
+  admin/operator = `Admin`); a unit test checks every file in `ui/` and every
   `styles` entry is built in; the modules read the root info (`uploadBytes`) from
   `api.info.host`, `databases.js` `hostInfo`, never fetch it themselves),
   `mounts` (`/db/<name>/<rest>`:
@@ -311,12 +316,20 @@ from published files). When this file disagrees with the code, the code wins: sa
   server logs to stderr.
 - `crates/graphersal-server/ui/`: the server's web UI, the playground UI profile `server`
   (the graphersal-memory `memory` profile's pattern; the engine's playground mechanism: its
-  `playground/CLAUDE.md` "UI profiles"): `profile.json` (module tabs Databases, Backups, Import,
-  Export, Models, Runs; no workspace: the root has no graph; `files` = `server-ui/` relative to `/`),
+  `playground/CLAUDE.md` "UI profiles"): `profile.json` (the admin's: module tabs Databases, Backups, Import,
+  Export, Models, Runs, Users, `header` = `header.js`; no workspace: the root has no graph; `files` = `server-ui/` relative to `/`),
+  `profile-views.json` (the keys a user's view (`mine-tab.js`, "My databases" over `GET
+  api/databases`) and anonymous's (`login-tab.js`, "Sign in": paste a token, `POST api/login`,
+  then the address's `?next=` if `access-api.js` `safeNext` takes it, else the root) replace;
+  the server picks the view per principal, the page never decides it),
   the tab modules `*-tab.js` (Vue options components with `template`, props `api` and `params`;
   cross-tab links through `api.navigate(tab, {db})`), the pure models `admin-api.js` (requests,
-  rules, texts of every admin action) and `databases.js` (`databaseRows`, `fetchDatabases`,
-  `hostHeaders`, `downloadBlob`), `shared.js` (one list, admin client and root info for every
+  rules, texts of every admin action, the Users tab's `userRows` (`tokenText` `…last4`),
+  `grantRows`, `userActions` (last usable admin), forms and texts), `databases.js` (`databaseRows`, `fetchDatabases`,
+  `hostHeaders`, `downloadBlob`) and `access-api.js` (login/logout, `safeNext`, `principalOf`,
+  `headerModel`, `mineRows`, `refusalAction`: 401 with `login` -> the login page, 404 -> read the
+  root info again and load the root when no longer admin), `shared.js` (one list, admin client
+  with `onRefusal` = `handleRefusal`, and root info for every
   tab; polls while a database is loading); uploads (Import tab, Models tab's "A file from this
   computer": `modelUploadRequest` + `uploadImport({kind: 'model'})`) go through XHR with
   progress, sized against `api.info.host.uploadBytes` first; `server-ui.css` (`srv-*` classes on the playground's

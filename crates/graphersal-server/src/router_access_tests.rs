@@ -1204,3 +1204,140 @@ fn the_last_admin_is_never_removed_demoted_or_locked_out() {
         200,
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// "My databases" (B4): `GET /api/databases` and the profile per principal
+// ---------------------------------------------------------------------------------------------
+
+/// The `(name, level, aliasOf)` of each row of `GET /api/databases` as `who`.
+fn listed(fx: &Fixture, who: Who<'_>) -> Vec<(String, String, Option<String>)> {
+    let answer = expect(get(fx, who, "/api/databases"), 200);
+    answer["databases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| {
+            let name = row["name"].as_str().unwrap().to_string();
+            assert_eq!(row["playground"], format!("/db/{name}/"), "{row}");
+            assert_eq!(row["state"], "loaded", "{row}");
+            assert_eq!(row["readOnly"], row["level"] == "read", "{row}");
+            assert!(row["description"].is_string(), "{row}");
+            assert!(row.get("reason").is_none(), "no admin detail: {row}");
+            (
+                name,
+                row["level"].as_str().unwrap().to_string(),
+                row["aliasOf"].as_str().map(str::to_string),
+            )
+        })
+        .collect()
+}
+
+fn row(name: &str, level: &str, alias_of: Option<&str>) -> (String, String, Option<String>) {
+    (
+        name.to_string(),
+        level.to_string(),
+        alias_of.map(str::to_string),
+    )
+}
+
+#[test]
+fn my_databases_lists_only_what_the_principal_may_reach() {
+    let fx = fixture("access-mine");
+    // bob: `w` write, `r` read (and its alias `cur`); `h` and its alias `hid` are hidden.
+    assert_eq!(
+        listed(&fx, Who::Bearer(&fx.bob)),
+        [
+            row("cur", "read", Some("r")),
+            row("r", "read", None),
+            row("w", "write", None),
+        ]
+    );
+    // The same through the browser session.
+    let session = login(&fx, &fx.bob);
+    assert_eq!(listed(&fx, Who::Cookie(&session)).len(), 3);
+    // carol has no grant: an empty list, never a hidden name.
+    assert!(listed(&fx, Who::Bearer(&fx.carol)).is_empty());
+    let carol = get(&fx, Who::Bearer(&fx.carol), "/api/databases");
+    let text = String::from_utf8_lossy(carol.body()).into_owned();
+    for hidden in ["\"h\"", "\"hid\"", "\"w\"", "\"r\""] {
+        assert!(!text.contains(hidden), "{hidden} leaks: {text}");
+    }
+    // Anonymous is a principal: an empty list (200, not 401) until an anonymous grant opens one.
+    assert!(listed(&fx, Who::Anonymous).is_empty());
+    // An admin and the operator reach everything, at write.
+    let all = [
+        row("cur", "write", Some("r")),
+        row("h", "write", None),
+        row("hid", "write", Some("h")),
+        row("r", "write", None),
+        row("w", "write", None),
+    ];
+    assert_eq!(listed(&fx, Who::Bearer(&fx.alice)), all);
+    assert_eq!(listed(&fx, Who::Bearer(OPERATOR)), all);
+    // An anonymous grant opens `h` (and its alias) to everyone, logged in or not.
+    let operator = Principal::operator();
+    let grant = Grant::new(Subject::parse("anonymous").unwrap(), "h", Level::Read).unwrap();
+    fx.access.grant(&operator, grant).unwrap();
+    assert_eq!(
+        listed(&fx, Who::Anonymous),
+        [row("h", "read", None), row("hid", "read", Some("h"))]
+    );
+    assert_eq!(
+        listed(&fx, Who::Bearer(&fx.carol)),
+        [row("h", "read", None), row("hid", "read", Some("h"))]
+    );
+    // The level is capped by the database's mode: a read-only `w` is `read` for bob.
+    fx.loader.set_read_only("w", true).unwrap();
+    assert!(listed(&fx, Who::Bearer(&fx.bob)).contains(&row("w", "read", None)));
+    // Wrong credentials are 401, never anonymous; a write method is 405.
+    assert_unauthorized(
+        &get(&fx, Who::Bearer("not-a-token"), "/api/databases"),
+        "wrong token",
+    );
+    let post = post(&fx, Who::Bearer(&fx.bob), "/api/databases", json!({}));
+    assert_eq!(post.status(), 405);
+}
+
+#[test]
+fn the_root_profile_follows_the_principal() {
+    let fx = fixture("access-profile");
+    let tabs = |who| -> (Vec<String>, Value) {
+        let info = expect(get(&fx, who, "/api/info"), 200);
+        let profile = info["uiProfile"].clone();
+        assert_eq!(profile["name"], "server");
+        assert_eq!(profile["header"]["module"], "header.js");
+        let ids = profile["tabs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["id"].as_str().unwrap().to_string())
+            .collect();
+        (ids, profile["startTab"].clone())
+    };
+    assert_eq!(
+        tabs(Who::Anonymous),
+        (vec!["login".to_string()], json!("login"))
+    );
+    assert_eq!(
+        tabs(Who::Bearer(&fx.bob)),
+        (vec!["mine".to_string()], json!("mine"))
+    );
+    let (admin, start) = tabs(Who::Bearer(&fx.alice));
+    assert_eq!(start, "databases");
+    assert!(admin.contains(&"users".to_string()), "{admin:?}");
+    assert_eq!(tabs(Who::Bearer(OPERATOR)).0, admin);
+    // The modules of every view are public files (the login page loads before any login).
+    for module in [
+        "login-tab.js",
+        "mine-tab.js",
+        "header.js",
+        "access-api.js",
+        "users-tab.js",
+    ] {
+        assert_eq!(
+            get(&fx, Who::Anonymous, &format!("/server-ui/{module}")).status(),
+            200,
+            "{module}"
+        );
+    }
+}

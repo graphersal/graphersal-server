@@ -45,3 +45,13 @@ p.srv-problems { padding-left: 0; }
 /* The Runs tab: the query text wraps, the one action needs no wide column. */
 .srv-runs .srv-actions { min-width: 0; }
 .srv-runs .srv-run-text { overflow-wrap: anywhere; max-width: 48ch; font-size: 12.5px; }
+/* Access: the header (who is signed in, Log out), the login page, "My databases", the Users tab's
+   token shown once. */
+.srv-header { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; }
+.srv-header-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 24ch; }
+.srv-login .srv-narrow { max-width: 420px; }
+.srv-mine-list { margin: 10px 0 0; padding-left: 18px; font-size: 13.5px; }
+.srv-mine-list li { margin: 4px 0; }
+.srv-token { background: var(--warn-soft); }
+.srv-token-row { display: flex; gap: 8px; margin-top: 6px; }
+.srv-token-row input { flex: 1 1 auto; min-width: 0; font-size: 12.5px; }
