@@ -47,8 +47,10 @@
 //! every database is unloaded ([`Loader::shutdown`]: its Store closed cleanly), the runtime is
 //! shut down, `server.run` is removed and the lock released.
 //!
-//! Safety: the server has no access control. The default listen address is the loopback; any
-//! other address gets a warning in `serve`'s start block (the console; [`Running::exposure`]
+//! Safety: every route but the probes, `/api/info` and the UI files needs a principal with
+//! access ([`crate::access`], enforced by the router); tokens travel in clear text over plain
+//! HTTP. The default listen address is the loopback; any other address gets a warning in
+//! `serve`'s start block (the console; [`Running::exposure`]
 //! tells a library caller). The `Host`/`Origin` checks of `graphersal_serve` (DNS
 //! rebinding, cross-site pages) run on every request but the probes.
 
@@ -368,15 +370,25 @@ pub fn start(
             return Err(err);
         }
     }
-    if let Err(err) = running.shared.router.ready(running.loader.clone()) {
+    let access = running.access.clone().ok_or_else(|| ServerError::Thread {
+        message: "the access state is missing".to_string(),
+    });
+    let ready = access.and_then(|access| {
+        running
+            .shared
+            .router
+            .ready(running.loader.clone(), access)
+            .map_err(|err| ServerError::Thread {
+                message: err.to_string(),
+            })
+    });
+    if let Err(err) = ready {
         // A first admin nobody will see must not close the directory for good.
         if let Some(first) = running.first_admin.take() {
             let _ = std::fs::remove_file(&first.path);
         }
         let _ = running.shutdown();
-        return Err(ServerError::Thread {
-            message: err.to_string(),
-        });
+        return Err(err);
     }
     // The databases with `auto_load = true`, each on a background thread of its own.
     running.loader.auto_load();
@@ -400,7 +412,7 @@ pub fn start(
         running.url,
         match exposure {
             Exposure::Loopback => "loopback",
-            Exposure::Network => "reachable from the network, no access control",
+            Exposure::Network => "reachable from the network",
         }
     );
     Ok(running)
@@ -418,7 +430,8 @@ impl Running {
         &self.url
     }
 
-    /// Whether the server is reachable from the network (no access control!).
+    /// Whether the server is reachable from the network (tokens travel in clear text over plain
+    /// HTTP).
     pub fn exposure(&self) -> Exposure {
         self.exposure
     }

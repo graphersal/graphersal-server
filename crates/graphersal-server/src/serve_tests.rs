@@ -185,9 +185,10 @@ fn a_running_request_is_not_cut_by_the_idle_or_header_timeout() {
     let mut stream = TcpStream::connect(running.address()).unwrap();
     write!(
         stream,
-        "POST /api/admin/databases HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\n\
+        "POST /api/admin/databases HTTP/1.1\r\nHost: {}\r\n{}Content-Type: application/json\r\n\
          Content-Length: {}\r\nConnection: close\r\n\r\n",
         running.address(),
+        crate::test_support::admin_header(running.address()),
         body.len()
     )
     .unwrap();
@@ -215,12 +216,14 @@ fn h2_request(running: &Running, method: &str, path: &str, body: &[u8]) -> (u16,
                 .await
                 .unwrap();
         tokio::spawn(conn);
-        let request = hyper::Request::builder()
+        let mut request = hyper::Request::builder()
             .method(method)
             .uri(format!("http://{address}{path}"))
-            .header("content-type", "application/json")
-            .body(Outgoing::full(body))
-            .unwrap();
+            .header("content-type", "application/json");
+        if let Some(token) = crate::test_support::operator_token(address) {
+            request = request.header("authorization", format!("Bearer {token}"));
+        }
+        let request = request.body(Outgoing::full(body)).unwrap();
         let response = sender.send_request(request).await.unwrap();
         let status = response.status().as_u16();
         let version = response.version();

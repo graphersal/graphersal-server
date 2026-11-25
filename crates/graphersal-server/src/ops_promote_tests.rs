@@ -413,7 +413,14 @@ fn start(dir: &ServerDir) -> Running {
 }
 
 fn call(address: SocketAddr, method: &str, path: &str, body: Option<Value>) -> (u16, Value) {
-    crate::client::request(address, method, path, body.as_ref()).expect("answers")
+    crate::client::request(
+        address,
+        crate::test_support::operator_token(address).as_deref(),
+        method,
+        path,
+        body.as_ref(),
+    )
+    .expect("answers")
 }
 
 /// `POST path` with `body` as an upload (not JSON).
@@ -424,8 +431,9 @@ fn upload(address: SocketAddr, path: &str, body: &[u8]) -> (u16, Value) {
         .set_read_timeout(Some(Duration::from_secs(120)))
         .unwrap();
     let head = format!(
-        "POST {path} HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\nContent-Type: \
+        "POST {path} HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n{}Content-Type: \
          application/octet-stream\r\nContent-Length: {}\r\n\r\n",
+        crate::test_support::admin_header(address),
         body.len()
     );
     stream.write_all(head.as_bytes()).unwrap();

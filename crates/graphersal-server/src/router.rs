@@ -1,20 +1,39 @@
 //! Which answer a request gets: the probes and the lifecycle 503s (`graphersal_serve::Server`),
-//! the `Host`/`Origin` checks (every request but the probes), then the routes:
+//! the `Host`/`Origin` checks (every request but the probes), the browser login and logout,
+//! then authentication ([`Access::authenticate`]: wrong credentials are `401`, never anonymous;
+//! the principal's identity goes onto the request), then the routes, each refused per
+//! principal:
 //!
+//! - `POST /api/login {"token"}`: a browser session for a user token, its id in the
+//!   `gs_session` cookie (`HttpOnly; SameSite=Strict; Path=/`); `POST /api/logout` ends it and
+//!   clears the cookie. Both run before authentication (a stale cookie must not lock a browser
+//!   out of logging in again).
 //! - `/db/<name>/...`: the database `<name>` (or the database an alias names, resolved per
 //!   request), its playground, API and MCP endpoint, with the prefix stripped
-//!   ([`crate::mounts`]); `/db/<name>` redirects to `/db/<name>/`; `404` for an unknown name,
-//!   `409` for a database that is not loaded;
-//! - `GET /api/info`: the server's identity and its UI profile (`uiProfile`, the `server`
-//!   profile of [`crate::ui_assets`]);
-//! - `/api/admin/...`: the admin API ([`crate::admin_api`]);
-//! - `/mcp`: the server-wide MCP endpoint over every database ([`crate::mcp`]; `404` when
-//!   `server.toml` turns MCP off);
+//!   ([`crate::mounts`]), for a principal granted at least `read` on it. Without a grant the
+//!   database does not exist for the principal: anonymous gets `401` (for EVERY name, so
+//!   nothing about existence leaks; a `GET` of a page or static file `303` to the login page
+//!   `/?next=<path>`), a logged-in principal the unknown-name `404`. A `read` grant marks the
+//!   forwarded request read-only (`Request::mark_read_only`: the reading authorizer, write
+//!   routes `409`, the read-only MCP profile); the database's own mode still applies in its
+//!   context. `/db/<name>` redirects to `/db/<name>/`; `409` for a database that is not
+//!   loaded.
+//! - `GET /api/info`: the server's identity, its UI profile (`uiProfile`) and the principal
+//!   (`principal {id, kind, admin}`); for anonymous only what the login page needs (`server`,
+//!   `protocol`, `dev`, `experimental`, `uiProfile`, `principal`, `login: "/"`).
+//! - `/api/admin/...` (the admin API, Runs included; [`crate::admin_api`]): admins only;
+//!   anonymous gets `401`, a logged-in principal without the admin role `404` as if the API did
+//!   not exist. The admin core records its events with the principal as the actor.
+//! - `/mcp`: the server-wide MCP endpoint over the databases the principal may see
+//!   ([`crate::mcp`]; `404` when `server.toml` turns MCP off).
 //! - any other `/api/...` path: `404`;
 //! - `GET /server-ui/<file>`: a file of the `server` UI profile ([`crate::ui_assets`]);
 //! - every other `GET`: a file of the embedded playground at the root (`/` = its `index.html`,
 //!   unchanged; the page shows the `server` profile: the database list and the admin tabs, no
-//!   graph), `404` when there is no such file.
+//!   graph), `404` when there is no such file. These files are public (the login page is one).
+//!
+//! A `401` is `{"error", "login": "/"}` with `WWW-Authenticate: Bearer`; a refused session
+//! cookie is cleared with it.
 
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
@@ -24,8 +43,16 @@ use graphersal_serve::{
 };
 use serde_json::json;
 
+use crate::access::{Access, AuthError, Level, Principal, SESSION_COOKIE};
 use crate::loader::Loader;
 use crate::mounts::{self, Databases};
+
+/// The login page of the server (its UI at the root), named in every `401`.
+pub(crate) const LOGIN_PAGE: &str = "/";
+/// The browser login route.
+pub(crate) const LOGIN: &str = "/api/login";
+/// The browser logout route.
+pub(crate) const LOGOUT: &str = "/api/logout";
 
 /// The host name every `GET /api/info` answers as `server`: the root's and each database
 /// mount's (`ContextBuilder::server_name`), so a client tells this server from the CLI's dev
@@ -49,6 +76,8 @@ pub(crate) struct Router {
     pub(crate) host_check: HostCheck,
     /// The loader (and through it the registry), set by [`Self::ready`].
     loader: OnceLock<Arc<Loader>>,
+    /// The access state, set by [`Self::ready`].
+    access: OnceLock<Arc<Access>>,
     /// The playground served at the root.
     ui: Ui,
 }
@@ -60,12 +89,17 @@ impl Router {
             lifecycle: graphersal_serve::Server::new(),
             host_check,
             loader: OnceLock::new(),
+            access: OnceLock::new(),
             ui: Ui::embedded(),
         }
     }
 
-    /// The server serves its routes and the databases of `loader`.
-    pub(crate) fn ready(&self, loader: Arc<Loader>) -> Result<(), ServeError> {
+    /// The server serves its routes and the databases of `loader`, each request refused or
+    /// let through by `access`.
+    pub(crate) fn ready(&self, loader: Arc<Loader>, access: Arc<Access>) -> Result<(), ServeError> {
+        self.access
+            .set(access)
+            .map_err(|_| ServeError::Lifecycle("the router was made ready before".to_string()))?;
         self.loader
             .set(loader.clone())
             .map_err(|_| ServeError::Lifecycle("the router was made ready before".to_string()))?;
@@ -108,37 +142,53 @@ impl Router {
         if let Err(refused) = self.host_check.check(&request) {
             return Answer::Response(error_response(refused));
         }
+        let Some(access) = self.access.get() else {
+            return Answer::Response(self.lifecycle.handle(request));
+        };
         let url = request.url().to_string();
         let (path, query) = match url.split_once('?') {
             Some((path, query)) => (path, Some(query)),
             None => (url.as_str(), None),
         };
         let method = request.method().clone();
+        if path == LOGIN || path == LOGOUT {
+            let answer = if method != Method::Post {
+                Err(not_allowed(&method, path))
+            } else if path == LOGIN {
+                login(access, &mut request)
+            } else {
+                logout(access, &request)
+            };
+            return Answer::Response(answer.unwrap_or_else(error_response));
+        }
+        let principal = match access.authenticate(&request) {
+            Ok(principal) => principal,
+            Err(err) => return Answer::Response(refused_credentials(&err, &method, path, &url)),
+        };
+        if let Some(identity) = principal.identity() {
+            request.set_identity(identity);
+        }
         if let Some((name, rest)) = mounts::split_db_path(path) {
-            let Ok(entry) = loader.registry().resolve(name) else {
-                return Answer::Response(mounts::unknown_database(name));
-            };
-            let Some(rest) = rest else {
-                return Answer::Response(mounts::redirect_to_slash(path, query));
-            };
-            // Only a check: the resolver takes the context again and holds it for the request.
-            if loader.context(&entry.name).is_none() {
-                return Answer::Response(mounts::not_loaded(&entry));
-            }
-            let target = match query {
-                Some(query) => format!("/{rest}?{query}"),
-                None => format!("/{rest}"),
-            };
-            return Answer::Response(self.lifecycle.handle(mounts::forward(
+            return Answer::Response(self.database(
+                loader,
+                access,
+                &principal,
                 &mut request,
-                &target,
-                &entry.name,
-            )));
+                (name, rest),
+                (path, query, &url),
+            ));
         }
         let read = matches!(method, Method::Get | Method::Head);
         let answer = if path == crate::mcp::ENDPOINT {
             match loader.mcp() {
-                Some(mcp) => return Answer::Response(crate::mcp::route(mcp, loader, &mut request)),
+                Some(mcp) => {
+                    let directory = crate::mcp::Directory {
+                        loader,
+                        access,
+                        principal: &principal,
+                    };
+                    return Answer::Response(crate::mcp::route(mcp, &directory, &mut request));
+                }
                 None => Err(HttpError::new(
                     404,
                     "the MCP endpoint is off: server.toml [mcp] enabled = false",
@@ -146,12 +196,16 @@ impl Router {
             }
         } else if path == "/api/info" {
             if read {
-                info(self.upload_limit(), loader.mcp().map(|mcp| mcp.status()))
+                self.info_for(loader, &principal)
             } else {
                 Err(not_allowed(&method, path))
             }
         } else if let Some(endpoint) = path.strip_prefix("/api/admin/") {
-            let admin = crate::ops::Admin::online(loader.clone());
+            if !principal.is_admin() {
+                return Answer::Response(admin_refused(&principal, path));
+            }
+            let admin =
+                crate::ops::Admin::online(loader.clone()).with_audit(access.audit_as(&principal));
             if let Some(name) = crate::admin_api::export_target(&method, endpoint) {
                 return match crate::admin_api::export(&admin, name, query) {
                     Ok(download) => Answer::Download(download),
@@ -173,6 +227,67 @@ impl Router {
             Err(not_allowed(&method, path))
         };
         Answer::Response(answer.unwrap_or_else(error_response))
+    }
+
+    /// A request to `/db/<name>/<rest>` (`rest` `None`: no slash after the name) by
+    /// `principal`: refused without a grant (module docs), else forwarded to the database's
+    /// context with the principal's identity, read-only for a `read` grant.
+    fn database(
+        &self,
+        loader: &Loader,
+        access: &Access,
+        principal: &Principal,
+        request: &mut Request<'_>,
+        (name, rest): (&str, Option<&str>),
+        (path, query, url): (&str, Option<&str>, &str),
+    ) -> Response {
+        let entry = loader.registry().resolve(name).ok();
+        let granted = entry.as_ref().map_or(Level::None, |entry| {
+            access.granted_level(principal, &entry.name)
+        });
+        let Some(entry) = entry.filter(|_| granted != Level::None) else {
+            if !principal.is_anonymous() {
+                return mounts::unknown_database(name);
+            }
+            if is_page_request(request.method(), path) {
+                return redirect_to_login(url);
+            }
+            return unauthorized("log in to reach this database", false);
+        };
+        let Some(rest) = rest else {
+            return mounts::redirect_to_slash(path, query);
+        };
+        // Only a check: the resolver takes the context again and holds it for the request.
+        if loader.context(&entry.name).is_none() {
+            return mounts::not_loaded(&entry);
+        }
+        let target = match query {
+            Some(query) => format!("/{rest}?{query}"),
+            None => format!("/{rest}"),
+        };
+        let mut forwarded = mounts::forward(request, &target, &entry.name);
+        if let Some(identity) = principal.identity() {
+            forwarded.set_identity(identity);
+        }
+        if granted == Level::Read {
+            forwarded.mark_read_only();
+        }
+        self.lifecycle.handle(forwarded)
+    }
+
+    /// `GET /api/info` for `principal` (module docs).
+    fn info_for(&self, loader: &Loader, principal: &Principal) -> Result<Response, HttpError> {
+        let mut answer = if principal.is_anonymous() {
+            anonymous_info()?
+        } else {
+            info_value(self.upload_limit(), loader.mcp().map(|mcp| mcp.status()))?
+        };
+        answer["principal"] = json!({
+            "id": principal.id,
+            "kind": principal.kind.as_str(),
+            "admin": principal.is_admin(),
+        });
+        Ok(Response::json(200, &answer))
     }
 
     /// A file of the playground at the root (`/` and a directory: its `index.html`).
@@ -201,6 +316,126 @@ fn profile_file(path: &str, name: &str) -> Result<Response, HttpError> {
         .with_header("X-Content-Type-Options", "nosniff"))
 }
 
+/// Whether `method path` asks for a page or a static file a browser navigates to (a `GET`
+/// outside `/api` and the MCP endpoints, at the root or under `/db/<name>/`).
+fn is_page_request(method: &Method, path: &str) -> bool {
+    if !matches!(method, Method::Get | Method::Head) {
+        return false;
+    }
+    let rest = match mounts::split_db_path(path) {
+        Some((_, Some(rest))) => rest,
+        Some((_, None)) => return true,
+        None => path.trim_start_matches('/'),
+    };
+    !(rest == "api" || rest.starts_with("api/") || rest == "mcp")
+}
+
+/// The `Set-Cookie` value that ends the browser session cookie.
+fn cleared_session_cookie() -> String {
+    format!("{SESSION_COOKIE}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0")
+}
+
+/// `401 {"error": message, "login": "/"}` with `WWW-Authenticate: Bearer`; `clear`: the session
+/// cookie is cleared too.
+fn unauthorized(message: &str, clear: bool) -> Response {
+    let response = Response::json(401, &json!({ "error": message, "login": LOGIN_PAGE }))
+        .with_header("WWW-Authenticate", "Bearer")
+        .with_header("Cache-Control", "no-store");
+    if clear {
+        response.with_header("Set-Cookie", &cleared_session_cookie())
+    } else {
+        response
+    }
+}
+
+/// `303` to the login page with the return path `url` (`/?next=<url>`; `/` itself: `/`).
+fn redirect_to_login(url: &str) -> Response {
+    let location = if url == LOGIN_PAGE {
+        LOGIN_PAGE.to_string()
+    } else {
+        format!("{LOGIN_PAGE}?next={}", percent_encode(url))
+    };
+    Response::new(303, Vec::new())
+        .with_header("Location", &location)
+        .with_header("Cache-Control", "no-store")
+}
+
+/// The answer to credentials the chain refused: `401`; a refused session cookie is cleared, and
+/// a browser navigating to a page goes to the login page instead.
+fn refused_credentials(err: &AuthError, method: &Method, path: &str, url: &str) -> Response {
+    let session = *err == AuthError::InvalidSession;
+    if session && is_page_request(method, path) {
+        return redirect_to_login(url).with_header("Set-Cookie", &cleared_session_cookie());
+    }
+    unauthorized(&err.to_string(), session)
+}
+
+/// The admin API refused to `principal`: `401` for anonymous, `404` for a principal without the
+/// admin role (as if the API did not exist).
+fn admin_refused(principal: &Principal, path: &str) -> Response {
+    if principal.is_anonymous() {
+        unauthorized("log in as an admin to use the admin API", false)
+    } else {
+        error_response(HttpError::new(404, format!("unknown endpoint {path}")))
+    }
+}
+
+/// The body of `POST /api/login`.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LoginBody {
+    token: String,
+}
+
+/// `POST /api/login {"token"}`: a browser session for the user token, its id in the
+/// `gs_session` cookie; `401` for a token no user holds.
+fn login(access: &Access, request: &mut Request<'_>) -> Result<Response, HttpError> {
+    let body = request.json_body()?;
+    let body: LoginBody = serde_json::from_value(body)
+        .map_err(|err| HttpError::bad_request(format!("the body must be {{\"token\"}}: {err}")))?;
+    match access.login(body.token.trim()) {
+        Ok((id, principal)) => {
+            let cookie = format!(
+                "{SESSION_COOKIE}={}; HttpOnly; SameSite=Strict; Path=/",
+                id.expose()
+            );
+            Ok(Response::json(
+                200,
+                &json!({ "principal": {
+                    "id": principal.id,
+                    "kind": principal.kind.as_str(),
+                    "admin": principal.is_admin(),
+                }}),
+            )
+            .with_header("Set-Cookie", &cookie)
+            .with_header("Cache-Control", "no-store"))
+        }
+        Err(AuthError::Unavailable(message)) => {
+            tracing::error!(target: "graphersal_server", "login: {message}");
+            Err(HttpError::new(
+                500,
+                format!("cannot start a session: {message}"),
+            ))
+        }
+        Err(err) => Ok(unauthorized(&err.to_string(), false)),
+    }
+}
+
+/// `POST /api/logout`: the browser session of the request's cookie ends (if any) and the cookie
+/// is cleared; `{"loggedOut": bool}` (`false`: there was no live session).
+fn logout(access: &Access, request: &Request<'_>) -> Result<Response, HttpError> {
+    let ended = match crate::access::cookie(request, SESSION_COOKIE) {
+        Some(id) => access.logout(id).map_err(|err| {
+            tracing::error!(target: "graphersal_server", "logout: {err}");
+            HttpError::new(500, err.to_string())
+        })?,
+        None => false,
+    };
+    Ok(Response::json(200, &json!({ "loggedOut": ended }))
+        .with_header("Set-Cookie", &cleared_session_cookie())
+        .with_header("Cache-Control", "no-store"))
+}
+
 /// `405` for `method` on `path`.
 fn not_allowed(method: &Method, path: &str) -> HttpError {
     HttpError::new(405, format!("method {method} is not allowed on {path}"))
@@ -225,14 +460,26 @@ fn error_response(error: HttpError) -> Response {
 /// `uploadBytes` is the largest import upload (a client checks a file's size before it sends
 /// it; the profile's modules read it from `api.info.host`); `mcp` is the MCP endpoint's status
 /// (`{endpoint: "/mcp", readOnly, client}`), null when MCP is off.
+#[cfg(test)]
 fn info(upload_bytes: u64, mcp: Option<serde_json::Value>) -> Result<Response, HttpError> {
-    let profile = crate::ui_assets::profile().map_err(|err| {
+    Ok(Response::json(200, &info_value(upload_bytes, mcp)?))
+}
+
+/// The server's UI profile ([`crate::ui_assets::profile`]); `500` when it cannot be built.
+fn ui_profile() -> Result<serde_json::Value, HttpError> {
+    crate::ui_assets::profile().map_err(|err| {
         tracing::error!("{err}");
         HttpError::new(500, err)
-    })?;
-    Ok(Response::json(
-        200,
-        &json!({
+    })
+}
+
+/// The answer of [`info`] as JSON (the router adds the principal).
+fn info_value(
+    upload_bytes: u64,
+    mcp: Option<serde_json::Value>,
+) -> Result<serde_json::Value, HttpError> {
+    let profile = ui_profile()?;
+    Ok(json!({
             "server": SERVER_NAME,
             "protocol": graphersal_serve::PROTOCOL,
             "dev": false,
@@ -241,8 +488,35 @@ fn info(upload_bytes: u64, mcp: Option<serde_json::Value>) -> Result<Response, H
             "uploadBytes": upload_bytes,
             "mcp": mcp,
             "uiProfile": profile,
-        }),
-    ))
+    }))
+}
+
+/// `GET /api/info` for anonymous: only what the login page needs (the playground at the root
+/// takes the answer as its engine's by `protocol` and shows `uiProfile`; `login` names the
+/// login page); the router adds the principal.
+fn anonymous_info() -> Result<serde_json::Value, HttpError> {
+    Ok(json!({
+        "server": SERVER_NAME,
+        "protocol": graphersal_serve::PROTOCOL,
+        "dev": false,
+        "experimental": true,
+        "uiProfile": ui_profile()?,
+        "login": LOGIN_PAGE,
+    }))
+}
+
+/// `text` with every byte outside the URL's unreserved characters and `/` as `%XX` (a return
+/// path in a query string).
+fn percent_encode(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for byte in text.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~' | b'/') {
+            out.push(byte as char);
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
 }
 
 /// `%XX` decoded (as `graphersal_serve` decodes static paths); `None` for a broken escape or
@@ -304,17 +578,29 @@ mod tests {
         ))
     }
 
-    /// Makes `router` ready over an empty server directory (kept alive by the answer).
+    /// The operator token of the routers [`make_ready`] makes (the admin of these tests).
+    const OPERATOR: &str = "router-tests-operator-token";
+
+    /// Makes `router` ready over an empty server directory (kept alive by the answer), with
+    /// [`OPERATOR`] as the operator token.
     fn make_ready(router: &Router) -> TempDir {
         let temp = TempDir::new("router");
         let dir = server(&temp);
         let loader = Loader::new(Registry::scan(&dir).unwrap(), router.host_check.clone());
-        router.ready(loader).unwrap();
+        let (access, _) = Access::open(
+            &dir,
+            Some(crate::access::TokenHash::of(OPERATOR)),
+            crate::audit::Audit::default(),
+        )
+        .unwrap();
+        router.ready(loader, Arc::new(access)).unwrap();
         temp
     }
 
+    /// `GET url` as the admin (the operator token).
     fn get(router: &Router, url: &str, host: Option<&str>) -> Response {
-        let mut request = Request::new(Method::Get, url, std::io::empty());
+        let mut request = Request::new(Method::Get, url, std::io::empty())
+            .with_header("Authorization", &format!("Bearer {OPERATOR}"));
         if let Some(host) = host {
             request = request.with_header("Host", host);
         }
@@ -461,3 +747,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "router_access_tests.rs"]
+mod access_tests;

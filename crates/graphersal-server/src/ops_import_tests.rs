@@ -441,8 +441,9 @@ fn upload(
         .set_read_timeout(Some(Duration::from_secs(300)))
         .unwrap();
     let head = format!(
-        "POST {path} HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\nContent-Type: \
-         application/octet-stream\r\nContent-Length: {length}\r\n\r\n"
+        "POST {path} HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n{}Content-Type: \
+         application/octet-stream\r\nContent-Length: {length}\r\n\r\n",
+        crate::test_support::admin_header(address)
     );
     let mut writer = std::io::BufWriter::with_capacity(256 * 1024, &stream);
     writer.write_all(head.as_bytes()).unwrap();
@@ -619,7 +620,14 @@ fn imports_over_http_by_upload_and_by_path() {
 
     // By path (the console's form while a server runs).
     let call = |body: Value| {
-        crate::client::request(address, "POST", "/api/admin/import", Some(&body)).unwrap()
+        crate::client::request(
+            address,
+            crate::test_support::operator_token(address).as_deref(),
+            "POST",
+            "/api/admin/import",
+            Some(&body),
+        )
+        .unwrap()
     };
     let (status, answer) = call(json!({ "path": file.to_str().unwrap(), "name": "by-path" }));
     assert_eq!(status, 201, "{answer}");
@@ -631,7 +639,14 @@ fn imports_over_http_by_upload_and_by_path() {
     assert_eq!(status, 404, "{answer}");
     let (status, _) = call(json!({ "path": "/x", "name": "x", "bogus": 1 }));
     assert_eq!(status, 400);
-    let (status, _) = crate::client::request(address, "GET", "/api/admin/import", None).unwrap();
+    let (status, _) = crate::client::request(
+        address,
+        crate::test_support::operator_token(address).as_deref(),
+        "GET",
+        "/api/admin/import",
+        None,
+    )
+    .unwrap();
     assert_eq!(status, 405);
 
     // A cross-site upload is refused.
@@ -712,10 +727,24 @@ fn uploads_over_the_limit_are_refused_with_413() {
         "{answer}"
     );
     // The limit is announced; the server keeps answering.
-    let (status, info) = crate::client::request(address, "GET", "/api/info", None).unwrap();
+    let (status, info) = crate::client::request(
+        address,
+        crate::test_support::operator_token(address).as_deref(),
+        "GET",
+        "/api/info",
+        None,
+    )
+    .unwrap();
     assert_eq!(status, 200);
     assert_eq!(info["uploadBytes"], 1048576);
-    let (status, _) = crate::client::request(address, "GET", "/api/admin/databases", None).unwrap();
+    let (status, _) = crate::client::request(
+        address,
+        crate::test_support::operator_token(address).as_deref(),
+        "GET",
+        "/api/admin/databases",
+        None,
+    )
+    .unwrap();
     assert_eq!(status, 200);
     assert!(!dir.databases().join("a").exists());
     assert!(!dir.databases().join("b").exists());
@@ -756,6 +785,7 @@ fn an_import_on_a_taken_name_answers_the_help_by_upload_and_by_path() {
     // The path form (the console's while a server runs).
     let (status, answer) = crate::client::request(
         address,
+        crate::test_support::operator_token(address).as_deref(),
         "POST",
         "/api/admin/import",
         Some(&json!({ "path": file.to_str().unwrap(), "name": "taken" })),

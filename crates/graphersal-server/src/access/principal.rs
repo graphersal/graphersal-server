@@ -18,6 +18,17 @@ pub enum PrincipalKind {
     Anonymous,
 }
 
+impl PrincipalKind {
+    /// The kind as the API names it: `operator`, `user`, `anonymous`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PrincipalKind::Operator => "operator",
+            PrincipalKind::User => "user",
+            PrincipalKind::Anonymous => "anonymous",
+        }
+    }
+}
+
 /// The principal of a request: its id, kind, roles and groups.
 ///
 /// `#[non_exhaustive]`: build one with [`Principal::operator`], [`Principal::user`] or

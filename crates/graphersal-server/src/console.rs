@@ -367,7 +367,7 @@ pub fn run(dir: &ServerDir, command: &DbCommand) -> Result<Outcome, ServerError>
         Err(ServerError::Locked { .. }) if matches!(command, DbCommand::Export { .. }) => {
             let server = server_info(dir)?;
             Ok(Outcome {
-                body: export_remote(server.address, &path, command)?,
+                body: export_remote(&server, &path, command)?,
                 via: Via::Server(server.address),
                 server_url: Some(server.url),
             })
@@ -383,9 +383,9 @@ pub fn run(dir: &ServerDir, command: &DbCommand) -> Result<Outcome, ServerError>
         Err(ServerError::Locked { .. }) => {
             let server = server_info(dir)?;
             let address = server.address;
-            let mut answer = remote(address, &method, &path, body.as_ref())?;
+            let mut answer = remote(&server, &method, &path, body.as_ref())?;
             if let DbCommand::Load { name, wait: true } = command {
-                answer = wait_for_load(address, name, answer)?;
+                answer = wait_for_load(&server, name, answer)?;
             }
             Ok(Outcome {
                 body: answer,
@@ -452,13 +452,9 @@ fn remote_error(err: &ServerError) -> ServerError {
     }
 }
 
-/// `db export` through the server at `address`: its download streamed into `<out>.part`,
-/// renamed into `out` when complete.
-fn export_remote(
-    address: SocketAddr,
-    path: &str,
-    command: &DbCommand,
-) -> Result<Value, ServerError> {
+/// `db export` through the server of `server` (with its operator token): its download
+/// streamed into `<out>.part`, renamed into `out` when complete.
+fn export_remote(server: &RunInfo, path: &str, command: &DbCommand) -> Result<Value, ServerError> {
     let DbCommand::Export { out, .. } = command else {
         return Err(ServerError::InvalidInput {
             name: "export".to_string(),
@@ -471,7 +467,7 @@ fn export_remote(
     let answer = loop {
         let mut file =
             std::fs::File::create(&part).map_err(|err| ServerError::io("create", &part, err))?;
-        let answer = crate::client::download(address, &url, &mut file);
+        let answer = crate::client::download(server.address, bearer(server), &url, &mut file);
         let answer = answer.and_then(|answer| {
             file.sync_all()
                 .map_err(|err| ServerError::io("write", &part, err))?;
@@ -539,9 +535,18 @@ fn server_info(dir: &ServerDir) -> Result<RunInfo, ServerError> {
     }
 }
 
-/// The request sent to the server at `address` (`503` while it starts is retried a moment).
+/// The operator token of the server's run, the console's credentials.
+fn bearer(server: &RunInfo) -> Option<&str> {
+    server
+        .operator_token
+        .as_ref()
+        .map(crate::access::Secret::expose)
+}
+
+/// The request sent to the server of `server` with its operator token (`503` while it starts
+/// is retried a moment).
 fn remote(
-    address: SocketAddr,
+    server: &RunInfo,
     method: &Method,
     path: &str,
     body: Option<&Value>,
@@ -549,7 +554,8 @@ fn remote(
     let deadline = Instant::now() + START_WAIT;
     let url = format!("/api/admin/{path}");
     loop {
-        let (status, json) = crate::client::request(address, method.as_str(), &url, body)?;
+        let (status, json) =
+            crate::client::request(server.address, bearer(server), method.as_str(), &url, body)?;
         if status == 503 && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(100));
             continue;
@@ -559,13 +565,13 @@ fn remote(
 }
 
 /// Polls the database `name` until its load ended (`answer`: the load's answer).
-fn wait_for_load(address: SocketAddr, name: &str, answer: Value) -> Result<Value, ServerError> {
+fn wait_for_load(server: &RunInfo, name: &str, answer: Value) -> Result<Value, ServerError> {
     let deadline = Instant::now() + LOAD_WAIT;
     let mut current = answer;
     let load = current.get("load").cloned();
     while current["state"] == "loading" && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(100));
-        current = remote(address, &Method::Get, &format!("databases/{name}"), None)?;
+        current = remote(server, &Method::Get, &format!("databases/{name}"), None)?;
     }
     if let Some(load) = load {
         current["load"] = load;

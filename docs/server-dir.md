@@ -40,7 +40,6 @@ listen = "127.0.0.1:8484"   # IP:PORT or localhost:PORT; port 0 = a free port
 
 [mcp]
 enabled = true              # /mcp and /db/<name>/mcp (false: both answer 404)
-# token = "<secret>"        # every MCP request needs Authorization: Bearer <secret>
 max_sessions = 256          # MCP sessions remembered, the oldest forgotten first
 
 [defaults]                  # creation parameters of NEW databases
@@ -56,9 +55,8 @@ idle_timeout_secs = 60      # a connection without a running request is closed a
 
 | Key | Default | Read | Meaning |
 |---|---|---|---|
-| `listen` (top level) | `127.0.0.1:8484` | at start | the listen address; `serve --listen ADDR` overrides it. Any address that is not a loopback address gets a warning in the `serve` start block: there is no access control |
+| `listen` (top level) | `127.0.0.1:8484` | at start | the listen address; `serve --listen ADDR` overrides it. Any address that is not a loopback address gets a warning in the `serve` start block: tokens travel in clear text over plain HTTP |
 | `[mcp] enabled` | `true` | at start | serve the MCP endpoints (`docs/mcp.md`) |
-| `[mcp] token` | none | at start | the bearer token of every MCP request (the admin API and the database pages take no token) |
 | `[mcp] max_sessions` | `256` | at start | MCP sessions remembered (at least 1) |
 | `[defaults] chunk_bytes` | `1048576` | at every create | a new Store's chunk size (fixed for the database's life) |
 | `[defaults] damage_policy` | `"maintenance"` | at every create | a new Store's damage policy (fixed for the database's life) |

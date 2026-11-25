@@ -17,12 +17,12 @@ use crate::text::{self, Note, Section};
 const BANNER: &str = "\
 ==============================================================================
  graphersal-server - EXPERIMENTAL: many Graphersal graph databases over HTTP
- No access control. Loopback only. Every database is a Store on disk.
+ Users and grants in access.toml. Loopback only. Every database is a Store.
  The admin API and the server directory change without notice.
 ==============================================================================";
 
 /// The line of [`BANNER`] a non-loopback server replaces.
-const LOOPBACK_LINE: &str = " No access control. Loopback only. ";
+const LOOPBACK_LINE: &str = " Users and grants in access.toml. Loopback only. ";
 
 /// The one stdout line of `serve`: the address a browser on this machine opens (scripts read
 /// it; everything else goes to stderr).
@@ -47,7 +47,7 @@ fn banner(exposure: Exposure) -> String {
     match exposure {
         Exposure::Network => BANNER.replacen(
             LOOPBACK_LINE,
-            " REACHABLE FROM THE NETWORK, see the warning below.\n No access control. ",
+            " REACHABLE FROM THE NETWORK, see the warning below.\n Users and grants in access.toml. ",
             1,
         ),
         _ => BANNER.to_string(),
@@ -60,10 +60,10 @@ fn network_warning(address: &str) -> String {
     section.row(
         "warning",
         format!(
-            "graphersal-server listens on {address} and is reachable from the network: it \
-             has NO access control, anyone who reaches this port can read and change every \
-             database; listen on 127.0.0.1 for this machine only (serve --listen \
-             127.0.0.1:PORT)"
+            "graphersal-server listens on {address} and is reachable from the network: \
+             requests need a user token or a browser login, and over plain HTTP tokens and \
+             session cookies travel in clear text; put a TLS proxy in front, or listen on \
+             127.0.0.1 for this machine only (serve --listen 127.0.0.1:PORT)"
         ),
     );
     // The section's rows without its heading, at the left margin.
@@ -175,27 +175,16 @@ fn sections(running: &Running, config: Option<&ServerConfig>) -> Vec<Section> {
                 "every database and alias (list_graphs, use_graph)",
             );
             mcp.unwrapped("per database", format!("{url}/db/<name>/mcp (once loaded)"));
-            let connect = format!("claude mcp add --transport http graphersal-server {url}/mcp");
-            match &m.token {
-                Some(_) => {
-                    mcp.row(
-                        "token",
-                        "required: Authorization: Bearer <token from server.toml [mcp]>",
-                    );
-                    mcp.unwrapped(
-                        "connect",
-                        format!("{connect} --header \"Authorization: Bearer <token>\""),
-                    );
-                }
-                None => {
-                    mcp.row(
-                        "token",
-                        "none: anyone who reaches the port may call it (set [mcp] token in \
-                         server.toml)",
-                    );
-                    mcp.unwrapped("connect", connect);
-                }
-            }
+            let connect = format!(
+                "claude mcp add --transport http --header \"Authorization: Bearer <token>\" \
+                 graphersal-server {url}/mcp"
+            );
+            mcp.row(
+                "access",
+                "per principal: a user token (Authorization: Bearer <token>) sees its granted \
+                 databases, a request without one the anonymous grants (access.toml)",
+            );
+            mcp.unwrapped("connect", connect);
         }
         Some(_) => mcp.row("endpoint", "off ([mcp] enabled = false in server.toml)"),
         None => mcp.row("endpoint", "unknown (server.toml could not be read again)"),

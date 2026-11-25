@@ -497,12 +497,25 @@ fn start(dir: &ServerDir) -> Running {
 }
 
 fn call(address: SocketAddr, method: &str, path: &str, body: Option<Value>) -> (u16, Value) {
-    crate::client::request(address, method, path, body.as_ref()).expect("an answer")
+    crate::client::request(
+        address,
+        crate::test_support::operator_token(address).as_deref(),
+        method,
+        path,
+        body.as_ref(),
+    )
+    .expect("an answer")
 }
 
 fn download(address: SocketAddr, path: &str, out: &Path) -> crate::client::Downloaded {
     let mut file = fs::File::create(out).unwrap();
-    crate::client::download(address, path, &mut file).expect("an answer")
+    crate::client::download(
+        address,
+        crate::test_support::operator_token(address).as_deref(),
+        path,
+        &mut file,
+    )
+    .expect("an answer")
 }
 
 #[test]

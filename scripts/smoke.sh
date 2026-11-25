@@ -61,12 +61,15 @@ fail() {
 }
 
 # req METHOD PATH [curl args...]: the answer's status in $STATUS, its body in $BODY (or in the
-# file $OUT when set), its head in $HEAD.
+# file $OUT when set), its head in $HEAD. With $AUTH set (the first admin's token after init),
+# the request carries it as `Authorization: Bearer`; `AUTH= req ...` sends it anonymously.
 req() {
   local method=$1 path=$2
   shift 2
+  local auth=()
+  [ -n "${AUTH:-}" ] && auth=(-H "Authorization: Bearer $AUTH")
   STATUS=$(curl -sS -X "$method" -o "${OUT:-$BODY}" -D "$HEAD" -w '%{http_code}' --max-time 120 \
-    "$@" "${URL}${path}") || fail "curl $method $path failed"
+    ${auth[@]+"${auth[@]}"} "$@" "${URL}${path}") || fail "curl $method $path failed"
 }
 
 # jreq METHOD PATH JSON: a request with a JSON body.
@@ -180,6 +183,10 @@ for part in server.toml databases models/blobs backups trash tmp; do
 done
 grep -q "^  graphersal-server serve --dir " "$WORK/init.out" ||
   fail "init does not show the serve command on its own line: $(cat "$WORK/init.out")"
+# The first admin's token, printed once in a framed block on stderr: every request below goes
+# as that admin unless it says otherwise.
+AUTH=$(sed -n 's/^| token: *\([0-9a-f]\{64\}\) .*$/\1/p' "$WORK/init.err")
+[ -n "$AUTH" ] || fail "init printed no first admin token: $(cat "$WORK/init.err")"
 ok
 
 STEP="serve"
@@ -219,6 +226,44 @@ expect_json uiProfile.name server
 expect_json uiProfile.styles.0 server-ui.css
 expect_json admin null
 expect_json product null
+ok
+
+STEP="access: anonymous is refused, the first admin logs in and out"
+AUTH= req GET /api/info
+expect_status 200
+expect_json principal.kind anonymous
+expect_json login /
+expect_json uiProfile.name server
+expect_json uploadBytes null
+AUTH= req GET /api/admin/databases
+expect_status 401
+expect_json login /
+AUTH= req GET /db/acme/api/info
+expect_status 401
+AUTH= req GET /db/acme/
+expect_status 303
+[ "$(header Location)" = "/?next=/db/acme/" ] || fail "no login redirect: $(header Location)"
+req GET /api/info
+expect_json principal.kind user
+expect_json principal.admin true
+AUTH= jreq POST /api/login '{"token": "0000"}'
+expect_status 401
+ADMIN_TOKEN=$AUTH
+AUTH= jreq POST /api/login "{\"token\": \"$ADMIN_TOKEN\"}"
+expect_status 200
+COOKIE=$(header Set-Cookie)
+case "$COOKIE" in
+  gs_session=*"; HttpOnly; SameSite=Strict; Path=/") ;;
+  *) fail "login cookie: $COOKIE" ;;
+esac
+COOKIE=${COOKIE%%;*}
+AUTH= req GET /api/admin/databases -H "Cookie: $COOKIE"
+expect_status 200
+AUTH= req POST /api/logout -H "Cookie: $COOKIE"
+expect_status 200
+expect_json loggedOut true
+AUTH= req GET /api/admin/databases -H "Cookie: $COOKIE"
+expect_status 401
 ok
 
 STEP="connection limits in the start block, h2c"
@@ -350,7 +395,7 @@ req GET /db/acme/api/admin/runs
 expect_status 404
 # A page's endless query, in the background; the admin sees it and stops it.
 curl -sS -o "$WORK/endless.json" --max-time 120 -H 'Content-Type: application/json' \
-  -H 'X-Graphersal-Client: smoke' \
+  -H 'X-Graphersal-Client: smoke' -H "Authorization: Bearer $AUTH" \
   --data-binary '{"script": "let n = 0; loop { n += 1; }", "runId": "endless"}' \
   "${URL}/db/acme/api/execute" &
 ENDLESS_PID=$!
