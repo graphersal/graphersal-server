@@ -10,6 +10,9 @@
 //! description = "Acme's graph"
 //! needs_model = "org/model"        # set by an import whose snapshot names a model it does not
 //!                                  # carry: listed as `needs-model` until a load succeeds
+//!
+//! [limits.query]                   # this database's query limits, each key over server.toml's
+//! timeout_ms = 5000                # (crate::limits); read again at every load
 //! ```
 //!
 //! Every key is optional (its default applies); an unknown key is an error, so a typo is never
@@ -23,6 +26,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::ServerError;
 use crate::layout::write_atomic;
+use crate::limits::DatabaseLimits;
 use crate::names::validate_name;
 
 /// The file name of a database's configuration.
@@ -123,6 +127,11 @@ pub struct DatabaseConfig {
     /// the database as `needs-model` until a load succeeds (which clears it).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub needs_model: Option<String>,
+    /// The database's own limits (`[limits.query]`, each key over `server.toml`'s): read
+    /// again from the file at every load, and kept from the file when the server rewrites it
+    /// (no admin request changes them), so a hand edit applies at the next load.
+    #[serde(default, skip_serializing_if = "DatabaseLimits::is_empty")]
+    pub limits: DatabaseLimits,
 }
 
 impl DatabaseConfig {
@@ -162,6 +171,12 @@ impl DatabaseConfig {
         self
     }
 
+    /// The configuration with the limits `limits`.
+    pub fn with_limits(mut self, limits: DatabaseLimits) -> Self {
+        self.limits = limits;
+        self
+    }
+
     /// The configuration with a description.
     pub fn with_description(mut self, description: impl Into<String>) -> Self {
         self.description = description.into();
@@ -171,9 +186,18 @@ impl DatabaseConfig {
     /// Parses `database.toml`'s text (`path` names the file in the error) and checks the
     /// configuration on its own ([`DatabaseConfig::check`]).
     pub fn parse(text: &str, path: &Path) -> Result<Self, ServerError> {
-        let config: Self = toml::from_str(text).map_err(|err| ServerError::Config {
-            path: path.to_path_buf(),
-            message: err.message().to_string(),
+        let config: Self = toml::from_str(text).map_err(|err| {
+            let mut message = crate::config::toml_error_message(&err, text);
+            if message.contains("memory_limit") || message.contains("memory_headroom") {
+                message.push_str(
+                    "; the process memory ceiling is one setting of the whole server: set it in \
+                     server.toml's [limits]",
+                );
+            }
+            ServerError::Config {
+                path: path.to_path_buf(),
+                message,
+            }
         })?;
         config.check().map_err(|message| ServerError::Config {
             path: path.to_path_buf(),
@@ -281,6 +305,17 @@ mod tests {
         assert_eq!(DatabaseConfig::parse(&text, path).unwrap(), config);
         let plain = DatabaseConfig::plain().to_toml().unwrap();
         assert!(!plain.contains("base"), "{plain}");
+        assert!(!plain.contains("limits"), "{plain}");
+        let limited = DatabaseConfig::plain().with_auto_load(true).with_limits(
+            DatabaseLimits::default()
+                .with_query(crate::limits::QueryLimits::new().with_max_traversers(7)),
+        );
+        let text = limited.to_toml().unwrap();
+        assert!(
+            text.contains("[limits.query]\nmax_traversers = 7"),
+            "{text}"
+        );
+        assert_eq!(DatabaseConfig::parse(&text, path).unwrap(), limited);
         assert!(!plain.contains("description"), "{plain}");
     }
 
@@ -298,6 +333,10 @@ mod tests {
             ("kind = \"other\"", "unknown variant"),
             ("readonly = true", "unknown field"),
             ("auto_load = \"yes\"", "invalid type"),
+            ("[limits.query]\ntimeout_ms = -5", "timeout_ms"),
+            ("[limits.query]\nmax_traversers = \"x\"", "invalid type"),
+            ("[limits.query]\nmax_traverser = 1", "unknown field"),
+            ("[limits]\nmemory_limit = 1", "server.toml's [limits]"),
         ] {
             let err = DatabaseConfig::parse(text, path).unwrap_err();
             assert!(matches!(err, ServerError::Config { .. }), "{text}: {err}");

@@ -43,6 +43,7 @@ pub mod console;
 pub mod database;
 pub mod error;
 pub mod layout;
+pub mod limits;
 pub mod loader;
 pub mod lock;
 mod mcp;
@@ -75,6 +76,7 @@ pub use config::{
 pub use database::{DatabaseConfig, DatabaseKind, DatabaseRole};
 pub use error::ServerError;
 pub use layout::{InitReport, ServerDir};
+pub use limits::{DatabaseLimits, QueryLimits};
 pub use loader::{LoadStart, Loader};
 pub use lock::ServerLock;
 pub use models::{Adoption, ModelBlob, ModelsDir, ModelsIndex};

@@ -19,6 +19,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::database::{DatabaseConfig, DatabaseKind, DatabaseRole, STORE_DIR};
 use crate::error::ServerError;
+use crate::limits::DatabaseLimits;
 use crate::names::{fold, validate_name};
 use crate::registry::{DatabaseEntry, DbState, Inner, Registry, write_aliases};
 
@@ -213,6 +214,20 @@ impl Registry {
         Ok(())
     }
 
+    /// Replaces the limits in memory of the database `name` with `limits`, as a load read them
+    /// from its `database.toml` (the file already holds them: nothing is written). A database
+    /// gone meanwhile is no error.
+    pub(crate) fn refresh_limits(&self, name: &str, limits: DatabaseLimits) {
+        let mut inner = self.write();
+        if let Some(config) = inner
+            .entries
+            .get_mut(&fold(name))
+            .and_then(|entry| entry.config.as_mut())
+        {
+            config.limits = limits;
+        }
+    }
+
     /// Changes the configuration of the database `name` through `change`, then writes it.
     fn update_config(
         &self,
@@ -230,6 +245,11 @@ impl Registry {
         };
         let dir = entry.dir.clone();
         change(&inner, &mut config)?;
+        // No admin request sets the limits: the file's (perhaps edited by hand since the scan)
+        // are kept, not overwritten by the copy in memory.
+        if let Ok(on_disk) = DatabaseConfig::read(&dir) {
+            config.limits = on_disk.limits;
+        }
         config.write(&dir)?;
         let entry = inner.entries.get_mut(&key).ok_or_else(|| not_found(name))?;
         entry.config = Some(config);
