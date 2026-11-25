@@ -96,9 +96,11 @@ a database that is not loaded).
    `needs-model` or `failed` (with a `reason`); `readOnly` is the database's `read_only` flag
    (always `true` for a base). An alias row shows its database's kind, state and flag.
 3. `use_graph {"name": "acme"}` selects the database for this MCP session; every other tool
-   then works on it. An alias is resolved at that moment: the session keeps the real database
-   (`"selected": "acme", "requested": "prod"`), also when the alias is later moved to another
-   database. A new session started after the move gets the alias's new database.
+   then works on it. The session keeps the NAME it selected, a database or an alias, and
+   resolves it on every call, as `/db/<name>/` does (see "Sessions follow their alias" below):
+   `use_graph {"name": "prod"}` answers `"selected": "prod", "graph": "acme"` (the name, then
+   the database it names now), and `list_graphs` shows `"selected": "prod", "selectedGraph":
+   "acme"`.
 4. Every data tool (`gql`, `query`, `get_schema`, `statistics`, `run_saved_query`, ...) takes an
    optional `"graph": "<name or alias>"`: it runs that one call on another database without
    changing the selection (the alias resolved for that call).
@@ -107,6 +109,27 @@ a database that is not loaded).
 
 Saved queries are not tools of their own (on neither kind of endpoint in this version); run them
 with `run_saved_query` (and `graph` on `/mcp` when needed).
+
+### Sessions follow their alias
+
+A session that selected an alias keeps the alias's name:
+
+- **Re-pointed** (`PUT /api/admin/aliases/<alias> {"target"}`): the next call works on the new
+  database, silently. Errors of the new database (read-only, not loaded) are ordinary tool
+  errors.
+- **Removed** (`DELETE /api/admin/aliases/<alias>`): a call fails with `... (this MCP session
+  selected "<alias>", which names no graph now): pick another graph: list_graphs, then
+  use_graph`, as long as no database or alias of that name exists. An alias created again under
+  the name simply works on.
+- **Renamed** (`POST /api/admin/aliases/<alias>/rename {"name"}`, console `db alias rename OLD
+  NEW`, web UI "Rename…"): the session moves to the new name. Its next tool answer starts with
+  one line `note: alias "<old>" was renamed to "<new>"`; several renames before that call give
+  one note from the first old name to the current one (none when they lead back to the first
+  name). A `use_graph` call before it drops the note.
+- A session that selected a database by its own name stays on it (databases have no rename).
+
+The per-database endpoint `/db/<name>/mcp` resolves `<name>` per request: after a rename of an
+alias, `/db/<old name>/mcp` answers `404`.
 
 ### Reconnecting
 

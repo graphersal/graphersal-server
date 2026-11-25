@@ -1836,7 +1836,8 @@ fn mcp_serves_every_database_through_one_endpoint() {
         5
     );
 
-    // An alias is resolved at use_graph: a flip keeps the open session, a new one follows it.
+    // A session keeps the alias name it selected: a flip moves the open session, a new one
+    // selects the same name.
     running.registry().alias_set("cur", "a").unwrap();
     let pinned = mcp_initialize(address, "/mcp");
     let (text, is_error) = mcp_tool(
@@ -1846,9 +1847,12 @@ fn mcp_serves_every_database_through_one_endpoint() {
         "use_graph",
         serde_json::json!({"name": "cur"}),
     );
-    assert!(!is_error && text.contains("\"selected\":\"a\""), "{text}");
+    assert!(
+        !is_error && text.contains("\"selected\":\"cur\",\"graph\":\"a\""),
+        "{text}"
+    );
     running.registry().alias_set("cur", "b").unwrap();
-    assert_eq!(mcp_persons(address, "/mcp", &pinned, None), 5);
+    assert_eq!(mcp_persons(address, "/mcp", &pinned, None), 4);
     let fresh = mcp_initialize(address, "/mcp");
     let (text, is_error) = mcp_tool(
         address,
@@ -1857,7 +1861,10 @@ fn mcp_serves_every_database_through_one_endpoint() {
         "use_graph",
         serde_json::json!({"name": "cur"}),
     );
-    assert!(!is_error && text.contains("\"selected\":\"b\""), "{text}");
+    assert!(
+        !is_error && text.contains("\"selected\":\"cur\",\"graph\":\"b\""),
+        "{text}"
+    );
     assert_eq!(mcp_persons(address, "/mcp", &fresh, None), 4);
     let (text, _) = mcp_tool(
         address,
@@ -1963,6 +1970,167 @@ fn mcp_serves_every_database_through_one_endpoint() {
     assert_eq!(call(address, "GET", "/mcp", &[], "").0, 405);
     let (status, _, body) = call(address, "DELETE", "/mcp", &[("Mcp-Session-Id", &fresh)], "");
     assert_eq!(status, 200, "{body}");
+    running.stop().unwrap();
+}
+
+/// An admin API request with a JSON body: (status, answer).
+fn admin_json(
+    address: SocketAddr,
+    method: &str,
+    path: &str,
+    body: serde_json::Value,
+) -> (u16, serde_json::Value) {
+    let (status, _, answer) = call(
+        address,
+        method,
+        &format!("/api/admin/{path}"),
+        &[("Content-Type", "application/json")],
+        &body.to_string(),
+    );
+    (status, json(&answer))
+}
+
+#[test]
+fn mcp_sessions_follow_their_alias_name() {
+    let temp = TempDir::new("mcp-alias");
+    let root = temp.path();
+    let dir = ServerDir::init(root).unwrap().dir;
+    for name in ["a", "b"] {
+        modern_db(&dir, name);
+    }
+    // The console renames offline too.
+    let (code, _, err) = db(root, &["alias", "set", "old", "a"]);
+    assert_eq!(code, 0, "{err}");
+    let (code, out, err) = db(root, &["alias", "rename", "old", "cur"]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(
+        out,
+        "Renamed alias 'old' to 'cur' -> database 'a'\n  MCP sessions moved: 0\n"
+    );
+    let (code, _, err) = db(root, &["alias", "rename", "cur", "b"]);
+    assert_eq!(code, 1);
+    assert!(err.contains("\nHelp: choose another name"), "{err}");
+
+    let running = serve::start(
+        root,
+        ServeOptions::new().with_listen("127.0.0.1:0".parse().unwrap()),
+    )
+    .unwrap();
+    let address = running.address();
+    let loader = running.loader();
+    for name in ["a", "b"] {
+        loader.load(name).unwrap();
+        assert_eq!(
+            loader.wait(name, Duration::from_secs(120)).unwrap(),
+            DbState::Loaded
+        );
+    }
+    let session = mcp_initialize(address, "/mcp");
+    // b gets a fifth person: the counts tell the graphs apart (a 4, b 5).
+    let (text, is_error) = mcp_tool(
+        address,
+        "/mcp",
+        &session,
+        "gql",
+        serde_json::json!({"query": "INSERT (:person {name: 'zed'})", "graph": "b"}),
+    );
+    assert!(!is_error, "{text}");
+    let (text, is_error) = mcp_tool(
+        address,
+        "/mcp",
+        &session,
+        "use_graph",
+        serde_json::json!({"name": "CUR"}),
+    );
+    assert!(
+        !is_error && text.contains("\"selected\":\"cur\",\"graph\":\"a\""),
+        "{text}"
+    );
+    let count = serde_json::json!({"query": "MATCH (p:person) RETURN count(p) AS n"});
+    let counted = |expected: u64| {
+        let (text, is_error) = mcp_tool(address, "/mcp", &session, "gql", count.clone());
+        assert!(!is_error, "{text}");
+        assert!(text.contains(&format!("\"n\":{expected}")), "{text}");
+        text
+    };
+    assert!(!counted(4).starts_with("note:"));
+
+    // 1. A re-pointed alias: the session follows silently.
+    let (status, answer) = admin_json(
+        address,
+        "PUT",
+        "aliases/cur",
+        serde_json::json!({"target": "b"}),
+    );
+    assert_eq!(status, 200, "{answer}");
+    assert!(!counted(5).starts_with("note:"));
+
+    // 2. A removed alias: an error naming the flow while no graph has the name.
+    let (status, _, body) = call(address, "DELETE", "/api/admin/aliases/cur", &[], "");
+    assert_eq!(status, 200, "{body}");
+    let (text, is_error) = mcp_tool(address, "/mcp", &session, "gql", count.clone());
+    assert!(is_error, "{text}");
+    assert!(
+        text.contains("\"cur\"")
+            && text.contains("pick another graph: list_graphs, then use_graph"),
+        "{text}"
+    );
+
+    // 3. Created again under the name: the session works on, no note.
+    let (status, answer) = admin_json(
+        address,
+        "PUT",
+        "aliases/cur",
+        serde_json::json!({"target": "a"}),
+    );
+    assert_eq!(status, 200, "{answer}");
+    assert!(!counted(4).starts_with("note:"));
+
+    // 4. Renamed (the console through the running server): one note, then none.
+    let (code, out, err) = db(root, &["alias", "rename", "cur", "live"]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(
+        out,
+        "Renamed alias 'cur' to 'live' -> database 'a'\n  MCP sessions moved: 1\n"
+    );
+    assert!(err.contains("sent to its admin API"), "{err}");
+    let text = counted(4);
+    assert!(
+        text.starts_with("note: alias \"cur\" was renamed to \"live\"\n"),
+        "{text}"
+    );
+    assert!(!counted(4).starts_with("note:"));
+    let (text, is_error) = mcp_tool(
+        address,
+        "/mcp",
+        &session,
+        "list_graphs",
+        serde_json::json!({}),
+    );
+    assert!(!is_error, "{text}");
+    let listed = json(&text);
+    assert_eq!(listed["selected"], "live");
+    assert_eq!(listed["selectedGraph"], "a");
+    // Several renames before the next call: one note, the first name -> the current one.
+    for (old, new) in [("live", "v2"), ("v2", "v3")] {
+        let (status, answer) = admin_json(
+            address,
+            "POST",
+            &format!("aliases/{old}/rename"),
+            serde_json::json!({ "name": new }),
+        );
+        assert_eq!(status, 200, "{answer}");
+        assert_eq!(answer["mcpSessionsMoved"], 1, "{answer}");
+    }
+    let text = counted(4);
+    assert!(
+        text.starts_with("note: alias \"live\" was renamed to \"v3\"\n"),
+        "{text}"
+    );
+    assert!(!counted(4).starts_with("note:"));
+    // The old names are gone over HTTP too.
+    assert_eq!(call(address, "GET", "/db/live/api/info", &[], "").0, 404);
+    assert_eq!(call(address, "GET", "/db/v3/api/info", &[], "").0, 200);
     running.stop().unwrap();
 }
 

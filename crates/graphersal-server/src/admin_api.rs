@@ -29,6 +29,7 @@
 //! | GET | `aliases` | | `200 {"aliases": {alias: database}}` |
 //! | PUT | `aliases/<alias>` | `{"target"}` | `200 {"alias", "target"}` |
 //! | DELETE | `aliases/<alias>` | | `200 {"alias", "removed": true}` |
+//! | POST | `aliases/<alias>/rename` | `{"name"}` | `200 {"alias", "renamedFrom", "target", "mcpSessionsMoved"}` |
 //!
 //! The actions take real database names (not aliases). Errors are `{"error", "help"?}` with
 //! `400` (invalid name, body or schema), `404` (no such database, alias or endpoint), `405`,
@@ -356,6 +357,26 @@ pub(crate) fn route(
             .alias_remove(alias)
             .map(|()| Response::json(200, &json!({ "alias": fold(alias), "removed": true })))
             .map_err(|err| (err, None)),
+        (Method::Post, ["aliases", alias, "rename"]) if !alias.is_empty() => {
+            let body: RenameBody = body_of(request)?;
+            admin
+                .alias_rename(alias, &body.name)
+                .map(|renamed| {
+                    Response::json(
+                        200,
+                        &json!({
+                            "alias": renamed.new,
+                            "renamedFrom": renamed.old,
+                            "target": renamed.target,
+                            "mcpSessionsMoved": renamed.moved,
+                        }),
+                    )
+                })
+                .map_err(|err| {
+                    let help = rename_help(&err);
+                    (err, help)
+                })
+        }
         (_, ["databases"])
         | (_, ["databases", _])
         | (
@@ -371,6 +392,7 @@ pub(crate) fn route(
         | (_, ["runs"])
         | (_, ["aliases"])
         | (_, ["aliases", _])
+        | (_, ["aliases", _, "rename"])
         | (_, ["models", ..])
         | (_, ["import"]) => return Err(not_allowed()),
         _ => {
@@ -752,6 +774,12 @@ struct AliasBody {
     target: String,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RenameBody {
+    name: String,
+}
+
 /// The status of an admin core error.
 pub(crate) fn status_of(err: &ServerError) -> u16 {
     match err {
@@ -868,6 +896,18 @@ fn name_taken_help(err: &ServerError) -> Option<String> {
          aliases share one namespace, case-insensitive)"
             .to_string()
     })
+}
+
+/// The help of a refused alias rename: a taken name, or a database named instead of an alias.
+fn rename_help(err: &ServerError) -> Option<String> {
+    match err {
+        ServerError::NameInUse { .. } => name_taken_help(err),
+        ServerError::Refused { name, .. } if name != "aliases.toml" => Some(format!(
+            "databases have no rename; point an alias at it instead: PUT \
+             /api/admin/aliases/<alias> {{\"target\": \"{name}\"}}"
+        )),
+        _ => None,
+    }
 }
 
 /// The help of a refused unload: a base that loaded layers use.

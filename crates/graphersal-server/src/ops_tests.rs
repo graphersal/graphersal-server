@@ -630,6 +630,72 @@ fn every_admin_action_over_http() {
 }
 
 #[test]
+fn an_alias_is_renamed_over_http() {
+    let temp = TempDir::new("ops-http-rename");
+    let dir = server(&temp);
+    let running = start(&dir);
+    let address = running.address();
+    for name in ["acme", "other"] {
+        let (status, entry) = post_create(address, json!({ "name": name }));
+        assert_eq!(status, 201, "{entry}");
+    }
+    let (status, _) = call(
+        address,
+        "PUT",
+        "/api/admin/aliases/current",
+        Some(json!({"target": "acme"})),
+    );
+    assert_eq!(status, 200);
+    let rename = |alias: &str, body: Value| {
+        call(
+            address,
+            "POST",
+            &format!("/api/admin/aliases/{alias}/rename"),
+            Some(body),
+        )
+    };
+
+    let (status, answer) = rename("CURRENT", json!({"name": "live"}));
+    assert_eq!(status, 200, "{answer}");
+    assert_eq!(
+        answer,
+        json!({"alias": "live", "renamedFrom": "current", "target": "acme", "mcpSessionsMoved": 0})
+    );
+    let (_, aliases) = call(address, "GET", "/api/admin/aliases", None);
+    assert_eq!(aliases, json!({"aliases": {"live": "acme"}}));
+    let (status, _) = call(address, "GET", "/db/current/api/info", None);
+    assert_eq!(status, 404);
+
+    // Refusals, each with its status and help where there is one.
+    let (status, answer) = rename("live", json!({"name": "other"}));
+    assert_eq!(status, 409, "{answer}");
+    assert!(
+        answer["help"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("choose another name")
+    );
+    let (status, answer) = rename("live", json!({"name": "live"}));
+    assert_eq!(status, 409, "{answer}");
+    let (status, answer) = rename("acme", json!({"name": "x"}));
+    assert_eq!(status, 409, "{answer}");
+    let help = answer["help"].as_str().unwrap_or_default();
+    assert!(help.contains("databases have no rename"), "{answer}");
+    let (status, answer) = rename("current", json!({"name": "x"}));
+    assert_eq!(status, 404, "{answer}");
+    assert!(answer["help"].is_string(), "{answer}");
+    let (status, answer) = rename("live", json!({"name": "Bad Name"}));
+    assert_eq!(status, 400, "{answer}");
+    let (status, answer) = rename("live", json!({"target": "x"}));
+    assert_eq!(status, 400, "{answer}");
+    let (status, _) = call(address, "GET", "/api/admin/aliases/live/rename", None);
+    assert_eq!(status, 405);
+    let (_, aliases) = call(address, "GET", "/api/admin/aliases", None);
+    assert_eq!(aliases, json!({"aliases": {"live": "acme"}}));
+    running.stop().unwrap();
+}
+
+#[test]
 fn admin_requests_keep_the_host_check() {
     use std::io::{Read, Write};
     let temp = TempDir::new("ops-http-host");

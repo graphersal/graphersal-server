@@ -10,6 +10,7 @@ import http from 'node:http';
 import {
   adminRequest, sendAdmin, createAdmin, parseAdminError, AdminError, createBody, nameProblem,
   aliasRows, baseNames, realRows, rowActions, confirmText, outcomeText, loadAndWatch, bytesText,
+  renameProblem,
 } from '../admin-api.js';
 import { databaseRows, fetchDatabases } from '../databases.js';
 
@@ -17,7 +18,7 @@ import { databaseRows, fetchDatabases } from '../databases.js';
 
 const ALLOWED = {
   create: ['name', 'kind', 'role', 'base', 'schema', 'description', 'autoLoad', 'readOnly'],
-  clone: ['name'], readOnly: ['readOnly'], autoLoad: ['autoLoad'], alias: ['target'],
+  clone: ['name'], readOnly: ['readOnly'], autoLoad: ['autoLoad'], alias: ['target'], rename: ['name'],
 };
 
 /**
@@ -142,6 +143,19 @@ async function mockAdmin({ loadPolls = 2, loadEnds = 'loaded' } = {}) {
         return send(200, entry(name));
       }
       return send(405, { error: 'method not allowed' });
+    }
+    if (parts[0] === 'aliases' && parts.length === 3 && parts[2] === 'rename') {
+      const alias = parts[1];
+      if (req.method !== 'POST') return send(405, { error: 'method not allowed' });
+      if (refuseUnknown(ALLOWED.rename)) return;
+      if (!aliases[alias]) return notFound(alias);
+      if (dbs.has(body.name) || aliases[body.name]) {
+        return send(409, { error: `the name '${body.name}' is taken`, help: 'choose another name: GET /api/admin/databases lists the taken names' });
+      }
+      const target = aliases[alias];
+      delete aliases[alias];
+      aliases[body.name] = target;
+      return send(200, { alias: body.name, renamedFrom: alias, target, mcpSessionsMoved: 2 });
     }
     if (parts[0] === 'aliases' && parts.length === 2) {
       const alias = parts[1];
@@ -415,4 +429,40 @@ test('confirmations and outcomes name the subject', () => {
   assert.equal(outcomeText('load', 'acme', { state: 'failed', reason: 'bad' }), '"acme" failed to load: bad.');
   assert.equal(outcomeText('readOnly', 'acme', { readOnly: true }), '"acme" is read-only.');
   assert.equal(outcomeText('setAlias', 'live', { alias: 'live', target: 'acme' }), 'The alias "live" names "acme".');
+});
+
+test('renameAlias: the request, the mock round trip, the form check and the outcome', async () => {
+  assert.deepEqual(adminRequest.renameAlias('live', 'prod'), {
+    method: 'POST', path: 'api/admin/aliases/live/rename', body: { name: 'prod' },
+  });
+  assert.equal(renameProblem('live', 'prod'), null);
+  assert.equal(renameProblem('live', ' Prod '), null);
+  assert.match(renameProblem('live', ''), /Enter a new alias name/);
+  assert.match(renameProblem('live', 'bad name'), /at most 63/);
+  assert.match(renameProblem('live', 'LIVE'), /named "live" already/);
+
+  const mock = await mockAdmin();
+  try {
+    const admin = createAdmin(mock.options);
+    await admin.create({ name: 'notes' });
+    await admin.create({ name: 'other' });
+    await admin.setAlias('live', 'notes');
+    const answer = await admin.renameAlias('live', 'prod');
+    assert.deepEqual(answer, { alias: 'prod', renamedFrom: 'live', target: 'notes', mcpSessionsMoved: 2 });
+    assert.deepEqual(mock.aliases, { prod: 'notes' });
+    assert.equal(
+      outcomeText('renameAlias', 'prod', answer),
+      'Renamed the alias "live" to "prod" (database "notes"); 2 open MCP sessions moved with it. Links to the old name stop working.',
+    );
+    assert.equal(
+      outcomeText('renameAlias', 'prod', { ...answer, mcpSessionsMoved: 0 }),
+      'Renamed the alias "live" to "prod" (database "notes"). Links to the old name stop working.',
+    );
+    await assert.rejects(admin.renameAlias('prod', 'other'), (err) => err instanceof AdminError
+      && err.status === 409 && /choose another name/.test(err.help));
+    await assert.rejects(admin.renameAlias('gone', 'x'), (err) => err instanceof AdminError && err.status === 404);
+    assert.ok(mock.log.some((r) => r.method === 'POST' && r.url === '/api/admin/aliases/prod/rename'));
+  } finally {
+    mock.server.close();
+  }
 });

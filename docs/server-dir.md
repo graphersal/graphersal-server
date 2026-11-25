@@ -100,7 +100,8 @@ current = "acme-2026.3"
 ```
 
 Aliases and database names share one namespace. `/db/<alias>/...` and the MCP endpoint resolve
-an alias on every request, so a flip (`PUT /api/admin/aliases/<alias>`) takes effect at once. An
+an alias on every request, so a flip (`PUT /api/admin/aliases/<alias>`) takes effect at once. A
+rename (`POST /api/admin/aliases/<alias>/rename`) rewrites the file in one atomic step. An
 alias whose target is missing is dropped at start and reported in the listing's `problems`.
 
 ## `databases/<name>/`
