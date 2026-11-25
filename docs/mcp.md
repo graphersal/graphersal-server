@@ -134,7 +134,8 @@ alias, `/db/<old name>/mcp` answers `404`.
 The selection belongs to the MCP session. A client that reconnects (a new `initialize`) starts
 without a selection and calls `use_graph` again; the error of its first call says so. The
 server remembers at most `max_sessions` sessions: the oldest is forgotten first, its client gets
-`404` for its unknown session id, initializes again and selects its database again. `DELETE
+`404` for its unknown session id, initializes again and selects its database again. A server
+restart keeps the sessions (and their selections). `DELETE
 /mcp` with the session id ends a session. `GET /mcp` (a server-sent event stream) is not
 offered: `405`.
 
@@ -171,4 +172,7 @@ A per-database endpoint of a database that is not loaded answers the mount's `40
   and profile; `/db/<name>/mcp` answers `401` (anonymous) or `404` (a user) without a grant. An
   MCP session belongs to the principal that initialized it: another principal using its id
   gets `404`. Tokens travel in clear text over plain HTTP.
-- MCP sessions live in memory: a server restart forgets them (clients initialize again).
+- MCP sessions survive a restart: they are kept in the server directory's `sessions/mcp.json`
+  (hashes of the ids only; `server-dir.md`), so a client goes on with its session id, its
+  selection and a pending rename note. Revoking or reissuing a user's token, or removing the
+  user, ends that user's MCP sessions at once (their clients get `404` and initialize again).

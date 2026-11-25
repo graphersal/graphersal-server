@@ -2652,3 +2652,291 @@ fn user_commands_offline_and_through_a_server() {
         std::thread::sleep(Duration::from_millis(20));
     }
 }
+
+/// Starts a server on `root` (port 0) with `acme` loaded.
+fn start_with_acme(root: &Path) -> serve::Running {
+    let running = serve::start(
+        root,
+        ServeOptions::new().with_listen("127.0.0.1:0".parse().unwrap()),
+    )
+    .unwrap();
+    running.loader().load("acme").unwrap();
+    assert_eq!(
+        running
+            .loader()
+            .wait("acme", Duration::from_secs(120))
+            .unwrap(),
+        DbState::Loaded
+    );
+    running
+}
+
+/// A browser login with `token`: the `Cookie` header value.
+fn browser_login(address: SocketAddr, token: &str) -> String {
+    let (status, head, body) = send(
+        address,
+        "POST",
+        "/api/login",
+        &[("Content-Type", "application/json")],
+        "",
+        &serde_json::json!({ "token": token }).to_string(),
+    );
+    assert_eq!(status, 200, "{body}");
+    header_of(&head, "Set-Cookie")
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_string()
+}
+
+/// The principal id `/api/info` names for the browser `cookie`, or the refusal's status.
+fn browser_principal(address: SocketAddr, cookie: &str) -> Result<String, u16> {
+    let (status, _, body) = send(address, "GET", "/api/info", &[("Cookie", cookie)], "", "");
+    if status != 200 {
+        return Err(status);
+    }
+    Ok(json(&body)["principal"]["id"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string())
+}
+
+/// A `gql` count of persons in the MCP session `session` as the bearer of `token`, without a
+/// `graph` (the session's selection): `Ok(count)`, or `Err(status)` when the request is
+/// refused.
+fn mcp_selected_persons(
+    address: SocketAddr,
+    token: &str,
+    session: &str,
+) -> Result<serde_json::Value, u16> {
+    let bearer = format!("Bearer {token}");
+    let (status, _, body) = mcp_post(
+        address,
+        "/mcp",
+        Some(session),
+        &[("Authorization", &bearer)],
+        serde_json::json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {
+            "name": "gql", "arguments": {"query": "MATCH (p:person) RETURN count(p) AS n"}}}),
+    );
+    if status != 200 {
+        return Err(status);
+    }
+    Ok(json(&body)["result"].clone())
+}
+
+/// `initialize` + `use_graph acme` on `/mcp` as the bearer of `token`: the session id.
+fn mcp_session_on_acme(address: SocketAddr, token: &str) -> String {
+    let bearer = format!("Bearer {token}");
+    let (status, head, body) = mcp_post(
+        address,
+        "/mcp",
+        None,
+        &[("Authorization", &bearer)],
+        serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "protocolVersion": "2025-06-18", "clientInfo": {"name": "it", "version": "1"}}}),
+    );
+    assert_eq!(status, 200, "{body}");
+    let session = header_of(&head, "Mcp-Session-Id").unwrap().to_string();
+    let (status, _, body) = mcp_post(
+        address,
+        "/mcp",
+        Some(&session),
+        &[("Authorization", &bearer)],
+        serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
+            "name": "use_graph", "arguments": {"name": "acme"}}}),
+    );
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("selected"), "{body}");
+    session
+}
+
+/// Whether `result` (a `tools/call` result) is the modern sample's count of 4 persons.
+fn counts_four(result: &serde_json::Value) -> bool {
+    result["isError"] != true
+        && result["content"][0]["text"]
+            .as_str()
+            .is_some_and(|t| t.contains("\"n\":4"))
+}
+
+#[test]
+fn browser_and_mcp_sessions_survive_a_restart_until_their_token_changes() {
+    let temp = TempDir::new("sessions-restart");
+    let root = temp.path().join("srv");
+    let dir = ServerDir::init(&root).unwrap().dir;
+    modern_db(&dir, "acme");
+    let running = start_with_acme(&root);
+    let address = running.address();
+    let mut tokens = std::collections::HashMap::new();
+    for name in ["alice", "bob"] {
+        let (status, answer) = admin_json(
+            address,
+            "POST",
+            "users",
+            serde_json::json!({ "name": name }),
+        );
+        assert_eq!(status, 201, "{answer}");
+        tokens.insert(name, answer["token"].as_str().unwrap().to_string());
+        let (status, answer) = admin_json(
+            address,
+            "POST",
+            "grants",
+            serde_json::json!({"subject": name, "database": "acme", "level": "read"}),
+        );
+        assert_eq!(status, 200, "{answer}");
+    }
+    let cookies: std::collections::HashMap<&str, String> = ["alice", "bob"]
+        .into_iter()
+        .map(|n| (n, browser_login(address, &tokens[n])))
+        .collect();
+    let mcp: std::collections::HashMap<&str, String> = ["alice", "bob"]
+        .into_iter()
+        .map(|n| (n, mcp_session_on_acme(address, &tokens[n])))
+        .collect();
+    for name in ["alice", "bob"] {
+        assert_eq!(
+            browser_principal(address, &cookies[name]).as_deref(),
+            Ok(name)
+        );
+        assert!(counts_four(
+            &mcp_selected_persons(address, &tokens[name], &mcp[name]).unwrap()
+        ));
+    }
+    running.stop().unwrap();
+
+    // On disk: hashes only.
+    let browser_file = dir.sessions().join("browser.json");
+    let mcp_file = dir.sessions().join("mcp.json");
+    let stored = std::fs::read_to_string(&browser_file).unwrap()
+        + std::fs::read_to_string(&mcp_file).unwrap().as_str();
+    for secret in cookies.values().chain(mcp.values()).chain(tokens.values()) {
+        let bare = secret.trim_start_matches("gs_session=");
+        assert!(!stored.contains(bare), "a clear secret on disk: {stored}");
+    }
+
+    // 1. A restart: the cookies and the MCP sessions (with their selection) keep working.
+    let running = start_with_acme(&root);
+    let address = running.address();
+    for name in ["alice", "bob"] {
+        assert_eq!(
+            browser_principal(address, &cookies[name]).as_deref(),
+            Ok(name)
+        );
+        let result = mcp_selected_persons(address, &tokens[name], &mcp[name]).unwrap();
+        assert!(counts_four(&result), "{name}: {result}");
+    }
+    // Another principal does not find alice's MCP session.
+    assert_eq!(
+        mcp_selected_persons(address, &tokens["bob"], &mcp["alice"]),
+        Err(404)
+    );
+
+    // 2. Bob's token revoked, then reissued (online): his sessions end at once, on disk too.
+    let (status, _, body) = call(address, "DELETE", "/api/admin/users/bob/token", &[], "");
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(json(&body)["mcpSessionsEnded"], 1, "{body}");
+    let (status, answer) = admin_json(address, "POST", "users/bob/token", serde_json::json!({}));
+    assert_eq!(status, 200, "{answer}");
+    let bob_new = answer["token"].as_str().unwrap().to_string();
+    let stored = std::fs::read_to_string(&browser_file).unwrap();
+    assert!(!stored.contains("\"bob\""), "{stored}");
+    assert!(
+        !std::fs::read_to_string(&mcp_file)
+            .unwrap()
+            .contains("user:bob")
+    );
+    assert_eq!(browser_principal(address, &cookies["bob"]), Err(401));
+    assert_eq!(
+        mcp_selected_persons(address, &bob_new, &mcp["bob"]),
+        Err(404)
+    );
+    running.stop().unwrap();
+
+    // 3. Alice's token reissued by the console while no server runs: her stored sessions go too.
+    let (code, out, err) = user(&root, &["token", "alice"]);
+    assert_eq!(code, 0, "{err}");
+    let alice_new = printed_token(&out);
+    assert!(
+        !std::fs::read_to_string(&browser_file)
+            .unwrap()
+            .contains("\"alice\"")
+    );
+    assert!(
+        !std::fs::read_to_string(&mcp_file)
+            .unwrap()
+            .contains("user:alice")
+    );
+
+    let running = start_with_acme(&root);
+    let address = running.address();
+    for (name, token) in [("alice", &alice_new), ("bob", &bob_new)] {
+        assert_eq!(
+            browser_principal(address, &cookies[name]),
+            Err(401),
+            "{name}"
+        );
+        assert_eq!(
+            mcp_selected_persons(address, token, &mcp[name]),
+            Err(404),
+            "{name}"
+        );
+    }
+    // New sessions work and survive like the old ones did.
+    let cookie = browser_login(address, &alice_new);
+    let session = mcp_session_on_acme(address, &alice_new);
+    running.stop().unwrap();
+
+    // 4. Broken session files: the server starts with no sessions and overwrites them.
+    std::fs::write(&browser_file, "{ broken").unwrap();
+    std::fs::write(&mcp_file, "\u{0}garbage").unwrap();
+    let running = start_with_acme(&root);
+    let address = running.address();
+    assert_eq!(browser_principal(address, &cookie), Err(401));
+    assert_eq!(
+        mcp_selected_persons(address, &alice_new, &session),
+        Err(404)
+    );
+    let cookie = browser_login(address, &alice_new);
+    assert_eq!(browser_principal(address, &cookie).as_deref(), Ok("alice"));
+    assert!(
+        std::fs::read_to_string(&browser_file)
+            .unwrap()
+            .contains("\"version\": 1")
+    );
+    running.stop().unwrap();
+}
+
+#[test]
+fn a_session_lifetime_from_server_toml_ends_restored_browser_sessions() {
+    let temp = TempDir::new("sessions-lifetime");
+    let root = temp.path().join("srv");
+    let dir = ServerDir::init(&root).unwrap().dir;
+    modern_db(&dir, "acme");
+    let running = start_with_acme(&root);
+    let address = running.address();
+    let (status, answer) = admin_json(address, "POST", "users", serde_json::json!({"name": "eve"}));
+    assert_eq!(status, 201, "{answer}");
+    let token = answer["token"].as_str().unwrap().to_string();
+    let cookie = browser_login(address, &token);
+    running.stop().unwrap();
+    // The stored session was made an hour ago; the lifetime is now one minute.
+    let browser_file = dir.sessions().join("browser.json");
+    let mut stored = json(&std::fs::read_to_string(&browser_file).unwrap());
+    let created = stored["sessions"][0]["created_unix_s"].as_u64().unwrap();
+    stored["sessions"][0]["created_unix_s"] = serde_json::json!(created - 3600);
+    std::fs::write(&browser_file, stored.to_string()).unwrap();
+    let config = std::fs::read_to_string(dir.config_path()).unwrap();
+    std::fs::write(
+        dir.config_path(),
+        config.replace("# lifetime_secs = 2592000", "lifetime_secs = 60"),
+    )
+    .unwrap();
+    assert!(dir.load_config().unwrap().sessions.lifetime_secs == Some(60));
+    let running = start_with_acme(&root);
+    let address = running.address();
+    assert_eq!(browser_principal(address, &cookie), Err(401));
+    // A new login lives (within its minute).
+    let cookie = browser_login(address, &token);
+    assert_eq!(browser_principal(address, &cookie).as_deref(), Ok("eve"));
+    running.stop().unwrap();
+}

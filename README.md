@@ -245,7 +245,8 @@ every file and key: [`docs/server-dir.md`](docs/server-dir.md).
   `materialize=true` (`--materialize`) for a standalone snapshot with the models.
 - **No memory figures** in the database listing (only `sizeBytes` on disk): a loaded database's
   memory is known only inside its session thread.
-- No admin tools over MCP; MCP sessions live in memory (a restart forgets them).
+- No admin tools over MCP. Browser and MCP sessions survive a restart (`sessions/`, hashes
+  only; `docs/server-dir.md`).
 - **Plain HTTP** (HTTP/1.1 and h2c, no TLS, so no HTTP/2 negotiation by ALPN): put a reverse
   proxy in front for anything beyond the loopback. On HTTP/2 an answer of a request whose body
   the route did not read resets that stream (HTTP/1.1 closes the connection with a lingering

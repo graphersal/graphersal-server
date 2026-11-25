@@ -327,3 +327,134 @@ fn the_first_serve_without_access_toml_makes_the_first_admin() {
     );
     running.stop().unwrap();
 }
+
+/// The access state of `f`'s directory over its stored browser sessions with `limits`.
+fn reopened(f: &Fixture, limits: SessionLimits) -> (Access, Arc<crate::sessions::FileSessions>) {
+    let table = Arc::new(crate::sessions::FileSessions::open(&f.dir));
+    let (access, _) = Access::open_with_limits(
+        &f.dir,
+        Some(f.operator.hash()),
+        table.clone(),
+        limits,
+        Audit::default(),
+    )
+    .unwrap();
+    (access, table)
+}
+
+#[test]
+fn stored_browser_sessions_survive_a_reopen_and_end_with_their_token() {
+    let f = fixture("access-stored");
+    let operator = Principal::operator();
+    let (access, _) = reopened(&f, SessionLimits::unlimited());
+    let bob_token = access.add_user(&operator, "bob", Vec::new()).unwrap();
+    let carol_token = access.add_user(&operator, "carol", Vec::new()).unwrap();
+    let (bob_id, bob) = access.login(bob_token.expose()).unwrap();
+    let (carol_id, _) = access.login(carol_token.expose()).unwrap();
+    drop(access);
+
+    // A restart: the cookie still works.
+    let (access, table) = reopened(&f, SessionLimits::unlimited());
+    assert_eq!(table.len(), 2);
+    assert_eq!(access.authenticate(&with_cookie(&bob_id)).unwrap(), bob);
+    // A revoked token ends the session in memory and on disk at once.
+    access.revoke_token(&operator, "bob").unwrap();
+    assert_eq!(
+        access.authenticate(&with_cookie(&bob_id)),
+        Err(AuthError::InvalidSession)
+    );
+    assert_eq!(crate::sessions::FileSessions::open(&f.dir).len(), 1);
+    // Logout too.
+    assert!(access.logout(carol_id.expose()).unwrap());
+    assert!(crate::sessions::FileSessions::open(&f.dir).is_empty());
+    drop(access);
+
+    // A token changed while no server ran (the file edited): the stored session is dropped at
+    // the next open.
+    let (access, _) = reopened(&f, SessionLimits::unlimited());
+    let (carol_id, _) = access.login(carol_token.expose()).unwrap();
+    drop(access);
+    let mut file = AccessFile::read(&f.dir).unwrap().unwrap();
+    file.issue_token("carol").unwrap();
+    file.write(&f.dir).unwrap();
+    let (access, table) = reopened(&f, SessionLimits::unlimited());
+    assert!(table.is_empty());
+    assert_eq!(
+        access.authenticate(&with_cookie(&carol_id)),
+        Err(AuthError::InvalidSession)
+    );
+}
+
+#[test]
+fn browser_sessions_expire_by_lifetime_and_idle_time() {
+    use std::time::Duration;
+    let f = fixture("access-expiry");
+    let operator = Principal::operator();
+    let token = f.access.add_user(&operator, "dave", Vec::new()).unwrap();
+    let hour = Duration::from_secs(3600);
+    let now = SystemTime::now();
+    let table = crate::sessions::FileSessions::open(&f.dir);
+    // Four stored sessions: fresh, logged in two days ago (seen now), idle for two hours, and
+    // one whose clock is in the future (nothing expires on a clock that went back).
+    let mut sessions = Vec::new();
+    for (created, last_seen) in [
+        (now, now),
+        (now - 48 * hour, now),
+        (now - 3 * hour, now - 2 * hour),
+        (now + hour, now + hour),
+    ] {
+        let id = Secret::generate().unwrap();
+        let mut session = BrowserSession::new("dave", token.hash(), created);
+        session.last_seen = last_seen;
+        table.insert(id.hash(), session).unwrap();
+        sessions.push(id);
+    }
+    drop(table);
+    let alive = |access: &Access| -> Vec<bool> {
+        sessions
+            .iter()
+            .map(|id| access.authenticate(&with_cookie(id)).is_ok())
+            .collect()
+    };
+    // Unlimited (the default): every session is kept (not used here: a request would update
+    // `last_seen` of the idle one).
+    let (access, table) = reopened(&f, SessionLimits::unlimited());
+    assert_eq!(table.len(), 4);
+    drop(access);
+    // An idle timeout of one hour ends the idle one (removed at the open, from the file too).
+    let idle = SessionLimits::unlimited().with_idle_timeout(Some(hour));
+    let (access, table) = reopened(&f, idle);
+    assert_eq!(table.len(), 3);
+    assert_eq!(alive(&access), [true, true, false, true]);
+    drop(access);
+    // A lifetime of one day ends the old one.
+    let lifetime = SessionLimits::unlimited().with_lifetime(Some(24 * hour));
+    let (access, table) = reopened(&f, lifetime);
+    assert_eq!(table.len(), 2);
+    assert_eq!(alive(&access), [true, false, false, true]);
+    assert_eq!(crate::sessions::FileSessions::open(&f.dir).len(), 2);
+
+    // A session that expires while the server runs is refused on its next request.
+    let (id, _) = access.login(token.expose()).unwrap();
+    let table = Arc::new(MemorySessions::new());
+    let (short, _) = Access::open_with_limits(
+        &f.dir,
+        None,
+        table.clone(),
+        SessionLimits::unlimited().with_idle_timeout(Some(hour)),
+        Audit::default(),
+    )
+    .unwrap();
+    let mut old = BrowserSession::new("dave", token.hash(), now - 2 * hour);
+    old.last_seen = now - 2 * hour;
+    table.insert(id.hash(), old).unwrap();
+    assert_eq!(
+        short.authenticate(&with_cookie(&id)),
+        Err(AuthError::InvalidSession)
+    );
+    assert_eq!(
+        table.get(&id.hash()),
+        None,
+        "the expired session is removed"
+    );
+}

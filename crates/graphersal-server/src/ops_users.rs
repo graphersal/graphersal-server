@@ -6,7 +6,9 @@
 //!   is rewritten, the browser sessions of a changed token end at once, and the MCP sessions
 //!   of that user end too (the endpoint's `forget_sessions_of`).
 //! - Offline (the console holding the server lock) the same [`Access`] code runs over the
-//!   directory's `access.toml` (no sessions exist then). A directory without `access.toml` is
+//!   directory's `access.toml` and its stored sessions (`sessions/`, [`crate::sessions`]): a
+//!   token change or removal drops the user's stored browser and MCP sessions from the files,
+//!   so they do not come back at the next start. A directory without `access.toml` is
 //!   refused: `init` or `serve` makes the first admin, whose token they print.
 //!
 //! The actor recorded with each change is the admin's principal ([`Admin::with_principal`];
@@ -20,6 +22,7 @@ use super::Admin;
 use crate::access::{ADMIN_ROLE, Access, AccessFile, Grant, Level, Principal, Secret, Subject};
 use crate::error::ServerError;
 use crate::names::{fold, validate_name};
+use crate::sessions::{FileSessions, McpSessionFile};
 
 /// What a token change ended besides the token itself.
 ///
@@ -27,7 +30,8 @@ use crate::names::{fold, validate_name};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub struct SessionsEnded {
-    /// The user's MCP sessions ended (always `0` offline: no server, no session).
+    /// The user's MCP sessions ended (offline, or with MCP off: the stored ones removed from
+    /// `sessions/mcp.json`).
     pub mcp: usize,
 }
 
@@ -68,7 +72,13 @@ impl Admin {
                     .to_string(),
             });
         }
-        let (access, _) = Access::open(dir, None, self.audit().clone())?;
+        let limits = dir
+            .load_config()
+            .map(|config| config.sessions.limits())
+            .unwrap_or_default();
+        let sessions = Arc::new(FileSessions::open(dir));
+        let (access, _) =
+            Access::open_with_limits(dir, None, sessions, limits, self.audit().clone())?;
         Ok(Arc::new(access))
     }
 
@@ -216,15 +226,20 @@ impl Admin {
         registry.get(&key).map(|_| ())
     }
 
-    /// Ends the MCP sessions of the user `name` (online; offline there are none).
+    /// Ends the MCP sessions of the user `name`: through the running endpoint (written through
+    /// to its store), else (offline, or MCP off) in `sessions/mcp.json` directly.
     fn end_sessions(&self, name: &str) -> SessionsEnded {
         let identity = format!("user:{}", fold(name));
-        let mcp = self
-            .loader
-            .as_ref()
-            .and_then(|loader| loader.mcp())
-            .map(|mcp| mcp.forget_sessions_of(Some(&identity)))
-            .unwrap_or(0);
+        if let Some(mcp) = self.loader.as_ref().and_then(|loader| loader.mcp()) {
+            return SessionsEnded {
+                mcp: mcp.forget_sessions_of(Some(&identity)),
+            };
+        }
+        let file = McpSessionFile::new(self.registry().dir());
+        let mcp = file.forget_identity(Some(&identity)).unwrap_or_else(|err| {
+            tracing::warn!(target: "graphersal_server", "MCP sessions: {err}");
+            0
+        });
         SessionsEnded { mcp }
     }
 }

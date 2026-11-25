@@ -15,6 +15,10 @@
 //!   the router refuses it like every other route of the database and marks it read-only for a
 //!   reader.
 //!
+//! MCP sessions survive a restart: `serve` builds the endpoint with [`persistent_endpoint`]
+//! (`sessions/mcp.json`, [`crate::sessions`]), so a client keeps its session id, its identity
+//! and its selected name across a restart.
+//!
 //! Both run after the router's `Host`/`Origin` checks and authentication; the request carries
 //! the principal's identity, so an MCP session belongs to the principal that initialized it
 //! (another principal, anonymous included, gets the unknown-session `404`). No MCP route of
@@ -28,24 +32,62 @@ use graphersal_mcp::{
 };
 use graphersal_serve::{Request, Response};
 
-use crate::access::{Access, Level, Principal};
+use crate::access::{Access, AccessFile, Level, Principal};
 use crate::config::McpConfig;
 use crate::database::{DatabaseKind, DatabaseRole};
+use crate::layout::ServerDir;
 use crate::loader::Loader;
 use crate::registry::{DatabaseEntry, DbState};
+use crate::sessions::McpSessionFile;
 
 /// The path of the server-wide endpoint.
 pub(crate) const ENDPOINT: &str = "/mcp";
 
-/// The server's MCP endpoint for `config`, `None` when MCP is off.
+/// The server's MCP endpoint for `config` with its sessions in memory only, `None` when MCP
+/// is off (the unit tests; `serve` uses [`persistent_endpoint`]).
+#[cfg(test)]
 pub(crate) fn endpoint(config: &McpConfig) -> Option<Arc<Mcp>> {
-    config.enabled.then(|| {
-        Arc::new(
-            Mcp::new(false, None, false)
-                .with_endpoint(ENDPOINT)
-                .with_max_sessions(config.max_sessions),
-        )
-    })
+    config.enabled.then(|| Arc::new(bare_endpoint(config)))
+}
+
+/// The endpoint of `config` without a session store.
+fn bare_endpoint(config: &McpConfig) -> Mcp {
+    Mcp::new(false, None, false)
+        .with_endpoint(ENDPOINT)
+        .with_max_sessions(config.max_sessions)
+}
+
+/// The server's MCP endpoint for `config` whose sessions survive a restart: kept in `dir`'s
+/// `sessions/mcp.json` ([`McpSessionFile`], restored now, written through on every change).
+/// The stored sessions of a user that is gone or has no token are dropped at this load
+/// (revoked while the server was down); `None` when MCP is off.
+pub(crate) fn persistent_endpoint(config: &McpConfig, dir: &ServerDir) -> Option<Arc<Mcp>> {
+    if !config.enabled {
+        return None;
+    }
+    let file = match AccessFile::read(dir) {
+        Ok(access) => {
+            let access = access.unwrap_or_default();
+            McpSessionFile::new(dir).keeping(move |identity| {
+                match identity.and_then(|id| id.strip_prefix("user:")) {
+                    Some(name) => access.user(name).is_some_and(|user| user.token.is_some()),
+                    None => true,
+                }
+            })
+        }
+        // A broken access.toml stops the start anyway (`Access::open`): keep every session.
+        Err(_) => McpSessionFile::new(dir),
+    };
+    match bare_endpoint(config).with_session_store(Arc::new(file)) {
+        Ok(mcp) => Some(Arc::new(mcp)),
+        Err(err) => {
+            tracing::warn!(
+                target: "graphersal_server",
+                "MCP sessions: {err}; they are kept in memory only"
+            );
+            Some(Arc::new(bare_endpoint(config)))
+        }
+    }
 }
 
 /// The databases of the registry as the directory of `/mcp` for one caller (module docs),

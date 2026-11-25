@@ -643,6 +643,25 @@ req GET /api/admin/databases/acme-imported
 expect_status 404
 ok
 
+STEP="sessions: a browser login and an MCP session before a restart"
+AUTH= jreq POST /api/login "{\"token\": \"$ADMIN_TOKEN\"}"
+expect_status 200
+KEPT_COOKIE=$(header Set-Cookie)
+KEPT_COOKIE=${KEPT_COOKIE%%;*}
+MCP_SESSION=""
+mcp 1 initialize '{"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "smoke", "version": "1"}}'
+expect_status 200
+MCP_SESSION=$(header Mcp-Session-Id)
+[ -n "$MCP_SESSION" ] || fail "no MCP session id"
+tool use_graph '{"name": "acme"}'
+[ "$TOOL_ERROR" != true ] || fail "use_graph: $TOOL_TEXT"
+[ -s "$DIR/sessions/browser.json" ] && [ -s "$DIR/sessions/mcp.json" ] ||
+  fail "no session files in $DIR/sessions"
+if grep -q "${KEPT_COOKIE#gs_session=}" "$DIR/sessions/browser.json"; then
+  fail "a clear session id in sessions/browser.json"
+fi
+ok
+
 STEP="stop"
 kill -TERM "$SERVER_PID"
 for _ in $(seq 1 300); do
@@ -657,6 +676,45 @@ SERVER_PID=""
 [ ! -e "$DIR/server.run" ] || fail "server.run is still there"
 if grep -q "panicked" "$LOG"; then fail "the log shows a panic"; fi
 grep -q "^Stopped: " "$LOG" || fail "no stop line on stderr: $(tail -c 400 "$LOG")"
+ok
+
+STEP="restart: the browser and MCP sessions survive"
+"$BIN" serve --dir "$DIR" --listen 127.0.0.1:0 >"$WORK/server2.out" 2>"$WORK/server2.log" &
+SERVER_PID=$!
+for _ in $(seq 1 150); do
+  [ -s "$DIR/server.run" ] && break
+  kill -0 "$SERVER_PID" 2>/dev/null || fail "the server exited: $(tail -c 400 "$WORK/server2.log")"
+  sleep 0.2
+done
+URL=$(sed -n 's/^url = "\(.*\)"$/\1/p' "$DIR/server.run" 2>/dev/null)
+URL=${URL%/}
+[ -n "$URL" ] || fail "no url in server.run"
+for _ in $(seq 1 150); do
+  STATUS=$(curl -s -o /dev/null -w '%{http_code}' "$URL/readyz")
+  [ "$STATUS" = 200 ] && break
+  sleep 0.2
+done
+[ "$STATUS" = 200 ] || fail "/readyz answers $STATUS"
+AUTH= req GET /api/admin/databases -H "Cookie: $KEPT_COOKIE"
+expect_status 200
+# The session keeps its selection: acme is not loaded after the restart, and the call names it.
+tool gql '{"query": "MATCH (p:person) RETURN count(p) AS n"}'
+[ "$TOOL_ERROR" = true ] || fail "acme answered although it is not loaded: $TOOL_TEXT"
+case "$TOOL_TEXT" in
+  *"database 'acme' is not loaded"*) ;;
+  *) fail "the MCP session lost its selection: $TOOL_TEXT" ;;
+esac
+kill -TERM "$SERVER_PID"
+for _ in $(seq 1 300); do
+  kill -0 "$SERVER_PID" 2>/dev/null || break
+  sleep 0.2
+done
+kill -0 "$SERVER_PID" 2>/dev/null && fail "the server still runs 60 s after SIGTERM"
+wait "$SERVER_PID"
+CODE=$?
+SERVER_PID=""
+[ "$CODE" = 0 ] || fail "exit code $CODE"
+if grep -q "panicked" "$WORK/server2.log"; then fail "the log shows a panic"; fi
 ok
 
 echo "smoke: all steps passed"
