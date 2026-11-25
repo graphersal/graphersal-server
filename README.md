@@ -103,7 +103,7 @@ databases and missing models. Paths and commands are never wrapped.
 | `db load NAME [--no-wait]`, `db unload NAME` | running server only; a loaded database's note shows its URL (`served at: http://.../db/NAME/`) |
 | `db promote NAME` | an unloaded plain database becomes a base (read-only, frozen for good) |
 | `db read-only NAME on\|off`, `db auto-load NAME on\|off` | flags, persisted; read-only applies at once |
-| `db alias set ALIAS DATABASE`, `db alias remove ALIAS` | aliases (a flip takes effect at once) |
+| `db alias set ALIAS DATABASE`, `db alias remove ALIAS`, `db alias rename OLD NEW` | aliases (a flip takes effect at once; a rename moves open MCP sessions with it) |
 | `db backup NAME`, `db backups NAME` | verified ZIP backups in `DIR/backups/NAME/` |
 | `db restore NAME BACKUP [--name NEW]` | over NAME (unloaded) or into the new database NEW |
 | `db export NAME --out FILE [--no-models] [--materialize]` | a packed snapshot (`.gsnap`) |

@@ -508,7 +508,7 @@ ok
 STEP="mcp use_graph"
 tool use_graph '{"name": "current"}'
 [ "$TOOL_ERROR" != true ] || fail "$TOOL_TEXT"
-echo "$TOOL_TEXT" | grep -q '"selected": *"acme-l"' || fail "use_graph: $TOOL_TEXT"
+echo "$TOOL_TEXT" | grep -q '"selected": *"current", *"graph": *"acme-l"' || fail "use_graph: $TOOL_TEXT"
 ok
 
 STEP="mcp gql"
@@ -518,6 +518,28 @@ echo "$TOOL_TEXT" | grep -q '"n": *2' || fail "gql on acme-l: $TOOL_TEXT"
 tool gql '{"query": "MATCH (p:person) RETURN count(p) AS n", "graph": "acme"}'
 [ "$TOOL_ERROR" != true ] || fail "$TOOL_TEXT"
 echo "$TOOL_TEXT" | grep -q '"n": *1' || fail "gql on acme: $TOOL_TEXT"
+ok
+
+STEP="alias rename moves the MCP session"
+"$BIN" db alias rename current live --dir "$DIR" >"$WORK/rename.out" 2>"$WORK/rename.err" ||
+  fail "db alias rename: $(cat "$WORK/rename.err")"
+grep -q "^Renamed alias 'current' to 'live' -> database 'acme-l'\$" "$WORK/rename.out" ||
+  fail "db alias rename: $(cat "$WORK/rename.out")"
+grep -q "^  MCP sessions moved: 1\$" "$WORK/rename.out" ||
+  fail "the open MCP session did not move: $(cat "$WORK/rename.out")"
+tool gql '{"query": "MATCH (p:person) RETURN count(p) AS n"}'
+[ "$TOOL_ERROR" != true ] || fail "$TOOL_TEXT"
+case "$TOOL_TEXT" in
+  'note: alias "current" was renamed to "live"'*) ;;
+  *) fail "no rename note: $TOOL_TEXT" ;;
+esac
+echo "$TOOL_TEXT" | grep -q '"n": *2' || fail "gql on live: $TOOL_TEXT"
+tool gql '{"query": "MATCH (p:person) RETURN count(p) AS n"}'
+case "$TOOL_TEXT" in note:*) fail "the note came twice: $TOOL_TEXT" ;; esac
+jreq POST /api/admin/aliases/live/rename '{"name": "acme-l"}'
+expect_status 409
+req GET /db/current/api/info
+expect_status 404
 req DELETE /mcp -H "Mcp-Session-Id: $MCP_SESSION"
 case "$STATUS" in 200 | 202 | 204) ;; *) fail "DELETE /mcp: HTTP $STATUS" ;; esac
 ok

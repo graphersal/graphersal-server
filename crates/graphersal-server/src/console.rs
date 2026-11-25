@@ -122,6 +122,13 @@ pub enum DbCommand {
         /// The alias.
         alias: String,
     },
+    /// `db alias rename OLD NEW`.
+    AliasRename {
+        /// The alias.
+        alias: String,
+        /// Its new name.
+        name: String,
+    },
     /// `db backup NAME`.
     Backup {
         /// The database.
@@ -236,6 +243,11 @@ impl DbCommand {
                 Some(json!({ "target": target })),
             ),
             DbCommand::AliasRemove { alias } => (Method::Delete, format!("aliases/{alias}"), None),
+            DbCommand::AliasRename { alias, name } => (
+                Method::Post,
+                format!("aliases/{alias}/rename"),
+                Some(json!({ "name": name })),
+            ),
             DbCommand::Backup { name } => (Method::Post, format!("databases/{name}/backup"), None),
             DbCommand::Backups { name } => (Method::Get, format!("databases/{name}/backups"), None),
             DbCommand::Restore {

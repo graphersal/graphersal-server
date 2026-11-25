@@ -51,7 +51,7 @@ pub(crate) mod test_support;
 pub(crate) mod text;
 mod ui_assets;
 
-pub use admin::TmpBuild;
+pub use admin::{Renamed, TmpBuild};
 pub use config::{
     DEFAULT_HEADER_TIMEOUT_SECS, DEFAULT_IDLE_TIMEOUT_SECS, DEFAULT_LISTEN,
     DEFAULT_MAX_CONNECTIONS, DEFAULT_MCP_SESSIONS, DatabaseDefaults, Limits, McpConfig,

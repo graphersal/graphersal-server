@@ -105,6 +105,53 @@ impl Registry {
         Ok(())
     }
 
+    /// Renames the alias `old` (case-insensitive) to `new`, keeping its database: one atomic
+    /// rewrite of `aliases.toml`. `moved` runs under the registry's write lock right after the
+    /// file and memory changed, with the old (folded) and the new name (the server moves its
+    /// MCP sessions there, so no lookup sees the rename half done); its result is returned in
+    /// [`Renamed::moved`]. Refused: `old` is no alias (a database has no rename), `new` is an
+    /// invalid name or a name taken by a database, an alias (also `old` itself) or a build, a
+    /// broken `aliases.toml`.
+    pub fn alias_rename<T>(
+        &self,
+        old: &str,
+        new: &str,
+        moved: impl FnOnce(&str, &str) -> T,
+    ) -> Result<Renamed<T>, ServerError> {
+        let old_key = fold(old);
+        let mut inner = self.write();
+        refuse_broken_aliases(&inner)?;
+        let Some(target) = inner.aliases.get(&old_key).cloned() else {
+            if inner.entries.contains_key(&old_key) {
+                return Err(ServerError::Refused {
+                    name: old_key,
+                    message: "it is a database, not an alias; only an alias can be renamed"
+                        .to_string(),
+                });
+            }
+            return Err(not_found(old));
+        };
+        validate_name(new)?;
+        if let Some(holder) = inner.holder_of(new) {
+            return Err(ServerError::NameInUse {
+                name: new.to_string(),
+                holder,
+            });
+        }
+        let mut aliases = inner.aliases.clone();
+        aliases.remove(&old_key);
+        aliases.insert(new.to_string(), target.clone());
+        write_aliases(&self.dir.aliases_path(), &aliases)?;
+        inner.aliases = aliases;
+        let moved = moved(&old_key, new);
+        Ok(Renamed {
+            old: old_key,
+            new: new.to_string(),
+            target,
+            moved,
+        })
+    }
+
     /// Sets whether the database `name` is loaded at server start (persisted in its
     /// `database.toml`).
     pub fn set_auto_load(&self, name: &str, auto_load: bool) -> Result<DatabaseEntry, ServerError> {
@@ -521,6 +568,20 @@ fn check_new(inner: &Inner, name: &str, config: &DatabaseConfig) -> Result<(), S
     Ok(())
 }
 
+/// A renamed alias ([`Registry::alias_rename`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Renamed<T> {
+    /// The old name (folded).
+    pub old: String,
+    /// The new name.
+    pub new: String,
+    /// The database the alias names.
+    pub target: String,
+    /// What the `moved` callback returned.
+    pub moved: T,
+}
+
 fn refuse_broken_aliases(inner: &Inner) -> Result<(), ServerError> {
     match &inner.aliases_broken {
         Some(reason) => Err(ServerError::Refused {
@@ -719,6 +780,52 @@ mod tests {
         // The file is the truth after a rescan.
         let again = Registry::scan(registry.dir()).unwrap();
         assert!(again.aliases().is_empty());
+    }
+
+    #[test]
+    fn an_alias_rename_moves_the_name_and_keeps_the_database() {
+        let temp = TempDir::new("admin-alias-rename");
+        let registry = registry_with(&temp, &[("a", ""), ("b", "")]);
+        registry.alias_set("prod", "a").unwrap();
+        registry.alias_set("other", "b").unwrap();
+
+        let renamed = registry
+            .alias_rename("PROD", "live", |old, new| format!("{old}->{new}"))
+            .unwrap();
+        assert_eq!(renamed.old, "prod");
+        assert_eq!(renamed.new, "live");
+        assert_eq!(renamed.target, "a");
+        assert_eq!(renamed.moved, "prod->live");
+        assert_eq!(
+            registry.aliases().get("live").map(String::as_str),
+            Some("a")
+        );
+        assert!(!registry.aliases().contains_key("prod"));
+        let again = Registry::scan(registry.dir()).unwrap();
+        assert_eq!(again.aliases(), registry.aliases());
+
+        // Refusals change nothing and never call back.
+        let refused = |old: &str, new: &str| {
+            registry
+                .alias_rename(old, new, |_, _| panic!("called back"))
+                .unwrap_err()
+        };
+        let err = refused("prod", "x");
+        assert!(matches!(err, ServerError::NotFound { .. }), "{err}");
+        let err = refused("a", "x");
+        assert!(matches!(err, ServerError::Refused { .. }), "{err}");
+        assert!(err.to_string().contains("not an alias"), "{err}");
+        let err = refused("live", "Bad");
+        assert!(matches!(err, ServerError::InvalidName { .. }), "{err}");
+        for (taken, holder) in [("b", "database"), ("other", "alias"), ("live", "alias")] {
+            let err = refused("live", taken);
+            assert!(
+                matches!(&err, ServerError::NameInUse { holder: h, .. } if *h == holder),
+                "{err}"
+            );
+        }
+        assert_eq!(registry.aliases().len(), 2);
+        assert_eq!(registry.aliases()["live"], "a");
     }
 
     #[test]

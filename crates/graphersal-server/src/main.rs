@@ -98,6 +98,8 @@ Usage:
         db auto-load NAME on|off
         db alias set ALIAS DATABASE
         db alias remove ALIAS
+        db alias rename OLD NEW  the alias OLD becomes NEW (same database); open MCP sessions
+                                 that selected OLD move to NEW
         db backup NAME           a verified ZIP backup into DIR/backups/NAME/<UTC time>.zip
                                  (it may be loaded)
         db backups NAME          the backups of NAME (also of a deleted database)
@@ -609,6 +611,10 @@ fn parse_db(
         },
         ["alias", "remove", alias] => DbCommand::AliasRemove {
             alias: alias.to_string(),
+        },
+        ["alias", "rename", alias, name] => DbCommand::AliasRename {
+            alias: alias.to_string(),
+            name: name.to_string(),
         },
         ["backup", name] => DbCommand::Backup {
             name: name.to_string(),

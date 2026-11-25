@@ -88,6 +88,7 @@ A `failed` database whose `database.toml` cannot be read has only `name`, `state
 | GET | `/api/admin/aliases` | | `200 {"aliases": {alias: database}}` |
 | PUT | `/api/admin/aliases/<alias>` | `{"target"}` | `200 {"alias", "target"}` (new alias or flip) |
 | DELETE | `/api/admin/aliases/<alias>` | | `200 {"alias", "removed": true}` |
+| POST | `/api/admin/aliases/<alias>/rename` | `{"name"}` | `200 {"alias", "renamedFrom", "target", "mcpSessionsMoved"}` (see Aliases) |
 | GET | `/api/admin/runs` | | `200 {"runs": [run...], "textHeadChars": 200}` (every loaded database) |
 | GET | `/api/admin/databases/<name>/runs` | | `200 {"database", "loaded": bool, "runs": [run...], "textHeadChars": 200}` |
 | POST | `/api/admin/databases/<name>/runs/cancel` | `{"id"}` | `200 {"database", "id", "cancelled": bool}` |
@@ -156,6 +157,22 @@ base cannot get a model later); a failed one. An unknown name is `404`.
 `read-only` is persisted in the database's `database.toml` and, when the database is loaded,
 applied at once: writes through its API and MCP endpoint are refused with a read-only error;
 a running request finishes. A base refuses `false` (`409`). `auto-load` is persisted only.
+
+### Aliases
+
+`PUT aliases/<alias> {"target"}` creates an alias or points it at another database (a flip):
+`/db/<alias>/...` and MCP sessions that selected the alias follow at once. `DELETE` removes it.
+An alias names a database, never another alias.
+
+`POST aliases/<alias>/rename {"name"}` gives the alias a new name and keeps its database, in one
+atomic rewrite of `aliases.toml`. The answer: `alias` (the new name), `renamedFrom` (the old
+name), `target`, `mcpSessionsMoved` (the open MCP sessions on `/mcp` that had selected the old
+name: they move to the new one, and the next answer of each carries one note, see
+`docs/mcp.md`). Refused: an old name that is no alias (`404`; a database name is `409` with
+the help: databases have no rename, point an alias at it), an invalid new name (`400`), a new
+name a database, another alias or the alias itself holds (`409`, help naming the listing), a
+broken `aliases.toml` (`409`). After a rename `/db/<old name>/...` (also `/db/<old>/mcp`) is
+`404`; open playground pages under the old name stop working.
 
 ### Backup
 
@@ -387,7 +404,7 @@ using its database's `POST /db/<name>/api/cancel`.
 
 ### Help on refusals
 
-Besides the cases above, a taken name (create, clone, restore, import, alias) answers help naming the
+Besides the cases above, a taken name (create, clone, restore, import, alias, alias rename) answers help naming the
 listing; `PUT .../read-only {"readOnly": false}` on a base names the layer to create instead;
 deleting a base that layers name names each layer's `DELETE`; a refused promotion names the
 unload, the materialized export or the model to add (see Promote); unloading a base that loaded
@@ -399,7 +416,7 @@ layers use names each layer's `unload`.
 graphersal-server db list | create NAME [...] | delete NAME | clone SOURCE NAME --dir DIR [--json]
 graphersal-server db load NAME [--no-wait] | unload NAME | promote NAME --dir DIR [--json]
 graphersal-server db read-only NAME on|off | auto-load NAME on|off --dir DIR [--json]
-graphersal-server db alias set ALIAS DATABASE | alias remove ALIAS --dir DIR [--json]
+graphersal-server db alias set ALIAS DATABASE | alias remove ALIAS | alias rename OLD NEW --dir DIR [--json]
 graphersal-server db backup NAME | backups NAME | restore NAME BACKUP [--name NEW] --dir DIR [--json]
 graphersal-server db export NAME --out FILE [--no-models] [--materialize] --dir DIR [--json]
 graphersal-server import DIR SOURCE --name NAME [--base BASE] [--format F] [--description TEXT] [--role normal|base] [--json]

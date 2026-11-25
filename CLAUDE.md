@@ -83,7 +83,9 @@ from published files). When this file disagrees with the code, the code wins: sa
   read-only base, base of layers (delete), base of loaded layers (unload); `GET /api/admin/databases/<name|alias>`; field names = the web UI's
   (`ui/databases.js` `databaseRows`); the actions: `POST databases` create, `DELETE databases/<name>`, `POST
   .../<name>/clone|load|unload|promote`, `PUT .../<name>/read-only|auto-load`, `GET aliases`, `PUT|DELETE
-  aliases/<alias>`; JSON bodies `deny_unknown_fields`; core errors -> `{"error","help"?}` via
+  aliases/<alias>`, `POST aliases/<alias>/rename {"name"}` (`Admin::alias_rename`: `Registry::alias_rename`
+  rewrites `aliases.toml` and, under the registry's write lock, calls `Mcp::rename_selection` so
+  open `/mcp` sessions move to the new name with one note; answer `mcpSessionsMoved`); JSON bodies `deny_unknown_fields`; core errors -> `{"error","help"?}` via
   `status_of` (400 invalid name/input, 404, 409 rule refusals, 500); the route table is in its
   module docs and `docs/admin-api.md` (the web UI's contract, `ui/admin-api.js`: keep them in sync);
   the run administration (V25, graphersal-serve 0.7.1 #32): `GET runs` (every loaded
@@ -182,7 +184,7 @@ from published files). When this file disagrees with the code, the code wins: sa
   at start with the lock held: cleans `tmp/`, broken entries -> `DbState::Failed`, broken aliases
   dropped into `problems()`, never fatal; entries behind an `RwLock`; `DbState`), `admin` (the
   admin core as `impl Registry`: `list`, `get`, `resolve`, aliases (target must be a database:
-  no chains), `set_auto_load`, `set_read_only` (persists the flag only; a base with layers stays
+  no chains; `alias_rename(old, new, moved)`: the new name unused, the callback runs under the write lock), `set_auto_load`, `set_read_only` (persists the flag only; a base with layers stays
   read-only), `prepare_tmp` -> `TmpBuild` -> `commit` (build in `tmp/`, atomic rename into
   `databases/`; a dropped build is removed), `delete` (the registry half of a delete: move into
   `trash/`, refusals), `prepare_replace` / `commit_replace` (a restore over an existing
@@ -228,7 +230,7 @@ from published files). When this file disagrees with the code, the code wins: sa
   (directory mode keeps the selection in the session table); held by the loader
   (`Loader::with_mcp`, `Loader::mcp()`; `Loader::new` = no MCP, the unit tests). `Directory`
   implements `GraphDirectory` over the registry + loader, no session job: `list` (databases +
-  aliases; kind plain/layer/base from `database.toml`, state, readOnly = `read_only` or base,
+  aliases; a session keeps the NAME it selected (alias or database) and graphersal-mcp resolves it per call: a flip moves it, a removed name errors, a rename moves it via `Admin::alias_rename`; kind plain/layer/base from `database.toml`, state, readOnly = `read_only` or base,
   description; an alias row carries its target's fields + `aliasOf`), `resolve` (alias -> real
   name NOW; unknown -> `no database or alias 'x'`), `host` (loaded -> the context + its
   `mcp_profile()`; else `McpError::Unavailable` with the state's text, `...; ask an operator to

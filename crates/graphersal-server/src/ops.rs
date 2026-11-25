@@ -38,6 +38,8 @@
 //!   `ops_runs.rs`).
 //! - `load`, `unload`, `set_read_only`, `set_auto_load`, `alias_set`, `alias_remove`: delegated
 //!   to the [`Loader`] and the [`Registry`].
+//! - [`Admin::alias_rename`]: [`Registry::alias_rename`], and online the MCP sessions that
+//!   selected the old name move to the new one (`Mcp::rename_selection`).
 //!
 //! Database names are real names here (an alias is not followed): an operation on an alias's
 //! name answers [`ServerError::NotFound`].
@@ -50,6 +52,7 @@ use graphersal::prelude::{GraphSchema, GraphStorage, TraversalGraph};
 use graphersal::storage::{LayerBase, LayeredGraph};
 use graphersal_serve::layer_base_of_store;
 
+use crate::admin::Renamed;
 use crate::database::{DatabaseConfig, DatabaseKind, DatabaseRole};
 use crate::error::ServerError;
 use crate::layout::ServerDir;
@@ -482,6 +485,25 @@ impl Admin {
     /// Removes the alias `alias` ([`Registry::alias_remove`]).
     pub fn alias_remove(&self, alias: &str) -> Result<(), ServerError> {
         self.registry.alias_remove(alias)
+    }
+
+    /// Renames the alias `old` to `new` ([`Registry::alias_rename`]); online, every MCP session
+    /// that selected `old` moves to `new` in the same step (its next answer carries one note):
+    /// [`Renamed::moved`] is the number of sessions moved (0 offline or with MCP off).
+    pub fn alias_rename(&self, old: &str, new: &str) -> Result<Renamed<usize>, ServerError> {
+        let mcp = self.loader.as_ref().and_then(|loader| loader.mcp());
+        let renamed = self.registry.alias_rename(old, new, |old, new| {
+            mcp.map_or(0, |mcp| mcp.rename_selection(old, new))
+        })?;
+        tracing::info!(
+            target: "graphersal_server",
+            "alias '{}' renamed to '{}' (database '{}', {} MCP session(s) moved)",
+            renamed.old,
+            renamed.new,
+            renamed.target,
+            renamed.moved
+        );
+        Ok(renamed)
     }
 
     /// The Store options of a new database: `server.toml`'s `[defaults]`.

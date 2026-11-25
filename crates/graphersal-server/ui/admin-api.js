@@ -53,6 +53,7 @@ const seg = (name) => encodeURIComponent(String(name));
  * The request of one admin action: `{method, path, body?}` with `path` relative to the server
  * root. Actions: list, get, create(body), delete, clone(newName), load, unload,
  * readOnly(value), autoLoad(value), aliases, setAlias(alias, target), removeAlias(alias),
+ * renameAlias(alias, newName) (atomic; open MCP sessions that selected the alias move with it),
  * backup(name), backups(name), restore(name, backup, newName?) (no `name` field when restoring
  * over the database itself), importPath({path, name, base?, format?, description?, role?}), models,
  * addModel({path?, repo?, license?}), removeModel(repo or blob hash), promote(name) (no body;
@@ -75,6 +76,7 @@ export const adminRequest = Object.freeze({
   aliases: () => ({ method: 'GET', path: 'api/admin/aliases' }),
   setAlias: (alias, target) => ({ method: 'PUT', path: `api/admin/aliases/${seg(alias)}`, body: { target } }),
   removeAlias: (alias) => ({ method: 'DELETE', path: `api/admin/aliases/${seg(alias)}` }),
+  renameAlias: (alias, newName) => ({ method: 'POST', path: `api/admin/aliases/${seg(alias)}/rename`, body: { name: newName } }),
   backup: (name) => ({ method: 'POST', path: `api/admin/databases/${seg(name)}/backup` }),
   backups: (name) => ({ method: 'GET', path: `api/admin/databases/${seg(name)}/backups` }),
   restore: (name, backup, newName) => ({
@@ -142,6 +144,17 @@ export function nameProblem(name, what = 'name') {
   if (!NAME_RULE.test(n.toLowerCase())) {
     return `A ${what} starts with a letter or digit and has at most 63 of a-z, 0-9, '.', '_', '-'.`;
   }
+  return null;
+}
+
+/**
+ * The problem with the new name of the alias `alias`, or null: a valid name other than its
+ * current one (whether a database or another alias holds it is the server's answer).
+ */
+export function renameProblem(alias, newName) {
+  const problem = nameProblem(newName, 'new alias name');
+  if (problem) return problem;
+  if (newName.trim().toLowerCase() === String(alias || '').toLowerCase()) return `The alias is named "${alias}" already.`;
   return null;
 }
 
@@ -288,6 +301,11 @@ export function outcomeText(action, subject, answer = {}) {
     case 'autoLoad': return answer.autoLoad ? `"${subject}" loads when the server starts.` : `"${subject}" no longer loads at start.`;
     case 'setAlias': return `The alias "${answer.alias || subject}" names "${answer.target}".`;
     case 'removeAlias': return `Removed the alias "${subject}".`;
+    case 'renameAlias': {
+      const moved = typeof answer.mcpSessionsMoved === 'number' && answer.mcpSessionsMoved > 0
+        ? `; ${answer.mcpSessionsMoved} open MCP session${answer.mcpSessionsMoved === 1 ? '' : 's'} moved with it` : '';
+      return `Renamed the alias "${answer.renamedFrom || ''}" to "${answer.alias || subject}" (database "${answer.target || ''}")${moved}. Links to the old name stop working.`;
+    }
     case 'backup': return `Backed up "${subject}" as ${answer.backup || 'a new backup'}${typeof answer.bytes === 'number' ? ` (${bytesText(answer.bytes)})` : ''}.`;
     case 'restore': {
       const from = answer.restoredFrom && answer.restoredFrom.backup ? ` from ${answer.restoredFrom.database || ''}/${answer.restoredFrom.backup}` : '';

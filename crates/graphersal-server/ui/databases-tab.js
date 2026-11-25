@@ -3,7 +3,7 @@
 // them, a link to each one's playground `db/<name>/`), the row actions (load with a poll until it
 // ends, unload, clone, promote to a base, delete; Backups… and Export… open those tabs for the
 // row, Runs… (a loaded row) the Runs tab), create (plain, base, or a layer over a base; optional description and schema) and the
-// aliases (set, flip, remove). Requests and rules: ./admin-api.js. Errors show the server's
+// aliases (set, flip, rename, remove). Requests and rules: ./admin-api.js. Errors show the server's
 // `error` and `help` verbatim. A `needs-model` row carries the hint to add its model; a base held
 // by loaded layers reads "in pool"; a database holding copied model blobs shows the server's link
 // warning. "Promote to base…" turns an unloaded plain database into a base after a one-way
@@ -11,13 +11,13 @@
 
 import { reactive, ref, computed, nextTick, onMounted } from 'vue';
 import {
-  createBody, nameProblem, rowActions, confirmText, outcomeText, loadAndWatch, baseNames, realRows,
+  createBody, nameProblem, renameProblem, rowActions, confirmText, outcomeText, loadAndWatch, baseNames, realRows,
   bytesText, transferActions, needsModelHint, poolText, promoteAction,
 } from './admin-api.js';
 import { admin, list, reload, patchRow, errorNotice, noticeClass, pageHref } from './shared.js';
 
 const emptyCreate = () => ({ name: '', kind: 'plain', role: 'normal', base: '', description: '', schema: '', readOnly: false, autoLoad: false });
-const freshDialog = () => ({ mode: null, source: '', form: emptyCreate(), alias: '', target: '', existing: false, problems: [], error: null, busy: false });
+const freshDialog = () => ({ mode: null, source: '', form: emptyCreate(), alias: '', target: '', newName: '', existing: false, problems: [], error: null, busy: false });
 
 export default {
   props: { api: { type: Object, required: true }, params: { type: Object, default: () => ({}) } },
@@ -92,6 +92,7 @@ export default {
     const openAlias = (alias) => openDialog('alias', alias
       ? { alias: alias.alias, target: alias.target, existing: true }
       : { target: databaseNames.value[0] || '' });
+    const openRename = (alias) => openDialog('rename', { alias: alias.alias, target: alias.target, newName: alias.alias });
 
     /** The request of the open dialog, or `{problems}` (shown in the dialog, nothing sent). */
     function dialogRequest() {
@@ -115,6 +116,13 @@ export default {
         const was = list.aliases.find((a) => a.alias === subject);
         if (was && was.target !== target && !window.confirm(confirmText('flipAlias', subject, target))) return { cancelled: true };
         return { subject, action: 'setAlias', send: () => admin.setAlias(subject, target) };
+      }
+      if (dialog.mode === 'rename') {
+        const problem = renameProblem(dialog.alias, dialog.newName);
+        if (problem) return { problems: [problem] };
+        const subject = dialog.newName.trim().toLowerCase();
+        const alias = dialog.alias;
+        return { subject, action: 'renameAlias', send: () => admin.renameAlias(alias, subject) };
       }
       return { cancelled: true };
     }
@@ -150,7 +158,7 @@ export default {
     return {
       list, rows, aliases, busy, notice, dlg, dialog, acts, more, promo, bases, databaseNames, showSize, showMemory,
       bytesText, needsModelHint, poolText, noticeClass, href: pageHref, reload,
-      loadDb, unloadDb, deleteDb, promoteDb, setFlag, openCreate, openClone, openAlias, closeDialog, submitDialog, removeAlias,
+      loadDb, unloadDb, deleteDb, promoteDb, setFlag, openCreate, openClone, openAlias, openRename, closeDialog, submitDialog, removeAlias,
       openBackups: (name) => props.api.navigate('backups', name ? { db: name } : {}),
       openExport: (row) => props.api.navigate('export', { db: row.name }),
       openRuns: (row) => props.api.navigate('runs', { db: row.name }),
@@ -161,6 +169,7 @@ export default {
         create: 'New database',
         clone: `Clone "${dialog.source}"`,
         alias: dialog.existing ? `Alias "${dialog.alias}"` : 'New alias',
+        rename: `Rename alias "${dialog.alias}"`,
       })[dialog.mode] || ''),
     };
   },
@@ -246,6 +255,7 @@ export default {
           <td class="mono">{{ a.target }}</td>
           <td class="srv-actions">
             <button type="button" class="btn small" :disabled="!!busy[a.alias]" @click="openAlias(a)">Point to…</button>
+            <button type="button" class="btn small" :disabled="!!busy[a.alias]" title="A new name for the alias, same database; open MCP sessions that selected it follow" @click="openRename(a)">Rename…</button>
             <button type="button" class="btn small danger" :disabled="!!busy[a.alias]" @click="removeAlias(a)">Remove…</button>
           </td>
         </tr>
@@ -286,13 +296,17 @@ export default {
             <label>Database
               <select v-model="dialog.target" name="target"><option v-for="n in databaseNames" :key="n" :value="n">{{ n }}</option></select></label>
           </template>
+          <template v-else-if="dialog.mode === 'rename'">
+            <p>The alias "{{ dialog.alias }}" (database "{{ dialog.target }}") gets a new name. Links to db/{{ dialog.alias }}/ stop working; open MCP sessions that selected it move to the new name.</p>
+            <label>New name <input v-model="dialog.newName" name="newName" class="mono" autocomplete="off" spellcheck="false"></label>
+          </template>
           <ul v-if="dialog.problems.length" class="srv-problems" role="alert"><li v-for="p in dialog.problems" :key="p">{{ p }}</li></ul>
           <div v-if="dialog.error" class="notice srv-notice srv-error" role="alert">
             <div class="srv-notice-text"><span>{{ dialog.error.text }}</span>
               <p v-if="dialog.error.help" class="srv-help">{{ dialog.error.help }}</p></div>
           </div>
           <div class="store-dialog-buttons">
-            <button type="submit" class="btn primary" :disabled="dialog.busy">{{ dialog.busy ? 'Working…' : dialog.mode === 'create' ? 'Create' : dialog.mode === 'clone' ? 'Clone' : 'Save' }}</button>
+            <button type="submit" class="btn primary" :disabled="dialog.busy">{{ dialog.busy ? 'Working…' : dialog.mode === 'create' ? 'Create' : dialog.mode === 'clone' ? 'Clone' : dialog.mode === 'rename' ? 'Rename' : 'Save' }}</button>
             <button type="button" class="btn" :disabled="dialog.busy" @click="closeDialog">Cancel</button>
           </div>
         </div>

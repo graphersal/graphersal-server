@@ -154,6 +154,17 @@ fn render_with(command: &DbCommand, answer: &Value, dir: &Path, server: Option<&
         DbCommand::AliasRemove { .. } => {
             Note::new(format!("Removed alias '{}'", s("alias"))).text()
         }
+        DbCommand::AliasRename { .. } => Note::new(format!(
+            "Renamed alias '{}' to '{}' -> database '{}'",
+            s("renamedFrom"),
+            s("alias"),
+            s("target")
+        ))
+        .detail(
+            "MCP sessions moved",
+            answer["mcpSessionsMoved"].as_u64().unwrap_or(0).to_string(),
+        )
+        .text(),
         DbCommand::Backup { .. } => {
             let name = s("database");
             Note::new(format!("Backed up database '{name}'"))
