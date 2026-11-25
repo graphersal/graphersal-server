@@ -415,7 +415,7 @@ test('import from a server path: the JSON form, absolute paths only, notes in th
     assert.equal(suggestName('/home/u/graph.json'), 'graph');
     assert.equal(suggestName('C:\\x\\My_Data.graphml'), 'my_data');
     assert.equal(suggestName('...'), '');
-    assert.equal(suggestName('a'.repeat(80) + '.gstore').length, 63);
+    assert.equal(suggestName('a'.repeat(80) + '.gstore').length, 32);
   } finally {
     server.close();
   }

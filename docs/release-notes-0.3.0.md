@@ -76,3 +76,32 @@ A server in the background without hunting for its pid:
 - The `serve` start block's `stop` row names `graphersal-server stop --dir DIR`.
 - Under systemd or launchd run `serve` in the foreground: examples in
   [`server-dir.md`](server-dir.md#running-as-a-service).
+
+## Shorter names for new databases, aliases and users
+
+- **A NEW name** (create, clone, import by upload, path or inbox, restore into a new name, a
+  new alias, alias rename, user add; console, admin API and web UI alike) has **at most 32
+  characters** (was 63), **ends with a letter or digit** (no trailing `-`, `_` or `.`) and
+  holds **no `..`**; the rest is unchanged (`[a-z0-9]` first, `[a-z0-9._-]` inside, no Windows
+  device names, `jobs` reserved for databases and aliases). A refusal is `400` (console: exit
+  code 1) with `invalid name "<name>": <reason>`, one reason per check.
+- **Existing names keep working:** a database, alias, user or grant named by 0.2.0 under the
+  older rule (up to 63 characters, a trailing `-` or `_`, `..` inside) is still loaded,
+  served under `/db/<name>/`, looked up, granted, flipped (an alias) and backed up; its backup
+  restores over it and, after the database was deleted, under its own name again (which a
+  `jobs` database made before 0.2.0 now may too). Only a restore into ANOTHER name takes the
+  new rule.
+- **Web UI:** every field where a new database, alias or user name is typed (create, clone,
+  import, restore into a new database, alias, alias rename, add user) shows the rule under it
+  (*Up to 32 characters: lower-case letters, digits, '.', '_' and '-'; starts and ends with a
+  letter or digit.*) and checks it before sending, with the server's own error text. The name
+  suggested from an import file is always a valid new name (cut to 32 characters, `..` made
+  one dot, no trailing `-`/`_`/`.`), and the default name of a restore into a new database
+  (`<name>-restored`) is shortened to fit.
+- **Windows:** the short names keep paths under the server directory short; keep the server
+  directory itself short too (`MAX_PATH` = 260 characters unless long paths are enabled;
+  [`server-dir.md`](server-dir.md#databasesname)).
+- The library: `names::MAX_NAME_LEN` is 32; new `names::MAX_EXISTING_NAME_LEN` (63) and
+  `names::validate_new_user_name`; `validate_new_name` checks the new rule; `validate_name`
+  stays the rule of existing names; `Registry::prepare_tmp_former_name` (a restore under the
+  deleted database's own name).

@@ -290,13 +290,20 @@ from published files). When this file disagrees with the code, the code wins: sa
   (minimal std `TcpStream` HTTP/1.1 client: `Host` = address, no `Origin`, `Connection: close`,
   Content-Length/chunked/close bodies, timeouts; `download` streams a `200` body into a writer:
   `db export` through a server), `error`
-  (`ServerError`), `names` (name rule `[a-z0-9][a-z0-9._-]{0,62}`, Windows device names refused,
-  `fold` = lower case for case-insensitive lookups; B7: `validate_new_name` also refuses the
-  `RESERVED` names (`jobs`: the default backup root `backups/jobs/`), used by
-  `Registry::prepare_tmp` (create/clone/import/restore as new), `alias_set` (a new alias only),
-  `alias_rename` and the upload import's quick check; `validate_name` alone for existing
-  directories and user names, so an old `jobs` database stays served; the admin API's help is
-  `RESERVED_HELP`), `database` (`database.toml`:
+  (`ServerError`), `names` (two rules: NEW names (0.3.0) `validate_new_user_name` = at most
+  `MAX_NAME_LEN` 32, `[a-z0-9]` first, `[a-z0-9._-]`, a letter/digit last, no `..`, no Windows
+  device name, and `validate_new_name` = that plus the `RESERVED` names (`jobs`: the default
+  backup root `backups/jobs/`); EXISTING names `validate_name` = the old rule
+  `[a-z0-9][a-z0-9._-]{0,62}` not ending in '.' (`MAX_EXISTING_NAME_LEN` 63); `fold` = lower
+  case for case-insensitive lookups. `validate_new_name` is used by `Registry::prepare_tmp`
+  (create/clone/import/restore into another name), `alias_set` (a new alias only),
+  `alias_rename` and the upload import's quick check; `validate_new_user_name` by
+  `AccessFile::add_user`; `validate_name` alone for registry scan, lookups, grants, existing
+  users and `Registry::prepare_tmp_former_name` (a restore under the deleted database's own
+  name), so old names (longer, trailing '-'/'_', `..`, `jobs`) stay served; the admin API's
+  help is `RESERVED_HELP`. The web UI mirrors the rule in `ui/admin-api.js` (`newNameReason`,
+  `existingNameReason`, same order and texts; `ui/tests/names.test.mjs` checks the texts
+  against `names.rs`; `NAME_HINT` under every name field)), `database` (`database.toml`:
   `DatabaseConfig`, `DatabaseKind`, `DatabaseRole`, `deny_unknown_fields`, `utc_now`),
   `registry` (`Registry`: NO registry file, the registry IS `databases/*/database.toml`; `scan`
   at start with the lock held: cleans `tmp/`, broken entries -> `DbState::Failed`, broken aliases

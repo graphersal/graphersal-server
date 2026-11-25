@@ -282,10 +282,21 @@ alias whose target is missing is dropped at start and reported in the listing's 
 ## `databases/<name>/`
 
 There is no registry file: the databases ARE the directories under `databases/`, read at start.
-Names follow `[a-z0-9][a-z0-9._-]{0,62}` (no Windows device names) and are unique
-case-insensitively. A new database or alias cannot be named `jobs` (reserved: the default
-backup root `backups/jobs/` would also hold the admin backups of a database of that name); a
-database of that name made by an earlier version is still served. A directory whose `database.toml` or Store is broken is listed as `failed`
+Names are unique case-insensitively. A NEW database or alias name (and a new user name) has
+at most 32 characters, `[a-z0-9]` first, `[a-z0-9._-]` inside, a letter or digit last, no `..`
+and no Windows device name (`con`, `nul.db`, `com1`, ...). A new database or alias cannot be
+named `jobs` either (reserved: the default backup root `backups/jobs/` would also hold the
+admin backups of a database of that name). A directory, alias or user named by 0.2.0 or
+earlier under the older rule `[a-z0-9][a-z0-9._-]{0,62}` (not ending in `.`; so up to 63
+characters, a trailing `-` or `_`, `..` inside, or `jobs`) is still loaded, served, granted
+and restored under its own name; only making a new one is refused.
+
+**Long paths on Windows.** A database's files live at `<server-dir>\databases\<name>\store\...`,
+and the Store adds directories and file names of its own below that (and backups, `tmp\`,
+`trash\` add a time stamp to the name). Windows refuses a path over 260 characters
+(`MAX_PATH`) unless long paths are enabled (the `LongPathsEnabled` policy). The 32-character
+name limit keeps the server's part short; keep the server directory itself short as well
+(e.g. `C:\gs\srv`, not a deep folder under the user profile). A directory whose `database.toml` or Store is broken is listed as `failed`
 with the reason; it never stops the server.
 
 Every create, clone, import and restore builds the new database in `tmp/` and renames it into

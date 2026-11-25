@@ -10,8 +10,91 @@
 // (`AdminError`). Actions take REAL database names; an alias is changed only through the alias
 // routes. Paths are relative to the server root (the base the client is created with).
 
-/** The database name rule of the server (lower case; names are answered in lower case). */
-export const NAME_RULE = /^[a-z0-9][a-z0-9._-]{0,62}$/;
+/**
+ * The rule of a NEW database, alias or user name, mirrored from the server's `names` module
+ * (`validate_new_name` / `validate_new_user_name`; a change there changes it here): `[a-z0-9]`
+ * first, `[a-z0-9._-]` inside, a letter or digit last, no `..`, at most `NAME_MAX` characters,
+ * no Windows device name (also before an extension), and for databases and aliases not a
+ * reserved name (`RESERVED_NAMES`). `newNameReason` runs the checks in the server's order with
+ * the server's texts; `NAME_RULE` is the shape alone (lower case; names are answered in lower
+ * case).
+ */
+export const NAME_RULE = /^[a-z0-9](?:[a-z0-9._-]{0,30}[a-z0-9])?$/;
+
+/** The longest new name (bytes = characters: names are ASCII). */
+export const NAME_MAX = 32;
+
+/** The longest EXISTING name (made by a server before 0.3.0; still served, granted, restored). */
+export const EXISTING_NAME_MAX = 63;
+
+/** The rule of a new name in one sentence, the hint under every field where a name is typed. */
+export const NAME_HINT = "Up to 32 characters: lower-case letters, digits, '.', '_' and '-'; starts and ends with a letter or digit.";
+
+/** The names a new database or alias cannot take (the server's `RESERVED`). */
+export const RESERVED_NAMES = Object.freeze(['jobs']);
+
+/** The device names Windows reserves (the server's `WINDOWS_RESERVED`). */
+const WINDOWS_DEVICES = Object.freeze([
+  'con', 'prn', 'aux', 'nul', 'com0', 'com1', 'com2', 'com3', 'com4', 'com5', 'com6', 'com7',
+  'com8', 'com9', 'lpt0', 'lpt1', 'lpt2', 'lpt3', 'lpt4', 'lpt5', 'lpt6', 'lpt7', 'lpt8', 'lpt9',
+]);
+
+/** A name's length as the server counts it (UTF-8 bytes). */
+function byteLength(name) {
+  return new TextEncoder().encode(name).length;
+}
+
+/** The first character and the character set, as the server checks both rules. */
+function characterReason(name) {
+  if (!/^[a-z0-9]/.test(name)) return 'a name starts with a lower-case letter or a digit';
+  if (!/^[a-z0-9._-]*$/.test(name)) return "a name holds only lower-case letters, digits, '.', '_' and '-'";
+  return null;
+}
+
+/** A Windows device name, also before an extension. */
+function deviceReason(name) {
+  return WINDOWS_DEVICES.includes(name.split('.')[0]) ? 'the name is reserved for a device on Windows' : null;
+}
+
+/**
+ * Why the server refuses `name` (already lower case) as a NEW name, word for word (the message
+ * of its `invalid name` error), or null. `reserved: false` for a user name (`RESERVED_NAMES`
+ * holds database names only).
+ */
+export function newNameReason(name, { reserved = true } = {}) {
+  const n = typeof name === 'string' ? name : '';
+  if (!n) return 'a name cannot be empty';
+  if (byteLength(n) > NAME_MAX) return 'a name has at most 32 characters';
+  const chars = characterReason(n);
+  if (chars) return chars;
+  if (!/[a-z0-9]$/.test(n)) return 'a name ends with a lower-case letter or a digit';
+  if (n.includes('..')) return "a name cannot hold '..'";
+  const device = deviceReason(n);
+  if (device) return device;
+  if (reserved && RESERVED_NAMES.includes(n)) {
+    return "the name is reserved: backup jobs write into backups/jobs/ by default, where the admin backups of a database named 'jobs' would go; pick another name, such as 'jobs-db'";
+  }
+  return null;
+}
+
+/**
+ * Why the server refuses `name` (already lower case) as an EXISTING name (the rule before
+ * 0.3.0, which names made then keep: at most 63 characters, not ending in '.'), or null.
+ */
+export function existingNameReason(name) {
+  const n = typeof name === 'string' ? name : '';
+  if (!n) return 'a name cannot be empty';
+  if (byteLength(n) > EXISTING_NAME_MAX) return 'a name has at most 63 characters';
+  const chars = characterReason(n);
+  if (chars) return chars;
+  if (n.endsWith('.')) return "a name cannot end with '.'";
+  return deviceReason(n);
+}
+
+/** The server's error text for a refused name: `invalid name "x": <reason>`. */
+function invalidNameText(name, reason) {
+  return `invalid name ${JSON.stringify(name)}: ${reason}`;
+}
 
 /** How often a started load is polled (milliseconds). */
 export const LOAD_POLL_MS = 1000;
@@ -167,14 +250,27 @@ export function createAdmin(options) {
   return client;
 }
 
-/** The problem with a database or alias name, or null. */
+/**
+ * The problem with the name of a NEW database or alias (trimmed, lower case as the server folds
+ * it), or null: `Enter a <what>.` when empty, else the server's own refusal text
+ * (`newNameReason`).
+ */
 export function nameProblem(name, what = 'name') {
-  const n = typeof name === 'string' ? name.trim() : '';
+  const n = typeof name === 'string' ? name.trim().toLowerCase() : '';
   if (!n) return `Enter a ${what}.`;
-  if (!NAME_RULE.test(n.toLowerCase())) {
-    return `A ${what} starts with a letter or digit and has at most 63 of a-z, 0-9, '.', '_', '-'.`;
-  }
-  return null;
+  const reason = newNameReason(n);
+  return reason ? invalidNameText(n, reason) : null;
+}
+
+/**
+ * The problem with the name of an EXISTING database or alias (one made before 0.3.0 may break
+ * the rule of new names), or null; texts as `nameProblem`.
+ */
+export function existingNameProblem(name, what = 'name') {
+  const n = typeof name === 'string' ? name.trim().toLowerCase() : '';
+  if (!n) return `Enter a ${what}.`;
+  const reason = existingNameReason(n);
+  return reason ? invalidNameText(n, reason) : null;
 }
 
 /**
@@ -807,16 +903,31 @@ export function poolText(row) {
 }
 
 /**
+ * The default name of a backup restored into a new database: `<name>-restored`, the database's
+ * name cut (and its `..` made one dot) so that the result is a valid new name even for a name
+ * made before 0.3.0 (`NAME_MAX`).
+ */
+export function restoredName(name) {
+  const suffix = '-restored';
+  const n = String(name || '').toLowerCase().replace(/[^a-z0-9._-]+/g, '-').replace(/\.{2,}/g, '.')
+    .slice(0, NAME_MAX - suffix.length).replace(/[._-]+$/, '');
+  return n ? `${n}${suffix}` : 'restored';
+}
+
+/**
  * A database name suggested from an upload's file name: the extensions of the import sources
- * dropped (`acme.layer.gsnap` -> `acme`), lower case, every other character `-`; '' when nothing
- * usable is left. Only a suggestion: the form checks it with `nameProblem`.
+ * dropped (`acme.layer.gsnap` -> `acme`), lower case, every other character `-`, `..` made one
+ * dot, cut to `NAME_MAX` characters and then to a letter or digit at the end: a valid new name,
+ * or '' when nothing usable is left (a Windows device or reserved name). The form still checks
+ * it with `nameProblem`.
  */
 export function suggestName(fileName) {
   let n = typeof fileName === 'string' ? fileName : '';
   n = n.replace(/^.*[\\/]/, '').toLowerCase();
   n = n.replace(/(\.layer)?\.(gsnap|gstore|graphson|jsonl|json|graphml|xml)$/, '');
-  n = n.replace(/[^a-z0-9._-]+/g, '-').replace(/^[^a-z0-9]+/, '').slice(0, 63).replace(/[._-]+$/, '');
-  return NAME_RULE.test(n) ? n : '';
+  n = n.replace(/[^a-z0-9._-]+/g, '-').replace(/\.{2,}/g, '.').replace(/^[^a-z0-9]+/, '')
+    .slice(0, NAME_MAX).replace(/[._-]+$/, '');
+  return newNameReason(n) ? '' : n;
 }
 
 
@@ -1017,12 +1128,13 @@ export function userActions(user, rows, { busy = false } = {}) {
   };
 }
 
-/** The problem with a new user's name, or null. */
+/** The problem with a new user's name, or null: the server's texts (`newNameReason` without the reserved database names, then its reserved user names). */
 export function userNameProblem(name) {
   const n = typeof name === 'string' ? name.trim().toLowerCase() : '';
   if (!n) return 'Enter a user name.';
-  if (!NAME_RULE.test(n)) return "A user name starts with a letter or digit and has at most 63 of a-z, 0-9, '.', '_', '-'.";
-  if (RESERVED_USER_NAMES.includes(n)) return `"${n}" is reserved: choose another name.`;
+  const reason = newNameReason(n, { reserved: false });
+  if (reason) return invalidNameText(n, reason);
+  if (RESERVED_USER_NAMES.includes(n)) return `'${n}': a reserved name (a grant subject or principal of its own)`;
   return null;
 }
 

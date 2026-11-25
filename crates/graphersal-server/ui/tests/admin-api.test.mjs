@@ -349,9 +349,9 @@ test('createBody: names, kinds, schema and defaults', () => {
   assert.deepEqual(createBody({ name: '', kind: 'layer' }).problems, ['Enter a name.', 'Choose the base database of the layer.']);
   assert.match(createBody({ name: 'x', schema: '{nope' }).problems[0], /not JSON/);
   assert.deepEqual(createBody({ name: 'x', schema: '[1]' }).problems, ['The schema must be a JSON object.']);
-  assert.match(createBody({ name: '-x' }).problems[0], /starts with a letter or digit/);
-  assert.equal(nameProblem('a'.repeat(63)), null);
-  assert.ok(nameProblem('a'.repeat(64)));
+  assert.match(createBody({ name: '-x' }).problems[0], /starts with a lower-case letter or a digit/);
+  assert.equal(nameProblem('a'.repeat(32)), null);
+  assert.ok(nameProblem('a'.repeat(33)));
   assert.ok(nameProblem('a/b'));
   assert.equal(nameProblem('my.db_1-2'), null);
 });
@@ -438,7 +438,7 @@ test('renameAlias: the request, the mock round trip, the form check and the outc
   assert.equal(renameProblem('live', 'prod'), null);
   assert.equal(renameProblem('live', ' Prod '), null);
   assert.match(renameProblem('live', ''), /Enter a new alias name/);
-  assert.match(renameProblem('live', 'bad name'), /at most 63/);
+  assert.match(renameProblem('live', 'bad name'), /holds only lower-case letters/);
   assert.match(renameProblem('live', 'LIVE'), /named "live" already/);
 
   const mock = await mockAdmin();
