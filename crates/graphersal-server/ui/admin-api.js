@@ -387,11 +387,14 @@ export function rowActions(row, { busy = false, aliasTargets = [] } = {}) {
   };
 }
 
+/** The note of the restore form: what a restore does not bring back. */
+export const RESTORE_GRANTS_NOTE = 'Grants do not come back with a restore: a deleted database\'s grants went with it, and a restore into a new name starts without any. Grant access again on the Users tab. A restore over the database itself keeps its grants.';
+
 /** The confirmation text of a destructive action, or null (no confirmation needed). */
 export function confirmText(action, subject, extra = '') {
   switch (action) {
     case 'delete':
-      return `Delete the database "${subject}"? Its directory moves to the server's trash/ directory (recoverable by hand only).`;
+      return `Delete the database "${subject}"? Its directory moves to the server's trash/ directory (recoverable by hand only), and every grant on it is removed (a restore does not bring them back).`;
     case 'unload':
       return `Unload "${subject}"? Running requests and jobs get up to 30 s; its pages stop answering until it is loaded again.`;
     case 'removeAlias':
@@ -411,12 +414,44 @@ export function confirmText(action, subject, extra = '') {
   }
 }
 
+/** `n` and `thing`, plural with an "s" unless `n` is 1. */
+function counted(n, thing) {
+  return `${n} ${thing}${n === 1 ? '' : 's'}`;
+}
+
+/** How many grants left on the name (from a deleted database or alias) the answer says were removed before the new database or alias took it. */
+export function leftoverGrants(answer = {}) {
+  const n = answer && answer.leftoverGrantsRemoved;
+  return typeof n === 'number' && n > 0 ? n : 0;
+}
+
+/** The warning sentence for removed leftover grants ('' when none). */
+function leftoverText(answer) {
+  const n = leftoverGrants(answer);
+  return n ? ` Removed ${counted(n, 'grant')} left on this name from a deleted database or alias; it does not inherit them.` : '';
+}
+
+/** The notice tone of a finished action: `warn` when grants left on the name were removed, else `tone`. */
+export function outcomeTone(answer = {}, tone = 'ok') {
+  return leftoverGrants(answer) ? 'warn' : tone;
+}
+
 /** The one-line outcome of a finished action (shown as a notice). */
 export function outcomeText(action, subject, answer = {}) {
+  const text = baseOutcomeText(action, subject, answer);
+  return ['create', 'clone', 'setAlias', 'renameAlias', 'restore', 'import'].includes(action)
+    ? text + leftoverText(answer) : text;
+}
+
+function baseOutcomeText(action, subject, answer) {
   switch (action) {
     case 'create': return `Created "${subject}" (unloaded).`;
     case 'clone': return `Cloned into "${subject}" (unloaded).`;
-    case 'delete': return `Deleted "${subject}"${answer.trash ? `; it was moved to ${answer.trash}` : ''}.`;
+    case 'delete': {
+      const g = typeof answer.grantsRemoved === 'number' ? answer.grantsRemoved : 0;
+      const grants = g ? `; ${counted(g, 'grant')} on it removed (a restore does not bring them back)` : '';
+      return `Deleted "${subject}"${answer.trash ? `; it was moved to ${answer.trash}` : ''}${grants}.`;
+    }
     case 'load':
       if (answer.state === 'loaded') return `"${subject}" is loaded.`;
       if (answer.state === 'failed') return `"${subject}" failed to load${answer.reason ? `: ${answer.reason}` : ''}.`;

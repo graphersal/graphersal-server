@@ -144,14 +144,38 @@ A grant may name an alias (`graphersal-server user grant bob prod read` with `pr
 - **follows a rename**: `db alias rename prod live` moves the alias's grants to `live` in
   `access.toml` (the answer says how many: `grantsMoved`);
 - **goes with the alias**: `db alias remove prod` removes the grants on `prod` too
-  (`grantsRemoved`), so a later alias or database named `prod` inherits nothing.
+  (`grantsRemoved`), so a later alias or database named `prod` inherits nothing
+  ([Grants never outlive their name](#grants-never-outlive-their-name)).
 
 Through an alias the granted level is the higher of the grants on the alias and on its target;
 the database's mode still caps it (a read-only target gives `read` at most). A `*` grant works
 as before: every database, by its own name and through every alias.
 
-Grants name names. A grant left on the name of a deleted database stays in `access.toml` and
-applies again to whatever takes that name later; the listings mark such a grant as missing.
+### Grants never outlive their name
+
+Grants name names, so a grant must not survive the thing it names: otherwise whatever takes the
+name later (a new database, an alias, a rename onto it) would inherit it.
+
+- **Deleting a database removes every grant on it** (`graphersal-server db delete`, `DELETE
+  /api/admin/databases/<name>`, the Databases tab): each is audited as a revoked grant, the
+  answer says how many (`grantsRemoved`), the console prints `grants removed: N` and the web UI
+  names them in its notice. Removing an alias does the same for the alias's grants.
+- **A restore does not bring grants back.** Restoring the backup of a deleted database (under
+  its own name or a new one) gives a database without grants: grant access again with
+  `graphersal-server user grant` or on the Users tab. A restore over an existing database keeps
+  that database's grants (it is still the same name).
+- **A name taken over leftovers drops them first.** `access.toml` may still hold grants on a
+  name nothing holds: written by 0.2.0 or an earlier 0.3.0 build (which kept a deleted
+  database's grants), or left when `access.toml` could not be rewritten during a delete or an
+  alias removal. Every operation that gives a name to a new database or alias (create, clone,
+  import, a restore into a new or a deleted database's name, a new alias, the new name of an
+  alias rename) removes those grants before the name becomes reachable, audits each as a revoked
+  grant and warns: the answer carries `leftoverGrantsRemoved: N`, the console prints
+  `warning: removed N grants left on this name ...` and the web UI shows a warning notice. If
+  `access.toml` cannot be rewritten then, the operation is refused and nothing changes.
+- **Leftovers stay visible until then:** the listings mark such a grant as missing, and it can
+  be revoked like any other (`graphersal-server user revoke`, `DELETE
+  /api/admin/grants/<subject>/<name>`, the Users tab).
 
 Every grant listing says what the name is now: the Users tab, `graphersal-server user list`
 (`prod → prod-2026-11 (alias)`, a name that names nothing `gone (missing)`), "My databases"

@@ -1998,3 +1998,265 @@ fn an_alias_grant_and_a_real_grant_add_up_capped_by_the_database_mode() {
         .clone();
     assert_eq!(star["kind"], "all", "{star}");
 }
+
+/// Unloads `name` through the admin API and waits until it is.
+fn unload_as_admin(fx: &Fixture, name: &str) {
+    expect(
+        post(
+            fx,
+            Who::Bearer(&fx.alice),
+            &format!("/api/admin/databases/{name}/unload"),
+            json!({}),
+        ),
+        200,
+    );
+}
+
+/// Loads `name` through the admin API and waits until it is.
+fn load_as_admin(fx: &Fixture, name: &str) {
+    let answer = post(
+        fx,
+        Who::Bearer(&fx.alice),
+        &format!("/api/admin/databases/{name}/load"),
+        json!({}),
+    );
+    assert!(
+        matches!(answer.status(), 200 | 202),
+        "{}",
+        String::from_utf8_lossy(answer.body())
+    );
+    assert_eq!(fx.loader.wait(name, WAIT).unwrap(), DbState::Loaded);
+}
+
+/// Whether `who` reaches `name` over MCP: `use_graph` succeeds and `list_graphs` names it.
+fn mcp_reaches(fx: &Fixture, who: Who<'_>, name: &str) -> bool {
+    let session = mcp_initialize(fx, who, "/mcp");
+    let (listing, error) = mcp_tool(fx, who, "/mcp", &session, "list_graphs", json!({}));
+    assert!(!error, "{listing}");
+    let listed = listing.contains(&format!("\"name\":\"{name}\""));
+    let (used, error) = mcp_tool(
+        fx,
+        who,
+        "/mcp",
+        &session,
+        "use_graph",
+        json!({"name": name}),
+    );
+    assert_eq!(
+        listed, !error,
+        "list_graphs and use_graph agree: {listing} / {used}"
+    );
+    !error
+}
+
+#[test]
+fn deleting_a_database_drops_its_grants_and_neither_a_new_one_nor_a_restore_revives_them() {
+    let fx = fixture("access-delete-grants");
+    let (alice, carol) = (fx.alice.clone(), fx.carol.clone());
+    expect(
+        post(
+            &fx,
+            Who::Bearer(&alice),
+            "/api/admin/grants",
+            json!({"subject": "carol", "database": "h", "level": "write"}),
+        ),
+        200,
+    );
+    assert_eq!(
+        person_count_as(&fx, Who::Bearer(&carol), "h"),
+        person_count(&fx, "h")
+    );
+    assert!(mcp_reaches(&fx, Who::Bearer(&carol), "h"));
+    // A backup to restore later; the alias `hid` names `h`, so it goes first.
+    let backup = expect(
+        post(
+            &fx,
+            Who::Bearer(&alice),
+            "/api/admin/databases/h/backup",
+            json!({}),
+        ),
+        201,
+    );
+    let backup = backup["backup"].as_str().unwrap().to_string();
+    expect(
+        delete(&fx, Who::Bearer(&alice), "/api/admin/aliases/hid"),
+        200,
+    );
+    unload_as_admin(&fx, "h");
+
+    // The delete drops carol's grant (audited) and says so.
+    let deleted = expect(
+        delete(&fx, Who::Bearer(&alice), "/api/admin/databases/h"),
+        200,
+    );
+    assert_eq!(deleted["grantsRemoved"], 1, "{deleted}");
+    assert_eq!(fx.access.file().grants_on("h"), 0);
+    let lines = fx.audit.lines();
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.ends_with("grant of user:carol on 'h' revoked")),
+        "{lines:?}"
+    );
+
+    // A new database of that name: no leftover to remove, and carol does not reach it.
+    let created = expect(
+        post(
+            &fx,
+            Who::Bearer(&alice),
+            "/api/admin/databases",
+            json!({"name": "h"}),
+        ),
+        201,
+    );
+    assert!(created.get("leftoverGrantsRemoved").is_none(), "{created}");
+    load_as_admin(&fx, "h");
+    assert_eq!(
+        get(&fx, Who::Bearer(&carol), "/db/h/api/info").status(),
+        404
+    );
+    assert!(!mcp_reaches(&fx, Who::Bearer(&carol), "h"));
+
+    // Deleted again and restored from the old backup: the grant does not come back.
+    unload_as_admin(&fx, "h");
+    let deleted = expect(
+        delete(&fx, Who::Bearer(&alice), "/api/admin/databases/h"),
+        200,
+    );
+    assert_eq!(deleted["grantsRemoved"], 0, "{deleted}");
+    let restored = expect(
+        post(
+            &fx,
+            Who::Bearer(&alice),
+            "/api/admin/databases/h/restore",
+            json!({"backup": backup}),
+        ),
+        201,
+    );
+    assert!(
+        restored.get("leftoverGrantsRemoved").is_none(),
+        "{restored}"
+    );
+    assert_eq!(fx.access.file().grants_on("h"), 0);
+    load_as_admin(&fx, "h");
+    assert_eq!(
+        get(&fx, Who::Bearer(&carol), "/db/h/api/info").status(),
+        404
+    );
+    assert!(!mcp_reaches(&fx, Who::Bearer(&carol), "h"));
+    // The admin still reaches it, and it holds the backed-up data.
+    assert_eq!(person_count(&fx, "h"), person_count(&fx, "r"));
+}
+
+#[test]
+fn grants_left_on_a_name_are_listed_revocable_and_removed_when_the_name_is_taken() {
+    let fx = fixture("access-leftover-grants");
+    let (alice, carol) = (fx.alice.clone(), fx.carol.clone());
+    // Grants left on names nothing holds (as an older version left them on deleted names).
+    let operator = Principal::operator();
+    for name in ["gone", "gone-alias", "gone-rename", "kept"] {
+        let grant = Grant::new(Subject::parse("user:carol").unwrap(), name, Level::Write).unwrap();
+        fx.access.grant(&operator, grant).unwrap();
+    }
+    // Listed as `missing`, and revocable.
+    let grants = expect(get(&fx, Who::Bearer(&alice), "/api/admin/grants"), 200);
+    let missing: Vec<&str> = grants["grants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|g| g["kind"] == "missing")
+        .map(|g| g["database"].as_str().unwrap())
+        .collect();
+    assert_eq!(missing, ["gone", "gone-alias", "gone-rename", "kept"]);
+    let revoked = expect(
+        delete(
+            &fx,
+            Who::Bearer(&alice),
+            "/api/admin/grants/user:carol/kept",
+        ),
+        200,
+    );
+    assert_eq!(revoked["revoked"], true, "{revoked}");
+
+    // A new database takes `gone`: the grant goes first, the answer warns.
+    let created = expect(
+        post(
+            &fx,
+            Who::Bearer(&alice),
+            "/api/admin/databases",
+            json!({"name": "gone"}),
+        ),
+        201,
+    );
+    assert_eq!(created["leftoverGrantsRemoved"], 1, "{created}");
+    assert_eq!(fx.access.file().grants_on("gone"), 0);
+    load_as_admin(&fx, "gone");
+    assert_eq!(
+        get(&fx, Who::Bearer(&carol), "/db/gone/api/info").status(),
+        404
+    );
+    assert!(!mcp_reaches(&fx, Who::Bearer(&carol), "gone"));
+
+    // A new alias takes `gone-alias`: the same.
+    let set = expect(
+        put(
+            &fx,
+            Who::Bearer(&alice),
+            "/api/admin/aliases/gone-alias",
+            json!({"target": "w"}),
+        ),
+        200,
+    );
+    assert_eq!(set["leftoverGrantsRemoved"], 1, "{set}");
+    assert_eq!(
+        get(&fx, Who::Bearer(&carol), "/db/gone-alias/api/info").status(),
+        404
+    );
+    // A flip of an existing alias removes nothing.
+    let flipped = expect(
+        put(
+            &fx,
+            Who::Bearer(&alice),
+            "/api/admin/aliases/gone-alias",
+            json!({"target": "r"}),
+        ),
+        200,
+    );
+    assert!(flipped.get("leftoverGrantsRemoved").is_none(), "{flipped}");
+
+    // A rename onto `gone-rename`: the leftover goes, the alias's own grants (none) move.
+    let renamed = expect(
+        post(
+            &fx,
+            Who::Bearer(&alice),
+            "/api/admin/aliases/gone-alias/rename",
+            json!({"name": "gone-rename"}),
+        ),
+        200,
+    );
+    assert_eq!(renamed["leftoverGrantsRemoved"], 1, "{renamed}");
+    assert_eq!(renamed["grantsMoved"], 0, "{renamed}");
+    assert_eq!(
+        get(&fx, Who::Bearer(&carol), "/db/gone-rename/api/info").status(),
+        404
+    );
+    assert!(!mcp_reaches(&fx, Who::Bearer(&carol), "gone-rename"));
+
+    // carol has no grant left; each removal was audited.
+    assert!(
+        fx.access
+            .file()
+            .grants()
+            .iter()
+            .all(|g| g.subject.to_string() != "user:carol")
+    );
+    let lines = fx.audit.lines();
+    for name in ["gone", "gone-alias", "gone-rename", "kept"] {
+        let revoked = format!("grant of user:carol on '{name}' revoked");
+        assert!(
+            lines.iter().any(|l| l.ends_with(&revoked)),
+            "{name}: {lines:?}"
+        );
+    }
+    let _ = fx.loader.unload("gone");
+}

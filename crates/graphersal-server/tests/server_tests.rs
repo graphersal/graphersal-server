@@ -4070,3 +4070,58 @@ fn a_grant_on_an_alias_follows_its_flip_through_the_console_and_http() {
     assert_eq!(rows[0]["aliasOf"], "prod-2026-11");
     running.stop().unwrap();
 }
+
+#[test]
+fn a_deleted_database_takes_its_grants_through_the_console_and_http() {
+    let temp = TempDir::new("delete-grants");
+    let root = temp.path().join("srv");
+    let out = run(&["init", root.to_str().unwrap()]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let dir = ServerDir::new(&root);
+    modern_db(&dir, "acme");
+    let (code, out, err) = user(&root, &["add", "reader"]);
+    assert_eq!(code, 0, "{err}");
+    let token = printed_token(&out);
+    let (code, _, err) = user(&root, &["grant", "reader", "acme", "read"]);
+    assert_eq!(code, 0, "{err}");
+
+    let running = serve::start(
+        &root,
+        ServeOptions::new().with_listen("127.0.0.1:0".parse().unwrap()),
+    )
+    .unwrap();
+    let address = running.address();
+    let loader = running.loader();
+    let load = |name: &str| {
+        loader.load(name).unwrap();
+        assert_eq!(
+            loader.wait(name, Duration::from_secs(120)).unwrap(),
+            DbState::Loaded
+        );
+    };
+    load("acme");
+    let bearer = format!("Authorization: Bearer {token}\r\n");
+    let info = || send(address, "GET", "/db/acme/api/info", &[], &bearer, "");
+    let (status, _, body) = info();
+    assert_eq!(status, 200, "{body}");
+    // Deleted through the running server: the console names the removed grant.
+    loader.unload("acme").unwrap();
+    let (code, out, err) = db(&root, &["delete", "acme"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        out.contains("grants removed: 1 (a restore does not bring them back)"),
+        "{out}"
+    );
+    // A new database of the same name: the former reader gets the unknown-name 404.
+    let (code, out, err) = db(&root, &["create", "acme"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(!out.contains("warning"), "{out}");
+    load("acme");
+    let (status, _, body) = info();
+    assert_eq!(status, 404, "{body}");
+    let (code, out, err) = user(&root, &["list"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(!out.contains("acme"), "no grant left: {out}");
+    loader.unload("acme").unwrap();
+    running.stop().unwrap();
+}

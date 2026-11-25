@@ -149,7 +149,7 @@ databases and missing models. Paths and commands are never wrapped.
 | `status [--json]` | running or stopped: pid, address, version, uptime, databases, memory, the log; exit code 0 running, 3 stopped |
 | `db list` | the databases and aliases with their states |
 | `db create NAME [--base BASE] [--kind plain\|layer] [--role normal\|base] [--schema FILE.json] [--description TEXT] [--auto-load] [--read-only]` | a new empty database; `--base` makes a layer over a `role = base` database |
-| `db delete NAME` | an unloaded database, moved to `DIR/trash/` |
+| `db delete NAME` | an unloaded database, moved to `DIR/trash/`; every grant on it is removed (a restore does not bring them back) |
 | `db clone SOURCE NAME` | a fork of SOURCE's latest state (it may be loaded) |
 | `db load NAME [--no-wait]`, `db unload NAME` | running server only; a loaded database's note shows its URL (`served at: http://.../db/NAME/`) |
 | `db promote NAME` | an unloaded plain database becomes a base (read-only, frozen for good) |

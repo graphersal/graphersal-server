@@ -103,12 +103,30 @@ impl Admin {
         }
     }
 
-    /// Removes the grants on the alias `alias` (removed): how many.
-    pub(crate) fn drop_alias_grants(&self, alias: &str) -> Result<usize, ServerError> {
+    /// Removes the grants on the name `name` itself (an alias removed, a database deleted):
+    /// how many, each audited as a revoked grant.
+    pub(crate) fn drop_grants_on(&self, name: &str) -> Result<usize, ServerError> {
         match self.grants_state()? {
-            Some(access) => access.drop_grants(&self.principal, alias),
+            Some(access) => access.drop_grants(&self.principal, name),
             None => Ok(0),
         }
+    }
+
+    /// Removes the grants left on the name `name` (a database or alias deleted while an older
+    /// version ran, or whose grants could not be removed then) before a new database or alias
+    /// takes that name, so the new one never inherits them: how many (audited each, and a
+    /// warning in the log when any).
+    pub(crate) fn drop_leftover_grants(&self, name: &str) -> Result<usize, ServerError> {
+        let dropped = self.drop_grants_on(name)?;
+        if dropped > 0 {
+            tracing::warn!(
+                target: "graphersal_server",
+                "'{}': removed {dropped} grant(s) left on the name from a deleted database or \
+                 alias before it was taken again",
+                crate::names::fold(name)
+            );
+        }
+        Ok(dropped)
     }
 
     /// The users and grants as they are now.

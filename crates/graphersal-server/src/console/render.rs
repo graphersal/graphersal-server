@@ -73,23 +73,37 @@ fn render_with(command: &DbCommand, answer: &Value, dir: &Path, server: Option<&
     let dir_arg = shell_word(dir);
     match command {
         DbCommand::List => render_list(answer, &dir_arg),
-        DbCommand::Create { .. } => entry_note(
-            Note::new(format!("Created database '{}'", s("name"))),
+        DbCommand::Create { .. } => leftover_note(
+            entry_note(
+                Note::new(format!("Created database '{}'", s("name"))),
+                answer,
+            ),
             answer,
         )
         .text(),
         DbCommand::Delete { .. } => {
             let trash = below(dir, &s("trash"));
-            Note::new(format!("Deleted database '{}'", s("name")))
+            let note = Note::new(format!("Deleted database '{}'", s("name")))
                 .detail("moved to", &trash)
                 .detail(
                     "recover",
                     "move it back into databases/ by hand while no server runs",
-                )
-                .text()
+                );
+            match answer["grantsRemoved"].as_u64().unwrap_or(0) {
+                0 => note.text(),
+                grants => note
+                    .detail(
+                        "grants removed",
+                        format!("{grants} (a restore does not bring them back)"),
+                    )
+                    .text(),
+            }
         }
-        DbCommand::Clone { source, .. } => entry_note(
-            Note::new(format!("Cloned database '{source}' into '{}'", s("name"))),
+        DbCommand::Clone { source, .. } => leftover_note(
+            entry_note(
+                Note::new(format!("Cloned database '{source}' into '{}'", s("name"))),
+                answer,
+            ),
             answer,
         )
         .text(),
@@ -145,11 +159,14 @@ fn render_with(command: &DbCommand, answer: &Value, dir: &Path, server: Option<&
             on_off(answer["autoLoad"] == Value::Bool(true))
         ))
         .text(),
-        DbCommand::AliasSet { .. } => Note::new(format!(
-            "Alias '{}' -> database '{}'",
-            s("alias"),
-            s("target")
-        ))
+        DbCommand::AliasSet { .. } => leftover_note(
+            Note::new(format!(
+                "Alias '{}' -> database '{}'",
+                s("alias"),
+                s("target")
+            )),
+            answer,
+        )
         .text(),
         DbCommand::AliasRemove { .. } => {
             let note = Note::new(format!("Removed alias '{}'", s("alias")));
@@ -169,11 +186,12 @@ fn render_with(command: &DbCommand, answer: &Value, dir: &Path, server: Option<&
                 0 => note,
                 grants => note.detail("grants moved", grants.to_string()),
             };
-            note.detail(
-                "MCP sessions moved",
-                answer["mcpSessionsMoved"].as_u64().unwrap_or(0).to_string(),
-            )
-            .text()
+            leftover_note(note, answer)
+                .detail(
+                    "MCP sessions moved",
+                    answer["mcpSessionsMoved"].as_u64().unwrap_or(0).to_string(),
+                )
+                .text()
         }
         DbCommand::Backup { .. } => {
             let name = s("database");
@@ -204,10 +222,18 @@ fn render_with(command: &DbCommand, answer: &Value, dir: &Path, server: Option<&
                     from["database"].as_str().unwrap_or_default()
                 ),
             );
-            if let Some(trash) = answer["trash"].as_str() {
-                note = note.detail("replaced", format!("moved to {}", below(dir, trash)));
+            match answer["trash"].as_str() {
+                Some(trash) => {
+                    note = note.detail("replaced", format!("moved to {}", below(dir, trash)));
+                }
+                None => {
+                    note = note.detail(
+                        "grants",
+                        "none come back with a restore; grant access again with `user grant`",
+                    );
+                }
             }
-            note.text()
+            leftover_note(note, answer).text()
         }
         DbCommand::Import { source, .. } => render_import(source, answer, &dir_arg),
         DbCommand::ImportInbox { file, .. } => {
@@ -503,6 +529,23 @@ fn entry_note(note: Note, entry: &Value) -> Note {
         _ => note,
     };
     state_details(note, entry)
+}
+
+/// `note` with a warning when the answer says grants left on the name (from a deleted
+/// database or alias) were removed before the new database or alias took it
+/// (`leftoverGrantsRemoved`).
+fn leftover_note(note: Note, answer: &Value) -> Note {
+    match answer["leftoverGrantsRemoved"].as_u64().unwrap_or(0) {
+        0 => note,
+        n => note.detail(
+            "warning",
+            format!(
+                "removed {} left on this name from a deleted database or alias (it does not \
+                 inherit them)",
+                text::count(n as usize, "grant")
+            ),
+        ),
+    }
 }
 
 /// `note` with the state of `entry` and, for a failed or needs-model one, its reason.
@@ -804,6 +847,7 @@ fn render_import(source: &Path, answer: &Value, dir_arg: &str) -> String {
     if !notes.is_empty() {
         note = note.detail("notes", notes.join("\n"));
     }
+    let mut note = leftover_note(note, answer);
     if !missing.is_empty() {
         note = note.command(
             "add the missing model to the shared models, then load it",

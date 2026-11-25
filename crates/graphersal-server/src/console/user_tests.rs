@@ -406,3 +406,94 @@ fn grants_on_aliases_are_marked_and_follow_the_alias_offline() {
     let text = render(&DbCommand::UserList, &list, dir.root());
     assert!(text.contains("gone (missing)"), "{text}");
 }
+
+#[test]
+fn a_deleted_database_takes_its_grants_and_a_new_one_drops_leftovers_with_a_note() {
+    let temp = TempDir::new("console-users-delete");
+    let dir = server(&temp);
+    ok(
+        &dir,
+        DbCommand::Create {
+            name: user("acme"),
+            spec: CreateSpec::plain(),
+        },
+    );
+    ok(
+        &dir,
+        DbCommand::UserAdd {
+            name: user("bob"),
+            admin: false,
+        },
+    );
+    ok(
+        &dir,
+        DbCommand::UserGrant {
+            subject: user("bob"),
+            database: user("acme"),
+            level: user("write"),
+        },
+    );
+    // Delete: the grant goes with the database, and the console says so.
+    let delete = DbCommand::Delete { name: user("acme") };
+    let (deleted, _) = ok(&dir, delete.clone());
+    assert_eq!(deleted["grantsRemoved"], 1, "{deleted}");
+    let text = render(&delete, &deleted, dir.root());
+    assert!(
+        text.lines()
+            .any(|line| line.trim() == "grants removed: 1 (a restore does not bring them back)"),
+        "{text}"
+    );
+    assert_eq!(file(&dir).grants_on("acme"), 0);
+    // Without grants the delete prints no such line.
+    ok(
+        &dir,
+        DbCommand::Create {
+            name: user("other"),
+            spec: CreateSpec::plain(),
+        },
+    );
+    let delete_other = DbCommand::Delete {
+        name: user("other"),
+    };
+    let (deleted, _) = ok(&dir, delete_other.clone());
+    assert_eq!(deleted["grantsRemoved"], 0, "{deleted}");
+    let text = render(&delete_other, &deleted, dir.root());
+    assert!(!text.contains("grants removed"), "{text}");
+    // A grant left on the name (an older version kept it): the next create drops it and warns.
+    let mut stale = file(&dir);
+    stale.grant(
+        crate::access::Grant::new(
+            crate::access::Subject::parse("user:bob").unwrap(),
+            "acme",
+            crate::access::Level::Write,
+        )
+        .unwrap(),
+    );
+    stale.write(&dir).unwrap();
+    let create = DbCommand::Create {
+        name: user("acme"),
+        spec: CreateSpec::plain(),
+    };
+    let (created, _) = ok(&dir, create.clone());
+    assert_eq!(created["leftoverGrantsRemoved"], 1, "{created}");
+    let text = render(&create, &created, dir.root());
+    assert!(
+        text.contains(
+            "warning: removed 1 grant left on this name from a deleted database or alias"
+        ),
+        "{text}"
+    );
+    assert_eq!(file(&dir).grants_on("acme"), 0);
+    // A create on a clean name prints no warning.
+    let (created, _) = ok(&dir, create_other());
+    assert!(created.get("leftoverGrantsRemoved").is_none(), "{created}");
+    let text = render(&create_other(), &created, dir.root());
+    assert!(!text.contains("warning"), "{text}");
+}
+
+fn create_other() -> DbCommand {
+    DbCommand::Create {
+        name: user("other"),
+        spec: CreateSpec::plain(),
+    }
+}

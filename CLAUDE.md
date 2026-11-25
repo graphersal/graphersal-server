@@ -34,7 +34,7 @@ from published files). When this file disagrees with the code, the code wins: sa
   `Access::reach(registry, principal, name)` -> (entry, granted) is the one check of the router,
   `user_api` and `mcp::Directory`; `rename_grants`/`drop_grants` (audited `GrantsMoved` /
   `GrantRevoked`) called by `Admin::alias_rename` (under the registry's write lock) and
-  `Admin::alias_remove` via `Admin::grants_state`), `Secret`/`TokenHash` (256-bit OS random via `ring`,
+  `Admin::alias_remove` via `Admin::grants_state`; B3-FIX: grants never outlive their name: `Admin::delete` drops the database's grants (`Deleted::grants`), every new name (create, clone, import, restore into a new name: `Admin::commit_new`; a new alias: `Registry::alias_set_with`; a rename's new name: `Registry::alias_rename_with`, both claims under the registry's write lock) first drops the grants left on it (`Admin::drop_leftover_grants`, audited `GrantRevoked`, answer `leftoverGrantsRemoved` when > 0)), `Secret`/`TokenHash` (256-bit OS random via `ring`,
   SHA-256, constant-time compare, redacted `Debug`), the authenticator chain
   (`Authenticator` trait: `OperatorToken` (per run, `server.run`), `UserTokens` (Bearer),
   `SessionCookie` (`gs_session`, `SessionTable` trait, `MemorySessions`; a session ends when

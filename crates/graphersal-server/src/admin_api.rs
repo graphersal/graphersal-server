@@ -6,7 +6,7 @@
 //! | GET | `databases` | | `200 {"databases": [entry...], "aliases": {alias: database}, "problems": [text...]}` |
 //! | POST | `databases` | `{"name", "kind"?, "role"?, "base"?, "schema"?, "description"?, "autoLoad"?, "readOnly"?}` | `201` entry |
 //! | GET | `databases/<name>` | | `200` entry (`<name>` may be an alias) |
-//! | DELETE | `databases/<name>` | | `200 {"name", "trash"}` |
+//! | DELETE | `databases/<name>` | | `200 {"name", "trash", "grantsRemoved"}` (its grants go with it) |
 //! | POST | `databases/<name>/clone` | `{"name"}` | `201` entry of the clone |
 //! | POST | `databases/<name>/load` | | `202` entry + `"load": "started" \| "already-loading"`, `200` + `"already-loaded"` |
 //! | POST | `databases/<name>/unload` | | `200` entry + `"unloaded": bool` |
@@ -32,6 +32,12 @@
 //! | DELETE | `aliases/<alias>` | | `200 {"alias", "removed": true, "grantsRemoved"}` (its grants go with it) |
 //! | POST | `aliases/<alias>/rename` | `{"name"}` | `200 {"alias", "renamedFrom", "target", "mcpSessionsMoved", "grantsMoved"}` |
 //! | GET, POST, PUT, DELETE | `users...`, `grants...` | | the users and grants of `access.toml` (the `admin_api_users.rs` table) |
+//!
+//! A new database or alias never inherits grants left on its name (from a database or alias
+//! deleted while an older version ran, or whose grants could not be removed then): create,
+//! clone, import, a restore into a new or a deleted database's name, a new alias (`PUT
+//! aliases/<alias>`) and a rename's new name remove them first, each audited as a revoked
+//! grant, and the answer then carries `"leftoverGrantsRemoved": n` (absent when none).
 //!
 //! The actions take real database names (not aliases). Errors are `{"error", "help"?}` with
 //! `400` (invalid name, body or schema), `404` (no such database, alias or endpoint), `405`,
@@ -160,8 +166,10 @@ pub(crate) fn route(
             let name = body.name.clone();
             let spec = body.into_spec();
             admin
-                .create(&name, &spec)
-                .map(|entry| Response::json(201, &entry_json(&entry, None)))
+                .create_reported(&name, &spec)
+                .map(|(entry, leftover)| {
+                    Response::json(201, &with_leftover(entry_json(&entry, None), leftover))
+                })
                 .map_err(|err| {
                     let help = name_taken_help(&err);
                     (err, help)
@@ -180,6 +188,7 @@ pub(crate) fn route(
                     &json!({
                         "name": deleted.name,
                         "trash": relative(registry.dir().root(), &deleted.trash),
+                        "grantsRemoved": deleted.grants,
                     }),
                 )
             })
@@ -190,8 +199,10 @@ pub(crate) fn route(
         (Method::Post, ["databases", name, "clone"]) => {
             let body: CloneBody = body_of(request)?;
             admin
-                .clone_database(name, &body.name)
-                .map(|entry| Response::json(201, &entry_json(&entry, None)))
+                .clone_reported(name, &body.name)
+                .map(|(entry, leftover)| {
+                    Response::json(201, &with_leftover(entry_json(&entry, None), leftover))
+                })
                 .map_err(|err| {
                     let help = name_taken_help(&err);
                     (err, help)
@@ -270,7 +281,7 @@ pub(crate) fn route(
                     if let Some(trash) = &restored.replaced {
                         entry["trash"] = Value::String(relative(registry.dir().root(), trash));
                     }
-                    Response::json(201, &entry)
+                    Response::json(201, &with_leftover(entry, restored.leftover_grants))
                 })
                 .map_err(|err| {
                     let target = body.name.as_deref().unwrap_or(name);
@@ -362,10 +373,13 @@ pub(crate) fn route(
             let body: AliasBody = body_of(request)?;
             admin
                 .alias_set(alias, &body.target)
-                .map(|()| {
+                .map(|leftover| {
                     Response::json(
                         200,
-                        &json!({ "alias": fold(alias), "target": fold(&body.target) }),
+                        &with_leftover(
+                            json!({ "alias": fold(alias), "target": fold(&body.target) }),
+                            leftover,
+                        ),
                     )
                 })
                 .map_err(|err| {
@@ -389,13 +403,16 @@ pub(crate) fn route(
                 .map(|renamed| {
                     Response::json(
                         200,
-                        &json!({
-                            "alias": renamed.new,
-                            "renamedFrom": renamed.old,
-                            "target": renamed.target,
-                            "mcpSessionsMoved": renamed.moved,
-                            "grantsMoved": renamed.grants,
-                        }),
+                        &with_leftover(
+                            json!({
+                                "alias": renamed.new,
+                                "renamedFrom": renamed.old,
+                                "target": renamed.target,
+                                "mcpSessionsMoved": renamed.moved,
+                                "grantsMoved": renamed.grants,
+                            }),
+                            renamed.leftover,
+                        ),
                     )
                 })
                 .map_err(|err| {
@@ -663,6 +680,16 @@ fn inbox_json(registry: &Registry, files: &[InboxFile]) -> Value {
     })
 }
 
+/// `answer` with `"leftoverGrantsRemoved": n` when a new database or alias took a name that
+/// still had grants (from a deleted database or alias) and they were removed first (`n` > 0;
+/// the field is absent otherwise).
+fn with_leftover(mut answer: Value, leftover: usize) -> Value {
+    if leftover > 0 {
+        answer["leftoverGrantsRemoved"] = json!(leftover);
+    }
+    answer
+}
+
 /// The answer of an import: `201` entry + `"import"`, or the error.
 fn import_answer(
     admin: &Admin,
@@ -686,7 +713,7 @@ fn import_answer(
                 details["layerBase"] = json!(layer_base);
             }
             entry["import"] = details;
-            Response::json(201, &entry)
+            Response::json(201, &with_leftover(entry, imported.leftover_grants))
         }
         Err(err) => {
             let help = match &err {
