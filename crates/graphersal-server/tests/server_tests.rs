@@ -1667,6 +1667,78 @@ fn import_offline_and_through_a_server() {
 }
 
 #[test]
+fn import_from_the_inbox_offline_and_through_a_server() {
+    use graphersal::prelude::{Graph, GraphExport, TraversalGraph};
+    let temp = TempDir::new("console-inbox");
+    let dir = ServerDir::init(temp.path().join("srv")).unwrap().dir;
+    let root = dir.root().to_str().unwrap().to_string();
+    let (code, out, err) = import(&[&root, "--list"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.starts_with("The import inbox "), "{out}");
+    assert!(
+        out.contains(&format!(
+            "graphersal-server import {root} --inbox FILE --name NAME"
+        )),
+        "{out}"
+    );
+    Graph::new(TraversalGraph::tinkerpop_modern())
+        .export_graphson_writer(std::fs::File::create(dir.imports().join("modern.json")).unwrap())
+        .unwrap();
+    let (code, out, err) = import(&[&root, "--list"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("Import inbox (1)"), "{out}");
+    assert!(out.contains("modern.json"), "{out}");
+    assert!(out.contains("graphson"), "{out}");
+    let (code, out, _) = import(&[&root, "--list", "--json"]);
+    assert_eq!(code, 0);
+    assert_eq!(json(&out)["imports"][0]["name"], "modern.json");
+
+    // Offline.
+    let (code, out, err) = import(&[&root, "--inbox", "modern.json", "--name", "gs"]);
+    assert_eq!(code, 0, "{err}");
+    let shown = dir.imports().join("modern.json");
+    assert!(
+        out.contains(&format!("  source: {}\n", shown.display())),
+        "{out}"
+    );
+    // Usage errors (2): SOURCE and --inbox both, --list with options; a traversal (1).
+    let (code, _, _) = import(&[&root, "/x.json", "--inbox", "modern.json", "--name", "x"]);
+    assert_eq!(code, 2);
+    let (code, _, _) = import(&[&root, "--list", "--name", "x"]);
+    assert_eq!(code, 2);
+    let (code, _, err) = import(&[&root, "--inbox", "../server.toml", "--name", "x"]);
+    assert_eq!(code, 1);
+    assert!(err.contains("inbox name"), "{err}");
+    let (code, _, err) = import(&[&root, "--inbox", "nope.json", "--name", "x"]);
+    assert_eq!(code, 1);
+    assert!(
+        err.contains(&format!("graphersal-server import {root} --list")),
+        "the help names the console command: {err}"
+    );
+
+    // Through a running server.
+    let mut server = ServerProcess::spawn(
+        Command::new(BIN)
+            .args(["serve", "--dir", &root, "--listen", "127.0.0.1:0"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped()),
+    );
+    let info = wait_for_run_file(&dir);
+    let (code, out, err) = import(&[&root, "--list", "--json"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(err.contains("sent to its admin API"), "{err}");
+    assert_eq!(json(&out)["imports"].as_array().unwrap().len(), 1);
+    let (code, out, err) = import(&[&root, "--inbox", "modern.json", "--name", "gs2", "--json"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        err.contains(&format!("sent to its admin API at {}", info.address)),
+        "{err}"
+    );
+    assert_eq!(json(&out)["import"]["format"], "graphson");
+    stop_and_wait(&mut server);
+}
+
+#[test]
 fn import_on_a_taken_name_shows_the_console_help_offline_and_through_a_server() {
     use graphersal::prelude::{Graph, GraphExport, TraversalGraph};
     let temp = TempDir::new("console-import-taken");

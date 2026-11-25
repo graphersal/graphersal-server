@@ -10,7 +10,7 @@ use super::{DbCommand, Outcome};
 use crate::config::DEFAULT_LISTEN;
 use crate::database::DatabaseKind;
 use crate::error::ServerError;
-use crate::layout::InitReport;
+use crate::layout::{IMPORTS_DIR, InitReport};
 use crate::text::{self, Note, Section, table};
 
 /// The binary's name in the commands the text shows.
@@ -200,6 +200,10 @@ fn render_with(command: &DbCommand, answer: &Value, dir: &Path, server: Option<&
             note.text()
         }
         DbCommand::Import { source, .. } => render_import(source, answer, &dir_arg),
+        DbCommand::ImportInbox { file, .. } => {
+            render_import(&dir.join(IMPORTS_DIR).join(file), answer, &dir_arg)
+        }
+        DbCommand::InboxList => render_inbox(answer, &dir_arg),
         DbCommand::ModelsList => render_models(answer, &dir_arg),
         DbCommand::ModelsAdd { .. } => render_models_add(answer, &dir_arg),
         DbCommand::ModelsRemove { .. } => Note::new(format!(
@@ -672,6 +676,48 @@ fn render_backups(name: &str, answer: &Value, dir: &Path, dir_arg: &str) -> Stri
                 "restore one",
                 format!("{BIN} db restore {name} BACKUP [--name NEW] --dir {dir_arg}"),
             )
+            .text(),
+    );
+    text::render(&[section])
+}
+
+/// `import DIR --list`: the import inbox.
+fn render_inbox(answer: &Value, dir_arg: &str) -> String {
+    let inbox = answer["dir"].as_str().unwrap_or_default();
+    let rows = answer["imports"].as_array().cloned().unwrap_or_default();
+    let import = format!("{BIN} import {dir_arg} --inbox FILE --name NAME");
+    if rows.is_empty() {
+        return Note::new(format!("The import inbox {inbox} is empty"))
+            .command(
+                "put a file or Store directory there, then import it",
+                import,
+            )
+            .text();
+    }
+    let cells: Vec<Vec<String>> = rows
+        .iter()
+        .map(|row| {
+            let mut name = row["name"].as_str().unwrap_or_default().to_string();
+            if row["directory"] == true {
+                name.push('/');
+            }
+            vec![
+                name,
+                text::bytes(row["bytes"].as_u64().unwrap_or_default()),
+                row["kind"].as_str().unwrap_or("?").to_string(),
+                row["modified"].as_str().unwrap_or_default().to_string(),
+            ]
+        })
+        .collect();
+    let mut section = Section::new(format!("Import inbox ({})", rows.len()));
+    section.unwrapped("directory", inbox);
+    section.lines([String::new()]);
+    section.lines(table(&["NAME", "SIZE", "KIND", "MODIFIED"], &cells));
+    section.lines([String::new()]);
+    section.note(
+        "import",
+        &Note::new("a new database from one of them (KIND is guessed from the name)")
+            .command("import one", import)
             .text(),
     );
     text::render(&[section])

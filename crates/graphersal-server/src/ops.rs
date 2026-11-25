@@ -669,6 +669,10 @@ pub use import::{ImportFormat, ImportSource, Imported};
 pub(crate) use transfer::ExportFile;
 pub use transfer::{BackupInfo, ExportSpec, Exported, Restored};
 
+#[path = "ops_inbox.rs"]
+mod inbox;
+pub use inbox::InboxFile;
+
 #[path = "ops_models.rs"]
 mod models;
 pub use models::{ModelAddSpec, ModelAdded, ModelRemoved};

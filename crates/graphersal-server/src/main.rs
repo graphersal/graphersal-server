@@ -6,6 +6,7 @@
 //!     [--header-timeout SECS] [--idle-timeout SECS]
 //! graphersal-server db list|create|delete|clone|load|unload|promote|read-only|auto-load|alias|backup|backups|restore|export ... --dir DIR [--json]
 //! graphersal-server import DIR SOURCE --name NAME [--base BASE] [--format F] [--description TEXT] [--role normal|base] [--json]
+//! graphersal-server import DIR --inbox FILE --name NAME [...] | import DIR --list [--json]
 //! graphersal-server models list|add|remove ... --dir DIR [--json]
 //! ```
 //!
@@ -128,6 +129,12 @@ Usage:
       frozen for good) of a plain source (not of a layer, nor of a source naming a model
       neither it nor the shared models carry). Through a running server the server reads
       SOURCE itself (same machine).
+  graphersal-server import DIR --inbox FILE --name NAME [--base BASE] [--format FORMAT]
+                    [--description TEXT] [--role normal|base] [--json]
+      The same from the import inbox DIR/imports/: FILE is one file or Store directory
+      name there (no path; a link leading outside the inbox is refused).
+  graphersal-server import DIR --list [--json]
+      The entries of the import inbox DIR/imports/ (size, kind guessed from the name).
   graphersal-server models COMMAND ... --dir DIR [--json]
       The shared embedding models of DIR (one copy in DIR/models/blobs/, hard-linked into
       every database holding it; copied with a warning where the file system has no hard
@@ -423,11 +430,13 @@ fn print_outcome(dir: &ServerDir, command: &DbCommand, json: bool) -> ExitCode {
     }
 }
 
-/// `import DIR SOURCE --name NAME ...`.
+/// `import DIR SOURCE --name NAME ...`, `import DIR --inbox FILE --name NAME ...`,
+/// `import DIR --list`.
 fn import_command(args: &[String]) -> ExitCode {
     let mut positional: Vec<&String> = Vec::new();
     let mut values: Vec<(String, String)> = Vec::new();
     let mut json = false;
+    let mut list = false;
     let mut rest = args.iter();
     while let Some(arg) = rest.next() {
         if !arg.starts_with("--") {
@@ -439,7 +448,7 @@ fn import_command(args: &[String]) -> ExitCode {
             None => (arg.clone(), None),
         };
         match flag.as_str() {
-            "--name" | "--base" | "--format" | "--description" | "--role" => {
+            "--name" | "--base" | "--format" | "--description" | "--role" | "--inbox" => {
                 let Some(value) = inline.or_else(|| rest.next().cloned()) else {
                     return usage_error(&format!("import: {flag} needs a value"));
                 };
@@ -449,6 +458,7 @@ fn import_command(args: &[String]) -> ExitCode {
                 values.push((flag, value));
             }
             "--json" if inline.is_none() => json = true,
+            "--list" if inline.is_none() => list = true,
             _ => return usage_error(&format!("import: unknown argument {arg:?}")),
         }
     }
@@ -458,30 +468,65 @@ fn import_command(args: &[String]) -> ExitCode {
             .find(|(f, _)| f == flag)
             .map(|(_, v)| v.clone())
     };
-    let [dir, source] = positional.as_slice() else {
-        return usage_error("import takes two arguments: the server directory and the source");
-    };
-    let Some(name) = value("--name") else {
-        return usage_error("import needs --name NAME (the new database's name)");
-    };
-    let source = match console::source_path(std::path::Path::new(source)) {
-        Ok(source) => source,
-        Err(err) => return failure_text(&format!("cannot resolve {source}: {err}")),
-    };
-    let role = match value("--role").as_deref() {
-        None => DatabaseRole::Normal,
-        Some(word) => match DatabaseRole::parse(word) {
-            Some(role) => role,
-            None => return usage_error(&format!("import: --role is normal or base, not {word:?}")),
-        },
-    };
-    let command = DbCommand::Import {
-        source,
-        name,
-        role,
-        base: value("--base"),
-        format: value("--format"),
-        description: value("--description"),
+    let (dir, command) = if list {
+        let [dir] = positional.as_slice() else {
+            return usage_error("import --list takes one argument: the server directory");
+        };
+        if !values.is_empty() {
+            return usage_error("import --list takes no other option than --json");
+        }
+        (dir, DbCommand::InboxList)
+    } else {
+        let role = match value("--role").as_deref() {
+            None => DatabaseRole::Normal,
+            Some(word) => match DatabaseRole::parse(word) {
+                Some(role) => role,
+                None => {
+                    return usage_error(&format!("import: --role is normal or base, not {word:?}"));
+                }
+            },
+        };
+        let (dir, source) = match (positional.as_slice(), value("--inbox")) {
+            ([dir], Some(_)) => (dir, None),
+            ([_, _], Some(_)) => {
+                return usage_error("import: give either SOURCE or --inbox FILE, not both");
+            }
+            ([dir, source], None) => (dir, Some(source)),
+            _ => {
+                return usage_error(
+                    "import takes two arguments: the server directory and the source (or the \
+                     server directory and --inbox FILE)",
+                );
+            }
+        };
+        let Some(name) = value("--name") else {
+            return usage_error("import needs --name NAME (the new database's name)");
+        };
+        let command = match source {
+            Some(source) => {
+                let source = match console::source_path(std::path::Path::new(source)) {
+                    Ok(source) => source,
+                    Err(err) => return failure_text(&format!("cannot resolve {source}: {err}")),
+                };
+                DbCommand::Import {
+                    source,
+                    name,
+                    role,
+                    base: value("--base"),
+                    format: value("--format"),
+                    description: value("--description"),
+                }
+            }
+            None => DbCommand::ImportInbox {
+                file: value("--inbox").unwrap_or_default(),
+                name,
+                role,
+                base: value("--base"),
+                format: value("--format"),
+                description: value("--description"),
+            },
+        };
+        (dir, command)
     };
     let dir = match ServerDir::open(dir) {
         Ok(dir) => dir,

@@ -178,7 +178,7 @@ ok
 
 STEP="init"
 "$BIN" init "$DIR" >"$WORK/init.out" 2>"$WORK/init.err" || fail "$(cat "$WORK/init.err")"
-for part in server.toml databases models/blobs backups trash tmp; do
+for part in server.toml databases models/blobs backups trash tmp imports; do
   [ -e "$DIR/$part" ] || fail "init made no $part"
 done
 grep -q "^  graphersal-server serve --dir " "$WORK/init.out" ||
@@ -484,6 +484,22 @@ expect_json state unloaded
 load acme-imported
 execute acme-imported 'g.v().has_label("person").count().next()'
 [ "$RESULT" = 1 ] || fail "acme-imported counts $RESULT"
+ok
+
+STEP="import from the inbox"
+cp "$WORK/acme.gsnap" "$DIR/imports/acme-inbox.gsnap"
+req GET /api/admin/imports
+expect_status 200
+expect_json imports.0.name acme-inbox.gsnap
+expect_json imports.0.kind snapshot
+jreq POST /api/admin/import '{"inbox": "../server.toml", "name": "evil"}'
+expect_status 400
+jreq POST /api/admin/import '{"inbox": "acme-inbox.gsnap", "name": "acme-inbox"}'
+expect_status 201
+expect_json import.format snapshot
+load acme-inbox
+execute acme-inbox 'g.v().has_label("person").count().next()'
+[ "$RESULT" = 1 ] || fail "acme-inbox counts $RESULT"
 ok
 
 STEP="promote + layer sees base data"

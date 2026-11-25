@@ -118,7 +118,8 @@ A `failed` database whose `database.toml` cannot be read has only `name`, `state
 | POST | `/api/admin/databases/<name>/restore` | `{"backup", "name"?}` | `201` entry + `"restoredFrom": {"database", "backup"}`, `"replaced": bool`, `"trash"` (when replaced) |
 | GET | `/api/admin/databases/<name>/export?models=true\|false&materialize=true\|false` | | `200` the `.gsnap` file as a download |
 | POST | `/api/admin/import?name=<n>&base=<b>&format=<f>&description=<d>&role=<normal\|base>` | the file itself (`Content-Type: application/octet-stream`, or anything but JSON) | `201` entry + `"import"` |
-| POST | `/api/admin/import` | JSON `{"path", "name", "base"?, "format"?, "description"?, "role"?}` | `201` entry + `"import"` |
+| POST | `/api/admin/import` | JSON `{"path" \| "inbox", "name", "base"?, "format"?, "description"?, "role"?}` | `201` entry + `"import"` |
+| GET | `/api/admin/imports` | | `200 {"dir", "imports": [{"name", "kind", "directory", "bytes", "modified"}...]}`: the import inbox |
 | GET | `/api/admin/models` | | `200 {"models": [model...], "missing": [{"database", "model"}...]}` |
 | POST | `/api/admin/models` | `{"path"?, "repo"?, "license"?}` | `201` (from a path) or `200` (a repository) `{"added": [model...], "resolved": [database...], "stillMissing": [{"database", "model"}...], "notes": [string...]}` |
 | POST | `/api/admin/models?repo=<r>&license=<l>&format=<gsnap\|tar>` | the file itself (anything but JSON): a `.gsnap` carrying model blobs or a `.tar` (or gzip-compressed `.tar.gz`/`.tgz`) of a Model2Vec model directory | `201`, the same answer |
@@ -289,7 +290,7 @@ is still a JSON answer.
 
 ### Import
 
-A new database from another one, in two forms:
+A new database from another one, in three forms:
 
 - **Upload** (the web UI's Import tab): `POST /api/admin/import?name=<name>` with the file as the raw
   request body (`Content-Type: application/octet-stream`; not multipart) and a
@@ -312,6 +313,25 @@ A new database from another one, in two forms:
   `Content-Type: application/json` and `{"path": "/absolute/path", "name", "base"?, "format"?,
   "description"?, "role"?}`: the server reads the file or directory on its own machine. A relative path
   is `400`, a missing one `404`.
+- **Inbox** (the web UI's Import tab, the console's `import DIR --inbox FILE`): the same JSON
+  form with `{"inbox": "<entry name>"}` instead of `"path"` (exactly one of the two, else
+  `400`): one entry of the server directory's import inbox `imports/`. A name that is not one
+  plain entry (a separator `/`, `\` or `:`, a leading `.`, `..` included) is `400`, a missing
+  entry `404` (help: `GET /api/admin/imports lists the import inbox`), a symbolic link leading
+  outside `imports/` `409`. The file stays in the inbox.
+
+`GET /api/admin/imports` lists the inbox (an older server directory gets `imports/` here):
+
+| Field | Type | Meaning |
+|---|---|---|
+| `dir` | string | the inbox's absolute path on the server's machine |
+| `imports[].name` | string | the entry's name (what `"inbox"` takes), sorted |
+| `imports[].kind` | string or null | `snapshot`, `store`, `graphson`, `graphml` guessed from the name (`.gsnap`; `.gstore` or a directory holding a Store; `.json`/`.jsonl`/`.graphson`; `.xml`/`.graphml`), else `null`; the import still detects the content |
+| `imports[].directory` | bool | a directory (a Store directory) |
+| `imports[].bytes` | number | its size (a directory: every file below it) |
+| `imports[].modified` | string or null | last modification, RFC 3339 UTC |
+
+Entries starting with `.` and symbolic links leading outside `imports/` are not listed.
 
 Sources, detected from the content (a file name never decides a snapshot):
 
@@ -508,6 +528,8 @@ graphersal-server db alias set ALIAS DATABASE | alias remove ALIAS | alias renam
 graphersal-server db backup NAME | backups NAME | restore NAME BACKUP [--name NEW] --dir DIR [--json]
 graphersal-server db export NAME --out FILE [--no-models] [--materialize] --dir DIR [--json]
 graphersal-server import DIR SOURCE --name NAME [--base BASE] [--format F] [--description TEXT] [--role normal|base] [--json]
+graphersal-server import DIR --inbox FILE --name NAME [--base BASE] [--format F] [--description TEXT] [--role normal|base] [--json]
+graphersal-server import DIR --list [--json]
 graphersal-server models list | add SOURCE [--repo R] [--license L] | remove REPO --dir DIR [--json]
 graphersal-server user list | add NAME [--admin] | token NAME [--revoke] | remove NAME --dir DIR [--json]
 graphersal-server user admin NAME on|off | grant SUBJECT DATABASE read|write | revoke SUBJECT DATABASE --dir DIR [--json]
@@ -526,6 +548,8 @@ writes it, through a server the console streams the download. Its `--json` answe
 admin core imports `SOURCE` itself; through a running server the console sends the path form
 with `SOURCE` made absolute (the server reads it; no upload). Its answer is the import answer
 above; the text names the format, the kind and the state, and lists the notes.
+`import DIR --inbox FILE` sends the inbox form (`{"inbox": FILE}`), `import DIR --list` is
+`GET /api/admin/imports` (a table of name, size, kind, modified).
 
 `models add SOURCE` (a model directory, a `.tar` or `.tar.gz` of one or a `.gsnap`) sends the path form
 with `SOURCE` made absolute when it exists, else

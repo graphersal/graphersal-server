@@ -18,7 +18,8 @@
 //! | POST | `databases/<name>/restore` | `{"backup", "name"?}` | `201` entry + `"restoredFrom": {"database", "backup"}`, `"replaced"`, `"trash"?` |
 //! | GET | `databases/<name>/export?models=true\|false&materialize=true\|false` | | `200` the `.gsnap` file (download) |
 //! | POST | `import?name=<n>&base=<b>&format=<f>&description=<d>&role=<normal\|base>` | the file itself (any content type but JSON) | `201` entry + `"import"` |
-//! | POST | `import` | JSON `{"path", "name", "base"?, "format"?, "description"?, "role"?}` (a file or directory on the server's machine, absolute) | `201` entry + `"import"` |
+//! | POST | `import` | JSON `{"path" \| "inbox", "name", "base"?, "format"?, "description"?, "role"?}` (`path`: a file or directory on the server's machine, absolute; `inbox`: an entry name of the import inbox `imports/`) | `201` entry + `"import"` |
+//! | GET | `imports` | | `200 {"dir", "imports": [{"name", "kind", "directory", "bytes", "modified"}...]}`: the import inbox |
 //! | GET | `models` | | `200 {"models": [model...], "missing": [{"database", "model"}...]}` (rebuilds `models/models.toml`) |
 //! | POST | `models` | `{"path"?, "repo"?, "license"?}` (`path`: a Model2Vec directory or a `.gsnap`, absolute, on the server's machine; `repo` alone: a model `models/` holds) | `201` (from a path) / `200` `{"added": [model...], "resolved": [database...], "stillMissing": [{"database", "model"}...], "notes": [text...]}` |
 //! | POST | `models?repo=<r>&license=<l>&format=<gsnap\|tar>` | the file itself (any content type but JSON): a `.gsnap` carrying model blobs or a tar archive (or `.tar.gz`) of a Model2Vec model directory (format detected unless given) | `201` as above |
@@ -54,6 +55,15 @@
 //! gzip-compressed: decompressed first, at most the upload limit) is unpacked into `tmp/` first, refusing absolute paths, `..`, links, devices and more than
 //! 1000 entries (`400`: `not a usable model archive: ...`); a file that is neither a `.gsnap`
 //! nor a tar archive, or not of the `format` given, is `400`.
+//!
+//! The import inbox (`imports/` of the server directory, [`crate::ops::Admin::inbox`]): `dir`
+//! is its absolute path on the server's machine; an entry's `kind` (`snapshot` | `store` |
+//! `graphson` | `graphml` | `null`) is guessed from its name (a directory: a Store when it holds
+//! one; the import still detects the content), `bytes` its size (a directory: every file below
+//! it), `modified` RFC 3339 UTC or `null`. Hidden entries (a leading `.`) and links leading
+//! outside `imports/` are not listed. An import by `inbox` takes ONE entry name: a name with a
+//! separator, a leading `.` (`..` included) is `400`, a missing entry `404`, a link leading
+//! outside `imports/` `409`.
 //!
 //! `"import"` of the answer: `{"format": "snapshot" | "store" | "graphson" | "graphml",
 //! "layerBase"?, "modelsMissing": [repo...], "modelsResolved": [repo...], "skipped": n,
@@ -117,7 +127,7 @@ use crate::loader::LoadStart;
 use crate::names::fold;
 use crate::ops::{
     Admin, BackupInfo, CreateSpec, DatabaseRun, ExportFile, ExportSpec, ImportFormat, ImportSource,
-    ModelAddSpec, ModelAdded, TmpFile,
+    InboxFile, ModelAddSpec, ModelAdded, TmpFile,
 };
 use crate::registry::{DatabaseEntry, DbState, Registry};
 
@@ -276,6 +286,10 @@ pub(crate) fn route(
                 import_upload(admin, request)
             };
         }
+        (_, ["imports"]) if read => admin
+            .inbox()
+            .map(|files| Response::json(200, &inbox_json(registry, &files)))
+            .map_err(|err| (err, None)),
         (_, ["models"]) if read => admin
             .models_index()
             .map(|index| Response::json(200, &models_json(&index)))
@@ -400,7 +414,8 @@ pub(crate) fn route(
         | (_, ["aliases", _])
         | (_, ["aliases", _, "rename"])
         | (_, ["models", ..])
-        | (_, ["import"]) => return Err(not_allowed()),
+        | (_, ["import"])
+        | (_, ["imports"]) => return Err(not_allowed()),
         _ => {
             return Err(HttpError::new(
                 404,
@@ -427,16 +442,38 @@ pub(crate) fn is_upload(method: &Method, path: &str, content_type: Option<&str>)
             .is_some_and(|value| value.to_ascii_lowercase().contains("application/json"))
 }
 
-/// `POST import {"path", ...}`: a file or directory on the server's machine.
+/// `POST import {"path" | "inbox", ...}`: a file or directory on the server's machine, or an
+/// entry of the import inbox.
 fn import_path(admin: &Admin, request: &mut Request<'_>) -> Result<Response, HttpError> {
     let body: ImportBody = body_of(request)?;
-    let path = PathBuf::from(&body.path);
-    if !path.is_absolute() {
-        return Err(HttpError::bad_request(format!(
-            "import: the path {:?} is not absolute (the server resolves it on its own machine)",
-            body.path
-        )));
-    }
+    let path = match (&body.path, &body.inbox) {
+        (Some(given), None) => {
+            let path = PathBuf::from(given);
+            if !path.is_absolute() {
+                return Err(HttpError::bad_request(format!(
+                    "import: the path {given:?} is not absolute (the server resolves it on its \
+                     own machine)"
+                )));
+            }
+            path
+        }
+        (None, Some(inbox)) => match admin.inbox_source(inbox) {
+            Ok(path) => path,
+            Err(err) => {
+                let help = match &err {
+                    ServerError::Refused { .. } => None,
+                    _ => Some("GET /api/admin/imports lists the import inbox".to_string()),
+                };
+                return Ok(error_answer(&err, help));
+            }
+        },
+        _ => {
+            return Err(HttpError::bad_request(
+                "import: name the source with either \"path\" (absolute, on the server's \
+                 machine) or \"inbox\" (an entry of imports/), not both",
+            ));
+        }
+    };
     let format = parse_format(body.format.as_deref())?;
     let role = parse_role(body.role.as_deref())?;
     let source = ImportSource::new(path).with_format(format);
@@ -600,6 +637,26 @@ fn parse_role(role: Option<&str>) -> Result<DatabaseRole, HttpError> {
     }
 }
 
+/// `GET imports`: the import inbox.
+fn inbox_json(registry: &Registry, files: &[InboxFile]) -> Value {
+    let rows: Vec<Value> = files
+        .iter()
+        .map(|file| {
+            json!({
+                "name": file.name,
+                "kind": file.kind.map(ImportFormat::as_str),
+                "directory": file.directory,
+                "bytes": file.bytes,
+                "modified": file.modified,
+            })
+        })
+        .collect();
+    json!({
+        "dir": registry.dir().imports().to_string_lossy(),
+        "imports": rows,
+    })
+}
+
 /// The answer of an import: `201` entry + `"import"`, or the error.
 fn import_answer(
     admin: &Admin,
@@ -676,7 +733,10 @@ fn query_decode(value: &str) -> Option<String> {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ImportBody {
-    path: String,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    inbox: Option<String>,
     name: String,
     #[serde(default)]
     base: Option<String>,

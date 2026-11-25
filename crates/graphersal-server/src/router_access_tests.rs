@@ -1573,3 +1573,137 @@ fn allowed_hosts_admit_a_proxy_name_and_refuse_others() {
         403
     );
 }
+
+#[test]
+fn the_import_inbox_is_listed_and_imported_by_admins_only_and_stays_inside() {
+    let fx = fixture("access-inbox");
+    let imports = fx.loader.registry().dir().imports();
+    use graphersal::prelude::GraphExport;
+    graphersal::prelude::Graph::new(TraversalGraph::tinkerpop_modern())
+        .export_graphson_writer(std::fs::File::create(imports.join("people.json")).unwrap())
+        .unwrap();
+    std::fs::write(imports.join(".hidden.json"), "{}").unwrap();
+    let outside = fx.loader.registry().dir().root().join("outside.json");
+    std::fs::write(&outside, "{}").unwrap();
+    let (alice, bob) = (fx.alice.as_str(), fx.bob.as_str());
+
+    // Admins only: anonymous 401, a user without the admin role 404, the listing and the
+    // import alike.
+    assert_unauthorized(&get(&fx, Who::Anonymous, "/api/admin/imports"), "list");
+    assert_eq!(
+        get(&fx, Who::Bearer(bob), "/api/admin/imports").status(),
+        404
+    );
+    let by_bob = post(
+        &fx,
+        Who::Bearer(bob),
+        "/api/admin/import",
+        json!({"inbox": "people.json", "name": "bobs"}),
+    );
+    assert_eq!(by_bob.status(), 404);
+    assert!(!fx.loader.registry().dir().databases().join("bobs").exists());
+
+    // The listing.
+    let listing = expect(get(&fx, Who::Bearer(alice), "/api/admin/imports"), 200);
+    assert_eq!(listing["dir"], imports.to_string_lossy().as_ref());
+    let rows = listing["imports"].as_array().unwrap();
+    assert_eq!(rows.len(), 1, "{listing}");
+    assert_eq!(rows[0]["name"], "people.json");
+    assert_eq!(rows[0]["kind"], "graphson");
+    assert_eq!(rows[0]["directory"], false);
+    assert!(rows[0]["bytes"].as_u64().unwrap() > 0);
+    assert!(rows[0]["modified"].is_string());
+    let refused = send(
+        &fx,
+        Who::Bearer(alice),
+        Method::Post,
+        "/api/admin/imports",
+        None,
+        &[],
+    );
+    assert_eq!(refused.status(), 405);
+
+    // An import by inbox name.
+    let imported = expect(
+        post(
+            &fx,
+            Who::Bearer(OPERATOR),
+            "/api/admin/import",
+            json!({"inbox": "people.json", "name": "people"}),
+        ),
+        201,
+    );
+    assert_eq!(imported["name"], "people");
+    assert_eq!(imported["import"]["format"], "graphson");
+    assert!(
+        imports.join("people.json").is_file(),
+        "the inbox file stays"
+    );
+
+    // Traversal and other names that are not one inbox entry: 400; missing: 404.
+    for name in [
+        "../outside.json",
+        "..",
+        ".",
+        "",
+        ".hidden.json",
+        "sub/people.json",
+        "..\\outside.json",
+        "/etc/passwd",
+    ] {
+        let answer = post(
+            &fx,
+            Who::Bearer(alice),
+            "/api/admin/import",
+            json!({"inbox": name, "name": "evil"}),
+        );
+        assert_eq!(answer.status(), 400, "{name:?}: {:?}", json_of(&answer));
+    }
+    let missing = expect(
+        post(
+            &fx,
+            Who::Bearer(alice),
+            "/api/admin/import",
+            json!({"inbox": "nope.json", "name": "evil"}),
+        ),
+        404,
+    );
+    assert!(
+        missing["help"]
+            .as_str()
+            .unwrap()
+            .contains("GET /api/admin/imports")
+    );
+    // Both or neither of path and inbox: 400.
+    for body in [
+        json!({"inbox": "people.json", "path": outside.to_str().unwrap(), "name": "evil"}),
+        json!({"name": "evil"}),
+    ] {
+        let answer = post(&fx, Who::Bearer(alice), "/api/admin/import", body);
+        assert_eq!(answer.status(), 400);
+    }
+    // A link leading outside the inbox: not listed, refused (409).
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(&outside, imports.join("escape.json")).unwrap();
+        let listing = expect(get(&fx, Who::Bearer(alice), "/api/admin/imports"), 200);
+        assert_eq!(listing["imports"].as_array().unwrap().len(), 1, "{listing}");
+        let answer = expect(
+            post(
+                &fx,
+                Who::Bearer(alice),
+                "/api/admin/import",
+                json!({"inbox": "escape.json", "name": "evil"}),
+            ),
+            409,
+        );
+        assert!(
+            answer["error"]
+                .as_str()
+                .unwrap()
+                .contains("outside imports/"),
+            "{answer}"
+        );
+    }
+    assert!(!fx.loader.registry().dir().databases().join("evil").exists());
+}

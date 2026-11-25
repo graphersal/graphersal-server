@@ -113,6 +113,7 @@ databases and missing models. Paths and commands are never wrapped.
 | `db restore NAME BACKUP [--name NEW]` | over NAME (unloaded) or into the new database NEW |
 | `db export NAME --out FILE [--no-models] [--materialize]` | a packed snapshot (`.gsnap`) |
 | `import DIR SOURCE --name NAME [--base BASE] [--format F] [--description TEXT] [--role normal\|base]` | a new database from a `.gsnap`, a Store (directory or `.gstore`), GraphSON or GraphML; an embedding model it names without carrying comes from `models/` (else the database is `needs-model` until `models add`); a model blob a Store lacks is filled from `models/` (else the database is `needs-model` until `models add`, like a snapshot); `--role base` makes a base of a plain source |
+| `import DIR --inbox FILE --name NAME [...]`, `import DIR --list` | the same from the import inbox `DIR/imports/` (FILE: one entry name there; a link leading outside is refused), and its listing |
 | `models list`, `models add SOURCE [--repo R] [--license L]`, `models remove REPO` | the shared embedding models; SOURCE: a Model2Vec model directory, a `.tar` or `.tar.gz` of one, a `.gsnap` carrying models, or a repository `models/` holds |
 | `user list` | the users of `access.toml`: roles, the last 4 characters of each token (`…a1b2`), what each reaches; then the grants of `anonymous` and roles |
 | `user add NAME [--admin]` | a new user; its token is printed once on stdout (only a SHA-256 hash is kept) |
@@ -147,7 +148,8 @@ same mechanism graphersal-memory uses for its `memory` profile; the playground's
 "UI profiles"). The profile and its modules live in `crates/graphersal-server/ui/` and are
 built into the binary: `profile.json`, the tabs `databases-tab.js` (the list with load,
 unload, clone, promote, delete, read-only and auto-load, create, aliases), `backups-tab.js`
-(back up, list, restore), `import-tab.js` (upload with progress, or a path on the server),
+(back up, list, restore), `import-tab.js` (upload with progress, a file picked from the server's import inbox
+`imports/`, or a path on the server),
 `export-tab.js` (`.gsnap` download), `models-tab.js` (the shared models; add one by
 uploading a `.gsnap` or a `.tar` of a model directory with progress, or from a path on the
 server) and `runs-tab.js` (the run administration: the queries that wait or run on the loaded

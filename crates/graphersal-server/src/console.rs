@@ -172,6 +172,25 @@ pub enum DbCommand {
         /// The new database's role ([`DatabaseRole::Base`]: a base of a plain source).
         role: DatabaseRole,
     },
+    /// `import DIR --inbox FILE --name NAME [--base BASE] [--format F] [--description TEXT]
+    /// [--role normal|base]`: the entry `file` of the import inbox `DIR/imports/` (read where
+    /// the server directory is) as the new database `name`.
+    ImportInbox {
+        /// The inbox entry's name (one file or directory name in `imports/`).
+        file: String,
+        /// The new database's name.
+        name: String,
+        /// A layer's base database.
+        base: Option<String>,
+        /// The format hint (`snapshot`, `store`, `graphson`, `graphml`).
+        format: Option<String>,
+        /// The new database's description.
+        description: Option<String>,
+        /// The new database's role ([`DatabaseRole::Base`]: a base of a plain source).
+        role: DatabaseRole,
+    },
+    /// `import DIR --list`: the entries of the import inbox `DIR/imports/`.
+    InboxList,
     /// `models list`.
     ModelsList,
     /// `models add SOURCE [--repo R] [--license L]`: a Model2Vec directory, a `.tar` (or
@@ -325,23 +344,23 @@ impl DbCommand {
                 description,
                 role,
             } => {
-                let mut body = Map::new();
-                body.insert("path".into(), json!(source.to_string_lossy()));
-                if *role != DatabaseRole::Normal {
-                    body.insert("role".into(), json!(role.as_str()));
-                }
-                body.insert("name".into(), json!(name));
-                if let Some(base) = base {
-                    body.insert("base".into(), json!(base));
-                }
-                if let Some(format) = format {
-                    body.insert("format".into(), json!(format));
-                }
-                if let Some(description) = description {
-                    body.insert("description".into(), json!(description));
-                }
-                (Method::Post, "import".into(), Some(Value::Object(body)))
+                let source = ("path", json!(source.to_string_lossy()));
+                let body = import_body(source, name, base, format, description, *role);
+                (Method::Post, "import".into(), Some(body))
             }
+            DbCommand::ImportInbox {
+                file,
+                name,
+                base,
+                format,
+                description,
+                role,
+            } => {
+                let source = ("inbox", json!(file));
+                let body = import_body(source, name, base, format, description, *role);
+                (Method::Post, "import".into(), Some(body))
+            }
+            DbCommand::InboxList => (Method::Get, "imports".into(), None),
             DbCommand::ModelsList => (Method::Get, "models".into(), None),
             DbCommand::ModelsAdd {
                 path,
@@ -687,6 +706,34 @@ fn answer_of(status: u16, json: Value) -> Result<Value, ServerError> {
         message: text("error").unwrap_or_else(|| format!("the server answered {status}")),
         help: text("help"),
     })
+}
+
+/// The JSON body of `POST import`: the source (`("path", ..)` or `("inbox", ..)`), then the
+/// fields that are set (`role` only when not normal).
+fn import_body(
+    (key, source): (&str, Value),
+    name: &str,
+    base: &Option<String>,
+    format: &Option<String>,
+    description: &Option<String>,
+    role: DatabaseRole,
+) -> Value {
+    let mut body = Map::new();
+    body.insert(key.into(), source);
+    if role != DatabaseRole::Normal {
+        body.insert("role".into(), json!(role.as_str()));
+    }
+    body.insert("name".into(), json!(name));
+    if let Some(base) = base {
+        body.insert("base".into(), json!(base));
+    }
+    if let Some(format) = format {
+        body.insert("format".into(), json!(format));
+    }
+    if let Some(description) = description {
+        body.insert("description".into(), json!(description));
+    }
+    Value::Object(body)
 }
 
 /// The absolute path of the import source `source` as given on the command line, without `.`
