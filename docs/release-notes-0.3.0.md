@@ -9,6 +9,45 @@ directory itself) open to group or others: run `graphersal-server init DIR` once
 directory's owner; it tightens the modes and lists them under `owner only`. The error of a
 refused command names the exact `chmod`/`chown` too.
 
+## Safe concurrent changes
+
+Many browsers (and scripts, and the console) may change the server at the same time; the files
+stay whole and every acknowledged change stays
+([`server-dir.md`](server-dir.md#concurrent-changes)).
+
+- **Atomic writes with their own temporary file.** Every configuration file (`access.toml`,
+  `aliases.toml`, `database.toml`, `server.run`, the session files, `models/models.toml`,
+  backup sidecars) is written to a temporary file of its own (`<file>.tmp-<pid>-<n>`; 0.2 used
+  one fixed `<file>.tmp` per file), flushed to the disk, renamed into place, and on unix the
+  directory is flushed too (the new file survives a power loss). Temporary files a crash left
+  behind are removed at the next start (only names the server makes).
+- **Locks held across read, change and write; memory only after the write.** Fixed on the way:
+  the grants of a deleted database or a removed alias are now dropped in the same step as the
+  name (before, a new database or alias of that name made in between could lose the grants it
+  had just been given); a grant is written while its database or alias is known to exist (it
+  could land on a name deleted at that moment); `user admin NAME on|off` reads and changes the
+  roles in one step (a concurrent role change is no longer undone); the `grantsRemoved` count of
+  a user removal is taken in the same step. The lock order is documented.
+- **Revisions against lost updates.** Users and grants (`access.toml`), aliases
+  (`aliases.toml`) and each database's settings (`database.toml`) carry a `revision`: `GET
+  users`, `GET grants`, `GET aliases` (also as `ETag`), `aliasesRevision` of `GET databases`,
+  and `revision` in every database entry. A change may send the revision it is based on (body
+  field `revision` or `If-Match`); when someone else changed the object meanwhile it is refused
+  with `409 {"error", "help": "changed by someone else: reload", "revision": <current>}` and
+  nothing changes. Without a revision a change is applied as before (the console, scripts,
+  older clients). Checked: every users and grants change, alias set/flip/rename/remove, read-only
+  and auto-load ([`admin-api.md`](admin-api.md#revisions-concurrent-changes)).
+- **Web UI:** the Users tab, the alias dialogs and remove, and the read-only and auto-load
+  toggles send the revision of what they show; on a `409` the tab shows a warning (the server's
+  text and help, and that the tab now shows the current state) and reads its data again.
+- The library: `revision` (`of`, `check`, `from_if_match`, `etag`, `CONFLICT_HELP`),
+  `ServerError::Conflict`, `Admin::expecting`, `Access::edit` (`AccessEdit`, with `set_admin`),
+  `Access::revision`, `AccessFile::revision`, `DatabaseEntry::revision`,
+  `Registry::aliases_with_revision`, `aliases_revision`, `alias_remove_with`, `delete_with`,
+  `set_read_only_expecting`, `set_auto_load_expecting`, `Loader::set_read_only_expecting`,
+  `ServerDir::remove_stale_temps`; `Registry::alias_set_with` and `alias_rename_with` take the
+  expected revision.
+
 ## The server directory is the boundary
 
 The OS user owning the server directory is the operator (PostgreSQL's peer-authentication

@@ -84,7 +84,27 @@ from published files). When this file disagrees with the code, the code wins: sa
   (`ServerDir`, `init` (creates `sessions/` and the import inbox `imports/` too; the root `0700`,
   `security::tighten` at the end: `InitReport::secured` = old paths whose mode it tightened; an
   existing directory of another OS user refused by `security::check_owner`), file names,
-  `write_atomic`), `security` (round 3 B1: the OS user owning the server directory is the
+  `write_atomic` (round 3 B-CONCUR: a temporary name of its own per write, `temp_path` =
+  `<file>.tmp-<pid>-<n>`, `create_new`, fsync of the file, rename, fsync of the directory on
+  unix (`sync_parent`: a plain `libc::fsync`, not macOS's `F_FULLFSYNC`; a failure only warns:
+  the file is in place; `write_atomic_private_volatile` skips it for `server.run`, so the
+  probes are not delayed by the disk); `is_temp_name` (ours only,
+  plus the 0.2 `<file>.tmp` of `ATOMIC_FILES` and `access.toml.new-<pid>`) and
+  `ServerDir::remove_stale_temps` (root, `sessions/`, `models/`, `databases/*/`, `backups/*/`;
+  called by `Registry::scan`, i.e. with the server lock held)), `revision` (B-CONCUR:
+  optimistic concurrency: `of(text)` = 16 hex of SHA-256 of the file text; `check(expected,
+  current, what)` -> `ServerError::Conflict {what, revision}` = 409 with help `CONFLICT_HELP`
+  "changed by someone else: reload" and `revision` in the answer (`admin_api::error_answer`);
+  objects: users+grants (`AccessFile::revision`, checked in `Access::change` via
+  `Access::edit(actor, expected)` = `AccessEdit`), aliases (`registry::aliases_revision`,
+  `check_aliases` in `alias_set_with`/`alias_rename_with`/`alias_remove_with`), a database's
+  settings (`DatabaseEntry::revision`, checked in `Registry::update_config`); `Admin::expecting`
+  carries it; the admin API takes the body's `revision`, else `If-Match`
+  (`from_if_match`; `*` = none); GET answers carry `revision`/`aliasesRevision`/entry `revision`
+  and `ETag`; no revision = applied as before; inventory of files/writers/locks and the lock
+  order in `docs/server-dir.md` "Concurrent changes" and `ops.rs` module docs; tests
+  `ops_concurrency_tests.rs` (409s; the 8 x 50 stress over HTTP: models, files parse, no temps,
+  memory = fresh scan)), `security` (round 3 B1: the OS user owning the server directory is the
   operator; `check(dir)` before `serve::start` and `console::run` (and `main.rs` before
   `ServerDir::open`): root + `server.toml` + `aliases.toml` owned by the euid and not g/o
   writable, `access.toml`, `server.run`, `sessions/` and its files owned and not g/o
@@ -489,6 +509,11 @@ WD_TIMEOUT=600 ../graphersal/ai/bench/watchdog.sh scripts/smoke.sh   # end to en
 - English in every file. Synthetic test data only; servers on port 0; kill what you start.
 - Do not change or delete an existing test without listing it (file, name, reason) in the
   task report.
+- Concurrent changes (B-CONCUR): a writer of a server file takes that file's lock and holds it
+  across read, change and write; memory changes only after the write succeeded; never take a
+  lock earlier in the documented order while holding a later one (loader state, loader flips,
+  registry, access, session tables; models/naming locks are leaves). A new runtime writer goes
+  into the inventory of `docs/server-dir.md`; a new editable shared object gets a revision.
 - Tokens and session ids: only hashes at rest, never logged (`Secret`'s `Debug` is redacted;
   audit events show `token_last4` only).
 - Access is enforced by the router (B3, module docs of `router.rs`): authentication right after
