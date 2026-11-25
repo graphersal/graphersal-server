@@ -4,16 +4,16 @@
 //!
 //! | Method | Path | Body | Answer |
 //! |---|---|---|---|
-//! | GET | `users` | | `200 {"users": [user...], "grants": [grant...]}` |
-//! | POST | `users` | `{"name", "admin"?}` | `201` user + `"token"` (shown once) |
+//! | GET | `users` | | `200 {"users": [user...], "grants": [grant...], "revision"}` (+ `ETag`) |
+//! | POST | `users` | `{"name", "admin"?, "revision"?}` | `201` user + `"token"` (shown once) |
 //! | GET | `users/<name>` | | `200` user |
 //! | DELETE | `users/<name>` | | `200 {"name", "removed": true, "grantsRemoved", "mcpSessionsEnded"}` |
 //! | POST | `users/<name>/token` | | `200` user + `"token"` (shown once) + `"mcpSessionsEnded"` |
 //! | DELETE | `users/<name>/token` | | `200` user (`hasToken: false`) + `"mcpSessionsEnded"` |
-//! | PUT | `users/<name>/admin` | `{"admin": bool}` | `200` user |
-//! | PUT | `users/<name>/roles` | `{"roles": [role...]}` | `200` user |
-//! | GET | `grants` | | `200 {"grants": [grant...]}` |
-//! | POST | `grants` | `{"subject", "database", "level"}` | `200` grant (set, or its level replaced) |
+//! | PUT | `users/<name>/admin` | `{"admin": bool, "revision"?}` | `200` user |
+//! | PUT | `users/<name>/roles` | `{"roles": [role...], "revision"?}` | `200` user |
+//! | GET | `grants` | | `200 {"grants": [grant...], "revision"}` (+ `ETag`) |
+//! | POST | `grants` | `{"subject", "database", "level", "revision"?}` | `200` grant (set, or its level replaced) |
 //! | DELETE | `grants/<subject>/<database>` | | `200 {"subject", "database", "revoked": bool}` |
 //!
 //! A user: `name`, `roles`, `admin` (has the `admin` role), `hasToken`, `tokenLast4` (the last
@@ -28,8 +28,11 @@
 //! on an alias reaches its current target only through the alias's name. Path segments may be
 //! percent-encoded (`user%3Abob`).
 //!
+//! Every change may be based on the revision of `access.toml` (`revision` in the body, else
+//! `If-Match`; [`crate::revision`]): a stale one is `409` with the current `revision`.
+//!
 //! Errors: `400` (invalid name, subject or level), `404` (no such user, database or alias),
-//! `409` (a name taken or reserved, the last admin).
+//! `409` (a name taken or reserved, the last admin, a stale revision).
 
 use std::collections::BTreeMap;
 
@@ -55,6 +58,7 @@ pub(super) fn route(
     method: &Method,
     segments: &[&str],
     request: &mut Request<'_>,
+    expecting: &dyn Fn(Option<String>) -> Admin,
 ) -> Option<Result<Response, HttpError>> {
     let read = matches!(method, Method::Get | Method::Head);
     let decoded: Vec<String> = match segments
@@ -88,24 +92,31 @@ pub(super) fn route(
                 .iter()
                 .map(|grant| grant_json(admin, &aliases, grant))
                 .collect();
-            Response::json(200, &json!({ "users": users, "grants": grants }))
+            let revision = file.revision();
+            Response::json(
+                200,
+                &json!({ "users": users, "grants": grants, "revision": revision }),
+            )
+            .with_header("ETag", &crate::revision::etag(&revision))
         }),
         (Method::Post, ["users"]) => {
             let body: AddBody = match body_of(request) {
                 Ok(body) => body,
                 Err(err) => return Some(Err(err)),
             };
-            admin.user_add(&body.name, body.admin).and_then(|token| {
-                let mut user = one_user(admin, &body.name)?;
-                user["token"] = Value::String(token.expose().to_string());
-                Ok(Response::json(201, &user))
-            })
+            expecting(body.revision.clone())
+                .user_add(&body.name, body.admin)
+                .and_then(|token| {
+                    let mut user = one_user(admin, &body.name)?;
+                    user["token"] = Value::String(token.expose().to_string());
+                    Ok(Response::json(201, &user))
+                })
         }
         (_, ["users", name]) if read && !name.is_empty() => {
             one_user(admin, name).map(|user| Response::json(200, &user))
         }
         (Method::Delete, ["users", name]) if !name.is_empty() => {
-            admin.user_remove(name).map(|(grants, ended)| {
+            expecting(None).user_remove(name).map(|(grants, ended)| {
                 Response::json(
                     200,
                     &json!({
@@ -118,7 +129,7 @@ pub(super) fn route(
             })
         }
         (Method::Post, ["users", name, "token"]) if !name.is_empty() => {
-            admin.user_token(name).and_then(|(token, ended)| {
+            expecting(None).user_token(name).and_then(|(token, ended)| {
                 let mut user = one_user(admin, name)?;
                 user["token"] = Value::String(token.expose().to_string());
                 user["mcpSessionsEnded"] = json!(ended.mcp);
@@ -126,7 +137,7 @@ pub(super) fn route(
             })
         }
         (Method::Delete, ["users", name, "token"]) if !name.is_empty() => {
-            admin.user_revoke_token(name).and_then(|ended| {
+            expecting(None).user_revoke_token(name).and_then(|ended| {
                 let mut user = one_user(admin, name)?;
                 user["mcpSessionsEnded"] = json!(ended.mcp);
                 Ok(Response::json(200, &user))
@@ -137,7 +148,7 @@ pub(super) fn route(
                 Ok(body) => body,
                 Err(err) => return Some(Err(err)),
             };
-            admin
+            expecting(body.revision.clone())
                 .user_set_admin(name, body.admin)
                 .and_then(|()| one_user(admin, name))
                 .map(|user| Response::json(200, &user))
@@ -147,7 +158,7 @@ pub(super) fn route(
                 Ok(body) => body,
                 Err(err) => return Some(Err(err)),
             };
-            admin
+            expecting(body.revision.clone())
                 .user_set_roles(name, body.roles)
                 .and_then(|()| one_user(admin, name))
                 .map(|user| Response::json(200, &user))
@@ -159,14 +170,16 @@ pub(super) fn route(
                 .iter()
                 .map(|grant| grant_json(admin, &aliases, grant))
                 .collect();
-            Response::json(200, &json!({ "grants": grants }))
+            let revision = file.revision();
+            Response::json(200, &json!({ "grants": grants, "revision": revision }))
+                .with_header("ETag", &crate::revision::etag(&revision))
         }),
         (Method::Post, ["grants"]) => {
             let body: GrantBody = match body_of(request) {
                 Ok(body) => body,
                 Err(err) => return Some(Err(err)),
             };
-            admin
+            expecting(body.revision.clone())
                 .grant_set(&body.subject, &body.database, &body.level)
                 .map(|grant| {
                     let aliases = admin.registry().aliases();
@@ -176,22 +189,24 @@ pub(super) fn route(
         (Method::Delete, ["grants", subject, database])
             if !subject.is_empty() && !database.is_empty() =>
         {
-            admin.grant_revoke(subject, database).and_then(|revoked| {
-                let subject = crate::ops::parse_subject(subject)?;
-                let database = if *database == "*" {
-                    database.to_string()
-                } else {
-                    fold(database)
-                };
-                Ok(Response::json(
-                    200,
-                    &json!({
-                        "subject": subject.to_string(),
-                        "database": database,
-                        "revoked": revoked,
-                    }),
-                ))
-            })
+            expecting(None)
+                .grant_revoke(subject, database)
+                .and_then(|revoked| {
+                    let subject = crate::ops::parse_subject(subject)?;
+                    let database = if *database == "*" {
+                        database.to_string()
+                    } else {
+                        fold(database)
+                    };
+                    Ok(Response::json(
+                        200,
+                        &json!({
+                            "subject": subject.to_string(),
+                            "database": database,
+                            "revoked": revoked,
+                        }),
+                    ))
+                })
         }
         (_, ["users"])
         | (_, ["users", _])
@@ -297,6 +312,9 @@ struct AddBody {
     name: String,
     #[serde(default)]
     admin: bool,
+    /// The revision of the users and grants the change is based on (crate::revision).
+    #[serde(default)]
+    revision: Option<String>,
 }
 
 /// `PUT users/<name>/admin`.
@@ -304,6 +322,9 @@ struct AddBody {
 #[serde(deny_unknown_fields)]
 struct AdminBody {
     admin: bool,
+    /// The revision of the users and grants the change is based on (crate::revision).
+    #[serde(default)]
+    revision: Option<String>,
 }
 
 /// `PUT users/<name>/roles`.
@@ -311,6 +332,9 @@ struct AdminBody {
 #[serde(deny_unknown_fields)]
 struct RolesBody {
     roles: Vec<String>,
+    /// The revision of the users and grants the change is based on (crate::revision).
+    #[serde(default)]
+    revision: Option<String>,
 }
 
 /// `POST grants`.
@@ -320,4 +344,7 @@ struct GrantBody {
     subject: String,
     database: String,
     level: String,
+    /// The revision of the users and grants the change is based on (crate::revision).
+    #[serde(default)]
+    revision: Option<String>,
 }

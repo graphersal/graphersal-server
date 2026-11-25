@@ -3,16 +3,16 @@
 //!
 //! | Method | Path | Body | Answer |
 //! |---|---|---|---|
-//! | GET | `databases` | | `200 {"databases": [entry...], "aliases": {alias: database}, "problems": [text...]}` |
+//! | GET | `databases` | | `200 {"databases": [entry...], "aliases": {alias: database}, "aliasesRevision", "problems": [text...]}` |
 //! | POST | `databases` | `{"name", "kind"?, "role"?, "base"?, "schema"?, "description"?, "autoLoad"?, "readOnly"?}` | `201` entry |
-//! | GET | `databases/<name>` | | `200` entry (`<name>` may be an alias) |
+//! | GET | `databases/<name>` | | `200` entry (`<name>` may be an alias); `ETag` = its `revision` |
 //! | DELETE | `databases/<name>` | | `200 {"name", "trash", "grantsRemoved"}` (its grants go with it) |
 //! | POST | `databases/<name>/clone` | `{"name"}` | `201` entry of the clone |
 //! | POST | `databases/<name>/load` | | `202` entry + `"load": "started" \| "already-loading"`, `200` + `"already-loaded"` |
 //! | POST | `databases/<name>/unload` | | `200` entry + `"unloaded": bool` |
 //! | POST | `databases/<name>/promote` | | `200` entry (now `role: base`, read-only; one way) |
-//! | PUT | `databases/<name>/read-only` | `{"readOnly": bool}` | `200` entry |
-//! | PUT | `databases/<name>/auto-load` | `{"autoLoad": bool}` | `200` entry |
+//! | PUT | `databases/<name>/read-only` | `{"readOnly": bool, "revision"?}` | `200` entry |
+//! | PUT | `databases/<name>/auto-load` | `{"autoLoad": bool, "revision"?}` | `200` entry |
 //! | POST | `databases/<name>/backup` | | `201` backup |
 //! | GET | `databases/<name>/backups` | | `200 {"database", "backups": [backup...]}` (also for a deleted database's name) |
 //! | POST | `databases/<name>/restore` | `{"backup", "name"?}` | `201` entry + `"restoredFrom": {"database", "backup"}`, `"replaced"`, `"trash"?` |
@@ -27,10 +27,10 @@
 //! | GET | `runs` | | `200 {"runs": [run...], "textHeadChars"}`: every loaded database's queued and running runs |
 //! | GET | `databases/<name>/runs` | | `200 {"database", "loaded", "runs": [run...], "textHeadChars"}` |
 //! | POST | `databases/<name>/runs/cancel` | `{"id"}` | `200 {"database", "id", "cancelled": bool}` (`false`: no such run now) |
-//! | GET | `aliases` | | `200 {"aliases": {alias: database}}` |
-//! | PUT | `aliases/<alias>` | `{"target"}` | `200 {"alias", "target"}` |
+//! | GET | `aliases` | | `200 {"aliases": {alias: database}, "revision"}` (+ `ETag`) |
+//! | PUT | `aliases/<alias>` | `{"target", "revision"?}` | `200 {"alias", "target"}` |
 //! | DELETE | `aliases/<alias>` | | `200 {"alias", "removed": true, "grantsRemoved"}` (its grants go with it) |
-//! | POST | `aliases/<alias>/rename` | `{"name"}` | `200 {"alias", "renamedFrom", "target", "mcpSessionsMoved", "grantsMoved"}` |
+//! | POST | `aliases/<alias>/rename` | `{"name", "revision"?}` | `200 {"alias", "renamedFrom", "target", "mcpSessionsMoved", "grantsMoved"}` |
 //! | GET, POST, PUT, DELETE | `users...`, `grants...` | | the users and grants of `access.toml` (the `admin_api_users.rs` table) |
 //!
 //! A new database or alias never inherits grants left on its name (from a database or alias
@@ -39,10 +39,15 @@
 //! aliases/<alias>`) and a rename's new name remove them first, each audited as a revoked
 //! grant, and the answer then carries `"leftoverGrantsRemoved": n` (absent when none).
 //!
+//! Revisions ([`crate::revision`]): the changes of users and grants, of aliases and of a
+//! database's read-only/auto-load are based on the revision in the body's `revision`, else in
+//! `If-Match` (none: no check); a stale one is `409 {"error", "help": "changed by someone else:
+//! reload", "revision": <current>}`, nothing changed.
+//!
 //! The actions take real database names (not aliases). Errors are `{"error", "help"?}` with
 //! `400` (invalid name, body or schema), `404` (no such database, alias or endpoint), `405`,
 //! `409` (a rule refuses it: name taken, loaded, named by an alias, base of layers, offline,
-//! failed database), `413` (body too large), `415` (an import source of no known format),
+//! failed database, a stale revision), `413` (body too large), `415` (an import source of no known format),
 //! `500` (a Store or file failed). The repository's
 //! `docs/admin-api.md` documents the routes for clients.
 //!
@@ -107,7 +112,8 @@
 //! directory on disk; a model blob linked from `models/` counts in full in every database
 //! holding it, so the sum over databases is more than the disk use), `pooled: true` +
 //! `pooledBy: [layer...]` (a base held in the loader's pool by its loaded layers or itself) and
-//! `linkWarning` (some of its model blobs are copies, not links). `memoryBytes` is not given:
+//! `linkWarning` (some of its model blobs are copies, not links). Every entry with a readable
+//! configuration carries `revision` (of its `database.toml`). `memoryBytes` is not given:
 //! a loaded database's memory is known only inside its session thread, which a listing does
 //! not wait for.
 //!
@@ -154,8 +160,15 @@ pub(crate) fn route(
     };
     let read = matches!(method, Method::Get | Method::Head);
     let segments: Vec<&str> = endpoint.split('/').collect();
+    // The revision a change is based on (crate::revision): the body's `revision`, else
+    // `If-Match`; none = no check.
+    let if_match = request
+        .header("If-Match")
+        .and_then(crate::revision::from_if_match);
+    let expecting =
+        |body: Option<String>| admin.clone().expecting(body.or_else(|| if_match.clone()));
     if matches!(segments.first(), Some(&("users" | "grants")))
-        && let Some(answer) = users::route(admin, method, &segments, request)
+        && let Some(answer) = users::route(admin, method, &segments, request, &expecting)
     {
         return answer;
     }
@@ -177,7 +190,14 @@ pub(crate) fn route(
         }
         (_, ["databases", name]) if read && !name.is_empty() => {
             return one(admin, name)
-                .map(|entry| Response::json(200, &entry))
+                .map(|entry| {
+                    let etag = entry["revision"].as_str().map(crate::revision::etag);
+                    let answer = Response::json(200, &entry);
+                    match etag {
+                        Some(etag) => answer.with_header("ETag", &etag),
+                        None => answer,
+                    }
+                })
                 .ok_or_else(|| HttpError::new(404, format!("no database or alias '{name}'")));
         }
         (Method::Delete, ["databases", name]) if !name.is_empty() => admin
@@ -241,7 +261,7 @@ pub(crate) fn route(
             }),
         (Method::Put, ["databases", name, "read-only"]) => {
             let body: ReadOnlyBody = body_of(request)?;
-            admin
+            expecting(body.revision.clone())
                 .set_read_only(name, body.read_only)
                 .map(|entry| Response::json(200, &entry_json(&entry, None)))
                 .map_err(|err| {
@@ -251,7 +271,7 @@ pub(crate) fn route(
         }
         (Method::Put, ["databases", name, "auto-load"]) => {
             let body: AutoLoadBody = body_of(request)?;
-            admin
+            expecting(body.revision.clone())
                 .set_auto_load(name, body.auto_load)
                 .map(|entry| Response::json(200, &entry_json(&entry, None)))
                 .map_err(|err| (err, None))
@@ -365,13 +385,16 @@ pub(crate) fn route(
                 })
                 .map_err(|err| (err, None))
         }
-        (_, ["aliases"]) if read => Ok(Response::json(
-            200,
-            &json!({ "aliases": registry.aliases() }),
-        )),
+        (_, ["aliases"]) if read => {
+            let (aliases, revision) = registry.aliases_with_revision();
+            Ok(
+                Response::json(200, &json!({ "aliases": aliases, "revision": revision }))
+                    .with_header("ETag", &crate::revision::etag(&revision)),
+            )
+        }
         (Method::Put, ["aliases", alias]) if !alias.is_empty() => {
             let body: AliasBody = body_of(request)?;
-            admin
+            expecting(body.revision.clone())
                 .alias_set(alias, &body.target)
                 .map(|leftover| {
                     Response::json(
@@ -387,7 +410,7 @@ pub(crate) fn route(
                     (err, help)
                 })
         }
-        (Method::Delete, ["aliases", alias]) if !alias.is_empty() => admin
+        (Method::Delete, ["aliases", alias]) if !alias.is_empty() => expecting(None)
             .alias_remove(alias)
             .map(|grants| {
                 Response::json(
@@ -398,7 +421,7 @@ pub(crate) fn route(
             .map_err(|err| (err, None)),
         (Method::Post, ["aliases", alias, "rename"]) if !alias.is_empty() => {
             let body: RenameBody = body_of(request)?;
-            admin
+            expecting(body.revision.clone())
                 .alias_rename(alias, &body.name)
                 .map(|renamed| {
                     Response::json(
@@ -853,12 +876,18 @@ struct CloneBody {
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct ReadOnlyBody {
     read_only: bool,
+    /// The database's revision the change is based on (crate::revision).
+    #[serde(default)]
+    revision: Option<String>,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct AutoLoadBody {
     auto_load: bool,
+    /// The database's revision the change is based on (crate::revision).
+    #[serde(default)]
+    revision: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -871,12 +900,18 @@ struct CancelRunBody {
 #[serde(deny_unknown_fields)]
 struct AliasBody {
     target: String,
+    /// The aliases' revision the change is based on (crate::revision).
+    #[serde(default)]
+    revision: Option<String>,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RenameBody {
     name: String,
+    /// The aliases' revision the change is based on (crate::revision).
+    #[serde(default)]
+    revision: Option<String>,
 }
 
 /// The status of an admin core error.
@@ -894,6 +929,7 @@ pub(crate) fn status_of(err: &ServerError) -> u16 {
         | ServerError::DatabaseFailed { .. }
         | ServerError::ModelUnavailable { .. }
         | ServerError::LastAdmin { .. }
+        | ServerError::Conflict { .. }
         | ServerError::Locked { .. } => 409,
         ServerError::Remote { status, .. } => *status,
         _ => 500,
@@ -936,11 +972,15 @@ fn error_answer(err: &ServerError, help: Option<String>) -> Response {
                  again (POST /api/admin/models), then import again"
             ))
         }
+        ServerError::Conflict { .. } => Some(crate::revision::CONFLICT_HELP.to_string()),
         _ => None,
     });
     let mut body = json!({ "error": err.to_string() });
     if let Some(help) = help {
         body["help"] = Value::String(help);
+    }
+    if let ServerError::Conflict { revision, .. } = err {
+        body["revision"] = Value::String(revision.clone());
     }
     Response::json(status_of(err), &body)
 }
@@ -1300,7 +1340,7 @@ fn relative(root: &Path, path: &Path) -> String {
 fn list(admin: &Admin) -> Value {
     let registry = admin.registry();
     let entries = registry.list();
-    let aliases = registry.aliases();
+    let (aliases, aliases_revision) = registry.aliases_with_revision();
     let extras = Extras::of(admin);
     let mut databases: Vec<Value> = entries.iter().map(|e| extras.row(e, None)).collect();
     for (alias, target) in &aliases {
@@ -1312,6 +1352,7 @@ fn list(admin: &Admin) -> Value {
     json!({
         "databases": databases,
         "aliases": aliases,
+        "aliasesRevision": aliases_revision,
         "problems": registry.problems(),
     })
 }
@@ -1598,6 +1639,9 @@ pub(crate) fn entry_json(entry: &DatabaseEntry, alias: Option<&str>) -> Value {
         if let Some(created) = &config.created {
             out.insert("created".into(), Value::String(created.clone()));
         }
+    }
+    if let Some(revision) = entry.revision() {
+        out.insert("revision".into(), Value::String(revision));
     }
     Value::Object(out)
 }

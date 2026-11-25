@@ -222,7 +222,7 @@ fn copy_chunked(reader: &mut dyn BufRead, out: &mut dyn Write) -> std::io::Resul
 }
 
 /// The status and the body of a raw HTTP/1.1 answer.
-fn parse_answer(answer: &[u8]) -> Result<(u16, Vec<u8>), String> {
+pub(crate) fn parse_answer(answer: &[u8]) -> Result<(u16, Vec<u8>), String> {
     let split = answer
         .windows(4)
         .position(|w| w == b"\r\n\r\n")

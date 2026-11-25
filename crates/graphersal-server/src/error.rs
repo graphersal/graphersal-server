@@ -241,6 +241,15 @@ pub enum ServerError {
         /// when there are none).
         log_tail: Vec<String>,
     },
+    /// A change named the revision it was based on ([`crate::revision`]) and the object has
+    /// another one now: someone else changed it since it was read. Nothing was changed.
+    #[non_exhaustive]
+    Conflict {
+        /// What changed (`users and grants`, `aliases`, `database 'acme'`).
+        what: String,
+        /// Its current revision (to read it again and retry).
+        revision: String,
+    },
     /// The running server refused an admin request (the console's admin client): its answer.
     #[non_exhaustive]
     Remote {
@@ -394,6 +403,11 @@ impl fmt::Display for ServerError {
             ),
             ServerError::Service { message, .. } => f.write_str(message),
             ServerError::Remote { message, .. } => f.write_str(message),
+            ServerError::Conflict { what, revision } => write!(
+                f,
+                "the {what} changed by someone else since you read them (now revision \
+                 {revision}); nothing was changed"
+            ),
         }
     }
 }

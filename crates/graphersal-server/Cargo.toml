@@ -42,7 +42,8 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 ctrlc = { workspace = true }
 
-# The server directory's owner check and the OS user name of audit records (`security`).
+# The server directory's owner check and the OS user name of audit records (`security`); the
+# plain `fsync(2)` of a directory after an atomic write (`layout::sync_dir`).
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
 

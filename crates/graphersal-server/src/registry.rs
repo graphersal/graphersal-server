@@ -122,6 +122,13 @@ impl DatabaseEntry {
     pub fn store_dir(&self) -> PathBuf {
         self.dir.join(STORE_DIR)
     }
+
+    /// The revision of its settings ([`crate::revision`]: of its `database.toml` text as the
+    /// server writes it); `None` without a readable configuration.
+    pub fn revision(&self) -> Option<String> {
+        let text = self.config.as_ref()?.to_toml().ok()?;
+        Some(crate::revision::of(text.as_bytes()))
+    }
 }
 
 /// The registry of a server directory (module docs).
@@ -194,6 +201,7 @@ impl Registry {
     pub fn scan(dir: &ServerDir) -> Result<Arc<Registry>, ServerError> {
         let mut inner = Inner::default();
         clean_tmp(&dir.tmp(), &mut inner.problems);
+        dir.remove_stale_temps();
         scan_databases(&dir.databases(), &mut inner)?;
         scan_aliases(&dir.aliases_path(), &mut inner);
         for problem in &inner.problems {
@@ -402,17 +410,27 @@ fn scan_aliases(path: &Path, inner: &mut Inner) {
     }
 }
 
+/// The text of `aliases.toml` holding `aliases`.
+pub(crate) fn aliases_text(aliases: &BTreeMap<String, String>) -> Result<String, String> {
+    let mut text = String::from("# alias = \"database\" (written by graphersal-server)\n");
+    text.push_str(&toml::to_string(aliases).map_err(|err| err.to_string())?);
+    Ok(text)
+}
+
+/// The revision of the aliases `aliases` ([`crate::revision`]: of their file text).
+pub(crate) fn aliases_revision(aliases: &BTreeMap<String, String>) -> String {
+    crate::revision::of(aliases_text(aliases).unwrap_or_default().as_bytes())
+}
+
 /// Writes `aliases` as `aliases.toml` (atomically).
 pub(crate) fn write_aliases(
     path: &Path,
     aliases: &BTreeMap<String, String>,
 ) -> Result<(), ServerError> {
-    let mut text = String::from("# alias = \"database\" (written by graphersal-server)\n");
-    let body = toml::to_string(aliases).map_err(|err| ServerError::Config {
+    let text = aliases_text(aliases).map_err(|message| ServerError::Config {
         path: path.to_path_buf(),
-        message: err.to_string(),
+        message,
     })?;
-    text.push_str(&body);
     write_atomic(path, text.as_bytes())
 }
 

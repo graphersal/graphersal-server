@@ -464,6 +464,18 @@ impl Loader {
     /// `Err`: the admin core's errors ([`Registry::set_read_only`]); [`ServerError::Refused`]
     /// for `false` on a base; [`ServerError::Serve`] when the loaded context refuses the flip.
     pub fn set_read_only(&self, name: &str, read_only: bool) -> Result<DatabaseEntry, ServerError> {
+        self.set_read_only_expecting(name, read_only, None)
+    }
+
+    /// [`Loader::set_read_only`] based on the database's revision `expected`
+    /// ([`crate::registry::DatabaseEntry::revision`]; `None`: no check): a stale one is
+    /// [`ServerError::Conflict`], nothing changed.
+    pub fn set_read_only_expecting(
+        &self,
+        name: &str,
+        read_only: bool,
+        expected: Option<&str>,
+    ) -> Result<DatabaseEntry, ServerError> {
         let entry = self.registry.get(name)?;
         if !read_only
             && entry
@@ -477,7 +489,9 @@ impl Loader {
             ));
         }
         let _flip = self.flips.lock().unwrap_or_else(|p| p.into_inner());
-        let entry = self.registry.set_read_only(&entry.name, read_only)?;
+        let entry = self
+            .registry
+            .set_read_only_expecting(&entry.name, read_only, expected)?;
         if let Some(context) = self.context(&entry.name) {
             context
                 .set_read_only(read_only)

@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::access::Secret;
 use crate::error::ServerError;
-use crate::layout::{ServerDir, write_atomic_private};
+use crate::layout::{ServerDir, write_atomic_private_volatile};
 
 /// The contents of `server.run`.
 ///
@@ -79,7 +79,7 @@ impl RunInfo {
             "# Written by the running graphersal-server and removed when it stops; valid only \
              while server.lock is held.\n{body}"
         );
-        write_atomic_private(&path, text.as_bytes())
+        write_atomic_private_volatile(&path, text.as_bytes())
     }
 
     /// Reads the run file of `dir`: `None` when there is none.

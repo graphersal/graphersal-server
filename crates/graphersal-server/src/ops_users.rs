@@ -141,33 +141,35 @@ impl Admin {
         } else {
             Vec::new()
         };
-        self.access_state()?.add_user(&self.principal, name, roles)
+        self.access_state()?
+            .edit(&self.principal, self.expected())
+            .add_user(name, roles)
     }
 
     /// Gives the user `name` a new token (to show once); its browser and MCP sessions end.
     pub fn user_token(&self, name: &str) -> Result<(Secret, SessionsEnded), ServerError> {
-        let token = self.access_state()?.issue_token(&self.principal, name)?;
+        let token = self
+            .access_state()?
+            .edit(&self.principal, self.expected())
+            .issue_token(name)?;
         Ok((token, self.end_sessions(name)))
     }
 
     /// Takes the user `name`'s token away; its browser and MCP sessions end.
     pub fn user_revoke_token(&self, name: &str) -> Result<SessionsEnded, ServerError> {
-        self.access_state()?.revoke_token(&self.principal, name)?;
+        self.access_state()?
+            .edit(&self.principal, self.expected())
+            .revoke_token(name)?;
         Ok(self.end_sessions(name))
     }
 
     /// Removes the user `name` with its grants; its browser and MCP sessions end. Answers the
     /// number of grants removed with it.
     pub fn user_remove(&self, name: &str) -> Result<(usize, SessionsEnded), ServerError> {
-        let access = self.access_state()?;
-        let subject = Subject::User(fold(name));
-        let grants = access
-            .file()
-            .grants()
-            .iter()
-            .filter(|grant| grant.subject == subject)
-            .count();
-        access.remove_user(&self.principal, name)?;
+        let grants = self
+            .access_state()?
+            .edit(&self.principal, self.expected())
+            .remove_user(name)?;
         Ok((grants, self.end_sessions(name)))
     }
 
@@ -186,26 +188,16 @@ impl Admin {
                 clean.push(role);
             }
         }
-        self.access_state()?.set_roles(&self.principal, name, clean)
+        self.access_state()?
+            .edit(&self.principal, self.expected())
+            .set_roles(name, clean)
     }
 
     /// Gives the user `name` the `admin` role (`on`) or takes it away, keeping its other roles.
     pub fn user_set_admin(&self, name: &str, on: bool) -> Result<(), ServerError> {
-        let access = self.access_state()?;
-        let file = access.file();
-        let user = file
-            .user(name)
-            .ok_or_else(|| ServerError::UserNotFound { name: fold(name) })?;
-        let mut roles: Vec<String> = user
-            .roles
-            .iter()
-            .filter(|role| *role != ADMIN_ROLE)
-            .cloned()
-            .collect();
-        if on {
-            roles.insert(0, ADMIN_ROLE.to_string());
-        }
-        access.set_roles(&self.principal, name, roles)
+        self.access_state()?
+            .edit(&self.principal, self.expected())
+            .set_admin(name, on)
     }
 
     /// Sets the grant of `subject` (`user:<name>`, a bare user name, `anonymous`, `role:<r>`,
@@ -227,9 +219,6 @@ impl Admin {
             message: "a grant's level is \"read\" or \"write\" (revoke it to give nothing)"
                 .to_string(),
         })?;
-        if database != "*" {
-            self.grant_database(database)?;
-        }
         let grant = Grant::new(subject.clone(), database, level).map_err(|message| {
             ServerError::InvalidInput {
                 name: database.to_string(),
@@ -237,12 +226,24 @@ impl Admin {
             }
         })?;
         let access = self.access_state()?;
-        if let Subject::User(name) = &subject
-            && access.file().user(name).is_none()
-        {
-            return Err(ServerError::UserNotFound { name: name.clone() });
+        let set = || {
+            if let Subject::User(name) = &subject
+                && access.file().user(name).is_none()
+            {
+                return Err(ServerError::UserNotFound { name: name.clone() });
+            }
+            access
+                .edit(&self.principal, self.expected())
+                .grant(grant.clone())
+        };
+        if database == "*" {
+            set()?;
+        } else {
+            // The name must exist WHILE the grant is written: under the registry's read lock,
+            // no delete or alias removal runs in between (they drop the name's grants under its
+            // write lock), so a grant never lands on a name that just went away.
+            self.registry().while_named(database, set)?;
         }
-        access.grant(&self.principal, grant.clone())?;
         Ok(grant)
     }
 
@@ -257,12 +258,8 @@ impl Admin {
             })?;
         }
         self.access_state()?
-            .revoke(&self.principal, &subject, database)
-    }
-
-    /// Checks that `database` names a database or an alias (not unknown).
-    fn grant_database(&self, database: &str) -> Result<(), ServerError> {
-        self.registry().resolve(database).map(|_| ())
+            .edit(&self.principal, self.expected())
+            .revoke(&subject, database)
     }
 
     /// Ends the MCP sessions of the user `name`: through the running endpoint (written through
