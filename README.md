@@ -75,6 +75,27 @@ them):
 No timeout covers a whole request: an upload streams as long as it keeps sending (each read of
 a body waits at most 120 s for the next piece).
 
+In the background, without hunting for a pid:
+
+```bash
+graphersal-server start --dir ./srv --listen 127.0.0.1:8484   # detached; waits until ready
+graphersal-server status --dir ./srv                          # running or stopped (exit 0 / 3)
+graphersal-server stop --dir ./srv                            # graceful, waits until stopped
+```
+
+`start` takes the `serve` options (and `--timeout SECS`, default 60), spawns `serve` as a
+detached process (its own session on Unix, no console window on Windows) with stdout and stderr
+appended to `./srv/logs/server.log`, waits for `GET /readyz`, then prints the usual start block
+and the address line (and, for a directory without `access.toml`, the first admin's token once:
+never into the log). A second `start` is refused while a server runs; a server that fails to
+start shows the last lines of its log. `stop` asks the server to stop through its admin API
+(`POST /api/admin/shutdown` with the run's operator token: the same clean stop as Ctrl+C; on
+Unix SIGTERM when the API cannot be reached) and waits until `server.lock` is free; without a
+server it prints `not running` and exits 0 (removing a stale `server.run`). `status` shows the
+pid, address, version, uptime, the databases (the loaded ones by name) and memory; a stale
+`server.run` left by a crash is reported. Under a service manager (systemd, launchd) run
+`serve` in the foreground instead: [Running as a service](docs/server-dir.md#running-as-a-service).
+
 A first session from the console (in a second terminal while the server runs). The console
 of the OS user owning `./srv` needs no token (it uses the run's operator token from
 `./srv/server.run`); HTTP clients send a user token, here the first admin's, printed once by
@@ -123,6 +144,9 @@ databases and missing models. Paths and commands are never wrapped.
 
 | Command | What |
 |---|---|
+| `start [serve options] [--timeout SECS]` | `serve` in the background (log `DIR/logs/server.log`); waits until ready, prints the start block and the address |
+| `stop [--timeout SECS]` | stops the running server cleanly and waits; `not running` (exit 0) when none runs |
+| `status [--json]` | running or stopped: pid, address, version, uptime, databases, memory, the log; exit code 0 running, 3 stopped |
 | `db list` | the databases and aliases with their states |
 | `db create NAME [--base BASE] [--kind plain\|layer] [--role normal\|base] [--schema FILE.json] [--description TEXT] [--auto-load] [--read-only]` | a new empty database; `--base` makes a layer over a `role = base` database |
 | `db delete NAME` | an unloaded database, moved to `DIR/trash/` |
@@ -160,7 +184,7 @@ the usage), `141` stdout closed before the result was written (`| head`).
 | `GET /api/databases` | the databases and aliases the caller may reach, with its level and the playground path of each ("My databases") |
 | `GET /server-ui/<file>` | the `server` UI profile's files (its modules and style sheet) |
 | `/db/<name>/...` | the playground and its HTTP API (`POST /db/<name>/api/execute {"script"}`, ...) on the database or alias `<name>`, resolved per request, at the caller's level (`docs/access.md`: without a grant `401` for anonymous, `303` to the login page for its pages, `404` for a user); `409` with help when it is not loaded (never loaded implicitly), `404` when unknown |
-| `/api/admin/...` | the admin API: [`docs/admin-api.md`](docs/admin-api.md); also the run administration (`GET /api/admin/runs`, `GET /api/admin/databases/<name>/runs`, `POST /api/admin/databases/<name>/runs/cancel {"id"}`: every client's queued and running queries, stop one) |
+| `/api/admin/...` | the admin API: [`docs/admin-api.md`](docs/admin-api.md) (also `GET /api/admin/server`, the server itself, and `POST /api/admin/shutdown`, which `stop` uses); also the run administration (`GET /api/admin/runs`, `GET /api/admin/databases/<name>/runs`, `POST /api/admin/databases/<name>/runs/cancel {"id"}`: every client's queued and running queries, stop one) |
 | `/mcp`, `/db/<name>/mcp` | the MCP endpoints: [`docs/mcp.md`](docs/mcp.md) |
 
 ## Web UI
@@ -231,6 +255,7 @@ a build first, else these two tests are skipped).
   backups/<name>/ admin backups; backups/jobs/: the backup root of backup jobs
   imports/        the import inbox
   sessions/       browser and MCP sessions (hashes only), kept over restarts
+  logs/server.log the log of a server `start` runs in the background (owner only)
   trash/  tmp/
 ```
 

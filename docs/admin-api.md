@@ -146,6 +146,8 @@ A `failed` database whose `database.toml` cannot be read has only `name`, `state
 | GET | `/api/admin/grants` | | `200 {"grants": [grant...]}` |
 | POST | `/api/admin/grants` | `{"subject", "database", "level"}` | `200` grant (new, or its level replaced) |
 | DELETE | `/api/admin/grants/<subject>/<database>` | | `200 {"subject", "database", "revoked": bool}` |
+| GET | `/api/admin/server` | | `200 {"server", "version", "pid", "address", "url", "directory", "startedAtMs", "uptimeSecs", "databases": {"total", "loaded": [name...], "loading": [name...]}, "aliases", "memory": {"liveBytes", "limitBytes", "availableBytes"}}` (see Server) |
+| POST | `/api/admin/shutdown` | | `202 {"stopping": true, "pid"}`, then the server stops (see Server) |
 
 ### Create
 
@@ -518,6 +520,23 @@ any of its grants, capped by the database's mode (read-only or a base: `read`).
 
 The console's `user` commands are these routes (offline the console edits `access.toml` itself,
 as the operator); the web UI's Users tab uses them too.
+
+### Server
+
+`GET /api/admin/server` describes the running server itself (`graphersal-server status`):
+version, process id, the bound address and its URL, the server directory, the start time
+(Unix milliseconds) and uptime in seconds, the number of databases with the names of the
+loaded and loading ones, the number of aliases, and memory (`liveBytes`: the live heap, `null`
+in this build, which installs no tracking allocator; `limitBytes`/`availableBytes`: the
+process memory ceiling and what is left below it, `null` without one).
+
+`POST /api/admin/shutdown` stops the server (`graphersal-server stop`): it answers `202
+{"stopping": true, "pid"}` and the server then stops exactly as on Ctrl+C or SIGTERM (running
+requests get 5 s, every database is unloaded, `server.run` removed, the lock released). Only
+the operator (the token of `server.run`) or a user with the admin role may; the principal
+`everyone` of a server with access control off gets `403` (stopping needs real credentials
+even then); a server embedded by a library caller without a stop hook answers `409`. The
+request is audited (`server shutdown requested`).
 
 ### Help on refusals
 

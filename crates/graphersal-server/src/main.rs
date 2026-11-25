@@ -4,17 +4,20 @@
 //! graphersal-server init DIR
 //! graphersal-server serve --dir DIR [--listen ADDR] [--max-connections N]
 //!     [--header-timeout SECS] [--idle-timeout SECS]
+//! graphersal-server start --dir DIR [serve options] [--timeout SECS]
+//! graphersal-server stop --dir DIR [--timeout SECS]
+//! graphersal-server status --dir DIR [--json]
 //! graphersal-server db list|create|delete|clone|load|unload|promote|read-only|auto-load|alias|backup|backups|restore|export ... --dir DIR [--json]
 //! graphersal-server import DIR SOURCE --name NAME [--base BASE] [--format F] [--description TEXT] [--role normal|base] [--json]
 //! graphersal-server import DIR --inbox FILE --name NAME [...] | import DIR --list [--json]
 //! graphersal-server models list|add|remove ... --dir DIR [--json]
 //! graphersal-server user ... --dir DIR [--json]
-//!     (db, import, models, user also: [--token TOKEN [--server ADDRESS]])
+//!     (db, import, models, user, stop, status also: [--token TOKEN [--server ADDRESS]])
 //! ```
 //!
 //! stdout carries only results, stderr diagnostics and the log. Exit codes: `0` ok, `1` the
-//! command failed, `2` invalid invocation, `141` stdout closed before the result was written
-//! (`| head`; as the graphersal CLI). The text comes from [`console`] in the graphersal CLI's
+//! command failed, `2` invalid invocation, `3` `status` of a stopped server, `141` stdout
+//! closed before the result was written (`| head`; as the graphersal CLI). The text comes from [`console`] in the graphersal CLI's
 //! layout; this file only writes it ([`out`], [`err`]: never `println!`, which panics when the
 //! reader of the pipe is gone).
 
@@ -27,7 +30,8 @@ use std::sync::mpsc;
 use graphersal_server::config::parse_listen;
 use graphersal_server::console::{self, DbCommand, Via};
 use graphersal_server::{
-    CreateSpec, DatabaseKind, DatabaseRole, ExportSpec, ServeOptions, ServerDir, serve,
+    CreateSpec, DatabaseKind, DatabaseRole, ExportSpec, ServeOptions, ServerDir, StopHook, daemon,
+    serve,
 };
 
 const EXIT_FAILED: u8 = 1;
@@ -86,7 +90,22 @@ Usage:
       port) overrides server.toml's listen; the other options override its [limits]
       max_connections (open connections served at once; one more is answered 503),
       header_timeout_secs and idle_timeout_secs. The bound address is written to DIR/server.run while the server
-      runs. Ctrl+C or SIGTERM stops it.
+      runs. Ctrl+C, SIGTERM or `stop` stops it. Runs in the foreground (for systemd, launchd
+      and other service managers).
+  graphersal-server start --dir DIR [serve options] [--timeout SECS]
+      serve in the background: a detached process (its own session on unix, no console
+      window on Windows), stdout and stderr appended to DIR/logs/server.log. Waits until it
+      is ready (GET /readyz; at most SECS, default 60), prints its start block (and, for a
+      directory without access.toml, the first admin's token, once) and its address on
+      stdout. Refused while a server runs on DIR; on failure the log's last lines.
+  graphersal-server stop --dir DIR [--timeout SECS]
+      Asks the server running on DIR to stop (POST /api/admin/shutdown with the operator
+      token of DIR/server.run; SIGTERM when its API cannot be reached, unix) and waits until
+      it stopped (at most SECS, default 60). No server: prints `not running` (exit 0) and
+      removes a stale server.run.
+  graphersal-server status --dir DIR [--json]
+      running or stopped: pid, address, version, uptime, databases (loaded ones by name),
+      memory, the log; a stale server.run is reported. Exit code 0 running, 3 stopped.
   graphersal-server db COMMAND ... --dir DIR [--json]
       Administer the databases of DIR. When a server runs on DIR the command goes through
       its admin API (address from DIR/server.run), otherwise it acts on DIR directly.
@@ -172,13 +191,14 @@ refuse a DIR (or access.toml, server.run, sessions/) owned by another user or op
 or others, naming the chmod/chown that fixes it (unix; on Windows DIR's ACL is the boundary).
 Other administrators send an admin token instead:
   ... --token TOKEN [--server ADDRESS]
-      db, import, models and user go to the running server with this user's admin token
+      db, import, models, user, stop and status go to the running server with this user's admin token
       (or the environment variable GRAPHERSAL_SERVER_TOKEN), at ADDRESS (IP:PORT) or the
       address in DIR/server.run; no file of DIR is written and its permissions are not
       checked. Refused when no server runs.
 
 stdout carries only results, stderr diagnostics and the log (level: RUST_LOG, default
-info). Exit codes: 0 ok, 1 the command failed, 2 invalid invocation.";
+info). Exit codes: 0 ok, 1 the command failed, 2 invalid invocation, 3 status: not
+running.";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -194,6 +214,9 @@ fn main() -> ExitCode {
         }
         Some("init") => init(&args[1..]),
         Some("serve") => serve_command(&args[1..]),
+        Some("start") => start_command(&args[1..]),
+        Some("stop") => stop_command(&args[1..]),
+        Some("status") => status_command(&args[1..]),
         Some("db") => db_command(&args[1..]),
         Some("import") => import_command(&args[1..]),
         Some("models") => models_command(&args[1..]),
@@ -256,12 +279,25 @@ fn print_first_admin(first: &graphersal_server::FirstAdmin, dir: &std::path::Pat
     ));
 }
 
-fn serve_command(args: &[String]) -> ExitCode {
+/// The `serve` options of a command line (`serve`, `start`).
+struct ServeArgs {
+    dir: String,
+    options: ServeOptions,
+    /// The options as `serve` takes them (without `--dir`), for the process `start` spawns.
+    passthrough: Vec<String>,
+    /// `--timeout SECS` (`start` only).
+    timeout: Option<std::time::Duration>,
+}
+
+/// Parses the `serve` options of `command` (`serve` or `start`; `start` also takes
+/// `--timeout SECS`); `Err`: the usage error's exit code.
+fn parse_serve(command: &str, args: &[String]) -> Result<ServeArgs, ExitCode> {
     let mut dir = None;
     let mut listen = None;
     let mut max_connections = None;
     let mut header_timeout = None;
     let mut idle_timeout = None;
+    let mut timeout = None;
     let mut rest = args.iter();
     while let Some(arg) = rest.next() {
         let (flag, inline) = match arg.split_once('=') {
@@ -274,24 +310,27 @@ fn serve_command(args: &[String]) -> ExitCode {
             "--max-connections" => &mut max_connections,
             "--header-timeout" => &mut header_timeout,
             "--idle-timeout" => &mut idle_timeout,
-            _ => return usage_error(&format!("serve: unknown argument {arg:?}")),
+            "--timeout" if command == "start" => &mut timeout,
+            _ => return Err(usage_error(&format!("{command}: unknown argument {arg:?}"))),
         };
         let Some(value) = inline.or_else(|| rest.next().cloned()) else {
-            return usage_error(&format!("serve: {flag} needs a value"));
+            return Err(usage_error(&format!("{command}: {flag} needs a value")));
         };
         if slot.replace(value).is_some() {
-            return usage_error(&format!("serve: {flag} given twice"));
+            return Err(usage_error(&format!("{command}: {flag} given twice")));
         }
     }
     let Some(dir) = dir else {
-        return usage_error("serve needs --dir DIR");
+        return Err(usage_error(&format!("{command} needs --dir DIR")));
     };
     let mut options = ServeOptions::new();
+    let mut passthrough = Vec::new();
     if let Some(listen) = listen {
         match parse_listen(&listen) {
             Ok(addr) => options = options.with_listen(addr),
-            Err(err) => return usage_error(&format!("--listen: {err}")),
+            Err(err) => return Err(usage_error(&format!("--listen: {err}"))),
         }
+        passthrough.extend(["--listen".to_string(), listen]);
     }
     // A whole number of at least 1.
     let positive = |flag: &str, value: &str| match value.trim().parse::<u64>() {
@@ -301,29 +340,49 @@ fn serve_command(args: &[String]) -> ExitCode {
         ))),
     };
     if let Some(value) = max_connections {
-        match positive("--max-connections", &value) {
-            Ok(n) => {
-                options = options.with_max_connections(usize::try_from(n).unwrap_or(usize::MAX))
-            }
-            Err(code) => return code,
-        }
+        let n = positive("--max-connections", &value)?;
+        options = options.with_max_connections(usize::try_from(n).unwrap_or(usize::MAX));
+        passthrough.extend(["--max-connections".to_string(), n.to_string()]);
     }
     if let Some(value) = header_timeout {
-        match positive("--header-timeout", &value) {
-            Ok(n) => options = options.with_header_timeout_secs(n),
-            Err(code) => return code,
-        }
+        let n = positive("--header-timeout", &value)?;
+        options = options.with_header_timeout_secs(n);
+        passthrough.extend(["--header-timeout".to_string(), n.to_string()]);
     }
     if let Some(value) = idle_timeout {
-        match positive("--idle-timeout", &value) {
-            Ok(n) => options = options.with_idle_timeout_secs(n),
-            Err(code) => return code,
-        }
+        let n = positive("--idle-timeout", &value)?;
+        options = options.with_idle_timeout_secs(n);
+        passthrough.extend(["--idle-timeout".to_string(), n.to_string()]);
     }
+    let timeout = match timeout {
+        Some(value) => Some(std::time::Duration::from_secs(positive(
+            "--timeout",
+            &value,
+        )?)),
+        None => None,
+    };
+    Ok(ServeArgs {
+        dir,
+        options,
+        passthrough,
+        timeout,
+    })
+}
+
+fn serve_command(args: &[String]) -> ExitCode {
+    let ServeArgs { dir, options, .. } = match parse_serve("serve", args) {
+        Ok(parsed) => parsed,
+        Err(code) => return code,
+    };
     init_logging();
 
-    // SIGINT/SIGTERM: the first stops the server cleanly, a second exits at once.
+    // SIGINT/SIGTERM: the first stops the server cleanly, a second exits at once. A shutdown
+    // request of the admin API (`graphersal-server stop`) takes the same way.
     let (stop_tx, stop_rx) = mpsc::channel::<()>();
+    let hook_tx = stop_tx.clone();
+    let options = options.with_stop_hook(StopHook::new(move || {
+        let _ = hook_tx.send(());
+    }));
     static SIGNALLED: AtomicBool = AtomicBool::new(false);
     if let Err(err) = ctrlc::set_handler(move || {
         if SIGNALLED.swap(true, Ordering::SeqCst) {
@@ -344,7 +403,8 @@ fn serve_command(args: &[String]) -> ExitCode {
         print_first_admin(&first, running.dir().root());
     }
     out(&console::address_line(&running));
-    // Wait for a signal (a closed channel cannot happen while the handler lives).
+    // Wait for a signal or a shutdown request (a closed channel cannot happen while the
+    // handler lives).
     let _ = stop_rx.recv();
     err(&console::stopping_text());
     let root = running.dir().root().to_path_buf();
@@ -353,6 +413,176 @@ fn serve_command(args: &[String]) -> ExitCode {
             err(&console::stopped_text(&root));
             // A closed stdout does not fail a server that served.
             ExitCode::SUCCESS
+        }
+        Err(error) => failure(&error),
+    }
+}
+
+/// The console's log only when RUST_LOG asks for it; stderr stays the result's diagnostics
+/// else.
+fn init_console_logging() {
+    if std::env::var_os("RUST_LOG").is_some() {
+        init_logging();
+    }
+}
+
+/// `start --dir DIR [serve options] [--timeout SECS]`: `serve` in the background.
+fn start_command(args: &[String]) -> ExitCode {
+    let parsed = match parse_serve("start", args) {
+        Ok(parsed) => parsed,
+        Err(code) => return code,
+    };
+    init_console_logging();
+    let program = match std::env::current_exe() {
+        Ok(program) => program,
+        Err(error) => return failure_text(&format!("cannot find this program's file: {error}")),
+    };
+    let dir = PathBuf::from(&parsed.dir);
+    let timeout = parsed.timeout.unwrap_or(daemon::START_TIMEOUT);
+    match daemon::start(&dir, &program, &parsed.passthrough, timeout) {
+        Ok(started) => {
+            let (block, address) = console::started_output(&started);
+            if !block.is_empty() {
+                err(&block);
+            }
+            if let Some(first) = &started.first_admin {
+                print_first_admin(first, &dir);
+            }
+            err(&format!("\n{}", console::started_note(&started, &dir)));
+            if let Some(address) = address {
+                out(&address);
+            }
+            exit(0)
+        }
+        Err(error) => failure(&error),
+    }
+}
+
+/// The values of `--dir`, `--token`, `--server`, `--timeout` and the switch `--json` of
+/// `stop` and `status` (`allowed`: the flags this command takes).
+struct ServiceArgs {
+    dir: String,
+    token: Option<String>,
+    server: Option<String>,
+    timeout: Option<String>,
+    json: bool,
+}
+
+fn parse_service(
+    command: &str,
+    args: &[String],
+    allowed: &[&str],
+) -> Result<ServiceArgs, ExitCode> {
+    let (mut dir, mut token, mut server, mut timeout) = (None, None, None, None);
+    let mut json = false;
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        let (flag, inline) = match arg.split_once('=') {
+            Some((flag, value)) if flag.starts_with("--") => (flag, Some(value.to_string())),
+            _ => (arg.as_str(), None),
+        };
+        if !allowed.contains(&flag) {
+            return Err(usage_error(&format!("{command}: unknown argument {arg:?}")));
+        }
+        if flag == "--json" && inline.is_none() {
+            json = true;
+            continue;
+        }
+        let slot = match flag {
+            "--dir" => &mut dir,
+            "--token" => &mut token,
+            "--server" => &mut server,
+            "--timeout" => &mut timeout,
+            _ => return Err(usage_error(&format!("{command}: unknown argument {arg:?}"))),
+        };
+        let Some(value) = inline.or_else(|| rest.next().cloned()) else {
+            return Err(usage_error(&format!("{command}: {flag} needs a value")));
+        };
+        if slot.replace(value).is_some() {
+            return Err(usage_error(&format!("{command}: {flag} given twice")));
+        }
+    }
+    let Some(dir) = dir else {
+        return Err(usage_error(&format!("{command} needs --dir DIR")));
+    };
+    Ok(ServiceArgs {
+        dir,
+        token,
+        server,
+        timeout,
+        json,
+    })
+}
+
+/// `stop --dir DIR [--timeout SECS] [--token TOKEN [--server ADDRESS]]`.
+fn stop_command(args: &[String]) -> ExitCode {
+    let parsed = match parse_service("stop", args, &["--dir", "--timeout", "--token", "--server"]) {
+        Ok(parsed) => parsed,
+        Err(code) => return code,
+    };
+    let timeout = match parsed
+        .timeout
+        .as_deref()
+        .map(str::trim)
+        .map(str::parse::<u64>)
+    {
+        None => daemon::STOP_TIMEOUT,
+        Some(Ok(secs)) if secs > 0 => std::time::Duration::from_secs(secs),
+        Some(_) => return usage_error("--timeout: not a whole number of at least 1"),
+    };
+    let remote = match Remote::of(parsed.token, parsed.server) {
+        Ok(remote) => remote,
+        Err(code) => return code,
+    };
+    init_console_logging();
+    let dir = PathBuf::from(&parsed.dir);
+    let result = match remote {
+        Some(remote) => daemon::stop_with_token(&dir, &remote.token, remote.address, timeout),
+        None => daemon::stop(&dir, timeout),
+    };
+    match result {
+        Ok(stopped) => {
+            out(&console::stop_text(&stopped, &dir));
+            exit(0)
+        }
+        Err(error) => failure(&error),
+    }
+}
+
+/// `status` of a stopped server (the LSB init script convention: 3 = not running).
+const EXIT_STOPPED: u8 = 3;
+
+/// `status --dir DIR [--json] [--token TOKEN [--server ADDRESS]]`: exit 0 running, 3 stopped.
+fn status_command(args: &[String]) -> ExitCode {
+    let parsed = match parse_service("status", args, &["--dir", "--json", "--token", "--server"]) {
+        Ok(parsed) => parsed,
+        Err(code) => return code,
+    };
+    let remote = match Remote::of(parsed.token, parsed.server) {
+        Ok(remote) => remote,
+        Err(code) => return code,
+    };
+    init_console_logging();
+    let dir = PathBuf::from(&parsed.dir);
+    let result = match remote {
+        Some(remote) => daemon::status_with_token(&dir, &remote.token, remote.address),
+        None => daemon::status(&dir),
+    };
+    match result {
+        Ok(status) => {
+            if parsed.json {
+                out(
+                    &serde_json::to_string_pretty(&console::status_json(&status))
+                        .unwrap_or_default(),
+                );
+            } else {
+                out(&console::status_text(&status, &dir));
+            }
+            if status.running {
+                exit(0)
+            } else {
+                ExitCode::from(EXIT_STOPPED)
+            }
         }
         Err(error) => failure(&error),
     }

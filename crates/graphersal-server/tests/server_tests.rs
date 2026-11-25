@@ -3565,3 +3565,332 @@ fn console_commands_with_a_token_go_through_the_running_server() {
     assert!(line.contains("user:carol"), "{line}");
     assert!(!line.contains("(os:"), "{line}");
 }
+
+/// A server `start` runs in the background on a directory: killed on drop when it still runs
+/// (its pid from `server.run`), so a failing test leaves no process behind.
+struct Background(PathBuf);
+
+impl Drop for Background {
+    fn drop(&mut self) {
+        let Ok(Some(info)) = RunInfo::read(&ServerDir::new(&self.0)) else {
+            return;
+        };
+        if !ServerLock::is_held(&ServerDir::new(&self.0)).unwrap_or(false) {
+            return;
+        }
+        #[cfg(unix)]
+        let _ = Command::new("kill")
+            .args(["-9", &info.pid.to_string()])
+            .status();
+        #[cfg(windows)]
+        let _ = Command::new("taskkill")
+            .args(["/F", "/PID", &info.pid.to_string()])
+            .status();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while ServerLock::is_held(&ServerDir::new(&self.0)).unwrap_or(false)
+            && Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+}
+
+/// `graphersal-server <command> --dir DIR <args>`: (exit code, stdout, stderr).
+fn service(command: &str, dir: &Path, args: &[&str]) -> (i32, String, String) {
+    let out = Command::new(BIN)
+        .arg(command)
+        .arg("--dir")
+        .arg(dir)
+        .args(args)
+        .output()
+        .unwrap();
+    (
+        out.status.code().unwrap_or(-1),
+        text(&out.stdout),
+        text(&out.stderr),
+    )
+}
+
+#[test]
+fn start_status_and_stop_run_a_server_in_the_background() {
+    let temp = TempDir::new("daemon");
+    let root = temp.path().join("srv");
+    let init = run(&["init", root.to_str().unwrap()]);
+    assert!(init.status.success(), "{}", text(&init.stderr));
+    // No access.toml: `start` makes the first admin and prints its token once, never into
+    // the log.
+    std::fs::remove_file(root.join("access.toml")).unwrap();
+    let dir = ServerDir::new(&root);
+    let _guard = Background(root.clone());
+
+    let (code, out, err) = service("start", &root, &["--listen", "127.0.0.1:0"]);
+    assert_eq!(code, 0, "{out}\n{err}");
+    let info = RunInfo::read(&dir).unwrap().expect("a run file");
+    assert_ne!(info.pid, std::process::id());
+    assert!(info.started_at_ms.is_some(), "{info:?}");
+    assert_eq!(
+        out.trim(),
+        format!("Graphersal server: {}", info.url),
+        "{out}"
+    );
+    assert!(
+        err.contains("graphersal-server - EXPERIMENTAL"),
+        "the start block: {err}"
+    );
+    assert!(
+        err.contains(&format!(
+            "Started in the background: pid {}, {}",
+            info.pid, info.url
+        )),
+        "{err}"
+    );
+    assert!(err.contains("graphersal-server stop --dir"), "{err}");
+    let token = err
+        .lines()
+        .find_map(|l| l.strip_prefix("| token:"))
+        .map(|t| t.trim().trim_end_matches('|').trim().to_string())
+        .unwrap_or_else(|| panic!("no first admin token: {err}"));
+    assert_eq!(token.len(), 64, "{err}");
+    let log_path = root.join("logs").join("server.log");
+    let log = std::fs::read_to_string(&log_path).unwrap();
+    assert!(
+        log.contains("graphersal-server start: serve --dir"),
+        "{log}"
+    );
+    assert!(log.contains("Graphersal server: "), "{log}");
+    assert!(
+        !log.contains(&token),
+        "the first admin's token is not logged"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&root.join("logs")), 0o700);
+        assert_eq!(mode(&log_path), 0o600);
+    }
+    assert_eq!(get(info.address, "/readyz").0, 200);
+    // The process is detached: it is not a child of this test (it survives the console).
+    assert!(ServerLock::is_held(&dir).unwrap());
+
+    // A second start is refused, naming the running server.
+    let (code, _, err) = service("start", &root, &["--listen", "127.0.0.1:0"]);
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains("already runs on"), "{err}");
+    assert!(err.contains(&format!("pid {}", info.pid)), "{err}");
+
+    // status: running, its facts; exit code 0.
+    let (code, out, err) = service("status", &root, &[]);
+    assert_eq!(code, 0, "{out}\n{err}");
+    assert!(out.contains("state:") && out.contains("running"), "{out}");
+    assert!(out.contains(&info.pid.to_string()), "{out}");
+    assert!(out.contains(&info.url), "{out}");
+    assert!(out.contains(env!("CARGO_PKG_VERSION")), "{out}");
+    assert!(out.contains("uptime:"), "{out}");
+    assert!(
+        out.contains("databases:") && out.contains("0 (0 loaded)"),
+        "{out}"
+    );
+    assert!(out.contains("memory:"), "{out}");
+    let (code, out, err) = service("status", &root, &["--json"]);
+    assert_eq!(code, 0, "{err}");
+    let status = json(&out);
+    assert_eq!(status["state"], "running", "{out}");
+    assert_eq!(status["server"]["pid"], info.pid, "{out}");
+    assert_eq!(status["server"]["databases"]["total"], 0, "{out}");
+    assert!(status["server"]["uptimeSecs"].is_u64(), "{out}");
+    assert!(
+        !out.contains("operatorToken") && !out.contains("operator_token"),
+        "{out}"
+    );
+    // status and stop through the server with the admin's token too.
+    let (code, out, err) = service("status", &root, &["--token", &token]);
+    assert_eq!(code, 0, "{out}\n{err}");
+    assert!(out.contains("running"), "{out}");
+
+    // stop: the graceful path; the lock is free afterwards, the run file gone.
+    let (code, out, err) = service("stop", &root, &[]);
+    assert_eq!(code, 0, "{out}\n{err}");
+    assert!(out.starts_with("stopped: "), "{out}");
+    assert!(out.contains(&info.pid.to_string()), "{out}");
+    assert!(!ServerLock::is_held(&dir).unwrap());
+    assert_eq!(RunInfo::read(&dir).unwrap(), None);
+    let log = std::fs::read_to_string(&log_path).unwrap();
+    assert!(
+        log.contains("shutdown requested through the admin API"),
+        "{log}"
+    );
+    assert!(
+        log.contains("Stopped:"),
+        "the same clean stop as Ctrl+C: {log}"
+    );
+
+    // Stopped now: status exits 3, stop says so and exits 0.
+    let (code, out, _) = service("status", &root, &[]);
+    assert_eq!(code, 3, "{out}");
+    assert!(out.contains("stopped"), "{out}");
+    assert!(!out.contains("stale"), "{out}");
+    let (code, out, err) = service("stop", &root, &[]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.starts_with("not running: "), "{out}");
+
+    // start again, stop with the admin's token (no file of the directory needed).
+    let (code, out, err) = service("start", &root, &["--listen", "127.0.0.1:0"]);
+    assert_eq!(code, 0, "{out}\n{err}");
+    assert!(
+        !err.contains("| token:"),
+        "the first admin exists now: {err}"
+    );
+    let (code, out, err) = service("stop", &root, &["--token", &token]);
+    assert_eq!(code, 0, "{out}\n{err}");
+    assert!(out.starts_with("stopped: "), "{out}");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while ServerLock::is_held(&dir).unwrap() {
+        assert!(
+            Instant::now() < deadline,
+            "the server did not release its lock"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn start_reports_a_server_that_cannot_start_with_its_log() {
+    let temp = TempDir::new("daemon-fails");
+    let root = temp.path();
+    ServerDir::init(root).unwrap();
+    let _guard = Background(root.to_path_buf());
+    // The port is taken: the server exits at once.
+    let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = taken.local_addr().unwrap().to_string();
+    let (code, out, err) = service("start", root, &["--listen", &address]);
+    assert_eq!(code, 1, "{out}\n{err}");
+    assert!(out.is_empty(), "{out}");
+    assert!(err.contains("exited before it was ready"), "{err}");
+    assert!(err.contains("The server's log (last lines):"), "{err}");
+    assert!(
+        err.contains(&format!("cannot listen on {address}")),
+        "{err}"
+    );
+    assert!(!ServerLock::is_held(&ServerDir::new(root)).unwrap());
+}
+
+#[test]
+fn status_and_stop_of_a_stopped_directory_and_a_stale_run_file() {
+    let temp = TempDir::new("daemon-left-behind");
+    let root = temp.path();
+    let dir = ServerDir::init(root).unwrap().dir;
+    let (code, out, err) = service("status", root, &[]);
+    assert_eq!(code, 3, "{err}");
+    assert!(out.contains("stopped"), "{out}");
+    assert!(!out.contains("stale"), "{out}");
+    let (code, out, _) = service("status", root, &["--json"]);
+    assert_eq!(code, 3);
+    assert_eq!(json(&out)["state"], "stopped", "{out}");
+    assert_eq!(json(&out)["staleRunFile"], false, "{out}");
+
+    // A server that did not stop cleanly left its run file (no lock held).
+    RunInfo::new(
+        "127.0.0.1:9".parse().unwrap(),
+        "http://127.0.0.1:9/".to_string(),
+    )
+    .write(&dir)
+    .unwrap();
+    let (code, out, err) = service("status", root, &[]);
+    assert_eq!(code, 3, "{err}");
+    assert!(out.contains("stopped"), "{out}");
+    assert!(out.contains("stale"), "{out}");
+    assert!(out.contains("http://127.0.0.1:9/"), "{out}");
+    assert!(dir.run_path().exists(), "status changes nothing");
+    let (code, out, _) = service("status", root, &["--json"]);
+    assert_eq!(code, 3);
+    assert_eq!(json(&out)["staleRunFile"], true, "{out}");
+    let (code, out, err) = service("stop", root, &[]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.starts_with("not running: "), "{out}");
+    assert!(out.contains("removed the server.run of pid"), "{out}");
+    assert!(!dir.run_path().exists());
+}
+
+#[test]
+fn the_shutdown_route_is_for_the_operator_and_admins_only() {
+    let temp = TempDir::new("shutdown-route");
+    let root = temp.path();
+    let dir = ServerDir::init(root).unwrap().dir;
+    let (code, out, err) = user(root, &["add", "bob"]);
+    assert_eq!(code, 0, "{err}");
+    let bob = printed_token(&out);
+    let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
+    let hook = graphersal_server::StopHook::new(move || {
+        let _ = stop_tx.send(());
+    });
+    let running = serve::start(
+        root,
+        ServeOptions::new()
+            .with_listen("127.0.0.1:0".parse().unwrap())
+            .with_stop_hook(hook),
+    )
+    .unwrap();
+    let address = running.address();
+    let bob_auth = format!("Authorization: Bearer {bob}\r\n");
+    // A user without the admin role: the admin API does not exist for it.
+    let (status, _, body) = send(address, "POST", "/api/admin/shutdown", &[], &bob_auth, "");
+    assert_eq!(status, 404, "{body}");
+    let (status, _, _) = send(address, "GET", "/api/admin/server", &[], &bob_auth, "");
+    assert_eq!(status, 404);
+    // Anonymous: log in first.
+    let (status, _, _) = send(address, "POST", "/api/admin/shutdown", &[], "", "");
+    assert_eq!(status, 401);
+    assert!(stop_rx.try_recv().is_err(), "nobody asked for a stop yet");
+
+    // The operator: the server facts, then the stop request reaches the hook.
+    let (status, _, body) = call(address, "GET", "/api/admin/server", &[], "");
+    assert_eq!(status, 200, "{body}");
+    let facts = json(&body);
+    assert_eq!(facts["pid"], std::process::id());
+    assert_eq!(facts["address"], address.to_string());
+    assert_eq!(facts["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(facts["directory"], dir.root().display().to_string());
+    assert!(facts["startedAtMs"].is_u64(), "{body}");
+    assert!(facts["memory"].is_object(), "{body}");
+    let (status, _, _) = call(address, "GET", "/api/admin/shutdown", &[], "");
+    assert_eq!(status, 405);
+    let (status, _, body) = call(address, "POST", "/api/admin/shutdown", &[], "");
+    assert_eq!(status, 202, "{body}");
+    assert_eq!(json(&body)["stopping"], true);
+    stop_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the hook was called");
+    running.stop().unwrap();
+}
+
+#[test]
+fn the_shutdown_route_needs_real_credentials_with_access_off_and_a_hook() {
+    let temp = TempDir::new("shutdown-open");
+    let root = temp.path();
+    ServerDir::init(root).unwrap();
+    std::fs::write(
+        root.join("server.toml"),
+        "listen = \"127.0.0.1:0\"\n[access]\nenabled = false\n",
+    )
+    .unwrap();
+    // No stop hook (a library caller): the operator gets 409.
+    let running = serve::start(
+        root,
+        ServeOptions::new().with_listen("127.0.0.1:0".parse().unwrap()),
+    )
+    .unwrap();
+    let address = running.address();
+    // Everyone is an admin with access off, but may not stop the server.
+    let (status, _, body) = send(address, "POST", "/api/admin/shutdown", &[], "", "");
+    assert_eq!(status, 403, "{body}");
+    let (status, _, _) = send(address, "GET", "/api/admin/server", &[], "", "");
+    assert_eq!(
+        status, 200,
+        "reading the facts is an ordinary admin request"
+    );
+    let (status, _, body) = call(address, "POST", "/api/admin/shutdown", &[], "");
+    assert_eq!(status, 409, "{body}");
+    assert!(body.contains("no stop hook"), "{body}");
+    running.stop().unwrap();
+}

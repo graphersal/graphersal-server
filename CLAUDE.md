@@ -88,7 +88,23 @@ from published files). When this file disagrees with the code, the code wins: sa
   `check_as(dir, euid)` for tests; `os_user()` (`getpwuid_r` via `libc`, unix only dependency;
   Windows `USERNAME`); `create_private_dir` (`sessions/` on first write); Windows: no check,
   documented), `lock` (`ServerLock`, fd-lock on
-  `server.lock`), `run_file` (`RunInfo`, `server.run`, mode 0600: it carries the per-run `operator_token`), `serve` (`start` -> `Running`, the
+  `server.lock`), `run_file` (`RunInfo`, `server.run`, mode 0600: it carries the per-run `operator_token`
+  and (round 3 B2) `started_at_ms`), `daemon` (round 3 B2: `start(dir, program, serve_args,
+  timeout)` = check, lock (held -> `ServerError::Service` naming pid/URL), first admin made HERE
+  (token never in the log; removed again when the spawn fails), `logs/` 0700 + `logs/server.log`
+  0600 appended (a `== <UTC> graphersal-server start: ... ==` line), lock dropped, `serve --dir
+  <absolute> <args>` spawned detached (unix `pre_exec` `setsid`, Windows `DETACHED_PROCESS |
+  CREATE_NEW_PROCESS_GROUP`), waits for its own `server.run` pid + `/readyz` 200 + the address
+  line in the log; failure = `Service` with `log_tail`; `stop(dir, timeout)` = no lock -> remove a
+  stale `server.run` under the lock, `NotRunning`; else `POST /api/admin/shutdown` with the
+  operator token (connect error or 404 -> unix SIGTERM fallback via `libc::kill`), waits for the
+  lock; `status(dir)` (stale run file reported, not removed; `GET /api/admin/server`);
+  `stop_with_token`/`status_with_token` through an address; texts in `console/service.rs`;
+  `main.rs` exit 3 = status stopped, stop of a stopped dir exit 0), `control` (round 3 B2,
+  private: `GET /api/admin/server` facts (`ServerFacts` in the `Router`) and `POST
+  /api/admin/shutdown`: operator or admin user, `everyone` 403, no `StopHook` 409, audited
+  `AuditEvent::ShutdownRequested`; the hook (`ServeOptions::with_stop_hook`) feeds `serve`'s
+  Ctrl+C channel, never stops the server on its own thread), `serve` (`start` -> `Running`, the
   listener: hyper 1.x `http1` server connections, and `http2` ones for h2c with prior
   knowledge (`sniff` peeks the preface; the HTTP/1 path is unchanged otherwise), on a tokio
   multi-thread runtime owned by `Running`; connection cap `[limits] max_connections`

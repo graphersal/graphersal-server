@@ -988,6 +988,19 @@ pub fn error_text(err: &ServerError) -> String {
             }
             text
         }
+        ServerError::Service { help, log_tail, .. } => {
+            let mut text = format!("Error: {err}");
+            if let Some(help) = help {
+                text.push_str(&format!("\nHelp: {help}"));
+            }
+            if !log_tail.is_empty() {
+                text.push_str("\nThe server's log (last lines):");
+                for line in log_tail {
+                    text.push_str(&format!("\n  | {line}"));
+                }
+            }
+            text
+        }
         _ => format!("Error: {err}"),
     }
 }

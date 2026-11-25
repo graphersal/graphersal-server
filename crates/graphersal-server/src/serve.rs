@@ -180,7 +180,46 @@ pub struct ServeOptions {
     pub header_timeout_secs: Option<u64>,
     /// The idle timeout in seconds, overriding `[limits] idle_timeout_secs`.
     pub idle_timeout_secs: Option<u64>,
+    /// What `POST /api/admin/shutdown` calls to have this server stopped (`None`: the route
+    /// answers `409`).
+    pub stop_hook: Option<StopHook>,
 }
+
+/// How the admin route `POST /api/admin/shutdown` (`graphersal-server stop`) asks the process
+/// that owns a [`Running`] server to stop it: the hook is called once per request, after which
+/// that process calls [`Running::stop`] (the same graceful path as Ctrl+C). The route never
+/// stops the server itself: it runs on one of the server's own threads, which a stop waits for.
+///
+/// `serve` sends the hook's calls into the channel its signal handler uses.
+#[derive(Clone)]
+pub struct StopHook(Arc<dyn Fn() + Send + Sync>);
+
+impl StopHook {
+    /// A hook calling `request` on every shutdown request.
+    pub fn new(request: impl Fn() + Send + Sync + 'static) -> Self {
+        Self(Arc::new(request))
+    }
+
+    /// Asks for the stop.
+    pub(crate) fn request(&self) {
+        (self.0)();
+    }
+}
+
+impl std::fmt::Debug for StopHook {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("StopHook")
+    }
+}
+
+impl PartialEq for StopHook {
+    /// The same hook (the same closure, shared).
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for StopHook {}
 
 impl ServeOptions {
     /// The defaults: everything from `server.toml`.
@@ -212,6 +251,12 @@ impl ServeOptions {
     /// `[limits] idle_timeout_secs`.
     pub fn with_idle_timeout_secs(mut self, secs: u64) -> Self {
         self.idle_timeout_secs = Some(secs);
+        self
+    }
+
+    /// The options with the hook `POST /api/admin/shutdown` calls ([`StopHook`]).
+    pub fn with_stop_hook(mut self, hook: StopHook) -> Self {
+        self.stop_hook = Some(hook);
         self
     }
 }
@@ -340,8 +385,11 @@ pub fn start(
     let host_check = HostCheck::new(exposure, address.port(), &url)
         .with_allowed_hosts(config.http.allowed_hosts.clone())
         .with_hint(host_hint(&url));
+    let facts = crate::control::ServerFacts::now(address, url.clone());
     let shared = Arc::new(Shared {
-        router: Router::new(host_check.clone()).with_modes(Modes::of(&config)),
+        router: Router::new(host_check.clone())
+            .with_modes(Modes::of(&config))
+            .with_control(facts.clone(), options.stop_hook.clone()),
         in_flight: AtomicUsize::new(0),
         limits,
         connections: Arc::new(Semaphore::new(limits.max_connections)),
@@ -353,6 +401,7 @@ pub fn start(
     let operator_hash = operator.hash();
     RunInfo::new(address, url.clone())
         .with_operator_token(operator)
+        .with_started_at_ms(facts.started_at_ms())
         .write(&dir)?;
     let (stop, stop_rx) = watch::channel(false);
     let accept = runtime.spawn(accept(socket, shared.clone(), stop_rx));

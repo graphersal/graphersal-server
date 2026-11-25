@@ -32,10 +32,16 @@ another user or open to group or others ([`access.md`](access.md#the-security-mo
   sessions/            (mode 0700)
     browser.json       browser sessions (hashes only, mode 0600): they survive a restart
     mcp.json           MCP sessions (hashes only, mode 0600): they survive a restart
+  logs/                (mode 0700, made by the first `start`)
+    server.log         stdout and stderr of a server `start` runs in the background (mode 0600)
 ```
 
-There is no log directory: the server logs to stderr (redirect it to keep a log file). A
-`logs/` directory an earlier version's `init` created is left alone.
+`serve` logs to stderr (redirect it to keep a log file). `graphersal-server start` runs
+`serve` in the background and appends its stdout and stderr to `logs/server.log` (created on
+the first `start`: `logs/` mode `0700`, the log `0600` on unix; each start adds a line `== <UTC
+time> graphersal-server start: serve --dir ... ==`). Nothing rotates the log: truncate or
+rotate it while the server is stopped (or use `copytruncate`). A `logs/` directory an earlier
+version's `init` created is reused.
 
 `init DIR` accepts a missing or empty directory, or an existing server directory (then it only
 creates the missing parts and keeps `server.toml` as it is).
@@ -178,8 +184,9 @@ clean stop:
 address = "127.0.0.1:51234"
 url = "http://127.0.0.1:51234/"
 pid = 12345
-version = "0.2.0"
+version = "0.3.0"
 operator_token = "<64 hex digits>"
+started_at_ms = 1764151975000
 ```
 
 It holds the address actually bound (port `0` resolved) and the operator token of this run: a
@@ -187,6 +194,77 @@ new one at every start, an admin credential the console sends (`Authorization: B
 whoever reads the file can act as an admin while the server runs ([`access.md`](access.md)). The console reads it to reach a
 running server; it is trustworthy only while `server.lock` is held (a crash leaves it behind,
 the next server overwrites it).
+
+`graphersal-server status` reads both: a held lock is a running server (its facts come from
+`GET /api/admin/server`, the uptime from `started_at_ms` when the server does not answer); a
+`server.run` without the lock is reported as stale. `graphersal-server stop` removes a stale
+one (holding the lock meanwhile) and `start` refuses while the lock is held.
+
+## Running as a service
+
+`start`/`stop`/`status` are for a person at a terminal. A service manager runs `serve` in the
+foreground instead: it keeps the process, its restarts and its log itself. `serve` stops
+cleanly on SIGTERM (databases unloaded, `server.run` removed, the lock released) and writes the
+log to stderr. Run it as the dedicated user that owns the directory (the directory's owner is
+its operator: [`access.md`](access.md#the-security-model)).
+
+systemd (`/etc/systemd/system/graphersal-server.service`):
+
+```ini
+[Unit]
+Description=graphersal-server
+After=network.target
+
+[Service]
+User=graphersal
+Group=graphersal
+ExecStart=/usr/local/bin/graphersal-server serve --dir /srv/graphersal --listen 127.0.0.1:8484
+KillSignal=SIGTERM
+TimeoutStopSec=120
+Restart=on-failure
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
+```
+
+`systemctl enable --now graphersal-server`; the log is `journalctl -u graphersal-server`. The
+first admin's token of a directory without `access.toml` lands in the journal: run
+`graphersal-server init /srv/graphersal` as that user first (it prints the token once on the
+terminal).
+
+launchd (`~/Library/LaunchAgents/org.graphersal.server.plist` for a user agent, or
+`/Library/LaunchDaemons/` with a `UserName` key for a daemon):
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>org.graphersal.server</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/graphersal-server</string>
+    <string>serve</string>
+    <string>--dir</string><string>/Users/me/graphersal</string>
+    <string>--listen</string><string>127.0.0.1:8484</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+  <key>ExitTimeOut</key><integer>120</integer>
+  <key>StandardErrorPath</key><string>/Users/me/graphersal/logs/server.log</string>
+  <key>StandardOutPath</key><string>/Users/me/graphersal/logs/server.log</string>
+</dict>
+</plist>
+```
+
+`launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/org.graphersal.server.plist`; stop it
+with `launchctl bootout gui/$(id -u)/org.graphersal.server` (SIGTERM). Create `logs/` first
+(`mkdir -m 700 /Users/me/graphersal/logs`).
+
+`graphersal-server status --dir DIR` works on a server a service manager runs too; `stop` would
+stop it as well, but the manager may restart it (systemd `Restart=on-failure` does not: the
+stop is a clean exit).
 
 ## `aliases.toml`
 

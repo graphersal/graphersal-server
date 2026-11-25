@@ -193,7 +193,10 @@ fn sections(running: &Running, config: Option<&ServerConfig>) -> Vec<Section> {
             limits.idle_timeout.as_secs()
         ),
     );
-    server.row("stop", "Ctrl+C or SIGTERM");
+    server.unwrapped(
+        "stop",
+        format!("Ctrl+C, SIGTERM, or graphersal-server stop --dir {dir_arg}"),
+    );
 
     let registry = running.registry();
     let mut entries = registry.list();
