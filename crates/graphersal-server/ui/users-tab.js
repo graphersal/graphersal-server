@@ -5,18 +5,41 @@
 // every subject, anonymous (= everyone) included (grant read or write on a database or on
 // every database, revoke). The last admin cannot be removed, demoted or left without a token:
 // the row disables those actions and the server refuses them too (409 with help, shown
-// verbatim). Requests, rules and texts: ./admin-api.js.
+// verbatim). Users and grants are read again on every visit of the tab and when the window gets
+// the focus back (./shared.js `useFreshData`: a user added in the console or another browser
+// shows up; the Add dialog and the grant form keep their input); both tables sort by any column.
+// Requests, rules and texts: ./admin-api.js.
 
-import { reactive, ref, computed, nextTick, onMounted } from 'vue';
+import { reactive, ref, computed, nextTick } from 'vue';
 import {
   userRows, grantRows, userActions, addUserForm, grantForm, userConfirmText, userOutcomeText,
   shownToken, grantChoices, GRANT_LEVELS, NAME_HINT,
 } from './admin-api.js';
-import { admin, list, ensureLoaded, errorNotice, noticeClass } from './shared.js';
+import {
+  admin, list, reload, errorNotice, noticeClass, useFreshData, useSort, SortTh,
+} from './shared.js';
+
+/** The grants of a user row as one text (its Grants cell). */
+const grantsTextOf = (u) => (u.admin ? 'every database (admin)' : (u.grants.map((g) => `${g.databaseText}: ${g.level}`).join(', ') || 'none'));
+
+/** The sortable columns of the user table. */
+const USER_COLUMNS = Object.freeze({
+  name: { type: 'text' },
+  token: { type: 'text', value: (u) => (u.hasToken ? u.tokenText : '') },
+  grants: { type: 'text', value: grantsTextOf },
+});
+
+/** The sortable columns of the grant table. */
+const GRANT_COLUMNS = Object.freeze({
+  subject: { type: 'text', value: (g) => g.subjectText },
+  database: { type: 'text', value: (g) => g.databaseText },
+  level: { type: 'text' },
+});
 
 const freshAdd = () => ({ name: '', admin: false, problems: [], error: null, busy: false });
 
 export default {
+  components: { SortTh },
   props: { api: { type: Object, required: true }, params: { type: Object, default: () => ({}) } },
   setup() {
     // `revision`: of the users and grants shown; every change sends it, so a change someone
@@ -31,6 +54,10 @@ export default {
     const grant = reactive({ subject: 'anonymous', database: '', level: 'read', problems: [], busy: false });
 
     const databaseChoices = computed(() => grantChoices(list.rows));
+    const userSort = useSort('users', USER_COLUMNS);
+    const grantSort = useSort('grants', GRANT_COLUMNS);
+    const users = computed(() => userSort.rows(s.users));
+    const grants = computed(() => grantSort.rows(s.grants));
 
     async function refresh() {
       try {
@@ -131,15 +158,18 @@ export default {
       }
     }
 
-    onMounted(async () => {
-      await Promise.all([refresh(), ensureLoaded()]);
-      if (!grant.database && databaseChoices.value.length) grant.database = databaseChoices.value[0].value;
+    // Every visit: the users, grants and database choices as they are now; the grant form keeps
+    // its choice while the database still exists.
+    useFreshData(async () => {
+      await Promise.all([refresh(), reload()]);
+      const values = databaseChoices.value.map((c) => c.value);
+      if ((!grant.database || (grant.database !== '*' && !values.includes(grant.database))) && values.length) grant.database = values[0];
     });
 
     return {
-      s, busy, notice, token, copied, dlg, add, grant, databaseChoices, GRANT_LEVELS, noticeClass, nameHint: NAME_HINT,
+      s, users, grants, userSort, grantSort, busy, notice, token, copied, dlg, add, grant, databaseChoices, GRANT_LEVELS, noticeClass, nameHint: NAME_HINT,
       acts: (u) => userActions(u, s.users, { busy: !!busy[u.name] }),
-      grantsText: (u) => u.grants.map((g) => `${g.databaseText}: ${g.level}`).join(', '),
+      grantsText: grantsTextOf,
       newToken, revokeToken, toggleAdmin, removeUser, revokeGrant, openAdd, closeAdd, submitAdd, submitGrant, copyToken, refresh,
     };
   },
@@ -176,12 +206,12 @@ export default {
     <p v-if="s.read && !s.users.length && !s.error" class="muted">No users.</p>
     <div v-if="s.users.length" class="srv-table-wrap">
     <table class="data-table srv-table">
-      <thead><tr><th>Name</th><th>Token</th><th>Grants</th><th><span class="sr-only">Actions</span></th></tr></thead>
+      <thead><tr><sort-th :s="userSort" k="name">Name</sort-th><sort-th :s="userSort" k="token">Token</sort-th><sort-th :s="userSort" k="grants">Grants</sort-th><th><span class="sr-only">Actions</span></th></tr></thead>
       <tbody>
-        <tr v-for="u in s.users" :key="u.name" :data-user="u.name">
+        <tr v-for="u in users" :key="u.name" :data-user="u.name">
           <td><span class="mono">{{ u.name }}</span> <span v-if="u.admin" class="badge accent">admin</span></td>
           <td class="mono" :title="u.hasToken ? 'The last four characters of its token' : 'It cannot sign in'">{{ u.tokenText }}</td>
-          <td>{{ u.admin ? 'every database (admin)' : (grantsText(u) || 'none') }}</td>
+          <td>{{ grantsText(u) }}</td>
           <td class="srv-actions">
             <button type="button" class="btn small" :disabled="!acts(u).newToken.enabled" :title="acts(u).newToken.title" @click="newToken(u)">New token…</button>
             <button type="button" class="btn small" :disabled="!acts(u).revokeToken.enabled" :title="acts(u).revokeToken.title" @click="revokeToken(u)">Revoke token…</button>
@@ -216,9 +246,9 @@ export default {
     <p v-if="s.read && !s.grants.length" class="muted">No grants: only admins reach a database.</p>
     <div v-else-if="s.grants.length" class="srv-table-wrap">
     <table class="data-table srv-table srv-grants">
-      <thead><tr><th>Who</th><th>Database</th><th>Level</th><th><span class="sr-only">Actions</span></th></tr></thead>
+      <thead><tr><sort-th :s="grantSort" k="subject">Who</sort-th><sort-th :s="grantSort" k="database">Database</sort-th><sort-th :s="grantSort" k="level">Level</sort-th><th><span class="sr-only">Actions</span></th></tr></thead>
       <tbody>
-        <tr v-for="g in s.grants" :key="g.subject + '/' + g.database" :data-grant="g.subject + '/' + g.database">
+        <tr v-for="g in grants" :key="g.subject + '/' + g.database" :data-grant="g.subject + '/' + g.database">
           <td>{{ g.subjectText }}</td>
           <td class="mono">{{ g.databaseText }}</td>
           <td>{{ g.level }}</td>

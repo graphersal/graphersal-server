@@ -7,19 +7,42 @@
 // `error` and `help` verbatim. A `needs-model` row carries the hint to add its model; a base held
 // by loaded layers reads "in pool"; a database holding copied model blobs shows the server's link
 // warning. "Promote to base…" turns an unloaded plain database into a base after a one-way
-// confirmation (`promoteAction` gives the reason it is disabled on every other row).
+// confirmation that explains bases and layers (`promoteAction` gives the reason it is disabled
+// on every other row; the Kind column's tooltips and the "Bases and layers" help say what the
+// kinds mean). The list is read again on every visit of the tab and when the window gets the
+// focus back (./shared.js `useFreshData`); both tables sort by any column (`useSort`).
 
-import { reactive, ref, computed, nextTick, onMounted } from 'vue';
+import { reactive, ref, computed, nextTick } from 'vue';
 import {
   createBody, nameProblem, existingNameProblem, renameProblem, NAME_HINT, rowActions, confirmText, outcomeText, outcomeTone, loadAndWatch, baseNames, realRows,
-  bytesText, transferActions, needsModelHint, poolText, promoteAction, isConflict,
+  bytesText, transferActions, needsModelHint, poolText, promoteAction, isConflict, kindHelp, BASE_HELP, PROMOTE_HELP, KIND_HELP,
 } from './admin-api.js';
-import { admin, list, reload, patchRow, errorNotice, noticeClass, pageHref } from './shared.js';
+import {
+  admin, list, reload, patchRow, errorNotice, noticeClass, pageHref, useFreshData, useSort, SortTh,
+} from './shared.js';
+
+/** The kind column's text: the kind, and "base" for a base. */
+const kindText = (row) => [row.kind, row.role === 'base' ? 'base' : ''].filter(Boolean).join(' · ');
+
+/** The sortable columns of the database table. */
+const DATABASE_COLUMNS = Object.freeze({
+  name: { type: 'text' },
+  state: { type: 'text', value: (r) => r.stateText },
+  kind: { type: 'text', value: kindText },
+  readOnly: { type: 'bool' },
+  autoLoad: { type: 'bool' },
+  size: { type: 'number', value: (r) => r.sizeBytes },
+  memory: { type: 'number', value: (r) => (r.state === 'loaded' ? r.memoryBytes : null) },
+});
+
+/** The sortable columns of the alias table. */
+const ALIAS_COLUMNS = Object.freeze({ alias: { type: 'text' }, target: { type: 'text' } });
 
 const emptyCreate = () => ({ name: '', kind: 'plain', role: 'normal', base: '', description: '', schema: '', readOnly: false, autoLoad: false });
 const freshDialog = () => ({ mode: null, source: '', form: emptyCreate(), alias: '', target: '', newName: '', existing: false, problems: [], error: null, busy: false });
 
 export default {
+  components: { SortTh },
   props: { api: { type: Object, required: true }, params: { type: Object, default: () => ({}) } },
   setup(props) {
     const busy = reactive({});
@@ -45,8 +68,10 @@ export default {
       }
     }
 
-    const rows = computed(() => list.rows);
-    const aliases = computed(() => list.aliases);
+    const dbSort = useSort('databases', DATABASE_COLUMNS);
+    const aliasSort = useSort('aliases', ALIAS_COLUMNS);
+    const rows = computed(() => dbSort.rows(list.rows));
+    const aliases = computed(() => aliasSort.rows(list.aliases));
     const aliasTargets = computed(() => list.aliases.map((a) => a.target));
     const acts = (row) => rowActions(row, { busy: !!busy[row.name], aliasTargets: aliasTargets.value });
     const more = (row) => transferActions(row, { busy: !!busy[row.name] });
@@ -163,10 +188,10 @@ export default {
       run(a.alias, 'removeAlias', () => admin.removeAlias(a.alias, list.aliasesRevision));
     }
 
-    onMounted(reload);
+    useFreshData(reload);
 
     return {
-      list, rows, aliases, busy, notice, dlg, dialog, acts, more, promo, bases, databaseNames, showSize, showMemory,
+      list, rows, aliases, dbSort, aliasSort, kindHelp, baseHelp: BASE_HELP, promoteHelp: PROMOTE_HELP, kindHelpOf: KIND_HELP, busy, notice, dlg, dialog, acts, more, promo, bases, databaseNames, showSize, showMemory,
       bytesText, needsModelHint, poolText, noticeClass, href: pageHref, reload, nameHint: NAME_HINT,
       loadDb, unloadDb, deleteDb, promoteDb, setFlag, openCreate, openClone, openAlias, openRename, closeDialog, submitDialog, removeAlias,
       openBackups: (name) => props.api.navigate('backups', name ? { db: name } : {}),
@@ -174,7 +199,7 @@ export default {
       openRuns: (row) => props.api.navigate('runs', { db: row.name }),
       openImport: () => props.api.navigate('import'),
       openModels: () => props.api.navigate('models'),
-      kindText: (row) => [row.kind, row.role === 'base' ? 'base' : ''].filter(Boolean).join(' · '),
+      kindText,
       dialogTitle: computed(() => ({
         create: 'New database',
         clone: `Clone "${dialog.source}"`,
@@ -209,10 +234,11 @@ export default {
     <div v-if="rows.length" class="srv-table-wrap">
     <table class="data-table srv-table srv-databases">
       <thead><tr>
-        <th>Name</th><th>State</th><th>Kind</th>
-        <th title="Every write to the database is refused">Read-only</th>
-        <th title="Loaded when the server starts">Auto-load</th>
-        <th v-if="showSize">Size</th><th v-if="showMemory">Memory</th>
+        <sort-th :s="dbSort" k="name">Name</sort-th><sort-th :s="dbSort" k="state">State</sort-th>
+        <sort-th :s="dbSort" k="kind" title="Plain: stores all its data itself. Layer: stores only its own changes over a base. Base: frozen and read-only; layers are built over it.">Kind</sort-th>
+        <sort-th :s="dbSort" k="readOnly" title="Every write to the database is refused">Read-only</sort-th>
+        <sort-th :s="dbSort" k="autoLoad" title="Loaded when the server starts">Auto-load</sort-th>
+        <sort-th v-if="showSize" :s="dbSort" k="size" num>Size</sort-th><sort-th v-if="showMemory" :s="dbSort" k="memory" num>Memory</sort-th>
         <th><span class="sr-only">Actions</span></th>
       </tr></thead>
       <tbody>
@@ -225,7 +251,7 @@ export default {
             <div v-if="row.model" class="muted srv-sub mono">{{ row.model }}</div>
             <div v-if="needsModelHint(row)" class="srv-sub srv-hint" :title="needsModelHint(row)">Add the model in the <a href="#" @click.prevent="openModels">Models</a> tab.</div>
             <div v-if="row.linkWarning" class="srv-sub srv-warn" :title="row.linkWarning">{{ row.linkWarning }}</div></td>
-          <td>{{ kindText(row) }}<div v-if="row.base" class="muted srv-sub">over {{ row.base }}</div></td>
+          <td :title="kindHelp(row) || null">{{ kindText(row) }}<div v-if="row.base" class="muted srv-sub">over {{ row.base }}</div></td>
           <td><input type="checkbox" :checked="row.readOnly" :disabled="!acts(row).readOnly.enabled" :title="acts(row).readOnly.title"
                      :aria-label="'Read-only: ' + row.name" @change="setFlag(row, 'readOnly', $event)"></td>
           <td><input type="checkbox" :checked="row.autoLoad" :disabled="!acts(row).autoLoad.enabled" :title="acts(row).autoLoad.title"
@@ -248,6 +274,16 @@ export default {
       </tbody>
     </table>
     </div>
+    <details v-if="rows.length" class="srv-help-box srv-bases-help">
+      <summary>Bases and layers</summary>
+      <p>{{ baseHelp }}</p>
+      <ul>
+        <li>{{ kindHelpOf.plain }}</li>
+        <li>{{ kindHelpOf.layer }}</li>
+        <li>Base: frozen and always read-only. Create one with "New database…" ("A base database"), by importing a file as a base, or with "Promote to base…" on an unloaded plain database.</li>
+      </ul>
+      <p>{{ promoteHelp }}</p>
+    </details>
     <p v-if="list.skipped" class="muted">{{ list.skipped }} entr{{ list.skipped === 1 ? 'y' : 'ies' }} of the server's answer could not be read.</p>
 
     <div class="srv-head">
@@ -258,7 +294,7 @@ export default {
     <p v-if="!aliases.length" class="muted">No aliases. An alias is a second name for a database (its pages are served under db/&lt;alias&gt;/ too); point it to another database to switch every link at once.</p>
     <div v-else class="srv-table-wrap">
     <table class="data-table srv-table srv-aliases">
-      <thead><tr><th>Alias</th><th>Database</th><th><span class="sr-only">Actions</span></th></tr></thead>
+      <thead><tr><sort-th :s="aliasSort" k="alias">Alias</sort-th><sort-th :s="aliasSort" k="target">Database</sort-th><th><span class="sr-only">Actions</span></th></tr></thead>
       <tbody>
         <tr v-for="a in aliases" :key="a.alias" :data-alias="a.alias">
           <td class="mono">{{ a.alias }}</td>
@@ -285,11 +321,11 @@ export default {
             <fieldset>
               <legend>Kind</legend>
               <label class="inline"><input type="radio" value="plain" v-model="dialog.form.kind"> Plain</label>
-              <label class="inline" :title="bases.length ? '' : 'Create a base database first'"><input type="radio" value="layer" v-model="dialog.form.kind" :disabled="!bases.length"> Layer over a base</label>
+              <label class="inline" :title="bases.length ? kindHelpOf.layer : 'Create a base database first'"><input type="radio" value="layer" v-model="dialog.form.kind" :disabled="!bases.length"> Layer over a base</label>
             </fieldset>
             <label v-if="dialog.form.kind === 'layer'">Base
               <select v-model="dialog.form.base" name="base"><option v-for="b in bases" :key="b" :value="b">{{ b }}</option></select></label>
-            <label v-else class="inline"><input type="checkbox" name="role" :checked="dialog.form.role === 'base'" @change="dialog.form.role = $event.target.checked ? 'base' : 'normal'">
+            <label v-else class="inline" :title="baseHelp"><input type="checkbox" name="role" :checked="dialog.form.role === 'base'" @change="dialog.form.role = $event.target.checked ? 'base' : 'normal'">
               A base database (always read-only; layers can be created over it)</label>
             <label>Description <input v-model="dialog.form.description" name="description" autocomplete="off"></label>
             <label>Schema (optional, JSON)

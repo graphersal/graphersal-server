@@ -152,7 +152,8 @@ from published files). When this file disagrees with the code, the code wins: sa
   connection, wait for `in_flight` up to 5 s, unload, `shutdown_timeout`), `router` (probes and 503s
   through `graphersal_serve::Server`, then `HostCheck::check` on everything else, then login/
   logout, authentication and the routes, each refused per principal (see "Access is enforced"
-  under the rules): `/db/<name>/...` via `mounts`, `GET /api/info` (root identity: `server:
+  under the rules; every in-memory answer leaves `Router::answer` through `router::no_store`:
+  `Cache-Control: no-store` exactly once, checked by `every_answer_says_no_store_exactly_once`): `/db/<name>/...` via `mounts`, `GET /api/info` (root identity: `server:
   router::SERVER_NAME` ("graphersal-server"; each mount's context sets the same via
   `ContextBuilder::server_name`, never `.dev(true)`), `protocol: graphersal_serve::PROTOCOL`
   ("graphersal/1", the only thing the playground's `isEngineInfo` checks; every mount answers it
@@ -453,7 +454,13 @@ from published files). When this file disagrees with the code, the code wins: sa
   `headerModel`, `mineRows`, `refusalAction`: 401 with `login` -> the login page, 404 -> read the
   root info again and load the root when no longer admin), `shared.js` (one list, admin client
   with `onRefusal` = `handleRefusal`, and root info for every
-  tab; polls while a database is loading); uploads (Import tab, Models tab's "A file from this
+  tab; polls while a database is loading; `useFreshData(refresh)`, `useSort(table, columns)` +
+  the header component `SortTh`), `fresh.js` (the playground keeps profile tabs alive in
+  `<keep-alive>`, so `onMounted` runs once: EVERY tab reads its data through `useFreshData`, on
+  set-up, on each later visit and on window focus/visibility while shown; a refresh replaces
+  only shown data, never form or dialog input; a poll runs only while its tab is active) and
+  `sort.js` (typed stable comparator, header toggling, the sort kept per table in localStorage;
+  every table header is a `<sort-th>`, checked by `ui/tests/sort.test.mjs`); uploads (Import tab, Models tab's "A file from this
   computer": `modelUploadRequest` + `uploadImport({kind: 'model'})`) go through XHR with
   progress, sized against `api.info.host.uploadBytes` first; `server-ui.css` (`srv-*` classes on the playground's
   theme tokens and generic classes). Modules import ONLY `vue` and `./<own file>.js` (checked by

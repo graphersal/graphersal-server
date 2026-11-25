@@ -8,11 +8,15 @@
 // large snapshot never sits in memory; a refusal shows as a failed download). A link cannot
 // carry a header, so with host headers (`window.GRAPHERSAL_ENGINE.headers`) the file is fetched
 // with them, kept as a Blob and saved; a refusal then shows the server's `error`/`help` here.
+// The database list is read again on every visit and when the window gets the focus back
+// (./shared.js `useFreshData`; the chosen options stay).
 
-import { reactive, ref, computed, watch, onMounted } from 'vue';
+import { reactive, ref, computed, watch } from 'vue';
 import { exportPath, parseAdminError, AdminError, realRows, transferActions } from './admin-api.js';
 import { downloadBlob } from './databases.js';
-import { ROOT, headers, list, ensureLoaded, noticeClass } from './shared.js';
+import {
+  ROOT, headers, list, reload, noticeClass, useFreshData,
+} from './shared.js';
 
 export default {
   props: { api: { type: Object, required: true }, params: { type: Object, default: () => ({}) } },
@@ -60,9 +64,13 @@ export default {
     }
 
     watch(() => props.params.db, (db) => choose(db || ''));
-    onMounted(async () => {
-      choose(props.params.db || '');
-      await ensureLoaded();
+    let chosen = false;
+    useFreshData(async () => {
+      if (!chosen) {
+        chosen = true;
+        choose(props.params.db || '');
+      }
+      await reload();
     });
 
     return { s, notice, loaded: computed(() => list.loaded), rows, row, layer, allowed, withHeaders, target, href, modelsApply, picked, linkClicked, fetchAndSave, noticeClass };

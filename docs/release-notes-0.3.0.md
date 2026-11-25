@@ -198,3 +198,26 @@ A server in the background without hunting for its pid:
   `Access::reach`, `granted_level_via`, `rename_grants`, `drop_grants` (`level_in` counts an
   alias's own grants); `Admin::alias_remove` answers the number of grants removed;
   `Renamed::grants`; `AuditEvent::GrantsMoved`.
+
+## The web UI shows the current state, sorts every table, explains bases
+
+- **Fresh data on every visit.** Every tab of every UI profile (the admin tabs, "My databases",
+  the sign-in page's open databases) reads its data again each time it is shown, and when the
+  window gets the focus back or the page becomes visible while it is shown. Before, the
+  playground kept a tab alive with the data of its first visit: a user added with
+  `graphersal-server user add` (or in another browser) did not appear in Users until the page
+  was reloaded. A refresh replaces only the shown data; an open dialog or form keeps its input.
+  The Runs tab's 2-second poll stops while another tab is shown.
+- **`Cache-Control: no-store` on every answer**, exactly once: the root, user and admin API
+  (also refusals, unknown routes and redirects), each database's API and the UI files. Answers
+  that named it twice (`GET /api/databases`, a `401`, login and logout) name it once now.
+- **Sortable columns** on every table (databases, aliases, users, grants, backups, the import
+  inbox, models, databases waiting for a model, runs, "My databases"): click a header for
+  ascending, again for descending (indicator and `aria-sort`); text in natural order, sizes,
+  durations and ids by number, dates by time, missing values last, stable; the choice is kept
+  per table in the browser (localStorage). The import inbox rows carry `bytes` for it.
+- **Bases and layers explained.** The confirmation of "Promote to base…" and its tooltip say
+  what a base is (a frozen, read-only database that layers are built over; each layer stores
+  only its own changes), that promotion is one way and forever, and when to use it; the
+  Databases tab's Kind column and the Backups tab's Kind column explain each kind in a tooltip,
+  and a "Bases and layers" box under the database table sums it up.

@@ -56,3 +56,16 @@ p.srv-problems { padding-left: 0; }
 .srv-token { background: var(--warn-soft); }
 .srv-token-row { display: flex; gap: 8px; margin-top: 6px; }
 .srv-token-row input { flex: 1 1 auto; min-width: 0; font-size: 12.5px; }
+
+/* Sortable column headers (shared.js SortTh): the whole header is the button. */
+.srv-table th .srv-sort { all: unset; cursor: pointer; display: inline-flex; align-items: center; gap: 4px; font: inherit; color: inherit; }
+.srv-table th .srv-sort:focus-visible { outline: 2px solid var(--accent, currentColor); outline-offset: 2px; border-radius: 2px; }
+.srv-table th.num { text-align: right; }
+.srv-sort-mark { font-size: 10px; opacity: 0.35; }
+.srv-sort-mark.on { opacity: 1; }
+.srv-table th .srv-sort:hover .srv-sort-mark { opacity: 0.8; }
+
+/* Inline help boxes (bases and layers in the Databases tab). */
+.srv-help-box { margin-top: 12px; max-width: 80ch; }
+.srv-help-box summary { cursor: pointer; }
+.srv-help-box p { margin: 6px 0; }

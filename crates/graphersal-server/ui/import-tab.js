@@ -8,19 +8,32 @@
 // and rules: ./admin-api.js `importRequest`, `uploadImport`. The server's `error`/`help` (a `413`
 // included) stay shown; Cancel aborts a running upload. "Import as a base" sends `role=base`
 // (only a plain source becomes a base: the server refuses a layer source with `400` and a source
-// missing its model with `409` + help).
+// missing its model with `409` + help). The database list (bases) and, with the inbox chosen, the
+// inbox are read again on every visit and when the window gets the focus back (./shared.js
+// `useFreshData`; the form keeps its input); the inbox table sorts by any column.
 
-import { reactive, ref, computed, watch, onMounted } from 'vue';
+import { reactive, ref, computed, watch } from 'vue';
 import {
   importRequest, uploadImport, uploadLimit, uploadSizeProblem, progressText, suggestName, NAME_HINT,
   outcomeText, outcomeTone, needsModelHint, bytesText, baseNames, inboxRows, IMPORT_FORMATS, BASE_IS_FROZEN,
 } from './admin-api.js';
-import { admin, ROOT, headers, list, ensureLoaded, reload, noticeClass } from './shared.js';
+import {
+  admin, ROOT, headers, list, reload, noticeClass, useFreshData, useSort, SortTh,
+} from './shared.js';
+
+/** The sortable columns of the inbox table. */
+const INBOX_COLUMNS = Object.freeze({
+  file: { type: 'text', value: (r) => r.label },
+  kind: { type: 'text', value: (r) => r.kindText },
+  size: { type: 'number', value: (r) => r.bytes },
+  modified: { type: 'date' },
+});
 import { hostInfo } from './databases.js';
 
 const freshForm = (source = 'upload') => ({ source, file: null, path: '', inbox: '', name: '', base: '', format: '', description: '', role: 'normal' });
 
 export default {
+  components: { SortTh },
   props: { api: { type: Object, required: true }, params: { type: Object, default: () => ({}) } },
   setup(props) {
     const form = reactive(freshForm());
@@ -126,10 +139,14 @@ export default {
       reset();
     }
 
-    onMounted(ensureLoaded);
+    useFreshData(async () => {
+      await Promise.all([reload(), form.source === 'inbox' ? loadInbox() : null]);
+    });
+    const inboxSort = useSort('inbox', INBOX_COLUMNS);
+    const inboxList = computed(() => inboxSort.rows(inbox.rows));
 
     return {
-      form, s, notice, inbox, loadInbox, pickInbox, fileInput, bases, limit, fileProblem, percent, cancel, submit, pickFile, pathChanged, noticeClass,
+      form, s, notice, inbox, inboxSort, inboxList, loadInbox, pickInbox, fileInput, bases, limit, fileProblem, percent, cancel, submit, pickFile, pathChanged, noticeClass,
       progressText, bytesText, formats: IMPORT_FORMATS, frozen: BASE_IS_FROZEN, nameHint: NAME_HINT,
       touchName: () => { nameTouched = true; },
       openDatabases: () => props.api.navigate('databases'),
@@ -163,11 +180,11 @@ export default {
         <p v-if="inbox.error" class="srv-problems" role="alert">{{ inbox.error.text }}<template v-if="inbox.error.help"> {{ inbox.error.help }}</template></p>
         <p v-else-if="inbox.loaded && !inbox.rows.length" class="muted">The inbox is empty.</p>
         <div v-else-if="inbox.rows.length" class="srv-table-wrap"><table class="data-table srv-table">
-          <thead><tr><th></th><th>File</th><th>Kind</th><th>Size</th><th>Modified</th></tr></thead>
+          <thead><tr><th><span class="sr-only">Pick</span></th><sort-th :s="inboxSort" k="file">File</sort-th><sort-th :s="inboxSort" k="kind">Kind</sort-th><sort-th :s="inboxSort" k="size" num>Size</sort-th><sort-th :s="inboxSort" k="modified">Modified</sort-th></tr></thead>
           <tbody>
-            <tr v-for="r in inbox.rows" :key="r.name">
+            <tr v-for="r in inboxList" :key="r.name">
               <td><input type="radio" name="inbox" :value="r.name" :checked="form.inbox === r.name" :disabled="!r.importable" @change="pickInbox(r)" :aria-label="'Import ' + r.name"></td>
-              <td class="mono">{{ r.label }}</td><td>{{ r.kindText }}</td><td>{{ r.sizeText }}</td><td class="muted">{{ r.modified }}</td>
+              <td class="mono">{{ r.label }}</td><td>{{ r.kindText }}</td><td class="num">{{ r.sizeText }}</td><td class="muted">{{ r.modified }}</td>
             </tr>
           </tbody>
         </table></div>
