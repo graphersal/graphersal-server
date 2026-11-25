@@ -21,7 +21,9 @@ from published files). When this file disagrees with the code, the code wins: sa
   is the `ui/` of the published graphersal-serve crate. Moving to a new Graphersal version:
   bump the four pins together, `cargo update -p graphersal ...`, commit the lock. Never edit the
   graphersal repository from a task here. This repository keeps its own `target/` (never share
-  graphersal's).
+  graphersal's). Temporarily (the access series) the root `Cargo.toml` takes the four crates as
+  PATH dependencies on `../graphersal-sa/crates/...` (the worktree of graphersal's branch
+  `feat/server-access`); task B-PIN restores `=0.8.0` from crates.io.
 - `src/lib.rs` modules: `config` (`server.toml`, `ServerConfig`, `parse_listen`, `[limits]
   upload_bytes` (default 4 GiB), `max_connections`, `header_timeout_secs`, `idle_timeout_secs`
   = `Limits`), `layout`

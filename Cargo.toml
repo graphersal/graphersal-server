@@ -13,18 +13,20 @@ edition = "2024"
 rust-version = "1.88"
 
 [workspace.dependencies]
-# Graphersal's hosting pieces, from crates.io. graphersal-serve, graphersal-session and
-# graphersal-mcp are EXPERIMENTAL crates: exact pin (`=`) during 0.x, all four on the same
-# version (graphersal-serve ships the playground UI it embeds in its `ui/`).
-graphersal = { version = "=0.7.1" }
-graphersal-serve = { version = "=0.7.1" }
+# Graphersal's hosting pieces. graphersal-serve, graphersal-session and graphersal-mcp are
+# EXPERIMENTAL crates: exact pin (`=`) from crates.io during 0.x, all four on the same version
+# (graphersal-serve ships the playground UI it embeds in its `ui/`).
+# path deps for the access series; B-PIN restores =0.8.0 from crates.io
+# (the worktree of graphersal's branch feat/server-access beside this repository).
+graphersal = { path = "../graphersal-sa/crates/graphersal" }
+graphersal-serve = { path = "../graphersal-sa/crates/graphersal-serve" }
 # The session a served database runs in: `graphersal_serve::launch` takes its `SessionPresets`,
 # and `Context::call` jobs receive its `Session` (already in the tree through graphersal-serve).
-graphersal-session = { version = "=0.7.1" }
+graphersal-session = { path = "../graphersal-sa/crates/graphersal-session" }
 # The MCP endpoint: `/mcp` over every database of the registry (its directory mode,
 # `Mcp::handle_directory`) and `/db/<name>/mcp` per loaded database, one shared `Mcp` (sessions,
 # token, statistics); already in the tree through graphersal-serve's `mcp` feature.
-graphersal-mcp = { version = "=0.7.1" }
+graphersal-mcp = { path = "../graphersal-sa/crates/graphersal-mcp" }
 
 # `server.toml` and the run file: the TOML reader/writer (serde based).
 toml = "1"
