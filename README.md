@@ -19,7 +19,10 @@ an HTTP API, a console (`graphersal-server db ...`) and the server's own web UI 
 > follows the same grants. Tokens travel in clear text over plain HTTP: the server listens on
 > the loopback (`127.0.0.1:8484`) by default and prints a warning when told to listen on any
 > other address. Every request but the health probes is also checked by `Host` and `Origin`
-> (against DNS rebinding and cross-site pages).
+> (against DNS rebinding and cross-site pages). Behind a reverse proxy that ends TLS, set
+> `server.toml`'s `[http] public_scheme = "https"` (a `Secure` login cookie) and
+> `allowed_hosts` (the public names); `[access] enabled = false` turns access control off
+> (every request is an admin; the start block warns). See `docs/server-dir.md`.
 
 ## Download / build
 
@@ -193,7 +196,8 @@ a build first, else these two tests are skipped).
 
 ```
 <server-dir>/
-  server.toml     listen address, MCP options, defaults for new databases, limits
+  server.toml     listen address, MCP options, defaults for new databases, limits,
+                  sessions, access control on/off, public scheme and host names
   server.lock     one running server per directory
   server.run      the running server's address (only while it runs)
   aliases.toml    current = "acme-2026.3"

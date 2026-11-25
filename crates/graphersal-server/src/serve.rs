@@ -80,14 +80,14 @@ use tokio::task::JoinHandle;
 
 use crate::access::{Access, FirstAdmin, Secret};
 use crate::audit::Audit;
-use crate::config::Limits;
+use crate::config::{Limits, ServerConfig};
 use crate::error::ServerError;
 use crate::layout::ServerDir;
 use crate::loader::Loader;
 use crate::lock::ServerLock;
 use crate::ops::ExportFile;
 use crate::registry::Registry;
-use crate::router::{Answer, Router};
+use crate::router::{Answer, Modes, Router};
 use crate::run_file::RunInfo;
 use crate::sessions::FileSessions;
 
@@ -247,6 +247,7 @@ pub struct Running {
     address: SocketAddr,
     url: String,
     exposure: Exposure,
+    config: ServerConfig,
     access: Option<Arc<Access>>,
     first_admin: Option<FirstAdmin>,
 }
@@ -266,6 +267,15 @@ fn check_limits(limits: &ConnectionLimits) -> Result<(), ServerError> {
         }
     }
     Ok(())
+}
+
+/// The hint of the `403` to an unknown `Host`: the URL to open, and the setting that admits a
+/// public name.
+fn host_hint(url: &str) -> String {
+    format!(
+        "open this server at {url}, or add the public name to [http] allowed_hosts in \
+         server.toml (behind a reverse proxy)"
+    )
 }
 
 /// Starts serving the server directory `root` (module docs).
@@ -313,9 +323,10 @@ pub fn start(
     };
     let url = url_of(address);
     let host_check = HostCheck::new(exposure, address.port(), &url)
-        .with_hint(format!("open this server at {url}"));
+        .with_allowed_hosts(config.http.allowed_hosts.clone())
+        .with_hint(host_hint(&url));
     let shared = Arc::new(Shared {
-        router: Router::new(host_check.clone()),
+        router: Router::new(host_check.clone()).with_modes(Modes::of(&config)),
         in_flight: AtomicUsize::new(0),
         limits,
         connections: Arc::new(Semaphore::new(limits.max_connections)),
@@ -348,6 +359,7 @@ pub fn start(
         address,
         url,
         exposure,
+        config: config.clone(),
         access: None,
         first_admin: None,
     };
@@ -445,6 +457,12 @@ impl Running {
     /// HTTP).
     pub fn exposure(&self) -> Exposure {
         self.exposure
+    }
+
+    /// The configuration the server started with (`server.toml` as read at start; the
+    /// access, HTTP, session and MCP modes in effect).
+    pub fn config(&self) -> &ServerConfig {
+        &self.config
     }
 
     /// The server directory.

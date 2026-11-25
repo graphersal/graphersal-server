@@ -82,6 +82,13 @@ idle_timeout_secs = 60      # a connection without a running request is closed a
 [sessions]                  # how long a browser session lasts; no limit when left out
 # lifetime_secs = 2592000   # since its login
 # idle_timeout_secs = 604800   # since its last request
+
+[access]
+enabled = true              # false: NO access control, every request is an admin
+
+[http]
+public_scheme = "http"      # "https" when a reverse proxy ends TLS (Secure login cookie)
+# allowed_hosts = ["db.example.com"]   # public names behind a reverse proxy
 ```
 
 | Key | Default | Read | Meaning |
@@ -97,6 +104,13 @@ idle_timeout_secs = 60      # a connection without a running request is closed a
 | `[limits] idle_timeout_secs` | `60` | at start | seconds a connection without a running request stays open (HTTP/1.1: at most the shorter of this and `header_timeout_secs`). `serve --idle-timeout SECS` overrides it |
 | `[sessions] lifetime_secs` | none (no limit) | at start | the longest a browser session lasts after its login, in seconds (at least 1); the browser logs in again afterwards |
 | `[sessions] idle_timeout_secs` | none (no limit) | at start | the longest a browser session lasts after its last request, in seconds (at least 1); counted coarsely (the last request is recorded at most every minute, every quarter of a shorter timeout) |
+| `[access] enabled` | `true` | at start | `false` turns access control off: nothing is refused, every request is an admin. Valid admin credentials keep their identity (the console's operator, an admin user); every other request (none, a user without the admin role, wrong credentials) runs as the admin principal `everyone`, which the audit names. Login still works but is not needed. The `serve` start block warns loudly, and louder (in the banner too) when the address is not a loopback address. `access.toml` is still read and its first admin created, so turning access back on needs no other change |
+| `[http] public_scheme` | `"http"` | at start | how clients reach the server: `"http"`, or `"https"` when a reverse proxy ends TLS. `https` gives the `gs_session` login cookie `Secure` (a browser drops a `Secure` cookie over plain HTTP, except on localhost). On `http` with an address that is not a loopback address, the start block warns that tokens travel in clear text; on `https` it warns to let only the proxy reach the address |
+| `[http] allowed_hosts` | `[]` | at start | further names a request's `Host` (and an `http://`/`https://` `Origin`) may name besides this machine's loopback names and the listen address: the public names behind a reverse proxy. Each a host name or IP address with an optional port (`"db.example.com"`, `"db.example.com:443"`); the port is not checked (a name is admitted on any port); lower case, no scheme or path. Other names are refused with `403` as before (DNS rebinding) |
+
+The login cookie (`gs_session`) carries `Max-Age` = `[sessions] lifetime_secs` when set, else
+400 days (the longest a browser keeps a cookie), so a browser restart keeps the login; the
+server still ends the session by its own limits. The logout clears it with `Max-Age=0`.
 
 The `[defaults]` apply to databases created empty (`db create`) and to snapshot (`.gsnap`),
 GraphSON and GraphML imports. A clone, a restore and a Store (`.gstore`, Store directory) import

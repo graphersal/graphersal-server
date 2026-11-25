@@ -20,6 +20,13 @@
 //! [sessions]                  # browser sessions (they survive a restart); unlimited by default
 //! lifetime_secs = 2592000     # the longest a session lasts after its login
 //! idle_timeout_secs = 604800  # the longest a session lasts after its last request
+//!
+//! [access]
+//! enabled = true              # false: no access control, every request is an admin
+//!
+//! [http]
+//! public_scheme = "http"      # "https" behind a TLS proxy: the login cookie gets `Secure`
+//! allowed_hosts = []          # public names behind a proxy ("db.example.com", port optional)
 //! ```
 //!
 //! Every key is optional (its default applies); an unknown key is an error (a typo must not be
@@ -60,6 +67,76 @@ pub struct ServerConfig {
     /// How long browser sessions last.
     #[serde(default)]
     pub sessions: SessionsConfig,
+    /// Whether access control is on.
+    #[serde(default)]
+    pub access: AccessConfig,
+    /// How clients reach the server (scheme, public host names).
+    #[serde(default)]
+    pub http: HttpConfig,
+}
+
+/// Access control (`[access]` of `server.toml`), read at start.
+///
+/// `#[non_exhaustive]`: further settings may be added.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct AccessConfig {
+    /// Whether requests are authenticated and refused per principal (default `true`). `false`:
+    /// no access control, every request runs as an admin (the operator or an admin user when
+    /// its credentials are valid, else the principal `everyone`); the start block warns.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+impl Default for AccessConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
+/// How clients reach the server: the scheme of its public URL.
+///
+/// `#[non_exhaustive]`: another scheme is not planned, but the set is not closed by definition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+#[non_exhaustive]
+pub enum PublicScheme {
+    /// Plain HTTP (the default): the login cookie has no `Secure` (a browser drops a `Secure`
+    /// cookie over plain HTTP except on localhost); tokens travel in clear text.
+    #[default]
+    Http,
+    /// HTTPS, TLS ended by a reverse proxy: the login cookie gets `Secure`.
+    Https,
+}
+
+impl PublicScheme {
+    /// The scheme as `server.toml` writes it: `http`, `https`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PublicScheme::Http => "http",
+            PublicScheme::Https => "https",
+        }
+    }
+}
+
+/// How clients reach the server (`[http]` of `server.toml`), read at start.
+///
+/// `#[non_exhaustive]`: further settings may be added.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct HttpConfig {
+    /// The scheme clients use (default [`PublicScheme::Http`]).
+    #[serde(default)]
+    pub public_scheme: PublicScheme,
+    /// Further host names a request's `Host` (and an `http(s)://` `Origin`) may name besides
+    /// the listen address's own names: the public names behind a reverse proxy. A name with an
+    /// optional port (`db.example.com`, `db.example.com:443`, an IP address, `[::1]`); the port
+    /// is not checked (a name is admitted on any port). [`ServerConfig::parse`] normalizes
+    /// them: lower case, no port, no trailing dot, IPv6 in brackets, no duplicates.
+    #[serde(default)]
+    pub allowed_hosts: Vec<String>,
 }
 
 /// How long browser sessions last (`[sessions]` of `server.toml`), read at start. Both keys
@@ -227,6 +304,8 @@ impl Default for ServerConfig {
             defaults: DatabaseDefaults::default(),
             limits: Limits::default(),
             sessions: SessionsConfig::default(),
+            access: AccessConfig::default(),
+            http: HttpConfig::default(),
         }
     }
 }
@@ -252,7 +331,7 @@ impl Default for DatabaseDefaults {
 impl ServerConfig {
     /// Parses and checks the text of `server.toml` (`path` names the file in errors).
     pub fn parse(text: &str, path: &Path) -> Result<Self, ServerError> {
-        let config: ServerConfig = toml::from_str(text).map_err(|err| ServerError::Config {
+        let mut config: ServerConfig = toml::from_str(text).map_err(|err| ServerError::Config {
             path: path.to_path_buf(),
             message: err.message().to_string(),
         })?;
@@ -311,6 +390,8 @@ impl ServerConfig {
                 )));
             }
         }
+        config.http.allowed_hosts = allowed_hosts(&config.http.allowed_hosts)
+            .map_err(|err| invalid(format!("http.allowed_hosts: {err}")))?;
         Ok(config)
     }
 
@@ -346,6 +427,62 @@ pub fn parse_listen(value: &str) -> Result<SocketAddr, ServerError> {
             .map_err(|_| refused("the port is not a number from 0 to 65535")),
         Some(_) => Err(refused("not an IP address with a port")),
         None => Err(refused("no port")),
+    }
+}
+
+/// Checks and normalizes the allowed host names ([`HttpConfig::allowed_hosts`]): each a host
+/// name or an IP address with an optional port, without scheme or path; lower case, port and
+/// trailing dot dropped, IPv6 in brackets, duplicates dropped.
+fn allowed_hosts(raw: &[String]) -> Result<Vec<String>, String> {
+    let mut names = Vec::new();
+    for entry in raw {
+        let value = entry.trim();
+        let refused = || {
+            format!(
+                "{entry:?} is not a host name such as db.example.com (an optional port, no \
+                 scheme or path): the public name of this server behind a reverse proxy"
+            )
+        };
+        let name = match value.parse::<SocketAddr>() {
+            Ok(addr) => normal_ip(addr.ip()),
+            Err(_) => {
+                let bare = value
+                    .strip_prefix('[')
+                    .and_then(|v| v.strip_suffix(']'))
+                    .unwrap_or(value);
+                match bare.parse::<IpAddr>() {
+                    Ok(ip) => normal_ip(ip),
+                    Err(_) => {
+                        let host = match value.rsplit_once(':') {
+                            Some((host, port)) if port.parse::<u16>().is_ok() => host,
+                            Some(_) => return Err(refused()),
+                            None => value,
+                        };
+                        let host = host.trim_end_matches('.');
+                        let valid = !host.is_empty()
+                            && host
+                                .chars()
+                                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_'));
+                        if !valid {
+                            return Err(refused());
+                        }
+                        host.to_ascii_lowercase()
+                    }
+                }
+            }
+        };
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    Ok(names)
+}
+
+/// An IP address as a `Host` header names it (IPv6 in brackets).
+fn normal_ip(ip: IpAddr) -> String {
+    match ip {
+        IpAddr::V4(ip) => ip.to_string(),
+        IpAddr::V6(ip) => format!("[{ip}]"),
     }
 }
 
@@ -395,7 +532,24 @@ pub fn default_config_text() -> String {
          # Since its login (30 days here):\n\
          # lifetime_secs = 2592000\n\
          # Since its last request (7 days here; counted coarsely, up to a minute):\n\
-         # idle_timeout_secs = 604800\n",
+         # idle_timeout_secs = 604800\n\
+         # The login cookie lasts as long as lifetime_secs, else 400 days (a browser restart\n\
+         # keeps the login).\n\
+         \n\
+         [access]\n\
+         # Access control: requests need a user token or a browser login (access.toml).\n\
+         # false = NO access control: every request is an admin (serve warns loudly). Read\n\
+         # when the server starts.\n\
+         enabled = true\n\
+         \n\
+         [http]\n\
+         # How clients reach the server: \"http\", or \"https\" when a reverse proxy ends TLS\n\
+         # (the login cookie then gets Secure; over http tokens travel in clear text).\n\
+         public_scheme = \"http\"\n\
+         # The public names behind a reverse proxy that requests may name in Host, besides\n\
+         # this machine's loopback names and the listen address (a port is optional and not\n\
+         # checked). Other names are refused (DNS rebinding).\n\
+         # allowed_hosts = [\"db.example.com\"]\n",
         DEFAULT_MCP_SESSIONS,
         defaults.chunk_bytes,
         defaults.damage_policy,
@@ -553,5 +707,56 @@ mod tests {
             assert!(err.contains(key) && err.contains("no limit"), "{err}");
         }
         assert!(parse("[sessions]\nenabled = false").is_err());
+    }
+
+    #[test]
+    fn access_and_http_modes_default_and_parse() {
+        let config = parse(&default_config_text()).unwrap();
+        assert!(config.access.enabled);
+        assert_eq!(config.http.public_scheme, PublicScheme::Http);
+        assert!(config.http.allowed_hosts.is_empty());
+        assert!(
+            default_config_text().contains("\n[access]\n")
+                && default_config_text().contains("\n[http]\n")
+        );
+        assert!(default_config_text().contains("public_scheme = \"http\""));
+        let config = parse(
+            "[access]\nenabled = false\n[http]\npublic_scheme = \"https\"\n\
+             allowed_hosts = [\"DB.Example.com.\", \"db.example.com:443\", \"10.0.0.7:80\", \
+             \"::1\", \"[fe80::1]:8484\", \"proxy\"]",
+        )
+        .unwrap();
+        assert!(!config.access.enabled);
+        assert_eq!(config.http.public_scheme, PublicScheme::Https);
+        assert_eq!(config.http.public_scheme.as_str(), "https");
+        assert_eq!(
+            config.http.allowed_hosts,
+            ["db.example.com", "10.0.0.7", "[::1]", "[fe80::1]", "proxy"]
+        );
+        for (text, needle) in [
+            (
+                "[http]\npublic_scheme = \"ftp\"",
+                "expected `http` or `https`",
+            ),
+            (
+                "[http]\nallowed_hosts = [\"https://db.example.com\"]",
+                "allowed_hosts",
+            ),
+            (
+                "[http]\nallowed_hosts = [\"db.example.com/x\"]",
+                "allowed_hosts",
+            ),
+            (
+                "[http]\nallowed_hosts = [\"db.example.com:x\"]",
+                "allowed_hosts",
+            ),
+            ("[http]\nallowed_hosts = [\"\"]", "allowed_hosts"),
+            ("[http]\nallowed_hosts = [\"a b\"]", "allowed_hosts"),
+            ("[http]\nallowed_host = []", "allowed_host"),
+            ("[access]\nenable = false", "enable"),
+        ] {
+            let err = parse(text).unwrap_err().to_string();
+            assert!(err.contains(needle), "{text:?}: {err}");
+        }
     }
 }

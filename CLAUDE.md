@@ -27,7 +27,8 @@ from published files). When this file disagrees with the code, the code wins: sa
 - `src/lib.rs` modules: `access` (B2: `access.toml` = `AccessFile` (`[users.<name>] roles,
   token_sha256, token_last4`; `[[grant]] subject/database/level`, `deny_unknown_fields`,
   written atomically mode 0600, hashes only), `Principal` (`identity()`: `user:<name>`,
-  `operator`, anonymous = `None`; `subjects()` incl. `anonymous` for everyone), `Level`
+  `operator`, `everyone` (B6: kind `Everyone`, admin, only with `[access] enabled = false`),
+  anonymous = `None`; `subjects()` incl. `anonymous` for everyone), `Level`
   (`None < Read < Write`; `granted_level` = admin/operator `Write`, else the highest grant of
   any subject; `effective_level` = min with the database mode (read-only flag or base);
   `Access::level_in` resolves aliases), `Secret`/`TokenHash` (256-bit OS random via `ring`,
@@ -48,7 +49,10 @@ from published files). When this file disagrees with the code, the code wins: sa
   promote/backup, read-only, auto-load, aliases), `config` (`server.toml`, `ServerConfig`, `parse_listen`, `[limits]
   upload_bytes` (default 4 GiB), `max_connections`, `header_timeout_secs`, `idle_timeout_secs`
   = `Limits`; `[sessions] lifetime_secs`, `idle_timeout_secs` = `SessionsConfig` (optional, >= 1,
-  missing = no limit) -> `SessionLimits`, read at start), `sessions` (B9: sessions survive a
+  missing = no limit) -> `SessionLimits`, read at start; B6: `[access] enabled` = `AccessConfig`
+  (default true), `[http] public_scheme` (`PublicScheme` http|https) and `allowed_hosts`
+  (normalized by `parse`: lower case, port dropped, IPv6 in brackets) = `HttpConfig`, read at
+  start; `Running::config()` = the config the server started with), `sessions` (B9: sessions survive a
   restart, ALWAYS on, no setting: `sessions/browser.json` = `FileSessions` (a `SessionTable`,
   write-through on insert/touch/remove/retain, a failed insert rolled back) and
   `sessions/mcp.json` = `McpSessionFile` (graphersal-mcp `SessionStore`; `keeping(identity
@@ -217,7 +221,10 @@ from published files). When this file disagrees with the code, the code wins: sa
   through a server shows `served at: <server.run url>db/<name>/`, from `Outcome::server_url`);
   `console::source_path` = the import source absolute and lexically normalised (kept as given
   when a `..` after a symlink would name another file)) and
-  `console/start.rs` (the `serve` start block: banner (+ the network warning), sections
+  `console/start.rs` (the `serve` start block: banner (`banner_for(exposure, access)`) + the
+  warnings (`warnings`: access off (louder off the loopback), else off the loopback http =
+  clear text, https = only the proxy should reach it), the Server rows access / scheme (with the
+  cookie's `Max-Age`) / allowed hosts (`mode_rows`), sections
   Server / Databases / Problems / Embedding models / MCP; `address_line` = the one stdout line;
   stop lines)), `text` (crate-private: the graphersal CLI's layout, copied from its
   `sections.rs` + `Note`: `Section`/`render` (`── Title ───` headings at 78, `key: value` in
@@ -405,7 +412,9 @@ WD_TIMEOUT=600 ../graphersal/ai/bench/watchdog.sh scripts/smoke.sh   # end to en
   granted level (none: anonymous 401 for every name, a page GET 303 `/?next=`, logged in = the
   unknown-name 404; read = `Request::mark_read_only` on the forwarded request; the database
   mode applies in its context); `/mcp` per principal (`mcp::Directory`); `POST /api/login
-  {"token"}` (`gs_session` cookie `HttpOnly; SameSite=Strict; Path=/`) and `POST /api/logout`
+  {"token"}` (`gs_session` cookie `Max-Age=<[sessions] lifetime_secs, else 400 days>;
+  HttpOnly; SameSite=Strict; Path=/`, `; Secure` with `public_scheme = "https"`;
+  `router::Modes`) and `POST /api/logout`
   run before authentication; root `/api/info` minimal for anonymous (`server`, `protocol`,
   `dev`, `experimental`, `uiProfile`, `principal`, `login`), `principal` for everyone; the UI
   files at `/` and `/server-ui/` are public. The console sends the run's operator token
@@ -413,4 +422,7 @@ WD_TIMEOUT=600 ../graphersal/ai/bench/watchdog.sh scripts/smoke.sh   # end to en
   as the admin through `test_support::operator_token(address)` (unit) and `operator_token` /
   `as_admin` in `tests/server_tests.rs` (the run file of a live test directory). Default listen `127.0.0.1:8484`, a warning for any
   non-loopback address (once, in the console's start block; `serve::start` itself only logs a
-  debug line), `graphersal_serve::HostCheck` on every request but the probes.
+  debug line), `graphersal_serve::HostCheck` on every request but the probes (with
+  `[http] allowed_hosts`). `[access] enabled = false` (B6): `router::open_principal` replaces
+  the refusals: valid admin credentials keep their identity, everything else is `everyone`
+  (tests `router_access_tests.rs` `access_off_*`, `the_login_cookie_*`, `allowed_hosts_*`).

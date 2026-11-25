@@ -18,8 +18,9 @@ rebinding, cross-site pages): send `Host: <the server's address>`; a browser pag
 origin is refused with `403`.
 
 Browser login (beside the admin API): `POST /api/login {"token": "<user token>"}` answers
-`200 {"principal": {"id", "kind", "admin"}}` with the cookie `gs_session` (`HttpOnly;
-SameSite=Strict; Path=/`), `401` for a token nobody holds; `POST /api/logout` ends the session
+`200 {"principal": {"id", "kind", "admin"}}` with the cookie `gs_session` (`Max-Age=<[sessions]
+lifetime_secs, else 400 days>; HttpOnly; SameSite=Strict; Path=/`, plus `Secure` when
+`server.toml [http] public_scheme = "https"`), `401` for a token nobody holds; `POST /api/logout` ends the session
 of the request's cookie and clears it (`200 {"loggedOut": bool}`). Browser sessions survive a
 server restart (kept in `sessions/browser.json`, hashes only) and last until the logout, a
 change of the user's token, the user's removal, or the `[sessions]` limits of `server.toml`
