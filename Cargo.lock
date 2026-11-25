@@ -327,7 +327,7 @@ dependencies = [
 
 [[package]]
 name = "graphersal"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "bitmask-enum",
  "compact_str",
@@ -360,7 +360,7 @@ dependencies = [
 
 [[package]]
 name = "graphersal-mcp"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "graphersal",
  "graphersal-session",
@@ -372,7 +372,7 @@ dependencies = [
 
 [[package]]
 name = "graphersal-serve"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "graphersal",
  "graphersal-mcp",
@@ -405,7 +405,7 @@ dependencies = [
 
 [[package]]
 name = "graphersal-session"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "graphersal",
  "serde",

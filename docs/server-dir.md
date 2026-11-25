@@ -56,7 +56,8 @@ level = "read"             # or "write"
 
 Change it with `graphersal-server user ... --dir DIR` (offline on the file, or through the
 running server so its sessions follow at once) or the admin API's `users` and `grants` routes
-(`admin-api.md`); an unknown key is an error.
+(`admin-api.md`); an unknown key is an error. The model (principals, levels, tokens, logins,
+modes): [`access.md`](access.md).
 
 ## `server.toml`
 
@@ -165,16 +166,20 @@ a server or an offline console command works on the directory; the OS releases i
 process ends, also on a crash. The file itself stays and means nothing when unlocked. A second
 `serve` on a locked directory is refused.
 
-`server.run` is written once the listener is bound and removed at a clean stop:
+`server.run` is written once the listener is bound (mode `0600` on unix) and removed at a
+clean stop:
 
 ```toml
 address = "127.0.0.1:51234"
 url = "http://127.0.0.1:51234/"
 pid = 12345
-version = "0.1.0"
+version = "0.2.0"
+operator_token = "<64 hex digits>"
 ```
 
-It holds the address actually bound (port `0` resolved). The console reads it to reach a
+It holds the address actually bound (port `0` resolved) and the operator token of this run: a
+new one at every start, an admin credential the console sends (`Authorization: Bearer`), so
+whoever reads the file can act as an admin while the server runs ([`access.md`](access.md)). The console reads it to reach a
 running server; it is trustworthy only while `server.lock` is held (a crash leaves it behind,
 the next server overwrites it).
 
@@ -195,7 +200,9 @@ alias whose target is missing is dropped at start and reported in the listing's 
 
 There is no registry file: the databases ARE the directories under `databases/`, read at start.
 Names follow `[a-z0-9][a-z0-9._-]{0,62}` (no Windows device names) and are unique
-case-insensitively. A directory whose `database.toml` or Store is broken is listed as `failed`
+case-insensitively. A new database or alias cannot be named `jobs` (reserved: the default
+backup root `backups/jobs/` would also hold the admin backups of a database of that name); a
+database of that name made by an earlier version is still served. A directory whose `database.toml` or Store is broken is listed as `failed`
 with the reason; it never stops the server.
 
 Every create, clone, import and restore builds the new database in `tmp/` and renames it into

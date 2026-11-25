@@ -22,7 +22,7 @@ an HTTP API, a console (`graphersal-server db ...`) and the server's own web UI 
 > (against DNS rebinding and cross-site pages). Behind a reverse proxy that ends TLS, set
 > `server.toml`'s `[http] public_scheme = "https"` (a `Secure` login cookie) and
 > `allowed_hosts` (the public names); `[access] enabled = false` turns access control off
-> (every request is an admin; the start block warns). See `docs/server-dir.md`.
+> (every request is an admin; the start block warns). See [`docs/access.md`](docs/access.md).
 
 ## Download / build
 
@@ -75,16 +75,27 @@ them):
 No timeout covers a whole request: an upload streams as long as it keeps sending (each read of
 a body waits at most 120 s for the next piece).
 
-A first session from the console (in a second terminal while the server runs):
+A first session from the console (in a second terminal while the server runs). The console
+on the server's machine needs no token (it uses the run's operator token from
+`./srv/server.run`); HTTP clients send a user token, here the first admin's, printed once by
+`init` (`docs/access.md`):
 
 ```bash
 graphersal-server db create acme --description "Acme" --dir ./srv
 graphersal-server db load acme --dir ./srv
-curl -s -X POST http://127.0.0.1:8484/db/acme/api/execute \
+TOKEN=<the first admin's token>
+curl -s -X POST http://127.0.0.1:8484/db/acme/api/execute -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"script": "g.add_v(\"person\").property(\"name\", \"ada\").iterate()"}'
-curl -s -X POST http://127.0.0.1:8484/db/acme/api/execute \
+curl -s -X POST http://127.0.0.1:8484/db/acme/api/execute -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' -d '{"script": "g.v().count().next()"}'
+```
+
+A user who should only read `acme` (its token printed once):
+
+```bash
+graphersal-server user add bob --dir ./srv
+graphersal-server user grant bob acme read --dir ./srv
 ```
 
 ## Console
@@ -132,12 +143,12 @@ the usage), `141` stdout closed before the result was written (`| head`).
 | Path | What |
 |---|---|
 | `GET /healthz`, `GET /readyz` | liveness `200`; readiness `200` or `503` while starting or stopping |
-| `GET /api/info` | the server's identity (`server: "graphersal-server"`, `protocol: "graphersal/1"`, `dev: false`), its UI profile `uiProfile`, `uploadBytes`, the MCP endpoint |
+| `GET /api/info` | the server's identity (`server: "graphersal-server"`, `protocol: "graphersal/1"`, `dev: false`), its UI profile `uiProfile` and the request's `principal`; for a logged-in principal also `uploadBytes`, the MCP endpoint and the version (anonymous gets only what the login page needs, plus `login: "/"`) |
 | `GET /` | the server's web UI (the playground showing the `server` UI profile: the login page, "My databases" or the admin tabs, by who asks) |
 | `POST /api/login`, `POST /api/logout` | the browser login with a user token (a `gs_session` cookie) and its logout |
 | `GET /api/databases` | the databases and aliases the caller may reach, with its level and the playground path of each ("My databases") |
 | `GET /server-ui/<file>` | the `server` UI profile's files (its modules and style sheet) |
-| `/db/<name>/...` | the playground and its HTTP API (`POST /db/<name>/api/execute {"script"}`, ...) on the database or alias `<name>`, resolved per request; `409` with help when it is not loaded (never loaded implicitly), `404` when unknown |
+| `/db/<name>/...` | the playground and its HTTP API (`POST /db/<name>/api/execute {"script"}`, ...) on the database or alias `<name>`, resolved per request, at the caller's level (`docs/access.md`: without a grant `401` for anonymous, `303` to the login page for its pages, `404` for a user); `409` with help when it is not loaded (never loaded implicitly), `404` when unknown |
 | `/api/admin/...` | the admin API: [`docs/admin-api.md`](docs/admin-api.md); also the run administration (`GET /api/admin/runs`, `GET /api/admin/databases/<name>/runs`, `POST /api/admin/databases/<name>/runs/cancel {"id"}`: every client's queued and running queries, stop one) |
 | `/mcp`, `/db/<name>/mcp` | the MCP endpoints: [`docs/mcp.md`](docs/mcp.md) |
 
@@ -199,13 +210,17 @@ a build first, else these two tests are skipped).
 ```
 <server-dir>/
   server.toml     listen address, MCP options, defaults for new databases, limits,
-                  sessions, access control on/off, public scheme and host names
+                  sessions, access control on/off, public scheme and host names, backup root
+  access.toml     users (token hashes and last 4 characters), roles, grants
   server.lock     one running server per directory
-  server.run      the running server's address (only while it runs)
+  server.run      the running server's address and operator token (only while it runs)
   aliases.toml    current = "acme-2026.3"
   databases/<name>/database.toml + store/
   models/         one copy of every embedding model, hard-linked into the databases
-  backups/  trash/  tmp/
+  backups/<name>/ admin backups; backups/jobs/: the backup root of backup jobs
+  imports/        the import inbox
+  sessions/       browser and MCP sessions (hashes only), kept over restarts
+  trash/  tmp/
 ```
 
 There is no registry file: the databases are the directories under `databases/`. Details of
@@ -213,22 +228,25 @@ every file and key: [`docs/server-dir.md`](docs/server-dir.md).
 
 ## Documentation
 
+- [`docs/access.md`](docs/access.md): access control: principals, grants and levels, tokens,
+  the first admin, browser login and sessions, MCP with a token, the modes, limits, audit.
 - [`docs/server-dir.md`](docs/server-dir.md): the server directory, `server.toml`,
-  `database.toml`, models, backups, external backups.
+  `access.toml`, `database.toml`, models, backups, the import inbox, sessions, external
+  backups.
 - [`docs/admin-api.md`](docs/admin-api.md): every admin route, its body and answer.
 - [`docs/mcp.md`](docs/mcp.md): the MCP endpoints, configuring an agent, the request headers.
 - `scripts/smoke.sh`: an end-to-end smoke test (build, init, serve, the admin API, the
-  database pages, MCP, a clean stop); needs only bash, curl and python3 (Unix).
+  database pages, MCP, users and a read-only user, the import inbox, a restart keeping the
+  sessions, a clean stop); needs only bash, curl and python3 (Unix).
 - `scripts/smoke.ps1`: the smoke test of a built binary in PowerShell 7 for Windows (CI and
   the release build): `pwsh scripts/smoke.ps1 -Bin <path to graphersal-server.exe>`.
-- [`docs/release-notes-0.1.0.md`](docs/release-notes-0.1.0.md): what 0.1.0 is and its known
-  limits. CI (`.github/workflows/ci.yml`) and the release build (`release.yml`) run on Windows
+- [`docs/release-notes-0.2.0.md`](docs/release-notes-0.2.0.md): what 0.2.0 changes (access
+  control and the rest); [`docs/release-notes-0.1.0.md`](docs/release-notes-0.1.0.md): what
+  0.1.0 is and its known limits. CI (`.github/workflows/ci.yml`) and the release build (`release.yml`) run on Windows
   only for now.
 
 ## Known limitations
 
-- **Plain HTTP** (see above): tokens and session cookies travel in clear text; keep the server
-  on the loopback or behind a TLS proxy.
 - A **base is frozen forever** (by design: layers depend on its exact state). A base with data
   comes from an import with role base (`import ... --role base`, `POST /api/admin/import?...
   &role=base`) or from promoting an unloaded plain database (`db promote NAME`, `POST
@@ -253,8 +271,9 @@ every file and key: [`docs/server-dir.md`](docs/server-dir.md).
   memory is known only inside its session thread.
 - No admin tools over MCP. Browser and MCP sessions survive a restart (`sessions/`, hashes
   only; `docs/server-dir.md`).
-- **Plain HTTP** (HTTP/1.1 and h2c, no TLS, so no HTTP/2 negotiation by ALPN): put a reverse
-  proxy in front for anything beyond the loopback. On HTTP/2 an answer of a request whose body
+- **Plain HTTP** (HTTP/1.1 and h2c, no TLS, so no HTTP/2 negotiation by ALPN): tokens and
+  session cookies travel in clear text; keep the server on the loopback or put a TLS reverse
+  proxy in front (`[http] public_scheme = "https"`). On HTTP/2 an answer of a request whose body
   the route did not read resets that stream (HTTP/1.1 closes the connection with a lingering
   close instead).
 - **Prebuilt binary for Windows x86_64 only**; other platforms build from source (see

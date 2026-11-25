@@ -506,7 +506,7 @@ fn import_upload(admin: &Admin, request: &mut Request<'_>) -> Result<Response, H
     let role = parse_role(params.remove("role").as_deref())?;
     // The quick refusals before the body is read (the listener drains it).
     let key = fold(&name);
-    if let Err(err) = crate::names::validate_name(&key) {
+    if let Err(err) = crate::names::validate_new_name(&key) {
         return Ok(error_answer(&err, None));
     }
     if let Ok(entry) = admin.registry().get(&key) {
@@ -870,6 +870,9 @@ pub(crate) fn status_of(err: &ServerError) -> u16 {
 /// `{"error", "help"?}` for an admin core error.
 fn error_answer(err: &ServerError, help: Option<String>) -> Response {
     let help = help.or_else(|| match err {
+        ServerError::InvalidName { name, .. } if crate::names::is_reserved(name) => {
+            Some(crate::names::RESERVED_HELP.to_string())
+        }
         ServerError::NotFound { .. } => {
             Some("GET /api/admin/databases lists the databases and aliases".to_string())
         }
@@ -1592,6 +1595,100 @@ mod tests {
 
     fn json_of(response: &Response) -> Value {
         serde_json::from_slice(response.body()).unwrap()
+    }
+
+    /// The route over an offline admin of `registry` with the request `url` and `body`.
+    fn route_with(
+        registry: &std::sync::Arc<Registry>,
+        method: &Method,
+        endpoint: &str,
+        url: &str,
+        content_type: &str,
+        body: &[u8],
+    ) -> Result<Response, HttpError> {
+        let mut request = Request::new(method.clone(), url, body)
+            .with_header("Content-Type", content_type)
+            .with_body_length(Some(body.len()));
+        super::route(
+            &Admin::offline(registry.clone()),
+            method,
+            endpoint,
+            &mut request,
+        )
+    }
+
+    /// `jobs` is reserved (the default backup root `backups/jobs/` would hold the admin
+    /// backups of a database of that name): create, clone, import, alias and alias rename
+    /// refuse it with help; nothing is made.
+    #[test]
+    fn the_reserved_name_jobs_is_refused_with_help() {
+        let temp = TempDir::new("admin-api-reserved");
+        let dir = server(&temp);
+        add_db(&dir, "acme", Some(""), true);
+        let registry = Registry::scan(&dir).unwrap();
+        registry.alias_set("cur", "acme").unwrap();
+        let cases: [(Method, &str, &str, &str, &[u8]); 5] = [
+            (
+                Method::Post,
+                "databases",
+                "/api/admin/databases",
+                "application/json",
+                br#"{"name": "jobs"}"#,
+            ),
+            (
+                Method::Post,
+                "databases/acme/clone",
+                "/api/admin/databases/acme/clone",
+                "application/json",
+                br#"{"name": "jobs"}"#,
+            ),
+            (
+                Method::Post,
+                "import",
+                "/api/admin/import?name=jobs",
+                "application/octet-stream",
+                b"not read",
+            ),
+            (
+                Method::Put,
+                "aliases/jobs",
+                "/api/admin/aliases/jobs",
+                "application/json",
+                br#"{"target": "acme"}"#,
+            ),
+            (
+                Method::Post,
+                "aliases/cur/rename",
+                "/api/admin/aliases/cur/rename",
+                "application/json",
+                br#"{"name": "jobs"}"#,
+            ),
+        ];
+        for (method, endpoint, url, content_type, body) in cases {
+            let answer = route_with(&registry, &method, endpoint, url, content_type, body)
+                .unwrap_or_else(|err| panic!("{endpoint}: {}", err.message()));
+            assert_eq!(answer.status(), 400, "{endpoint}");
+            let answer = json_of(&answer);
+            let error = answer["error"].as_str().unwrap();
+            assert!(error.contains("reserved"), "{endpoint}: {error}");
+            assert!(error.contains("backups/jobs/"), "{endpoint}: {error}");
+            assert_eq!(answer["help"], crate::names::RESERVED_HELP, "{endpoint}");
+        }
+        let names: Vec<String> = registry.list().into_iter().map(|e| e.name).collect();
+        assert_eq!(names, ["acme"]);
+        assert_eq!(registry.aliases().len(), 1);
+        assert_eq!(registry.aliases()["cur"], "acme");
+        // A similar name is fine.
+        let created = route_with(
+            &registry,
+            &Method::Post,
+            "databases",
+            "/api/admin/databases",
+            "application/json",
+            br#"{"name": "jobs-db"}"#,
+        )
+        .unwrap();
+        assert_eq!(created.status(), 201);
     }
 
     #[test]

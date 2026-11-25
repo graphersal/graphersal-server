@@ -1,0 +1,250 @@
+# Access control (EXPERIMENTAL)
+
+Who may do what on a graphersal-server: the principals, the grants in `access.toml`, tokens,
+browser logins, MCP, the modes of `server.toml` and the limits an admin sets. The file formats
+are in [`server-dir.md`](server-dir.md), the routes in [`admin-api.md`](admin-api.md) and
+[`mcp.md`](mcp.md).
+
+Access control is on by default. Every request except the health probes (`/healthz`,
+`/readyz`), the root `GET /api/info` and the files of the web UI needs a principal that is
+allowed to make it. Tokens and session cookies travel in clear text over plain HTTP (see
+[Modes](#modes)).
+
+## Principals
+
+Every request is answered for ONE principal:
+
+| Principal | Who | Identity (audit, MCP sessions) |
+|---|---|---|
+| a user | a request with `Authorization: Bearer <user token>`, or with the browser's `gs_session` cookie after a login | `user:<name>` |
+| the operator | the console on the server's machine, with the per-run operator token from `server.run` (`Authorization: Bearer`); an admin | `operator` |
+| anonymous | a request without credentials | none |
+| everyone | every request while access control is off (`[access] enabled = false`); an admin | `everyone` |
+
+Wrong credentials (a token nobody holds, an ended session's cookie) are `401`. They never
+fall back to anonymous. `GET /api/info` names the request's principal: `principal {id, kind,
+admin}`.
+
+The operator token is made fresh at every `serve` and written to `server.run` (mode `0600` on
+unix; removed at a clean stop). The console reads it from there, so whoever can read
+`server.run` can act as an admin while the server runs. The operator token cannot log in
+through the browser.
+
+## Grants and levels
+
+`access.toml` holds the users (each with roles, the SHA-256 of its token and the token's
+last four characters) and the grants. A grant has three parts:
+
+- `subject`: `user:<name>`, `role:<role>`, or `anonymous`. `anonymous` means everyone,
+  including requests without a token, so a logged-in user always reaches at least what
+  anonymous reaches.
+- `database`: the real name of a database, or `*` for every database. A grant cannot name an
+  alias: the grant follows the database, and an alias pointing at it is reached with the
+  database's level.
+- `level`: `read` or `write`.
+
+A principal's level on a database is computed in two steps:
+
+1. Its granted level is the highest grant of any of its subjects. A user with the `admin`
+   role, the operator and `everyone` get `write` on every database.
+2. That level is capped by the database's mode. On a read-only database or a base the
+   effective level is at most `read`.
+
+| Level | What the principal gets on `/db/<name>/...` and over MCP |
+|---|---|
+| none | the database is **hidden**: `404` like an unknown name, never listed (`GET /api/databases`, MCP `list_graphs`), and no alias leads to it |
+| `read` | every request is read-only: queries run under the reading authorizer, write routes answer `409`, MCP offers the read-only tools |
+| `write` | everything the database's own mode allows |
+
+`admin` is the only role with built-in meaning: write on every database, plus the admin API
+(`/api/admin/...`, which includes Runs and Users). Other roles get access only through
+`role:<role>` grants.
+
+User names follow the database name rule. `anonymous` and `operator` are reserved. The last
+admin (a user with the `admin` role and a token) cannot be removed, demoted or left without a
+token.
+
+### 401, 404 and 303
+
+| Request | Anonymous | Logged in without the right |
+|---|---|---|
+| `/api/admin/...` (admin API, Runs, Users) | `401 {"error", "login": "/"}` | `404`, as if the API did not exist |
+| `/db/<name>/...` API without a grant | `401` for **every** name, existing or not, so nothing about existence leaks | `404`, the unknown-name answer |
+| `GET` of a `/db/<name>/` page or static file | `303` to the login page `/?next=/db/<name>/...` | `404` |
+| `/db/<name>/mcp` without a grant | `401` | `404` |
+| `/mcp` | served, over the anonymous grants (often none) | served, over the user's grants |
+| wrong credentials, anywhere | `401` | `401` |
+
+Every `401` carries `WWW-Authenticate: Bearer` and the body `{"error", "login": "/"}`. When the
+request came with a refused session cookie, the answer also clears that cookie. The playground
+under `/db/<name>/` follows `login` to the login page and returns to its page afterwards.
+
+## The first admin
+
+`graphersal-server init DIR`, or the first `serve` of a directory without `access.toml`,
+creates the user `admin` (role `admin`) with a new token. The token is printed ONCE, on stderr,
+in a framed block (bold and colour on a terminal, an ASCII frame otherwise). stdout keeps only
+its usual line. The block names the user, the token, the file that keeps the hash, how to send
+the token, and how to replace a lost one:
+
+```text
++--------------------------------------------------------------------------+
+| FIRST ADMIN TOKEN - shown once, never again                              |
+|                                                                          |
+| user:   admin (role admin: every database, the admin API)                |
+| token:  <64 hex digits>                                                  |
+| ...                                                                      |
+| Lost it? This prints a new one (the old one stops working):              |
+|   graphersal-server user token admin --dir ./srv                         |
++--------------------------------------------------------------------------+
+```
+
+The console on the server's machine never needs this token (it uses the operator token).
+Copy it for the web UI or for an MCP client.
+
+## Tokens
+
+A user token is 256 random bits from the OS, written as 64 lower-case hex digits. The server
+keeps only its SHA-256 (`token_sha256`) and its last four characters (`token_last4`), and
+compares tokens in constant time. The token is shown once, in the answer that made it:
+`user add`, `user token`, or the Users tab. After that, listings show only `…a1b2` (console
+`user list`, the Users tab, `tokenLast4` in the admin API), which is enough to tell which token
+a user holds.
+
+```bash
+graphersal-server user add bob --dir ./srv                # prints bob's token once
+graphersal-server user grant bob acme read --dir ./srv    # read on acme
+graphersal-server user grant anonymous demo read --dir ./srv   # demo is public
+graphersal-server user token bob --dir ./srv              # a new token; the old one stops working
+graphersal-server user token bob --revoke --dir ./srv     # no token at all
+graphersal-server user list --dir ./srv
+```
+
+With a server running on the directory, these commands go through its admin API (actor
+`operator`) and take effect at once. Without one, they edit `access.toml` directly. A new
+token, a revoke and a user's removal end that user's browser and MCP sessions at once.
+
+Send a token as `Authorization: Bearer <token>`:
+
+```bash
+curl -s http://127.0.0.1:8484/db/acme/api/execute -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' -d '{"script": "g.v().count().next()"}'
+```
+
+## Browser login and logout
+
+The web UI at `/` shows the "Sign in" page to anonymous visitors. To log in, paste a user
+token. The page calls `POST /api/login {"token"}`, and the server answers with the cookie:
+
+```text
+Set-Cookie: gs_session=<session id>; Max-Age=<seconds>; HttpOnly; SameSite=Strict; Path=/[; Secure]
+```
+
+- `HttpOnly`: page scripts cannot read the cookie. `SameSite=Strict`: other sites cannot send
+  it.
+- `Max-Age` is `[sessions] lifetime_secs` when that is set, else 400 days, so a browser
+  restart keeps the login.
+- `Secure` is added when `[http] public_scheme = "https"`.
+
+After logging in, the page goes to its `?next=` path (only a path from the server root) or to
+`/`. There an admin sees the management tabs and Users, and any other user sees "My databases"
+(`GET /api/databases`: the databases it reaches, with its level). `POST /api/logout` (the top
+bar's "Log out") ends the session and clears the cookie (`Max-Age=0`).
+
+### Persistent sessions
+
+Browser sessions survive a restart or an upgrade. They are kept in `sessions/browser.json`,
+which holds only the SHA-256 of each session id and token. Restarts are always kept; there is
+no setting to turn this off. A session ends at:
+
+- the logout;
+- a new token or a revoke for its user, or the user's removal (at once, also through the
+  offline console);
+- `[sessions] lifetime_secs` after its login, or `[sessions] idle_timeout_secs` after its last
+  request (both unset, so no limit, by default; `server-dir.md`).
+
+A session's last request is recorded coarsely, at most once a minute. Deleting `sessions/`
+while no server runs logs every browser out.
+
+## MCP
+
+`/mcp` and `/db/<name>/mcp` follow the same grants ([`mcp.md`](mcp.md)). With a token, an
+agent sees the databases its user reaches:
+
+```bash
+claude mcp add --transport http --header "Authorization: Bearer <token>" \
+  graphersal http://127.0.0.1:8484/mcp
+```
+
+Without the header, the agent is anonymous. It sees only the databases granted to
+`anonymous`, and only on `/mcp`; `/db/<name>/mcp` answers `401` to anonymous requests.
+
+- A hidden database answers exactly like an unknown name, in `list_graphs`, `use_graph` and a
+  tool's `graph` argument.
+- A `read` level gets the read-only profile, with the reading tools only.
+- An MCP session belongs to the principal that sent its `initialize`. A request with another
+  principal's credentials and that session's id gets `404`.
+- MCP sessions survive a restart (`sessions/mcp.json`). A new token, a revoke or a user's
+  removal ends that user's MCP sessions; the client gets `404` and initializes again.
+
+There are no admin tools over MCP.
+
+## Modes
+
+All of these are keys in `server.toml`, read at start ([`server-dir.md`](server-dir.md) has
+the table):
+
+- **`[access] enabled`** (default `true`). With `false`, nothing is refused: every request is
+  an admin. Valid admin credentials keep their identity; everything else runs as `everyone`,
+  and the audit names that actor. The start block warns. When the address is not a loopback
+  address, the banner says so too: "ANYONE WHO REACHES IT IS AN ADMIN". `access.toml` is still
+  read and the first admin is still made, so turning access back on needs nothing else.
+- **`[http] public_scheme`** (default `"http"`). Set `"https"` when a reverse proxy in front
+  ends TLS, which makes the login cookie `Secure`. On `http` with an address that is not a
+  loopback address, the start block warns that tokens and cookies travel in clear text. On
+  `https` it warns to let only the proxy reach the address.
+- **`[http] allowed_hosts`** (default none). These are the public names a request's `Host` (and
+  `Origin`) may carry besides the loopback names and the listen address, for example
+  `["db.example.com"]` behind a proxy. Other names get `403`; this is the DNS rebinding check,
+  not authentication.
+- **`listen`**. The default `127.0.0.1:8484` is reachable from this machine only. Any other
+  address gets a warning in the start block.
+
+## Limits an admin sets
+
+- **Query limits** (`[limits.query]` in `server.toml`, and per database in its
+  `database.toml`, read at every load) are **ceilings**. A query may lower a limit for itself
+  (`g.with("evaluationTimeout", 1000)`), but it can never raise or remove one: that query
+  fails with `OptionAboveCeiling`. A key left unset is no ceiling: the engine's default then
+  applies, and a query may raise it. To cap a limit at the engine's default, set the key to
+  that value explicitly (for example `max_traversers = 10000000`). `0` means no limit (for
+  `max_value_depth`, the default).
+- **The memory ceiling** (`[limits] memory_limit`, server-wide) is the process memory limit.
+  A query, import or write that would cross it fails and rolls back.
+- **The backup root** (`[jobs] backup_root`, default `backups/jobs/`) is the only directory
+  backup jobs, and the Store panel's fork, attic fork and backup `dir`, write into. Paths are
+  relative to it; absolute or escaping paths are refused. Jobs found outside it at load are
+  dropped with a warning. Queries never touch files. The name `jobs` is reserved for databases
+  and aliases, because admin backups of a database named `jobs` would land in the default
+  root.
+- **The import inbox** (`imports/`): files put there by any means (scp, a mounted volume) are
+  imported by an admin by name (`import DIR --inbox FILE`, the Import tab,
+  `POST /api/admin/import {"inbox"}`). The inbox is flat, and a link leading outside it is
+  refused. The source path form (`{"path"}`) is admin-only as well.
+
+## Audit
+
+Every administrative event is one log line on the tracing target `graphersal_server::audit`,
+with the actor (`user:<name>`, `operator`, `everyone`, or `-` when unknown). Events are logged
+at `info`; refusals, such as a failed login, at `warn`. The events cover databases (create,
+delete, clone, import, restore, promote, backup), the read-only and auto-load flags, aliases
+(set, remove, rename), users (add, remove, roles, the first admin), tokens (issued, showing
+only `…last4`, and revoked), grants (set, revoked), and logins (succeeded, refused, logout).
+No line carries a token or a session id. The lines go to stderr with the rest of the log
+(redirect it to keep a file). `RUST_LOG` selects them like any target:
+
+```bash
+# warnings, plus every audit line
+RUST_LOG=warn,graphersal_server::audit=info graphersal-server serve --dir ./srv 2>> server.log
+grep graphersal_server::audit server.log
+```

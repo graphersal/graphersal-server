@@ -3,9 +3,9 @@
 #
 # Builds the binary, makes a server directory in a temporary directory, serves it on
 # 127.0.0.1:0 (the URL read from server.run) and walks through the admin API, the database
-# pages (with a promotion to a base and a layer over it), the run administration, a model upload
-# (.tar, .tar.gz), the MCP endpoint
-# and a clean stop.
+# pages (with a promotion to a base and a layer over it), users and a read-only user, the run
+# administration, the import inbox, a model upload (.tar, .tar.gz), the MCP endpoint, a clean
+# stop and a restart that keeps the browser and MCP sessions.
 # Prints one `ok <step>` line per step, or `FAIL <step>: <why>` and exits 1 at the first
 # failure. The server is killed on any exit.
 #
@@ -389,6 +389,38 @@ expect_status 401
 grep -q "is the last admin" "$WORK/rm.err" || fail "last admin: $(cat "$WORK/rm.err")"
 "$BIN" user remove smokey --dir "$DIR" >"$WORK/rm.out" 2>"$WORK/rm.err" ||
   fail "user remove: $(cat "$WORK/rm.err")"
+ok
+
+STEP="a read-only user: reads its database, cannot write, does not see another"
+"$BIN" user add reader --dir "$DIR" >"$WORK/reader.out" 2>"$WORK/reader.err" ||
+  fail "user add: $(cat "$WORK/reader.err")"
+READER_TOKEN=$(sed -n 's/^  token: *//p' "$WORK/reader.out")
+[ ${#READER_TOKEN} = 64 ] || fail "user add printed no token: $(cat "$WORK/reader.out")"
+"$BIN" user grant reader acme read --dir "$DIR" >"$WORK/grant.out" 2>"$WORK/grant.err" ||
+  fail "user grant: $(cat "$WORK/grant.err")"
+AUTH=$READER_TOKEN execute acme 'g.v().has_label("person").count().next()'
+[ "$RESULT" = 1 ] || fail "the reader counts $RESULT persons on acme, expected 1"
+AUTH=$READER_TOKEN jreq POST /db/acme/api/execute '{"script": "g.add_v(\"person\").iterate()"}'
+if [ "$STATUS" = 200 ] && [ "$(jget ok)" = true ]; then
+  fail "a read-only user's write succeeded: $(head -c 400 "$BODY")"
+fi
+execute acme 'g.v().has_label("person").count().next()'
+[ "$RESULT" = 1 ] || fail "acme counts $RESULT after the reader's refused write"
+AUTH=$READER_TOKEN req GET /db/acme-l/api/info
+expect_status 404
+AUTH=$READER_TOKEN req GET /api/databases
+expect_status 200
+expect_json databases.0.name acme
+expect_json databases.0.level read
+expect_json databases.1 null
+AUTH=$READER_TOKEN req GET /api/admin/databases
+expect_status 404
+ok
+
+STEP="the reserved name jobs is refused"
+jreq POST /api/admin/databases '{"name": "jobs"}'
+expect_status 400
+expect_body_contains "reserved"
 ok
 
 STEP="alias flip"

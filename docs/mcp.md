@@ -2,7 +2,8 @@
 
 **EXPERIMENTAL.** graphersal-server serves its databases to AI agents over the Model Context
 Protocol (Streamable HTTP transport, JSON answers). There are two kinds of endpoint, served by
-ONE endpoint object (the same MCP sessions, token and statistics for both):
+ONE endpoint object (the same MCP sessions and statistics for both), each answering per
+principal ([`access.md`](access.md)):
 
 | Endpoint | Serves | Tools |
 |---|---|---|
@@ -29,7 +30,8 @@ when MCP is off. A database's `GET /db/<name>/api/info` announces its own endpoi
 
 ### Adding the endpoint to an agent
 
-Claude Code (the server on its default address):
+Claude Code (the server on its default address), with a user token (`graphersal-server user
+add NAME`, then grants; [`access.md`](access.md)):
 
 ```bash
 claude mcp add --transport http --header "Authorization: Bearer <token>" \
@@ -38,6 +40,9 @@ claude mcp add --transport http --header "Authorization: Bearer <token>" \
 claude mcp add --transport http --header "Authorization: Bearer <token>" \
   acme http://127.0.0.1:8484/db/acme/mcp
 ```
+
+Without the header the agent is anonymous: `/mcp` serves it the databases granted to
+`anonymous` (often none), `/db/<name>/mcp` answers `401`.
 
 Other clients: any MCP client with the Streamable HTTP transport; the URL is the endpoint's.
 Requests go through the same `Host`/`Origin` checks as the rest of the server: a browser page
@@ -60,13 +65,13 @@ A notification (such as `notifications/initialized`) is answered `202` without a
 curl (`scripts/smoke.sh` walks through the whole flow):
 
 ```bash
-curl -si http://127.0.0.1:8484/mcp -H 'Content-Type: application/json' \
-  -H 'Accept: application/json, text/event-stream' \
+curl -si http://127.0.0.1:8484/mcp -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
   -d '{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion":
        "2025-06-18", "capabilities": {}, "clientInfo": {"name": "curl", "version": "1"}}}'
 # then, with the Mcp-Session-Id of that answer:
-curl -s http://127.0.0.1:8484/mcp -H 'Content-Type: application/json' \
-  -H 'Mcp-Session-Id: <id>' \
+curl -s http://127.0.0.1:8484/mcp -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' -H 'Mcp-Session-Id: <id>' \
   -d '{"jsonrpc": "2.0", "id": 2, "method": "tools/call",
        "params": {"name": "use_graph", "arguments": {"name": "acme"}}}'
 ```
