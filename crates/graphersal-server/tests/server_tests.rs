@@ -3087,3 +3087,187 @@ fn a_session_lifetime_from_server_toml_ends_restored_browser_sessions() {
     assert_eq!(browser_principal(address, &cookie).as_deref(), Ok("eve"));
     running.stop().unwrap();
 }
+
+/// A plain database `name` whose Store carries the backup jobs `jobs` (name, path), defined
+/// directly in the catalog as an imported or restored store would carry them.
+fn db_with_backup_jobs(dir: &ServerDir, name: &str, jobs: &[(&str, &Path)]) {
+    use graphersal::catalog::{Definition, JobDefinition, JobTask};
+    use graphersal::persist::{Store, StoreOptions};
+    use graphersal::prelude::{GraphStorage, TraversalGraph};
+    let db = dir.databases().join(name);
+    std::fs::create_dir_all(&db).unwrap();
+    std::fs::write(db.join("database.toml"), "description = \"jobs\"\n").unwrap();
+    let mut graph = TraversalGraph::tinkerpop_modern();
+    let definitions = jobs
+        .iter()
+        .map(|(job, path)| {
+            Definition::job(
+                *job,
+                JobDefinition::new(
+                    "0 3 * * *",
+                    JobTask::Backup {
+                        path: path.display().to_string(),
+                    },
+                ),
+            )
+        })
+        .collect();
+    graph.set_definitions(definitions).unwrap();
+    Store::create_with(db.join("store"), graph, StoreOptions::new())
+        .unwrap()
+        .close()
+        .unwrap();
+}
+
+/// `POST /db/<db>/api/<endpoint>` with the JSON `body`: (status, answer).
+fn db_post(
+    address: SocketAddr,
+    db: &str,
+    endpoint: &str,
+    body: serde_json::Value,
+) -> (u16, String) {
+    let (status, _, answer) = call(
+        address,
+        "POST",
+        &format!("/db/{db}/api/{endpoint}"),
+        &[("Content-Type", "application/json")],
+        &body.to_string(),
+    );
+    (status, answer)
+}
+
+#[test]
+fn backup_jobs_and_store_directories_stay_inside_the_backup_root() {
+    let temp = TempDir::new("backup-root");
+    let dir = ServerDir::init(temp.path()).unwrap().dir;
+    // `init` creates the default backup root.
+    let root = dir.backups().join("jobs");
+    assert!(root.is_dir());
+    let root = std::fs::canonicalize(&root).unwrap();
+    let outside = TempDir::new("backup-root-outside");
+    modern_db(&dir, "a");
+    db_with_backup_jobs(
+        &dir,
+        "carrier",
+        &[
+            ("evil", &outside.path().join("stolen")),
+            ("keep", &root.join("kept")),
+        ],
+    );
+    let running = serve::start(
+        temp.path(),
+        ServeOptions::new().with_listen("127.0.0.1:0".parse().unwrap()),
+    )
+    .unwrap();
+    let address = running.address();
+    for name in ["a", "carrier"] {
+        running.loader().load(name).unwrap();
+        assert_eq!(
+            running
+                .loader()
+                .wait(name, Duration::from_secs(120))
+                .unwrap(),
+            DbState::Loaded
+        );
+    }
+    let job = |name: &str, path: &str| serde_json::json!({"name": name, "schedule": "0 3 * * *", "action": "backup", "path": path});
+
+    // A relative path is relative to the root, and the job runs into it.
+    let (status, answer) = db_post(address, "a", "jobs/define", job("nightly", "nightly"));
+    assert_eq!(status, 200, "{answer}");
+    assert_eq!(json(&answer)["ok"], true, "{answer}");
+    let (status, answer) = db_post(
+        address,
+        "a",
+        "jobs/run",
+        serde_json::json!({"name": "nightly"}),
+    );
+    assert_eq!(status, 200, "{answer}");
+    let written = root.join("nightly");
+    assert!(
+        std::fs::read_dir(&written)
+            .map(|mut d| d.next().is_some())
+            .unwrap_or(false),
+        "the backup is written into {}: {answer}",
+        written.display()
+    );
+
+    // An absolute path is refused by the router, also one inside the root, with help.
+    for path in [
+        outside.path().join("x").display().to_string(),
+        root.join("inside").display().to_string(),
+    ] {
+        let (status, answer) = db_post(address, "a", "jobs/define", job("abs", &path));
+        assert_eq!(status, 200, "{answer}");
+        let answer = json(&answer);
+        assert_eq!(answer["ok"], false, "{answer}");
+        assert_eq!(answer["errors"][0]["field"], "path", "{answer}");
+        assert!(
+            answer["errors"][0]["help"]
+                .as_str()
+                .unwrap()
+                .contains("backup_root"),
+            "{answer}"
+        );
+    }
+    // `..` leaving the root is refused by the context's file root.
+    let (_, answer) = db_post(address, "a", "jobs/define", job("up", "../escape"));
+    assert_eq!(json(&answer)["ok"], false, "{answer}");
+    // So is a symbolic link inside the root pointing out of it.
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(outside.path(), root.join("link")).unwrap();
+        let (_, answer) = db_post(address, "a", "jobs/define", job("linked", "link/x"));
+        assert_eq!(json(&answer)["ok"], false, "{answer}");
+    }
+    assert!(!outside.path().join("escape").exists());
+    let (_, _, jobs) = call(address, "GET", "/db/a/api/jobs", &[], "");
+    for refused in ["\"abs\"", "\"up\"", "\"linked\""] {
+        assert!(!jobs.contains(refused), "{refused} was not defined: {jobs}");
+    }
+
+    // The Store panel's fork and backup directories must lie inside the root too.
+    let elsewhere = outside.path().join("copy").display().to_string();
+    for endpoint in ["store/fork", "store/backup"] {
+        let (status, answer) = db_post(
+            address,
+            "a",
+            endpoint,
+            serde_json::json!({"dir": elsewhere, "target": {"commit": 1}}),
+        );
+        assert_eq!(status, 403, "{endpoint}: {answer}");
+        assert!(answer.contains("file root"), "{endpoint}: {answer}");
+    }
+    assert!(!outside.path().join("copy").exists());
+
+    // A store carrying a job that writes outside the root: the job is dropped at load, a job
+    // inside the root is kept.
+    let (status, _, jobs) = call(address, "GET", "/db/carrier/api/jobs", &[], "");
+    assert_eq!(status, 200, "{jobs}");
+    assert!(!jobs.contains("\"evil\""), "{jobs}");
+    assert!(jobs.contains("\"keep\""), "{jobs}");
+    running.stop().unwrap();
+    assert!(!outside.path().join("stolen").exists());
+}
+
+#[test]
+fn a_configured_backup_root_is_created_at_start() {
+    let temp = TempDir::new("backup-root-config");
+    let dir = ServerDir::init(temp.path()).unwrap().dir;
+    let mounted = TempDir::new("backup-root-mounted");
+    let root = mounted.path().join("vault").join("jobs");
+    let config = std::fs::read_to_string(dir.config_path()).unwrap();
+    let configured = config.replace(
+        "# backup_root = \"backups/jobs\"",
+        &format!("backup_root = {:?}", root.display().to_string()),
+    );
+    assert_ne!(configured, config);
+    std::fs::write(dir.config_path(), configured).unwrap();
+    let running = serve::start(
+        temp.path(),
+        ServeOptions::new().with_listen("127.0.0.1:0".parse().unwrap()),
+    )
+    .unwrap();
+    assert!(root.is_dir());
+    running.stop().unwrap();
+}

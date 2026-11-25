@@ -163,6 +163,64 @@ fn open_principal(authenticated: Result<Principal, AuthError>) -> Principal {
     }
 }
 
+/// The database route that defines a scheduled job (below `/db/<name>/`).
+const JOBS_DEFINE: &str = "api/jobs/define";
+
+/// The help of a refused absolute backup job path.
+pub(crate) const BACKUP_PATH_HELP: &str = "give a path relative to the server's backup root \
+     (server.toml [jobs] backup_root), for example nightly: the backups go to \
+     <backup root>/nightly";
+
+/// The body of a `jobs/define` request, read (at most `graphersal_serve`'s JSON body limit) to
+/// check it before it is forwarded: `Err` is the answer instead. A body that is not a JSON
+/// object, or has no string `path`, is forwarded unchanged (the context reports it). A
+/// backup job's absolute `path` is refused like the engine's own field errors (`200`
+/// `{"ok": false, "errors": [{"field": "path", "message", "help"}]}`), so the playground's job
+/// form shows it on the path field.
+fn jobs_define_body(request: &mut Request<'_>) -> Result<Vec<u8>, Response> {
+    let text = request.text_body().map_err(error_response)?;
+    let path = serde_json::from_str::<serde_json::Value>(&text)
+        .ok()
+        .and_then(|body| body.get("path")?.as_str().map(|p| p.trim().to_string()))
+        .filter(|path| !path.is_empty());
+    match path {
+        Some(path) if is_absolute_path(&path) => Err(Response::json(
+            200,
+            &json!({
+                "ok": false,
+                "errors": [{
+                    "field": "path",
+                    "message": format!(
+                        "'{path}' is an absolute path: backup jobs write only below the \
+                         server's backup root"
+                    ),
+                    "help": BACKUP_PATH_HELP,
+                }],
+            }),
+        )),
+        _ => Ok(text.into_bytes()),
+    }
+}
+
+/// Whether `path` is absolute on any platform this server runs on: rooted (`/x`, `\x`) or
+/// with a Windows prefix (`C:`, `\\server\share`), also a Windows path on Unix (a name such
+/// as `c:x` is refused there too).
+fn is_absolute_path(path: &str) -> bool {
+    let native = Path::new(path);
+    if native.is_absolute()
+        || native.has_root()
+        || matches!(
+            native.components().next(),
+            Some(std::path::Component::Prefix(_))
+        )
+    {
+        return true;
+    }
+    let bytes = path.as_bytes();
+    path.starts_with('\\')
+        || (bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':')
+}
+
 impl Router {
     /// A router that is loading (no answer but the probes until [`Self::ready`]).
     pub(crate) fn new(host_check: HostCheck) -> Self {
@@ -369,7 +427,20 @@ impl Router {
             Some(query) => format!("/{rest}?{query}"),
             None => format!("/{rest}"),
         };
-        let mut forwarded = mounts::forward(request, &target, &entry.name);
+        // A backup job's path is relative to the backup root: an absolute one is refused here
+        // (the context's file root resolves a relative one and refuses one leaving the root).
+        let buffered = if request.method() == &Method::Post && rest == JOBS_DEFINE {
+            match jobs_define_body(request) {
+                Ok(body) => Some(body),
+                Err(answer) => return answer,
+            }
+        } else {
+            None
+        };
+        let mut forwarded = match &buffered {
+            Some(body) => mounts::forward_with_body(request, &target, &entry.name, body),
+            None => mounts::forward(request, &target, &entry.name),
+        };
         if let Some(identity) = principal.identity() {
             forwarded.set_identity(identity);
         }
@@ -676,6 +747,16 @@ fn content_type(path: &Path) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn absolute_backup_paths_are_recognised_on_every_platform() {
+        for path in ["/tmp/x", "\\x", "C:\\x", "c:x", "\\\\server\\share"] {
+            assert!(super::is_absolute_path(path), "{path}");
+        }
+        for path in ["nightly", "a/b", "../escape", "./x"] {
+            assert!(!super::is_absolute_path(path), "{path}");
+        }
+    }
+
     use super::*;
     use crate::registry::Registry;
     use crate::registry::tests::server;

@@ -56,7 +56,7 @@ from published files). When this file disagrees with the code, the code wins: sa
   (bytes, 0 = none, "auto", "none"; `limits::memory_limit` deserializer) and `memory_headroom`
   = the process memory ceiling, set once in `serve::start` after the lock
   (`limits::apply_memory_ceiling`, only what is set), server-wide only; `[limits.query]` =
-  `limits::QueryLimits`; `toml_error_message` adds the line a TOML error points at), `limits`
+  `limits::QueryLimits`; B12: `[jobs] backup_root` = `JobsConfig` (default `backups/jobs`, relative to the server dir; `ServerDir::backup_root`/`ensure_backup_root`, created by `init` and `serve::start`, resolved, passed as `Loader::with_backup_root` -> every context's `ContextBuilder::file_root`; at load `loader::drop_jobs_outside` drops stored jobs outside it (`jobs_outside_file_root`) in the launch closure, warning; the router refuses an absolute `path` of `POST /db/<n>/api/jobs/define` before forwarding (`router::jobs_define_body`, field-error shape, `mounts::forward_with_body`); MCP profiles keep NO policy: their queries run under the playground authorizers, which deny all file access); `toml_error_message` adds the line a TOML error points at), `limits`
   (B8: `QueryLimits` (keys = the graphersal CLI flags: `timeout_ms`, `max_operations`,
   `max_string_size`, `max_array_size`, `max_map_size`, `max_traversers`,
   `max_materialized_bytes`, `max_value_depth`; 0 = no limit, depth 0 = default), `over` (a

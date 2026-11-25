@@ -20,6 +20,7 @@ holds `server.toml`.
     blobs/<2 hex>/<sha256>   one copy of every embedding model blob
     models.toml        derived index of the models (rebuilt, never read back)
   backups/<name>/      <UTC time>.zip + <UTC time>.toml per backup
+  backups/jobs/        the backup root of backup jobs (server.toml [jobs] backup_root)
   trash/               deleted and replaced databases: <name>-<UTC time>/
   tmp/                 builds and uploads in progress (emptied at start)
   imports/             the import inbox: files and Store directories an admin imports by name
@@ -102,6 +103,9 @@ enabled = true              # false: NO access control, every request is an admi
 [http]
 public_scheme = "http"      # "https" when a reverse proxy ends TLS (Secure login cookie)
 # allowed_hosts = ["db.example.com"]   # public names behind a reverse proxy
+
+[jobs]
+# backup_root = "backups/jobs"   # the only directory backup jobs write into
 ```
 
 | Key | Default | Read | Meaning |
@@ -130,6 +134,7 @@ public_scheme = "http"      # "https" when a reverse proxy ends TLS (Secure logi
 | `[access] enabled` | `true` | at start | `false` turns access control off: nothing is refused, every request is an admin. Valid admin credentials keep their identity (the console's operator, an admin user); every other request (none, a user without the admin role, wrong credentials) runs as the admin principal `everyone`, which the audit names. Login still works but is not needed. The `serve` start block warns loudly, and louder (in the banner too) when the address is not a loopback address. `access.toml` is still read and its first admin created, so turning access back on needs no other change |
 | `[http] public_scheme` | `"http"` | at start | how clients reach the server: `"http"`, or `"https"` when a reverse proxy ends TLS. `https` gives the `gs_session` login cookie `Secure` (a browser drops a `Secure` cookie over plain HTTP, except on localhost). On `http` with an address that is not a loopback address, the start block warns that tokens travel in clear text; on `https` it warns to let only the proxy reach the address |
 | `[http] allowed_hosts` | `[]` | at start | further names a request's `Host` (and an `http://`/`https://` `Origin`) may name besides this machine's loopback names and the listen address: the public names behind a reverse proxy. Each a host name or IP address with an optional port (`"db.example.com"`, `"db.example.com:443"`); the port is not checked (a name is admitted on any port); lower case, no scheme or path. Other names are refused with `403` as before (DNS rebinding) |
+| `[jobs] backup_root` | `"backups/jobs"` | at start | the backup root: the only directory backup jobs, and the Store panel's fork, attic fork and backup `dir`, may write into ("Backup jobs" under `backups/`). A relative path is relative to the server directory; an absolute one may name a mounted storage. Created (with its parents) by `serve` and `init`; must not be empty |
 
 The login cookie (`gs_session`) carries `Max-Age` = `[sessions] lifetime_secs` when set, else
 400 days (the longest a browser keeps a cookie), so a browser restart keeps the login; the
@@ -273,6 +278,35 @@ with a sidecar `<UTC time>.toml` recording the database's kind, role, base, desc
 a layer, its base's identity. A layer's backup holds only the layer and restores only over a
 base with the same identity. Backups stay when their database is deleted; nothing removes them
 automatically.
+
+### Backup jobs
+
+Scheduled backup jobs (the playground's Jobs panel of a database, `POST
+/db/<name>/api/jobs/define` with `"action": "backup"`; incremental directory backups run by
+the database's job ticker while it is loaded, or at once with `jobs/run`) write only into the
+**backup root**, `server.toml [jobs] backup_root` (default `backups/jobs/`; it may name a
+mounted storage):
+
+- a job's `path` is relative to the root: `"path": "nightly"` writes into
+  `<backup root>/nightly/`; the job stores the resolved path;
+- an absolute `path` is refused when the job is defined, also one inside the root (`200
+  {"ok": false, "errors": [{"field": "path", "message", "help"}]}`, the form's field error);
+- a path leaving the root (`..`, a symbolic link inside the root pointing out of it) is
+  refused the same way by the database's file root;
+- a catalog loaded through the playground (`catalog/load`) with a job writing outside the root
+  is refused (`403`, nothing loaded);
+- the Store panel's fork, attic fork and backup take a `dir` inside the root only (relative to
+  it; outside: `403` "paths must lie inside the server's file root"); without a `dir` they
+  write next to the database's store as before;
+- at load, a stored job writing outside the root (an imported, restored or cloned store, or
+  a root moved in `server.toml`) is **dropped** from the database's catalog before the
+  database is served, with a warning on stderr naming the job and its path: define it again
+  with a path inside the root.
+
+Queries (the playground's `execute`, the MCP tools) never touch files: they cannot define a
+backup job at all. The admin backups above (`backups/<name>/`) are the server's own and are not
+affected. Keep the root's other writers trusted: a symbolic link created inside it after a
+job was checked is not seen.
 
 ## `trash/`
 

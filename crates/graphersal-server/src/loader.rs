@@ -13,6 +13,16 @@
 //! endpoint (`shared_mcp`): `/db/<name>/mcp` and the graphs of the server-wide `/mcp`
 //! (module `mcp`); a base's context has a read-only MCP profile.
 //!
+//! **Backup root** (`server.toml [jobs] backup_root`, resolved at start; [`Loader::with_backup_root`]):
+//! every context gets it as its file root (`ContextBuilder::file_root`): a backup job's path
+//! (`jobs/define`) is resolved under it and refused outside it, `catalog/load` refuses a
+//! catalog with a job writing outside it, and the `dir` of the Store panel's fork, attic fork
+//! and backup must lie inside it. The router refuses an absolute job path before forwarding
+//! (`crate::router`). At load, the stored jobs of a plain or layer database that write outside
+//! the root (an imported, restored or cloned store, or a root moved in `server.toml`) are
+//! DROPPED in the launch, before the context serves a request or the ticker starts, each with a
+//! warning naming the job and its path (`drop_jobs_outside`).
+//!
 //! The three kinds of database:
 //! - **plain**: its Store opened read-write ([`graphersal_serve::open_store`]), served as the
 //!   session's database (Store panel, history, checkpoints), with a scheduled-jobs ticker;
@@ -35,6 +45,7 @@
 //! database when the server stops.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
@@ -156,6 +167,10 @@ pub struct Loader {
     unload_wait: Duration,
     /// The server's MCP endpoint, shared by every context it builds (`None`: MCP is off).
     mcp: Option<Arc<Mcp>>,
+    /// The backup root (`server.toml [jobs] backup_root`, resolved): every context's file root
+    /// (`ContextBuilder::file_root`), and the root the stored jobs of a loaded database are
+    /// checked against (`None`: no confinement, the unit tests).
+    backup_root: Option<PathBuf>,
 }
 
 impl std::fmt::Debug for Loader {
@@ -184,6 +199,18 @@ impl Loader {
         host_check: HostCheck,
         mcp: Option<Arc<Mcp>>,
     ) -> Arc<Loader> {
+        Self::with_backup_root(registry, host_check, mcp, None)
+    }
+
+    /// [`Loader::with_mcp`] whose contexts confine file paths to `backup_root` (the resolved
+    /// `server.toml [jobs] backup_root`; module docs, "Backup root"): `serve` builds its loader
+    /// with it.
+    pub(crate) fn with_backup_root(
+        registry: Arc<Registry>,
+        host_check: HostCheck,
+        mcp: Option<Arc<Mcp>>,
+        backup_root: Option<PathBuf>,
+    ) -> Arc<Loader> {
         Arc::new(Loader {
             registry,
             host_check,
@@ -195,6 +222,7 @@ impl Loader {
             stopping: AtomicBool::new(false),
             unload_wait: UNLOAD_WAIT,
             mcp,
+            backup_root,
         })
     }
 
@@ -656,10 +684,34 @@ impl Loader {
                 )
             }
         };
-        let (launched, ()) =
-            graphersal_serve::launch(source, presets, |_: &mut Session| Ok::<_, String>(()), None)?;
+        // A base is read-only for good (its jobs are never run): only a plain or layer
+        // database's stored jobs are checked against the backup root.
+        let root = match kind {
+            Kind::Base => None,
+            Kind::Plain | Kind::Layer => self.backup_root.clone(),
+        };
+        let (launched, dropped) = graphersal_serve::launch(
+            source,
+            presets,
+            move |session: &mut Session| match root {
+                Some(root) => drop_jobs_outside(session, &root),
+                None => Ok(Vec::new()),
+            },
+            None,
+        )?;
         for warning in &launched.warnings {
             tracing::warn!(target: "graphersal_server", "database '{key}': {warning}");
+        }
+        for job in &dropped {
+            tracing::warn!(
+                target: "graphersal_server",
+                "database '{key}': dropped the backup job '{}': it writes '{}' outside the \
+                 backup root ({}); define it again with a path inside the root \
+                 (server.toml [jobs] backup_root)",
+                job.job,
+                job.path.display(),
+                job.reason
+            );
         }
         let (read_only, help) = match kind {
             Kind::Base => (true, BASE_HELP.to_string()),
@@ -677,7 +729,8 @@ impl Loader {
             .mount_path(Some(format!("/db/{key}")))
             .hooks(Arc::new(DatabaseInfo { name: key.clone() }))
             .read_only(read_only)
-            .runtime_read_only(Some(help));
+            .runtime_read_only(Some(help))
+            .file_root(self.backup_root.clone());
         if let Some(mcp) = &self.mcp {
             builder = builder.shared_mcp(mcp.clone());
             // A base is read-only for good: its agents see only the reading tools. A plain or
@@ -958,6 +1011,32 @@ fn close_error(name: &str, reason: &str) -> ServerError {
 
 fn on_off(on: bool) -> &'static str {
     if on { "on" } else { "off" }
+}
+
+/// Drops the stored jobs of the session's database that write outside the backup `root`
+/// (`graphersal_serve::jobs_outside_file_root`: an imported, restored or cloned store may carry
+/// backup jobs pointing anywhere, and the ticker or `jobs/run` would run them). Runs in the
+/// launch, before the context exists, so no request or tick sees them; answers what it dropped
+/// (each job once). A drop that fails fails the load: such a job is never served.
+fn drop_jobs_outside(
+    session: &mut Session,
+    root: &Path,
+) -> Result<Vec<graphersal_serve::JobOutsideFileRoot>, String> {
+    let definitions = session
+        .graph()
+        .definitions(Some(graphersal::catalog::DefinitionKind::JOB))
+        .map_err(|err| format!("cannot read the stored jobs: {err}"))?;
+    let mut outside = graphersal_serve::jobs_outside_file_root(&definitions, root);
+    outside.dedup_by(|a, b| a.job == b.job);
+    for job in &outside {
+        session.drop_job(&job.job).map_err(|err| {
+            format!(
+                "the backup job '{}' writes outside the backup root and cannot be dropped: {err}",
+                job.job
+            )
+        })?;
+    }
+    Ok(outside)
 }
 
 #[cfg(test)]

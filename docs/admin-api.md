@@ -235,6 +235,11 @@ place; a sidecar `<backup>.toml` beside it records the database's `kind`, `role`
 `description` and, for a layer, its base's identity. A layer's backup holds only the layer: it
 restores only over the same base.
 
+Scheduled backup jobs of a database (its playground's Jobs panel, `/db/<name>/api/jobs/...`)
+are not part of the admin API: they write only below `server.toml [jobs] backup_root`, a
+job's path relative to it; an absolute path or one leaving the root is refused when the job is
+defined (`server-dir.md`, "Backup jobs").
+
 A backup object:
 
 | Field | Type | When | Meaning |
