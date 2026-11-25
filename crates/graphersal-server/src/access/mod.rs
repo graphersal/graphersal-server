@@ -15,8 +15,8 @@
 //! Tokens and session ids are 256 random bits from the OS ([`Secret`]); only their hashes are
 //! kept, compared in constant time; none is ever logged.
 //!
-//! Enforcement on the routes is not part of this module: the router asks [`Access`] for the
-//! principal and the level and refuses accordingly.
+//! Enforcement on the routes is not part of this module: the server's router asks
+//! [`Access`] for the principal and the level and refuses accordingly.
 
 mod auth;
 mod model;
@@ -201,6 +201,19 @@ impl Access {
             Ok(entry) => self.read().level(principal, &entry),
             Err(_) => Level::None,
         }
+    }
+
+    /// The level granted to `principal` on the database `name` (a real database name), before
+    /// the database's mode caps it: admin and operator [`Level::Write`], else the highest grant
+    /// of any of its subjects. [`Level::None`]: the database does not exist for `principal`.
+    pub fn granted_level(&self, principal: &Principal, name: &str) -> Level {
+        self.read().granted_level(principal, name)
+    }
+
+    /// The audit handle of this server recording as `principal` (its identity; anonymous: no
+    /// actor).
+    pub fn audit_as(&self, principal: &Principal) -> Audit {
+        self.audit.with_actor(principal.identity())
     }
 
     /// Adds the user `name` with `roles`: its token (show it once). `actor`: who did it.

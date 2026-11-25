@@ -38,7 +38,8 @@ from published files). When this file disagrees with the code, the code wins: sa
   (open/authenticate/login/logout, user and grant changes audited), the first admin
   (`ensure_first_admin`: `init` (`InitReport::first_admin`) and `serve::start`
   (`Running::take_first_admin`) on a directory without `access.toml`; `console::first_admin_text`
-  frames the token, printed once on stderr by `main.rs`); NO route enforcement yet (B3)),
+  frames the token, printed once on stderr by `main.rs`); `Access::granted_level` (before the
+  database mode) and `audit_as(principal)`; enforcement is the router's (B3)),
   `audit` (`AuditEvent` typed, `Audit` handle = sink + actor, `TracingAudit` on target
   `graphersal_server::audit`; `Admin::with_audit` records create/delete/clone/import/restore/
   promote/backup, read-only, auto-load, aliases), `config` (`server.toml`, `ServerConfig`, `parse_listen`, `[limits]
@@ -66,8 +67,9 @@ from published files). When this file disagrees with the code, the code wins: sa
   every connection ends with `linger` (shutdown write, discard input for up to 2 s, close: no
   reset eats the answer); stop: `watch` signal -> accept task ends, `graceful_shutdown` on each
   connection, wait for `in_flight` up to 5 s, unload, `shutdown_timeout`), `router` (probes and 503s
-  through `graphersal_serve::Server`, then `HostCheck::check` on everything else, then the
-  routes: `/db/<name>/...` via `mounts`, `GET /api/info` (root identity: `server:
+  through `graphersal_serve::Server`, then `HostCheck::check` on everything else, then login/
+  logout, authentication and the routes, each refused per principal (see "Access is enforced"
+  under the rules): `/db/<name>/...` via `mounts`, `GET /api/info` (root identity: `server:
   router::SERVER_NAME` ("graphersal-server"; each mount's context sets the same via
   `ContextBuilder::server_name`, never `.dev(true)`), `protocol: graphersal_serve::PROTOCOL`
   ("graphersal/1", the only thing the playground's `isEngineInfo` checks; every mount answers it
@@ -110,7 +112,7 @@ from published files). When this file disagrees with the code, the code wins: sa
   over `Admin::runs` / `Admin::cancel_run` (`ops_runs.rs`: each context's OWN `Runs`
   (`Context::runs()`), ids unique per database; offline `Refused`); the mounts keep
   `ContextBuilder::admin_runs` OFF (query texts only through the admin surface, no token: the
-  admin surface has no access control); web UI tab `runs-tab.js`;
+  admin surface is admin-only since B3); web UI tab `runs-tab.js`;
   `POST .../<name>/backup`, `GET .../<name>/backups`, `POST .../<name>/restore {"backup",
   "name"?}`, `GET .../<name>/export?models=&materialize=`; `POST import?name=&base=&format=&description=&role=`
   with the raw file as the body (streamed by `copy_body_to` into `tmp/upload-*.bin` = `TmpFile`,
@@ -242,11 +244,16 @@ from published files). When this file disagrees with the code, the code wins: sa
   a missing model from `models/` when it holds it (V12); `models add <repo>` resolves the rest. Tests in
   `models_tests.rs`.
 - `mcp` (private): ONE `graphersal_mcp::Mcp` per process, built at start by `mcp::endpoint`
-  from `server.toml` `[mcp]` (`enabled`, `token`, `max_sessions` default 256 =
+  from `server.toml` `[mcp]` (`enabled`, `max_sessions` default 256 =
   `DEFAULT_MCP_SESSIONS`; read at start only), `with_endpoint("/mcp")`, never signed sessions
   (directory mode keeps the selection in the session table); held by the loader
-  (`Loader::with_mcp`, `Loader::mcp()`; `Loader::new` = no MCP, the unit tests). `Directory`
-  implements `GraphDirectory` over the registry + loader, no session job: `list` (databases +
+  (`Loader::with_mcp`, `Loader::mcp()`; `Loader::new` = no MCP, the unit tests); no token (the
+  old `[mcp] token` is gone: an unknown key now). `Directory { loader, access, principal }` is
+  built PER REQUEST by the router and implements `GraphDirectory` over the registry + loader
+  for that principal, no session job: only databases with a granted level (`list` filters,
+  `resolve`/`host` of a hidden name = the unknown-name error word for word; `host` for a `read`
+  grant = the context's profile `.with_read_only(true)`; listing `readOnly` also for a read
+  grant); `list` (databases +
   aliases; a session keeps the NAME it selected (alias or database) and graphersal-mcp resolves it per call: a flip moves it, a removed name errors, a rename moves it via `Admin::alias_rename`; kind plain/layer/base from `database.toml`, state, readOnly = `read_only` or base,
   description; an alias row carries its target's fields + `aliasOf`), `resolve` (alias -> real
   name NOW; unknown -> `no database or alias 'x'`), `host` (loaded -> the context + its
@@ -345,6 +352,20 @@ WD_TIMEOUT=600 ../graphersal/ai/bench/watchdog.sh scripts/smoke.sh   # end to en
   task report.
 - Tokens and session ids: only hashes at rest, never logged (`Secret`'s `Debug` is redacted;
   audit events show `token_last4` only).
-- No access control ENFORCED yet (the model is in `access`, routes come with B3): default listen `127.0.0.1:8484`, a warning for any
+- Access is enforced by the router (B3, module docs of `router.rs`): authentication right after
+  the Host check (wrong credentials `401 {"error","login":"/"}` + `WWW-Authenticate: Bearer`,
+  a refused cookie cleared; never downgraded to anonymous), identity set on the request;
+  `/api/admin/...` (Runs included) admin only (anonymous 401, other users 404 "unknown
+  endpoint"), the admin core audits with `Access::audit_as(principal)`; `/db/<name>/...` by
+  granted level (none: anonymous 401 for every name, a page GET 303 `/?next=`, logged in = the
+  unknown-name 404; read = `Request::mark_read_only` on the forwarded request; the database
+  mode applies in its context); `/mcp` per principal (`mcp::Directory`); `POST /api/login
+  {"token"}` (`gs_session` cookie `HttpOnly; SameSite=Strict; Path=/`) and `POST /api/logout`
+  run before authentication; root `/api/info` minimal for anonymous (`server`, `protocol`,
+  `dev`, `experimental`, `uiProfile`, `principal`, `login`), `principal` for everyone; the UI
+  files at `/` and `/server-ui/` are public. The console sends the run's operator token
+  (`client::request(address, token, ..)`). Tests: `router_access_tests.rs`; the HTTP tests go
+  as the admin through `test_support::operator_token(address)` (unit) and `operator_token` /
+  `as_admin` in `tests/server_tests.rs` (the run file of a live test directory). Default listen `127.0.0.1:8484`, a warning for any
   non-loopback address (once, in the console's start block; `serve::start` itself only logs a
   debug line), `graphersal_serve::HostCheck` on every request but the probes.

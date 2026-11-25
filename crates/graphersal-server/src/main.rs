@@ -65,7 +65,8 @@ fn exit(code: u8) -> ExitCode {
 }
 
 const USAGE: &str = "graphersal-server (EXPERIMENTAL): many Graphersal graph databases in one
-server directory, over HTTP. No access control: keep it on a loopback address.
+server directory, over HTTP. Users and grants in access.toml; tokens travel in clear text
+over plain HTTP: keep it on a loopback address or behind a TLS proxy.
 
 Usage:
   graphersal-server init DIR

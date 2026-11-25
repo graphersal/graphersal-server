@@ -12,12 +12,14 @@ database gets the Graphersal playground and its HTTP API under `/db/<name>/`; on
 list of running queries with a stop per query) are
 an HTTP API, a console (`graphersal-server db ...`) and the server's own web UI at `/`.
 
-> **No access control.** Anyone who reaches the port can read, change and delete every
-> database. The server listens on the loopback (`127.0.0.1:8484`) by default and prints a warning
-> when told to listen on any other address. Keep it on the loopback. Every request but the
-> health probes is checked by `Host` and `Origin` (against DNS rebinding and cross-site pages);
-> that is not authentication. The optional MCP token (`docs/mcp.md`) guards only the MCP
-> endpoints.
+> **Access per user.** `access.toml` holds the users (token hashes) and their grants per
+> database; `init` (or the first `serve` of a directory without the file) creates the first
+> admin and prints its token once. The admin API and Runs are for admins; a database a user has
+> no grant on does not exist for them; a `read` grant makes every request read-only; MCP
+> follows the same grants. Tokens travel in clear text over plain HTTP: the server listens on
+> the loopback (`127.0.0.1:8484`) by default and prints a warning when told to listen on any
+> other address. Every request but the health probes is also checked by `Host` and `Origin`
+> (against DNS rebinding and cross-site pages).
 
 ## Download / build
 
@@ -202,8 +204,8 @@ every file and key: [`docs/server-dir.md`](docs/server-dir.md).
 
 ## Known limitations
 
-- **No access control** (see above): loopback only. The MCP token is the only secret, and it
-  guards only the MCP endpoints.
+- **Plain HTTP** (see above): tokens and session cookies travel in clear text; keep the server
+  on the loopback or behind a TLS proxy.
 - A **base is frozen forever** (by design: layers depend on its exact state). A base with data
   comes from an import with role base (`import ... --role base`, `POST /api/admin/import?...
   &role=base`) or from promoting an unloaded plain database (`db promote NAME`, `POST
@@ -218,8 +220,7 @@ every file and key: [`docs/server-dir.md`](docs/server-dir.md).
   carry): add the model to `models/` (`models add`, or the Models tab) and it is resolved. As a
   base (`--role base`) such a source is refused (`409`): a base cannot get a model later.
 - The **run administration** (the Runs tab, `/api/admin/runs`) is under the admin surface and
-  shares its lack of access control: anyone who reaches the port sees every client's query
-  texts and can stop them. The databases' own pages (`/db/<name>/`) do not offer it. A run id
+  is for admins only: an admin sees every client's query texts and can stop them. The databases' own pages (`/db/<name>/`) do not offer it. A run id
   is unique within its database only.
 - A model archive is a **ustar `.tar`**, uncompressed or gzip-compressed (`tar -cf model.tar
   -C <model dir> .`, `tar -czf model.tar.gz ...`); zstd, bzip2, xz and `.zip` are not taken.

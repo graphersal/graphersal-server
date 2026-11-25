@@ -23,8 +23,12 @@
 //! request from the authenticator chain, and the level per database; a server directory
 //! without `access.toml` is closed (`init` and the first `serve` create the first admin and
 //! print its token once). Every administrative event goes through the audit sink
-//! ([`audit`]). The routes do not enforce the levels yet: the server listens on the loopback
-//! by default and warns when it listens on any other address.
+//! ([`audit`]). The router enforces them on every route but the probes, the root `/api/info`
+//! and the UI files: the admin API (Runs included) for admins only, each database by the
+//! principal's level (none = it does not exist for them, read = read-only requests), `/mcp`
+//! per principal; `POST /api/login` / `POST /api/logout` for browsers (the `gs_session`
+//! cookie). The server listens on the loopback by default and warns when it listens on any
+//! other address (tokens travel in clear text over plain HTTP).
 
 #![warn(missing_docs)]
 

@@ -9,9 +9,20 @@ The MCP endpoints (`/mcp`, `/db/<name>/mcp`) are documented in [`mcp.md`](mcp.md
 directory and its files (`server.toml`, `database.toml`, `models/`, `backups/`) in
 [`server-dir.md`](server-dir.md).
 
-There is NO access control in this version: the server listens on the loopback by default.
-Every request is checked by `Host` and `Origin` (DNS rebinding, cross-site pages): send
-`Host: <the server's address>`; a browser page of another origin is refused with `403`.
+The admin API is for admins only (a user with the `admin` role in `access.toml`, or the
+console with the run's operator token from `server.run`): send `Authorization: Bearer
+<token>` or the browser session cookie. Without credentials it answers `401 {"error",
+"login": "/"}`; a logged-in user without the admin role gets `404` as if the API did not
+exist; a token nobody holds is `401`. Every request is also checked by `Host` and `Origin` (DNS
+rebinding, cross-site pages): send `Host: <the server's address>`; a browser page of another
+origin is refused with `403`.
+
+Browser login (beside the admin API): `POST /api/login {"token": "<user token>"}` answers
+`200 {"principal": {"id", "kind", "admin"}}` with the cookie `gs_session` (`HttpOnly;
+SameSite=Strict; Path=/`), `401` for a token nobody holds; `POST /api/logout` ends the session
+of the request's cookie and clears it (`200 {"loggedOut": bool}`). `GET /api/info` names the
+request's `principal` (`{id, kind, admin}`); for anonymous it answers only `server`,
+`protocol`, `dev`, `experimental`, `uiProfile`, `principal` and `login: "/"`.
 
 ## Conventions
 

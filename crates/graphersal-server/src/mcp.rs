@@ -1,17 +1,25 @@
-//! The server's MCP endpoint: ONE `graphersal_mcp::Mcp` for the process (its MCP sessions,
-//! token, statistics), built at start from `server.toml` `[mcp]` ([`endpoint`]).
+//! The server's MCP endpoint: ONE `graphersal_mcp::Mcp` for the process (its MCP sessions and
+//! statistics), built at start from `server.toml` `[mcp]` ([`endpoint`]).
 //!
-//! - `/mcp` serves every database of the registry through the endpoint's directory mode
-//!   (`Mcp::handle_directory` over [`Directory`]): `list_graphs` lists the databases and aliases
-//!   with their states, `use_graph` selects one for the MCP session (an alias is resolved at
-//!   that moment and the session keeps the real database, also after the alias moves), every
-//!   data tool takes an optional `graph` for one call. A database that is not loaded is listed
-//!   with its state; using it is a tool error naming the state ("ask an operator to load it"):
-//!   the MCP endpoint never loads or unloads (admin only).
+//! - `/mcp` serves the databases of the registry the caller may see through the endpoint's
+//!   directory mode (`Mcp::handle_directory` over a [`Directory`] built per request for the
+//!   request's principal): `list_graphs` lists the visible databases and aliases with their
+//!   states, `use_graph` selects one for the MCP session (by name, resolved on every call),
+//!   every data tool takes an optional `graph` for one call. A database the caller may not see
+//!   answers exactly like an unknown name; one it may only read is served with the reading
+//!   profile. A database that is not loaded is listed with its state; using it is a tool error
+//!   naming the state ("ask an operator to load it"): the MCP endpoint never loads or unloads
+//!   (admin only).
 //! - `/db/<name>/mcp` is the single-graph endpoint of a loaded database (today's tools), served
-//!   by its context (`graphersal_serve`'s `/mcp` route behind the mount), on the same `Mcp`.
+//!   by its context (`graphersal_serve`'s `/mcp` route behind the mount), on the same `Mcp`;
+//!   the router refuses it like every other route of the database and marks it read-only for a
+//!   reader.
 //!
-//! Both run after the router's `Host`/`Origin` checks; the token (if any) is the endpoint's.
+//! Both run after the router's `Host`/`Origin` checks and authentication; the request carries
+//! the principal's identity, so an MCP session belongs to the principal that initialized it
+//! (another principal, anonymous included, gets the unknown-session `404`). No MCP route of
+//! this server resolves a session id to a graph (no session routes), so
+//! `Mcp::verified_session_route_for` has no caller here.
 
 use std::sync::Arc;
 
@@ -20,6 +28,7 @@ use graphersal_mcp::{
 };
 use graphersal_serve::{Request, Response};
 
+use crate::access::{Access, Level, Principal};
 use crate::config::McpConfig;
 use crate::database::{DatabaseKind, DatabaseRole};
 use crate::loader::Loader;
@@ -32,43 +41,77 @@ pub(crate) const ENDPOINT: &str = "/mcp";
 pub(crate) fn endpoint(config: &McpConfig) -> Option<Arc<Mcp>> {
     config.enabled.then(|| {
         Arc::new(
-            Mcp::new(false, config.token.clone(), false)
+            Mcp::new(false, None, false)
                 .with_endpoint(ENDPOINT)
                 .with_max_sessions(config.max_sessions),
         )
     })
 }
 
-/// The databases of the registry as the directory of `/mcp` (module docs). Every method
-/// answers from the registry and the loader's map: no session job.
+/// The databases of the registry as the directory of `/mcp` for one caller (module docs),
+/// built per request. Every method answers from the registry, the loader's map and the access
+/// state: no session job.
 pub(crate) struct Directory<'a> {
     pub(crate) loader: &'a Loader,
+    pub(crate) access: &'a Access,
+    pub(crate) principal: &'a Principal,
+}
+
+impl Directory<'_> {
+    /// The level granted to the caller on the real database `name`.
+    fn granted(&self, name: &str) -> Level {
+        self.access.granted_level(self.principal, name)
+    }
+
+    /// The error of a name that is unknown or hidden from the caller (the same text for both).
+    fn unknown(name: &str) -> McpError {
+        McpError::Failed(format!("no database or alias '{name}'"))
+    }
 }
 
 impl GraphDirectory for Directory<'_> {
     fn list(&self) -> Result<Vec<GraphEntry>, McpError> {
         let registry = self.loader.registry();
-        let entries = registry.list();
-        let mut graphs: Vec<GraphEntry> = entries.iter().map(|e| graph_entry(&e.name, e)).collect();
+        let entries: Vec<(DatabaseEntry, Level)> = registry
+            .list()
+            .into_iter()
+            .map(|e| {
+                let level = self.granted(&e.name);
+                (e, level)
+            })
+            .filter(|(_, level)| *level != Level::None)
+            .collect();
+        let mut graphs: Vec<GraphEntry> = entries
+            .iter()
+            .map(|(e, level)| graph_entry(&e.name, e, *level))
+            .collect();
         for (alias, target) in registry.aliases() {
-            if let Some(entry) = entries.iter().find(|e| e.name == target) {
-                graphs.push(graph_entry(&alias, entry).with_alias_of(&target));
+            if let Some((entry, level)) = entries.iter().find(|(e, _)| e.name == target) {
+                graphs.push(graph_entry(&alias, entry, *level).with_alias_of(&target));
             }
         }
         Ok(graphs)
     }
 
     fn resolve(&self, name: &str) -> Result<String, McpError> {
-        self.loader
-            .registry()
-            .resolve(name)
-            .map(|entry| entry.name)
-            .map_err(|_| McpError::Failed(format!("no database or alias '{name}'")))
+        match self.loader.registry().resolve(name) {
+            Ok(entry) if self.granted(&entry.name) != Level::None => Ok(entry.name),
+            _ => Err(Self::unknown(name)),
+        }
     }
 
     fn host(&self, route: &str) -> Result<(Arc<dyn Host>, Profile), McpError> {
+        let level = self.granted(route);
+        if level == Level::None {
+            return Err(Self::unknown(route));
+        }
         if let Some(context) = self.loader.context(route) {
             let profile = context.mcp_profile().cloned().unwrap_or_default();
+            let profile = if level == Level::Read {
+                profile.with_read_only(true)
+            } else {
+                profile
+            };
             let host: Arc<dyn Host> = context;
             return Ok((host, profile));
         }
@@ -81,8 +124,9 @@ impl GraphDirectory for Directory<'_> {
     }
 }
 
-/// The `list_graphs` entry `name` (the database's own name, or an alias of it) for `entry`.
-fn graph_entry(name: &str, entry: &DatabaseEntry) -> GraphEntry {
+/// The `list_graphs` entry `name` (the database's own name, or an alias of it) for `entry`;
+/// read-only also when the caller's `level` is only [`Level::Read`].
+fn graph_entry(name: &str, entry: &DatabaseEntry, level: Level) -> GraphEntry {
     let config = entry.config.as_ref();
     let base = config.is_some_and(|c| c.role == DatabaseRole::Base);
     let kind = if base {
@@ -101,7 +145,7 @@ fn graph_entry(name: &str, entry: &DatabaseEntry) -> GraphEntry {
     };
     let mut graph = GraphEntry::new(name, state)
         .with_kind(kind)
-        .with_read_only(base || config.is_some_and(|c| c.read_only));
+        .with_read_only(base || config.is_some_and(|c| c.read_only) || level == Level::Read);
     if let Some(description) = config
         .map(|c| c.description.as_str())
         .filter(|d| !d.is_empty())
@@ -134,9 +178,9 @@ fn not_loaded_text(entry: &DatabaseEntry) -> String {
     }
 }
 
-/// Answers a request to `/mcp` (after the `Host`/`Origin` checks) on the endpoint `mcp` over
-/// the databases of `loader`.
-pub(crate) fn route(mcp: &Mcp, loader: &Loader, request: &mut Request<'_>) -> Response {
+/// Answers a request to `/mcp` (after the `Host`/`Origin` checks and authentication; the
+/// request carries the principal's identity) on the endpoint `mcp` over `directory`.
+pub(crate) fn route(mcp: &Mcp, directory: &Directory<'_>, request: &mut Request<'_>) -> Response {
     let headers = request.headers().to_vec();
     let method = request.method().as_str().to_string();
     let identity = request.identity().map(str::to_string);
@@ -147,9 +191,7 @@ pub(crate) fn route(mcp: &Mcp, loader: &Loader, request: &mut Request<'_>) -> Re
     if let Some(identity) = &identity {
         mcp_request = mcp_request.with_identity(identity);
     }
-    let (status, headers, body) = mcp
-        .handle_directory(&Directory { loader }, mcp_request)
-        .into_parts();
+    let (status, headers, body) = mcp.handle_directory(directory, mcp_request).into_parts();
     let mut answer = Response::new(status, body);
     for (name, value) in &headers {
         answer = answer.with_header(name, value);
@@ -183,7 +225,13 @@ mod tests {
             registry,
             HostCheck::new(Exposure::Loopback, 8484, "http://127.0.0.1:8484/"),
         );
-        let directory = Directory { loader: &loader };
+        let (access, _) = Access::open(&dir, None, crate::audit::Audit::default()).unwrap();
+        let operator = Principal::operator();
+        let directory = Directory {
+            loader: &loader,
+            access: &access,
+            principal: &operator,
+        };
         let graphs = directory.list().unwrap();
         let find = |name: &str| graphs.iter().find(|g| g.name() == name).unwrap();
         assert_eq!(find("a").state(), &GraphState::Unloaded);
@@ -202,6 +250,80 @@ mod tests {
         let err = directory.host("broken").err().unwrap().to_string();
         assert!(err.contains("it failed"), "{err}");
         assert!(directory.host("gone").is_err());
+    }
+
+    /// The directory of one caller: only what it may see, hidden = unknown, the reading
+    /// profile for a reader.
+    #[test]
+    fn the_directory_shows_each_principal_its_own_databases() {
+        let temp = TempDir::new("mcp-directory-access");
+        let dir = server(&temp);
+        add_db(&dir, "a", None, true);
+        add_db(&dir, "b", None, true);
+        add_db(&dir, "c", None, true);
+        let registry = Registry::scan(&dir).unwrap();
+        registry.alias_set("cur", "b").unwrap();
+        registry.alias_set("hid", "c").unwrap();
+        let loader = Loader::new(
+            registry,
+            HostCheck::new(Exposure::Loopback, 8484, "http://127.0.0.1:8484/"),
+        );
+        let (access, _) = Access::open(&dir, None, crate::audit::Audit::default()).unwrap();
+        let operator = Principal::operator();
+        access.add_user(&operator, "bob", Vec::new()).unwrap();
+        for (database, level) in [("a", Level::Write), ("b", Level::Read)] {
+            let grant = crate::access::Grant::new(
+                crate::access::Subject::parse("user:bob").unwrap(),
+                database,
+                level,
+            )
+            .unwrap();
+            access.grant(&operator, grant).unwrap();
+        }
+        let bob = access.file().principal_of("bob").unwrap();
+        let directory = Directory {
+            loader: &loader,
+            access: &access,
+            principal: &bob,
+        };
+        let graphs = directory.list().unwrap();
+        let mut names: Vec<&str> = graphs.iter().map(GraphEntry::name).collect();
+        names.sort_unstable();
+        assert_eq!(names, ["a", "b", "cur"]);
+        let find = |name: &str| graphs.iter().find(|g| g.name() == name).unwrap();
+        assert!(!find("a").read_only());
+        assert!(find("b").read_only(), "a reader sees the graph read-only");
+        assert!(find("cur").read_only());
+        assert_eq!(directory.resolve("cur").unwrap(), "b");
+        let hidden = directory.resolve("c").err().unwrap().to_string();
+        let unknown = directory.resolve("zz").err().unwrap().to_string();
+        assert_eq!(hidden, "no database or alias 'c'");
+        assert_eq!(unknown, "no database or alias 'zz'");
+        assert_eq!(
+            directory.resolve("hid").err().unwrap().to_string(),
+            "no database or alias 'hid'"
+        );
+        assert_eq!(
+            directory.host("c").err().unwrap().to_string(),
+            "no database or alias 'c'"
+        );
+        // Not loaded: the state text, for a visible database only.
+        assert!(
+            directory
+                .host("a")
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("not loaded")
+        );
+        let anonymous = Principal::anonymous();
+        let nobody = Directory {
+            loader: &loader,
+            access: &access,
+            principal: &anonymous,
+        };
+        assert!(nobody.list().unwrap().is_empty());
+        assert!(nobody.resolve("a").is_err());
     }
 
     #[test]

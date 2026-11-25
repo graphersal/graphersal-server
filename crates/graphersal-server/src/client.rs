@@ -1,6 +1,7 @@
 //! A minimal HTTP/1.1 client for the console's admin requests to a running server on this
 //! machine (std `TcpStream`, no dependency): one request per connection (`Connection: close`),
-//! `Host` = the server's address (its `Host` check accepts it), no `Origin`, a JSON body with
+//! `Host` = the server's address (its `Host` check accepts it), no `Origin`, the operator
+//! token of the run (`server.run`) as `Authorization: Bearer` when given, a JSON body with
 //! `Content-Length`, timeouts on connect, read and write. Answers `Content-Length`, chunked and
 //! close-delimited bodies. [`download`] streams a `200` answer's body into a writer (an export).
 
@@ -20,10 +21,18 @@ const READ_TIMEOUT: Duration = Duration::from_secs(600);
 /// The largest answer read (the listing of many databases fits easily).
 const MAX_ANSWER_BYTES: u64 = 64 << 20;
 
-/// Sends `method path` (with `body` as JSON) to the server at `address` and answers the
-/// status and the JSON body (`Value::Null` for an empty body).
+/// The `Authorization` header line for the bearer `token` (empty without one).
+fn authorization(token: Option<&str>) -> String {
+    token
+        .map(|token| format!("Authorization: Bearer {token}\r\n"))
+        .unwrap_or_default()
+}
+
+/// Sends `method path` (with `body` as JSON, `token` as the bearer token) to the server at
+/// `address` and answers the status and the JSON body (`Value::Null` for an empty body).
 pub(crate) fn request(
     address: SocketAddr,
+    token: Option<&str>,
     method: &str,
     path: &str,
     body: Option<&Value>,
@@ -41,7 +50,8 @@ pub(crate) fn request(
     let payload = body.map(Value::to_string).unwrap_or_default();
     let mut head = format!(
         "{method} {path} HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\nAccept: \
-         application/json\r\nUser-Agent: graphersal-server-console\r\n"
+         application/json\r\nUser-Agent: graphersal-server-console\r\n{}",
+        authorization(token)
     );
     if body.is_some() {
         head.push_str("Content-Type: application/json\r\n");
@@ -88,10 +98,12 @@ impl Downloaded {
     }
 }
 
-/// Sends `GET path` to the server at `address` and streams a `200` answer's body into `out`
-/// (`Content-Length`, chunked or close-delimited); an error answer's JSON body is read instead.
+/// Sends `GET path` (with `token` as the bearer token) to the server at `address` and streams
+/// a `200` answer's body into `out` (`Content-Length`, chunked or close-delimited); an error
+/// answer's JSON body is read instead.
 pub(crate) fn download(
     address: SocketAddr,
+    token: Option<&str>,
     path: &str,
     out: &mut dyn Write,
 ) -> Result<Downloaded, ServerError> {
@@ -107,7 +119,8 @@ pub(crate) fn download(
         .map_err(|err| failed(err.to_string()))?;
     let head = format!(
         "GET {path} HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\nUser-Agent: \
-         graphersal-server-console\r\nContent-Length: 0\r\n\r\n"
+         graphersal-server-console\r\n{}Content-Length: 0\r\n\r\n",
+        authorization(token)
     );
     stream
         .write_all(head.as_bytes())

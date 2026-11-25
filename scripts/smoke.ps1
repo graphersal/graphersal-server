@@ -66,9 +66,11 @@ function Stop-Server {
     $script:server = $null
 }
 
-# GET or POST with a JSON body; returns @{ Status; Json }. Never throws on an HTTP error status.
+# GET or POST with a JSON body, as the first admin ($script:token, set after init); returns
+# @{ Status; Json }. Never throws on an HTTP error status.
 function Invoke-Api([string]$method, [string]$url, $body = $null) {
     $params = @{ Method = $method; Uri = $url; SkipHttpErrorCheck = $true; TimeoutSec = 120 }
+    if ($script:token) { $params.Headers = @{ Authorization = "Bearer $($script:token)" } }
     if ($null -ne $body) {
         $params.ContentType = "application/json"
         $params.Body = ($body | ConvertTo-Json -Compress)
@@ -91,8 +93,15 @@ try {
     if ($Version) { Expect ($versionText.Contains($Version)) "--version '$versionText' lacks $Version" }
     Ok "--version ($versionText)"
 
-    & $Bin init $dir | Out-Null
+    $initErr = Join-Path $work "init.err"
+    & $Bin init $dir 2> $initErr | Out-Null
     Expect ($LASTEXITCODE -eq 0) "init exited with $LASTEXITCODE"
+    # The first admin's token, printed once in a framed block on stderr.
+    $tokenLine = Get-Content $initErr | Where-Object { $_ -match '^\| token: *([0-9a-f]{64}) ' } |
+        Select-Object -First 1
+    Expect ($null -ne $tokenLine) "init printed no first admin token"
+    $null = $tokenLine -match '^\| token: *([0-9a-f]{64}) '
+    $script:token = $Matches[1]
     foreach ($part in @("server.toml", "databases", "models", "backups", "trash", "tmp")) {
         Expect (Test-Path (Join-Path $dir $part)) "init made no $part"
     }

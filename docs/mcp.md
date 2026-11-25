@@ -19,7 +19,6 @@ see one database.
 ```toml
 [mcp]
 enabled = true          # default; false: /mcp and every /db/<name>/mcp answer 404
-# token = "<secret>"    # optional: every MCP request needs Authorization: Bearer <secret>
 max_sessions = 256      # MCP sessions remembered, the oldest forgotten first (at least 1)
 ```
 
@@ -33,12 +32,11 @@ when MCP is off. A database's `GET /db/<name>/api/info` announces its own endpoi
 Claude Code (the server on its default address):
 
 ```bash
-claude mcp add --transport http graphersal http://127.0.0.1:8484/mcp
-# with a token:
-claude mcp add --transport http graphersal http://127.0.0.1:8484/mcp \
-  --header "Authorization: Bearer <secret>"
+claude mcp add --transport http --header "Authorization: Bearer <token>" \
+  graphersal http://127.0.0.1:8484/mcp
 # one database only:
-claude mcp add --transport http acme http://127.0.0.1:8484/db/acme/mcp
+claude mcp add --transport http --header "Authorization: Bearer <token>" \
+  acme http://127.0.0.1:8484/db/acme/mcp
 ```
 
 Other clients: any MCP client with the Streamable HTTP transport; the URL is the endpoint's.
@@ -56,7 +54,7 @@ server-sent event stream):
 | `Accept` | optional | must allow `application/json` when sent (`application/json, text/event-stream`; else `406`) |
 | `Mcp-Session-Id` | after `initialize` | the id from the `initialize` answer's `Mcp-Session-Id` header; an unknown id is `404` (initialize again). A request without one is served, but on `/mcp` it has no selection: `use_graph` is refused and every data tool needs `graph` |
 | `MCP-Protocol-Version` | optional | a revision the server speaks: `2025-11-25`, `2025-06-18`, `2025-03-26` (else `400`) |
-| `Authorization` | with a `token` | `Bearer <token>` (else `401`) |
+| `Authorization` | for a user | `Bearer <user token>` (`access.toml`); without it the request is anonymous (the anonymous grants only); a token nobody holds is `401` |
 
 A notification (such as `notifications/initialized`) is answered `202` without a body. With
 curl (`scripts/smoke.sh` walks through the whole flow):
@@ -167,8 +165,10 @@ A per-database endpoint of a database that is not loaded answers the mount's `40
 ## Limits of this version
 
 - No admin tools over MCP: an agent cannot create, delete, load, unload or change a database.
-- No access control beyond the optional token: whoever reaches the port (and knows the token,
-  if one is set) can read and change every loaded database that is not read-only. Keep the
-  server on a loopback address (the default `127.0.0.1:8484`).
-- One token for every endpoint; no per-database or per-agent policy.
+- Access follows `access.toml` (the old `[mcp] token` is gone; `server.toml` refuses it):
+  `/mcp` lists and serves only the databases the caller's user (or anonymous) is granted, a
+  hidden database answers exactly like an unknown name, a `read` grant gets the reading tools
+  and profile; `/db/<name>/mcp` answers `401` (anonymous) or `404` (a user) without a grant. An
+  MCP session belongs to the principal that initialized it: another principal using its id
+  gets `404`. Tokens travel in clear text over plain HTTP.
 - MCP sessions live in memory: a server restart forgets them (clients initialize again).

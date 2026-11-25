@@ -5,7 +5,6 @@
 //!
 //! [mcp]
 //! enabled = true              # /mcp over every database, /db/<name>/mcp per loaded database
-//! # token = "secret"          # optional: requests need `Authorization: Bearer secret`
 //! max_sessions = 256          # MCP sessions remembered (the oldest forgotten first)
 //!
 //! [defaults]                  # the creation parameters of new databases
@@ -30,7 +29,7 @@ use serde::Deserialize;
 
 use crate::error::ServerError;
 
-/// The default listen address (loopback only: the server has no access control).
+/// The default listen address (loopback only: tokens travel in clear text over plain HTTP).
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:8484";
 
 /// The contents of `server.toml`.
@@ -140,11 +139,6 @@ pub struct McpConfig {
     /// `/db/<name>/mcp` per loaded database (default `true`).
     #[serde(default = "default_true")]
     pub enabled: bool,
-    /// The bearer token every MCP request must carry (`Authorization: Bearer <token>`), on
-    /// `/mcp` and on every `/db/<name>/mcp`; `None` (the default): no token. It is the only
-    /// check of an MCP request besides the `Host`/`Origin` checks: no access control.
-    #[serde(default)]
-    pub token: Option<String>,
     /// How many MCP sessions the server remembers, the oldest forgotten first (its client
     /// initializes again and selects its graph again); default [`DEFAULT_MCP_SESSIONS`], at
     /// least 1. One table for `/mcp` and every `/db/<name>/mcp`.
@@ -203,7 +197,6 @@ impl Default for McpConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            token: None,
             max_sessions: DEFAULT_MCP_SESSIONS,
         }
     }
@@ -241,16 +234,6 @@ impl ServerConfig {
             return Err(invalid(format!(
                 "mcp.max_sessions: must be at least 1 (default {DEFAULT_MCP_SESSIONS})"
             )));
-        }
-        if config
-            .mcp
-            .token
-            .as_deref()
-            .is_some_and(|t| t.trim().is_empty())
-        {
-            return Err(invalid(
-                "mcp.token: must not be empty (remove the key for no token)".to_string(),
-            ));
         }
         if config.limits.upload_bytes == 0 {
             return Err(invalid(format!(
@@ -326,8 +309,9 @@ pub fn default_config_text() -> String {
         "# graphersal-server configuration (EXPERIMENTAL).\n\
          \n\
          # The address the server listens on: IP:PORT (or localhost:PORT); port 0 picks a free\n\
-         # port. The server has NO access control: keep it on a loopback address (127.0.0.1,\n\
-         # [::1]); any other address is reachable from the network (serve warns about it).\n\
+         # port. Requests need a user token or a browser login (access.toml); over plain HTTP\n\
+         # tokens travel in clear text: keep it on a loopback address (127.0.0.1, [::1]) or\n\
+         # behind a TLS proxy; any other address is reachable from the network (serve warns).\n\
          # `graphersal-server serve --listen ADDR` overrides it.\n\
          listen = \"{DEFAULT_LISTEN}\"\n\
          \n\
@@ -335,8 +319,6 @@ pub fn default_config_text() -> String {
          # The MCP endpoints: /mcp over every database (list_graphs, use_graph) and\n\
          # /db/<name>/mcp per loaded database. Read when the server starts.\n\
          enabled = true\n\
-         # A bearer token every MCP request must carry (no token by default):\n\
-         # token = \"<secret>\"\n\
          # How many MCP sessions are remembered (the oldest forgotten first).\n\
          max_sessions = {}\n\
          \n\
@@ -463,14 +445,13 @@ mod tests {
     fn mcp_options() {
         let config = parse("").unwrap();
         assert!(config.mcp.enabled);
-        assert_eq!(config.mcp.token, None);
         assert_eq!(config.mcp.max_sessions, DEFAULT_MCP_SESSIONS);
-        let config = parse("[mcp]\ntoken = \"s3cret\"\nmax_sessions = 3").unwrap();
-        assert_eq!(config.mcp.token.as_deref(), Some("s3cret"));
+        let config = parse("[mcp]\nmax_sessions = 3").unwrap();
         assert_eq!(config.mcp.max_sessions, 3);
         for (text, needle) in [
             ("[mcp]\nmax_sessions = 0", "max_sessions"),
-            ("[mcp]\ntoken = \" \"", "token"),
+            // The MCP token is gone (access.toml's users and grants replace it).
+            ("[mcp]\ntoken = \"s3cret\"", "token"),
         ] {
             let err = parse(text).unwrap_err().to_string();
             assert!(err.contains(needle), "{text:?}: {err}");

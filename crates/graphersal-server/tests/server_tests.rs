@@ -5,6 +5,7 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
@@ -13,6 +14,10 @@ use graphersal_server::{
 };
 
 const BIN: &str = env!("CARGO_BIN_EXE_graphersal-server");
+
+/// The live test directories ([`TempDir`]), where [`admin_header`] looks for a server's run
+/// file.
+static DIRS: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 
 /// A fresh directory under the system's temporary directory, removed on drop.
 struct TempDir(PathBuf);
@@ -27,6 +32,9 @@ impl TempDir {
         ));
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).unwrap();
+        DIRS.lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(path.clone());
         Self(path)
     }
 
@@ -37,7 +45,52 @@ impl TempDir {
 
 impl Drop for TempDir {
     fn drop(&mut self) {
+        DIRS.lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .retain(|dir| dir != &self.0);
         let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// The operator token of the server listening on `address` that a test started (in process or
+/// as a child) in one of the live [`TempDir`]s: its `server.run`, in the directory or one level
+/// below. `None` when no such server runs.
+fn operator_token(address: SocketAddr) -> Option<String> {
+    let dirs = DIRS.lock().unwrap_or_else(|p| p.into_inner()).clone();
+    let mut candidates = Vec::new();
+    for dir in dirs {
+        if let Ok(children) = std::fs::read_dir(&dir) {
+            candidates.extend(children.flatten().map(|child| child.path()));
+        }
+        candidates.push(dir);
+    }
+    candidates.into_iter().find_map(|root| {
+        let info = RunInfo::read(&ServerDir::new(root)).ok()??;
+        (info.address == address)
+            .then(|| info.operator_token.map(|token| token.expose().to_string()))
+            .flatten()
+    })
+}
+
+/// The `Authorization` header line of the admin of the server at `address` (its operator
+/// token, [`operator_token`]): the requests of these tests go as the admin unless they carry
+/// their own `Authorization` (B3 closed every route but the probes, `/api/info` and the UI
+/// files to anonymous). Empty when no such server runs.
+fn admin_header(address: SocketAddr) -> String {
+    operator_token(address)
+        .map(|token| format!("Authorization: Bearer {token}\r\n"))
+        .unwrap_or_default()
+}
+
+/// `head` (a request head) with the admin's `Authorization` ([`admin_header`]) after the
+/// request line, unless it carries one.
+fn as_admin(address: SocketAddr, head: &str) -> String {
+    if head.to_ascii_lowercase().contains("\r\nauthorization:") {
+        return head.to_string();
+    }
+    match head.split_once("\r\n") {
+        Some((line, rest)) => format!("{line}\r\n{}{rest}", admin_header(address)),
+        None => head.to_string(),
     }
 }
 
@@ -143,13 +196,16 @@ fn first_admin_token(stderr: &str) -> String {
     tokens[0].clone()
 }
 
-/// Sends `head` (and `body`) on a new connection and reads the answer: (status, body).
+/// Sends `head` (and `body`) on a new connection, as the admin ([`as_admin`]), and reads the
+/// answer: (status, body).
 fn exchange(address: SocketAddr, head: &str, body: &[u8]) -> (u16, String) {
     let mut stream = TcpStream::connect(address).unwrap();
     stream
         .set_read_timeout(Some(Duration::from_secs(10)))
         .unwrap();
-    stream.write_all(head.as_bytes()).unwrap();
+    stream
+        .write_all(as_admin(address, head).as_bytes())
+        .unwrap();
     stream.write_all(body).unwrap();
     let mut answer = Vec::new();
     stream.read_to_end(&mut answer).unwrap();
@@ -642,8 +698,9 @@ fn small_upload_server(temp: &TempDir) -> serve::Running {
 
 fn upload_head(address: SocketAddr, extra: &str) -> String {
     format!(
-        "POST /api/admin/import?name=big HTTP/1.1\r\nHost: {address}\r\nContent-Type: \
-         application/octet-stream\r\n{extra}\r\n"
+        "POST /api/admin/import?name=big HTTP/1.1\r\nHost: {address}\r\n{}Content-Type: \
+         application/octet-stream\r\n{extra}\r\n",
+        admin_header(address)
     )
 }
 
@@ -812,8 +869,9 @@ fn keep_alive_connections_serve_several_requests_and_close_on_stop() {
     assert!(rest.is_empty(), "{}", text(&rest));
 }
 
-/// Sends one request (`headers` beside `Host` and `Connection: close`) and reads the answer:
-/// (status, head, body).
+/// Sends one request (`headers` beside `Host` and `Connection: close`) as the admin (unless
+/// `headers` carry an `Authorization`, [`as_admin`]) and reads the answer: (status, head,
+/// body).
 fn call(
     address: SocketAddr,
     method: &str,
@@ -821,7 +879,29 @@ fn call(
     headers: &[(&str, &str)],
     body: &str,
 ) -> (u16, String, String) {
-    let mut head = format!("{method} {path} HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n");
+    let own = headers
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case("authorization"));
+    let auth = if own {
+        String::new()
+    } else {
+        admin_header(address)
+    };
+    send(address, method, path, headers, &auth, body)
+}
+
+/// Sends one request (`headers` beside `Host` and `Connection: close`, `auth` = an
+/// `Authorization` line or nothing) and reads the answer: (status, head, body).
+fn send(
+    address: SocketAddr,
+    method: &str,
+    path: &str,
+    headers: &[(&str, &str)],
+    auth: &str,
+    body: &str,
+) -> (u16, String, String) {
+    let mut head =
+        format!("{method} {path} HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n{auth}");
     for (name, value) in headers {
         head.push_str(&format!("{name}: {value}\r\n"));
     }
@@ -2172,21 +2252,29 @@ fn mcp_token_and_off_switch_come_from_server_toml() {
     let temp = TempDir::new("mcp-config");
     let dir = ServerDir::init(temp.path()).unwrap().dir;
     let config = dir.root().join("server.toml");
+    // `[mcp] token` is gone (B3: users and grants in access.toml replace it): refused.
     std::fs::write(&config, "[mcp]\ntoken = \"s3cret\"\nmax_sessions = 2\n").unwrap();
     let listen: SocketAddr = "127.0.0.1:0".parse().unwrap();
+    let err = serve::start(temp.path(), ServeOptions::new().with_listen(listen))
+        .err()
+        .expect("the old token key is refused")
+        .to_string();
+    assert!(err.contains("token"), "{err}");
+    std::fs::write(&config, "[mcp]\nmax_sessions = 2\n").unwrap();
     let running = serve::start(temp.path(), ServeOptions::new().with_listen(listen)).unwrap();
     let address = running.address();
     let init = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
         "protocolVersion": "2025-06-18", "clientInfo": {"name": "it", "version": "1"}}});
-    let (status, _, body) = mcp_post(address, "/mcp", None, &[], init.clone());
-    assert_eq!(status, 401, "{body}");
-    let (status, head, body) = mcp_post(
+    // A token nobody holds is refused; the admin's (and anonymous) MCP sessions open.
+    let (status, _, body) = mcp_post(
         address,
         "/mcp",
         None,
         &[("Authorization", "Bearer s3cret")],
-        init,
+        init.clone(),
     );
+    assert_eq!(status, 401, "{body}");
+    let (status, head, body) = mcp_post(address, "/mcp", None, &[], init);
     assert_eq!(status, 200, "{body}");
     assert!(header_of(&head, "Mcp-Session-Id").is_some(), "{head}");
     running.stop().unwrap();
@@ -2346,4 +2434,123 @@ fn the_first_serve_without_access_toml_prints_the_admin_token_once() {
     wait_for_run_file(&dir);
     let (_, stderr) = stop_and_wait(&mut server);
     assert!(!stderr.contains("FIRST ADMIN TOKEN"), "{stderr}");
+}
+
+/// B3 over the listener: the first admin's token (printed once by `init`) logs a browser in,
+/// the cookie is the admin's credentials, anonymous meets a closed server, a reader cannot
+/// write, and logout ends the session.
+#[test]
+fn access_is_enforced_over_the_listener_with_the_first_admin_token() {
+    let temp = TempDir::new("access-e2e");
+    let root = temp.path().join("srv");
+    let out = run(&["init", root.to_str().unwrap()]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let admin_token = first_admin_token(&text(&out.stderr));
+    let dir = ServerDir::new(&root);
+    modern_db(&dir, "acme");
+    let running = serve::start(
+        &root,
+        ServeOptions::new().with_listen("127.0.0.1:0".parse().unwrap()),
+    )
+    .unwrap();
+    let address = running.address();
+    let anonymous = |method: &str, path: &str, body: &str| {
+        send(
+            address,
+            method,
+            path,
+            &[("Content-Type", "application/json")],
+            "",
+            body,
+        )
+    };
+    // Anonymous: the minimal info, 401 on the admin API and the database, the login page.
+    let (status, _, body) = anonymous("GET", "/api/info", "");
+    assert_eq!(status, 200);
+    let info = json(&body);
+    assert_eq!(info["principal"]["kind"], "anonymous", "{info}");
+    assert_eq!(info["login"], "/");
+    for path in [
+        "/api/admin/databases",
+        "/db/acme/api/info",
+        "/db/nope/api/info",
+    ] {
+        let (status, head, body) = anonymous("GET", path, "");
+        assert_eq!(status, 401, "{path}: {body}");
+        assert_eq!(json(&body)["login"], "/", "{path}");
+        assert_eq!(header_of(&head, "WWW-Authenticate"), Some("Bearer"));
+    }
+    let (status, head, _) = anonymous("GET", "/db/acme/", "");
+    assert_eq!(status, 303);
+    assert_eq!(header_of(&head, "Location"), Some("/?next=/db/acme/"));
+    // The first admin logs in; the cookie loads and reaches the database.
+    let (status, head, body) = anonymous(
+        "POST",
+        "/api/login",
+        &serde_json::json!({ "token": admin_token }).to_string(),
+    );
+    assert_eq!(status, 200, "{body}");
+    let cookie = header_of(&head, "Set-Cookie").unwrap();
+    assert!(
+        cookie.contains("HttpOnly; SameSite=Strict; Path=/"),
+        "{cookie}"
+    );
+    let session = cookie.split(';').next().unwrap().to_string();
+    let as_browser =
+        |method: &str, path: &str| send(address, method, path, &[("Cookie", &session)], "", "");
+    let (status, _, body) = as_browser("POST", "/api/admin/databases/acme/load");
+    assert!(status == 200 || status == 202, "{body}");
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while as_browser("GET", "/db/acme/api/info").0 != 200 {
+        assert!(Instant::now() < deadline, "acme never loaded");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let (_, _, body) = as_browser("GET", "/api/info");
+    assert_eq!(json(&body)["principal"]["admin"], true, "{body}");
+    // A reader made through the access state reads but cannot write.
+    let access = running.access().unwrap();
+    let operator = graphersal_server::Principal::operator();
+    let reader = access.add_user(&operator, "reader", Vec::new()).unwrap();
+    access
+        .grant(
+            &operator,
+            graphersal_server::access::Grant::new(
+                graphersal_server::access::Subject::parse("user:reader").unwrap(),
+                "acme",
+                graphersal_server::Level::Read,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let bearer = format!("Authorization: Bearer {}\r\n", reader.expose());
+    let as_reader = |method: &str, path: &str, body: &str| {
+        send(
+            address,
+            method,
+            path,
+            &[("Content-Type", "application/json")],
+            &bearer,
+            body,
+        )
+    };
+    let (status, _, body) = as_reader("GET", "/db/acme/api/info", "");
+    assert_eq!(status, 200);
+    assert_eq!(json(&body)["readOnly"], true, "{body}");
+    let write = serde_json::json!({ "script": "g.add_v(\"person\").iterate()" }).to_string();
+    let (status, _, body) = as_reader("POST", "/db/acme/api/execute", &write);
+    assert_eq!(status, 200);
+    assert!(body.to_lowercase().contains("denied"), "{body}");
+    assert_eq!(as_reader("GET", "/api/admin/databases", "").0, 404);
+    let count = execute(address, "acme", "g.v().has_label(\"person\").count()");
+    assert_eq!(count, serde_json::json!(4), "nothing written: {count}");
+    // Logout ends the browser session.
+    let (status, head, _) = as_browser("POST", "/api/logout");
+    assert_eq!(status, 200);
+    assert!(
+        header_of(&head, "Set-Cookie")
+            .unwrap()
+            .contains("Max-Age=0")
+    );
+    assert_eq!(as_browser("GET", "/api/admin/databases").0, 401);
+    running.stop().unwrap();
 }
