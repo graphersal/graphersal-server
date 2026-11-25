@@ -11,7 +11,9 @@
 //!   models/          the shared embedding models: blobs/<2 hex>/<sha256>, models.toml (crate::models)
 //!   sessions/        browser.json, mcp.json: the sessions that survive a restart (crate::sessions)
 //!   imports/         the import inbox: files an admin imports by name (crate::ops::InboxFile)
-//!   backups/  trash/  tmp/
+//!   backups/         the admin's backups (backups/<name>/) and, by default, the backup root
+//!                    of backup jobs (backups/jobs/, `server.toml [jobs] backup_root`)
+//!   trash/  tmp/
 //! ```
 //!
 //! There is no log directory: the server logs to stderr (redirect it to keep a log file).
@@ -110,13 +112,14 @@ impl ServerDir {
     pub fn init(root: impl Into<PathBuf>) -> Result<InitReport, ServerError> {
         let dir = Self::new(root);
         let mut created = Vec::new();
+        let mut config = None;
         let existed = match fs::metadata(&dir.root) {
             Ok(meta) if !meta.is_dir() => {
                 return Err(ServerError::NotEmpty { path: dir.root });
             }
             Ok(_) => {
                 if dir.config_path().is_file() {
-                    dir.load_config()?;
+                    config = Some(dir.load_config()?);
                     true
                 } else {
                     let mut entries = fs::read_dir(&dir.root)
@@ -151,6 +154,12 @@ impl ServerDir {
                     Err(err) => return Err(ServerError::io("create directory", &path, err)),
                 }
             }
+        }
+        // The backup root of backup jobs (`[jobs] backup_root`, by default `backups/jobs/`).
+        let root = dir.backup_root(&config.unwrap_or_default());
+        if !root.is_dir() {
+            dir.ensure_backup_root(&root)?;
+            created.push(root);
         }
         // Last: a directory without `access.toml` is closed; its first admin is made here.
         let first_admin = crate::access::ensure_first_admin(&dir, &Audit::default())?;
@@ -239,6 +248,20 @@ impl ServerDir {
     /// `imports/` (the import inbox: [`crate::ops::Admin::inbox`]).
     pub fn imports(&self) -> PathBuf {
         self.root.join(IMPORTS_DIR)
+    }
+
+    /// The backup root of backup jobs for `config` (`[jobs] backup_root`, relative to this
+    /// directory; by default `backups/jobs/`), as configured (not created, not resolved).
+    pub fn backup_root(&self, config: &ServerConfig) -> PathBuf {
+        config.jobs.backup_root(&self.root)
+    }
+
+    /// Creates the backup root `root` (with its parents) when it is missing and answers it
+    /// resolved (symbolic links followed): the path every database context confines its job
+    /// paths and fork/backup directories to.
+    pub(crate) fn ensure_backup_root(&self, root: &Path) -> Result<PathBuf, ServerError> {
+        fs::create_dir_all(root).map_err(|err| ServerError::io("create directory", root, err))?;
+        fs::canonicalize(root).map_err(|err| ServerError::io("resolve", root, err))
     }
 
     /// Reads and checks `server.toml`.

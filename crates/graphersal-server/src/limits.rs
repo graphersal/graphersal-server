@@ -24,8 +24,9 @@
 //! `--max-operations` -> `max_operations`, ...) with the same meaning: `0` is "no limit" for
 //! `timeout_ms` and the `max_*` keys except `max_value_depth`, where `0` is the engine's default
 //! (128; a value depth is never unlimited). Setting `0` in `database.toml` lifts a global limit
-//! for that database. A query may still raise a traversal option for itself with
-//! `g.with("evaluationTimeout", ..)` (as in the graphersal dev server).
+//! for that database. A set limit is a ceiling (`SessionPresets::with_ceilings`): a query may
+//! lower it for itself with `g.with("evaluationTimeout", ..)`, never raise or remove it
+//! (`OptionAboveCeiling`); a key left unset is no ceiling.
 //!
 //! The process memory ceiling is one setting of the whole process (every database), so it is a
 //! key of `server.toml`'s `[limits]` only, set once at start
@@ -167,7 +168,9 @@ impl QueryLimits {
         if let Some(n) = self.max_value_depth.filter(|n| *n > 0) {
             presets = presets.with_option("traversal.max_value_depth", option_value(n));
         }
-        presets
+        // Ceilings: a query may lower a configured limit for itself (`g.with(..)`), never raise
+        // or remove it (`OptionAboveCeiling`). A key left unset is no ceiling.
+        presets.with_ceilings(true)
     }
 
     /// The limits as `key=value` pairs in file order (the start block's row); empty when no

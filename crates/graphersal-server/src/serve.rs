@@ -3,7 +3,9 @@
 //! [`start`] opens the server directory, takes its `server.lock` (a second server on the same
 //! directory is refused with [`ServerError::Locked`]), binds the listen address (`--listen`
 //! over `server.toml`'s `listen`; port `0` picks a free port), writes the bound address into
-//! `server.run` (with a new operator token for this run, [`crate::access`]), scans the database
+//! `server.run` (with a new operator token for this run, [`crate::access`]), creates the backup
+//! root of backup jobs (`[jobs] backup_root`, every database context's file root: [`Loader`]),
+//! scans the database
 //! registry ([`Registry::scan`]; `/readyz` answers `503 loading` until it is done), opens the
 //! access state ([`Access::open`]: a directory without `access.toml` gets its first admin
 //! here, its token handed out once by [`Running::take_first_admin`]; the browser and MCP
@@ -300,6 +302,9 @@ pub fn start(
             path: dir.config_path(),
             message,
         })?;
+    // The backup root of backup jobs (`[jobs] backup_root`): created now, resolved, every
+    // database context's file root.
+    let backup_root = dir.ensure_backup_root(&dir.backup_root(&config))?;
     let bind_error = |message: String| ServerError::Bind {
         address: listen.to_string(),
         message,
@@ -351,7 +356,12 @@ pub fn start(
     // MCP sessions survive a restart: restored from `sessions/mcp.json` now.
     let mcp = crate::mcp::persistent_endpoint(&config.mcp, &dir);
     let registry = Registry::empty(&dir);
-    let loader = Loader::with_mcp(registry.clone(), host_check.clone(), mcp.clone());
+    let loader = Loader::with_backup_root(
+        registry.clone(),
+        host_check.clone(),
+        mcp.clone(),
+        Some(backup_root.clone()),
+    );
     let mut running = Running {
         dir,
         shared,
@@ -373,7 +383,8 @@ pub fn start(
     // The scan with the lock held and the listener up: the probes answer meanwhile.
     match Registry::scan(&running.dir) {
         Ok(registry) => {
-            running.loader = Loader::with_mcp(registry.clone(), host_check, mcp);
+            running.loader =
+                Loader::with_backup_root(registry.clone(), host_check, mcp, Some(backup_root));
             running.registry = registry;
         }
         Err(err) => {

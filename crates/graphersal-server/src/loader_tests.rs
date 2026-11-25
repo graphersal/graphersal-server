@@ -532,6 +532,35 @@ fn query_limits_stop_a_heavy_query_of_a_limited_database_only() {
 }
 
 #[test]
+fn configured_query_limits_are_ceilings_a_query_may_lower_but_not_raise() {
+    let temp = TempDir::new("loader-ceilings");
+    let dir = server(&temp);
+    server_toml(
+        &dir,
+        "[limits.query]\ntimeout_ms = 60000\nmax_traversers = 100",
+    );
+    store_db(&dir, "limited", "", TraversalGraph::tinkerpop_modern());
+    let loader = loader_of(&dir);
+    assert_eq!(load(&loader, "limited"), DbState::Loaded);
+    let limited = loader.context("limited").unwrap();
+    assert_eq!(presets_of(&loader, "limited")["ceilings"], true);
+    for raise in [
+        "g.with(\"evaluationTimeout\", 120000).v().count().next()",
+        "g.with(\"traversal.max_traversers\", 1000).v().count().next()",
+    ] {
+        let err = run(&limited, raise).expect_err("a raise is refused");
+        assert!(err.contains("may only lower this limit"), "{raise}: {err}");
+    }
+    for lower in [
+        "g.with(\"evaluationTimeout\", 1000).v().count().next()",
+        "g.with(\"traversal.max_traversers\", 50).v().count().next()",
+    ] {
+        let answer = run(&limited, lower).expect("a lower value is accepted");
+        assert_eq!(answer["execution"]["results"][0], 6, "{lower}: {answer}");
+    }
+}
+
+#[test]
 fn no_query_limit_by_default() {
     let temp = TempDir::new("loader-no-limits");
     let dir = server(&temp);

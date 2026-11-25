@@ -87,6 +87,24 @@ pub(crate) fn forward<'b>(request: &'b mut Request<'_>, url: &str, real: &str) -
     forwarded.with_header(GRAPH_HEADER, real)
 }
 
+/// [`forward`] with the body already read into `body` (the router checked it first): the same
+/// method and headers, the length of `body`.
+pub(crate) fn forward_with_body<'b>(
+    request: &Request<'_>,
+    url: &str,
+    real: &str,
+    body: &'b [u8],
+) -> Request<'b> {
+    let mut forwarded =
+        Request::new(request.method().clone(), url, body).with_body_length(Some(body.len()));
+    for (name, value) in request.headers() {
+        if !name.eq_ignore_ascii_case(GRAPH_HEADER) {
+            forwarded = forwarded.with_header(name, value);
+        }
+    }
+    forwarded.with_header(GRAPH_HEADER, real)
+}
+
 /// The error text and the help of a request to the database `entry` that is not loaded,
 /// naming its state.
 pub(crate) fn not_loaded_text(entry: &DatabaseEntry) -> (String, String) {

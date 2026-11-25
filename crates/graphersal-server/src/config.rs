@@ -32,13 +32,16 @@
 //! [http]
 //! public_scheme = "http"      # "https" behind a TLS proxy: the login cookie gets `Secure`
 //! allowed_hosts = []          # public names behind a proxy ("db.example.com", port optional)
+//!
+//! [jobs]
+//! backup_root = "backups/jobs" # where backup jobs write (relative: to the server directory)
 //! ```
 //!
 //! Every key is optional (its default applies); an unknown key is an error (a typo must not be
 //! ignored silently).
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use graphersal::exec::MemoryLimit;
@@ -80,6 +83,44 @@ pub struct ServerConfig {
     /// How clients reach the server (scheme, public host names).
     #[serde(default)]
     pub http: HttpConfig,
+    /// The scheduled jobs of the databases (the backup root).
+    #[serde(default)]
+    pub jobs: JobsConfig,
+}
+
+/// The default backup root of backup jobs, relative to the server directory, as path
+/// components ([`JobsConfig::backup_root`]).
+pub const DEFAULT_BACKUP_ROOT: &[&str] = &["backups", "jobs"];
+
+/// The scheduled jobs of the databases (`[jobs]` of `server.toml`), read at start.
+///
+/// `#[non_exhaustive]`: further settings may be added.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct JobsConfig {
+    /// The **backup root**: the one directory backup jobs (`POST /db/<name>/api/jobs/define`,
+    /// action `backup`) and the Store panel's fork/backup `dir` may write into. A relative path
+    /// is relative to the server directory; an absolute one may name a mounted storage.
+    /// Missing: `<server-dir>/backups/jobs` ([`DEFAULT_BACKUP_ROOT`]). `serve` (and `init`)
+    /// create it. A backup job's `path` is resolved relative to it; an absolute path, or one
+    /// leaving it (`..`, a symbolic link pointing out), is refused when the job is defined.
+    #[serde(default)]
+    pub backup_root: Option<PathBuf>,
+}
+
+impl JobsConfig {
+    /// The backup root of the server directory `server_dir` ([`Self::backup_root`]): the
+    /// configured path (relative to `server_dir`), else the default.
+    pub fn backup_root(&self, server_dir: &Path) -> PathBuf {
+        match &self.backup_root {
+            Some(path) if path.is_absolute() => path.clone(),
+            Some(path) => server_dir.join(path),
+            None => DEFAULT_BACKUP_ROOT
+                .iter()
+                .fold(server_dir.to_path_buf(), |path, part| path.join(part)),
+        }
+    }
 }
 
 /// Access control (`[access]` of `server.toml`), read at start.
@@ -332,6 +373,7 @@ impl Default for ServerConfig {
             sessions: SessionsConfig::default(),
             access: AccessConfig::default(),
             http: HttpConfig::default(),
+            jobs: JobsConfig::default(),
         }
     }
 }
@@ -425,6 +467,18 @@ impl ServerConfig {
         }
         config.http.allowed_hosts = allowed_hosts(&config.http.allowed_hosts)
             .map_err(|err| invalid(format!("http.allowed_hosts: {err}")))?;
+        if config
+            .jobs
+            .backup_root
+            .as_ref()
+            .is_some_and(|root| root.as_os_str().is_empty())
+        {
+            return Err(invalid(
+                "jobs.backup_root: must name a directory (leave it out for the default, \
+                 backups/jobs in the server directory)"
+                    .to_string(),
+            ));
+        }
         Ok(config)
     }
 
@@ -633,7 +687,14 @@ pub fn default_config_text() -> String {
          # The public names behind a reverse proxy that requests may name in Host, besides\n\
          # this machine's loopback names and the listen address (a port is optional and not\n\
          # checked). Other names are refused (DNS rebinding).\n\
-         # allowed_hosts = [\"db.example.com\"]\n",
+         # allowed_hosts = [\"db.example.com\"]\n\
+         \n\
+         [jobs]\n\
+         # The backup root: the only directory backup jobs (and the Store panel's fork and\n\
+         # backup) may write into; a job's path is relative to it (absolute paths and paths\n\
+         # leaving it are refused). Relative to this directory, or an absolute path such as a\n\
+         # mounted storage; created at start. Read when the server starts.\n\
+         # backup_root = \"backups/jobs\"\n",
         DEFAULT_MCP_SESSIONS,
         defaults.chunk_bytes,
         defaults.damage_policy,
@@ -881,5 +942,29 @@ mod tests {
             let err = parse(text).unwrap_err().to_string();
             assert!(err.contains(needle), "{text:?}: {err}");
         }
+    }
+
+    #[test]
+    fn the_backup_root_defaults_to_backups_jobs_and_resolves_relative_to_the_directory() {
+        let dir = Path::new("srv");
+        let config = parse("").unwrap();
+        assert_eq!(
+            config.jobs.backup_root(dir),
+            dir.join("backups").join("jobs")
+        );
+        let config = parse("[jobs]\nbackup_root = \"vault\"\n").unwrap();
+        assert_eq!(config.jobs.backup_root(dir), dir.join("vault"));
+        let absolute = std::env::temp_dir().join("mounted");
+        let text = format!(
+            "[jobs]\nbackup_root = {:?}\n",
+            absolute.display().to_string()
+        );
+        assert_eq!(parse(&text).unwrap().jobs.backup_root(dir), absolute);
+        let err = parse("[jobs]\nbackup_root = \"\"\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("jobs.backup_root"), "{err}");
+        let err = parse("[jobs]\nroot = \"x\"\n").unwrap_err().to_string();
+        assert!(err.contains("unknown field"), "{err}");
     }
 }
