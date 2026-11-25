@@ -16,14 +16,12 @@ from published files). When this file disagrees with the code, the code wins: sa
   server's own `server` UI profile) and `mcp` (each
   context a host of the shared MCP endpoint); graphersal-mcp (the endpoint, directory mode).
 - The four Graphersal crates (graphersal, graphersal-serve, graphersal-session, graphersal-mcp)
-  from crates.io, pinned exactly (`=0.7.1`: EXPERIMENTAL crates, exact pin during 0.x), all on
+  from crates.io, pinned exactly (`=0.8.0`: EXPERIMENTAL crates, exact pin during 0.x), all on
   the same version; `Cargo.lock` is committed and CI builds `--locked`. The embedded playground
   is the `ui/` of the published graphersal-serve crate. Moving to a new Graphersal version:
   bump the four pins together, `cargo update -p graphersal ...`, commit the lock. Never edit the
   graphersal repository from a task here. This repository keeps its own `target/` (never share
-  graphersal's). Temporarily (the access series) the root `Cargo.toml` takes the four crates as
-  PATH dependencies on `../graphersal-sa/crates/...` (the worktree of graphersal's branch
-  `feat/server-access`); task B-PIN restores `=0.8.0` from crates.io.
+  graphersal's).
 - `src/lib.rs` modules: `access` (B2: `access.toml` = `AccessFile` (`[users.<name>] roles,
   token_sha256, token_last4`; `[[grant]] subject/database/level`, `deny_unknown_fields`,
   written atomically mode 0600, hashes only), `Principal` (`identity()`: `user:<name>`,
@@ -399,7 +397,7 @@ from published files). When this file disagrees with the code, the code wins: sa
   (the access model: principals, grants/levels, 401/404/303, tokens, login and sessions, MCP
   with a token, modes, limits as ceilings, backup root, inbox, audit), and the release notes
   `docs/release-notes-<version>.md` (release.yml uses the file of the tagged version as the
-  release text; 0.2.0 = the access series, not yet released).
+  release text; 0.2.0 = the access series, on Graphersal 0.8.0).
 - `scripts/smoke.sh`: the end-to-end smoke test (bash + curl + python3 only): builds, inits a
   temp server dir, serves on `127.0.0.1:0` (URL from `server.run`), walks create/load/execute/
   alias/read-only/backup/restore/export/upload import/promote + layer/models/MCP/unload/delete,
