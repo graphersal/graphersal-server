@@ -785,6 +785,7 @@ pub(crate) fn status_of(err: &ServerError) -> u16 {
     match err {
         ServerError::InvalidName { .. } | ServerError::InvalidInput { .. } => 400,
         ServerError::NotFound { .. }
+        | ServerError::UserNotFound { .. }
         | ServerError::ModelNotFound { .. }
         | ServerError::BackupNotFound { .. }
         | ServerError::SourceNotFound { .. } => 404,

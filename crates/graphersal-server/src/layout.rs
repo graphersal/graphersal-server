@@ -6,6 +6,7 @@
 //!   server.lock      one running server per directory (crate::lock)
 //!   server.run       the address of the running server (crate::run_file), removed at stop
 //!   aliases.toml     alias -> database name (crate::registry)
+//!   access.toml      users (token hashes), roles, grants (crate::access); mode 0600
 //!   databases/       one directory per database: database.toml + store/ (crate::registry)
 //!   models/          the shared embedding models: blobs/<2 hex>/<sha256>, models.toml (crate::models)
 //!   backups/  trash/  tmp/
@@ -20,6 +21,8 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
+use crate::access::FirstAdmin;
+use crate::audit::Audit;
 use crate::config::{ServerConfig, default_config_text};
 use crate::error::ServerError;
 
@@ -31,6 +34,8 @@ pub const LOCK_FILE: &str = "server.lock";
 pub const RUN_FILE: &str = "server.run";
 /// The alias file's name.
 pub const ALIASES_FILE: &str = "aliases.toml";
+/// The access file's name (users, token hashes, grants: [`crate::access`]).
+pub const ACCESS_FILE: &str = "access.toml";
 
 /// The subdirectories `init` creates, each as its path components.
 const SUBDIRS: &[&[&str]] = &[
@@ -57,8 +62,11 @@ pub struct InitReport {
     pub dir: ServerDir,
     /// Whether the directory was a server directory before (`server.toml` kept unchanged).
     pub existed: bool,
-    /// The paths `init` created (the root, `server.toml`, subdirectories), in creation order.
+    /// The paths `init` created (the root, `server.toml`, subdirectories, `access.toml`), in
+    /// creation order.
     pub created: Vec<PathBuf>,
+    /// The first admin, when the directory had no `access.toml`: its token, to be shown ONCE.
+    pub first_admin: Option<FirstAdmin>,
 }
 
 impl ServerDir {
@@ -88,6 +96,10 @@ impl ServerDir {
     ///   unchanged; missing subdirectories are created (so `init` completes an interrupted
     ///   `init` and is safe to repeat);
     /// - anything else (a file, a non-empty directory without `server.toml`): refused.
+    ///
+    /// A directory without `access.toml` then gets its first admin
+    /// ([`crate::access::ensure_first_admin`]): [`InitReport::first_admin`] holds its token,
+    /// for the caller to show once.
     pub fn init(root: impl Into<PathBuf>) -> Result<InitReport, ServerError> {
         let dir = Self::new(root);
         let mut created = Vec::new();
@@ -133,6 +145,11 @@ impl ServerDir {
                 }
             }
         }
+        // Last: a directory without `access.toml` is closed; its first admin is made here.
+        let first_admin = crate::access::ensure_first_admin(&dir, &Audit::default())?;
+        if let Some(first) = &first_admin {
+            created.push(first.path.clone());
+        }
         tracing::info!(
             target: "graphersal_server",
             "init {}: {} created",
@@ -143,6 +160,7 @@ impl ServerDir {
             dir,
             existed,
             created,
+            first_admin,
         })
     }
 
@@ -169,6 +187,11 @@ impl ServerDir {
     /// `aliases.toml`.
     pub fn aliases_path(&self) -> PathBuf {
         self.root.join(ALIASES_FILE)
+    }
+
+    /// `access.toml`.
+    pub fn access_path(&self) -> PathBuf {
+        self.root.join(ACCESS_FILE)
     }
 
     /// `databases/`.
@@ -232,10 +255,38 @@ pub(crate) fn dir_bytes(dir: &Path) -> u64 {
 /// Writes `bytes` to `path` through a temporary file beside it and a rename, so a reader sees
 /// either the old file or the whole new one.
 pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), ServerError> {
+    write_atomic_with(path, bytes, false)
+}
+
+/// [`write_atomic`] for a file only its owner may read (mode `0600` on unix; Windows: the
+/// directory's permissions): the run file with the operator token, `access.toml`.
+pub(crate) fn write_atomic_private(path: &Path, bytes: &[u8]) -> Result<(), ServerError> {
+    write_atomic_with(path, bytes, true)
+}
+
+/// Creates (or truncates) `path` for writing; `private`: mode `0600` on unix, also when the
+/// file was there before.
+pub(crate) fn create_file(path: &Path, private: bool) -> io::Result<fs::File> {
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    if private {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        options.mode(0o600);
+        let file = options.open(path)?;
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        return Ok(file);
+    }
+    #[cfg(not(unix))]
+    let _ = private;
+    options.open(path)
+}
+
+fn write_atomic_with(path: &Path, bytes: &[u8], private: bool) -> Result<(), ServerError> {
     let mut name = path.file_name().unwrap_or_default().to_os_string();
     name.push(".tmp");
     let tmp = path.with_file_name(name);
-    let written = fs::File::create(&tmp).and_then(|mut file| {
+    let written = create_file(&tmp, private).and_then(|mut file| {
         file.write_all(bytes)?;
         file.sync_all()
     });
@@ -345,5 +396,20 @@ mod tests {
         write_atomic(&path, b"a = 2\n").unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), "a = 2\n");
         assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn private_atomic_writes_are_for_the_owner_only() {
+        let temp = TempDir::new("layout-private");
+        let path = temp.path().join("secret.toml");
+        fs::write(&path, "old").unwrap();
+        write_atomic_private(&path, b"a = 1\n").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "a = 1\n");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
     }
 }

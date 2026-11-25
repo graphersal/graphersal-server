@@ -53,6 +53,7 @@ use graphersal::storage::{LayerBase, LayeredGraph};
 use graphersal_serve::layer_base_of_store;
 
 use crate::admin::Renamed;
+use crate::audit::{Audit, AuditEvent};
 use crate::database::{DatabaseConfig, DatabaseKind, DatabaseRole};
 use crate::error::ServerError;
 use crate::layout::ServerDir;
@@ -175,6 +176,8 @@ pub(crate) enum FailPoint {
 pub struct Admin {
     registry: Arc<Registry>,
     loader: Option<Arc<Loader>>,
+    /// Where the administrative events go ([`crate::audit`]), as which actor.
+    audit: Audit,
     #[cfg(test)]
     pub(crate) fail: Option<FailPoint>,
     /// Test hook: the shared models' hard links fail (the copy fallback).
@@ -188,6 +191,7 @@ impl Admin {
         Self {
             registry: loader.registry().clone(),
             loader: Some(loader),
+            audit: Audit::default(),
             #[cfg(test)]
             fail: None,
             #[cfg(test)]
@@ -201,6 +205,7 @@ impl Admin {
         Self {
             registry,
             loader: None,
+            audit: Audit::default(),
             #[cfg(test)]
             fail: None,
             #[cfg(test)]
@@ -215,6 +220,18 @@ impl Admin {
         let lock = ServerLock::acquire(dir)?;
         let registry = Registry::scan(dir)?;
         Ok((Self::offline(registry), lock))
+    }
+
+    /// The admin recording its events through `audit` (its sink and actor; default: the
+    /// tracing sink, no actor).
+    pub fn with_audit(mut self, audit: Audit) -> Self {
+        self.audit = audit;
+        self
+    }
+
+    /// The audit handle events are recorded with.
+    pub(crate) fn audit(&self) -> &Audit {
+        &self.audit
     }
 
     /// The registry.
@@ -281,12 +298,10 @@ impl Admin {
         }
         self.adopt_build(name, &store_dir);
         let entry = self.registry.commit(build)?;
-        tracing::info!(
-            target: "graphersal_server",
-            "database '{}' created ({})",
-            entry.name,
-            describe(entry.config.as_ref())
-        );
+        self.audit.record(AuditEvent::DatabaseCreated {
+            name: entry.name.clone(),
+            detail: describe(entry.config.as_ref()),
+        });
         Ok(entry)
     }
 
@@ -300,12 +315,10 @@ impl Admin {
             None => self.registry.delete(name)?,
         };
         let deleted = Deleted { name, trash };
-        tracing::info!(
-            target: "graphersal_server",
-            "database '{}' deleted into {}",
-            deleted.name,
-            deleted.trash.display()
-        );
+        self.audit.record(AuditEvent::DatabaseDeleted {
+            name: deleted.name.clone(),
+            trash: deleted.trash.clone(),
+        });
         Ok(deleted)
     }
 
@@ -374,12 +387,10 @@ impl Admin {
         forked?;
         self.adopt_build(new_name, &target);
         let cloned = self.registry.commit(build)?;
-        tracing::info!(
-            target: "graphersal_server",
-            "database '{}' cloned into '{}'",
-            entry.name,
-            cloned.name
-        );
+        self.audit.record(AuditEvent::DatabaseCloned {
+            source: entry.name.clone(),
+            name: cloned.name.clone(),
+        });
         Ok(cloned)
     }
 
@@ -405,6 +416,19 @@ impl Admin {
     /// its served context when it is loaded ([`Loader::set_read_only`]). A base database
     /// refuses `false`.
     pub fn set_read_only(&self, name: &str, read_only: bool) -> Result<DatabaseEntry, ServerError> {
+        let entry = self.set_read_only_inner(name, read_only)?;
+        self.audit.record(AuditEvent::ReadOnlySet {
+            name: entry.name.clone(),
+            on: read_only,
+        });
+        Ok(entry)
+    }
+
+    fn set_read_only_inner(
+        &self,
+        name: &str,
+        read_only: bool,
+    ) -> Result<DatabaseEntry, ServerError> {
         if let Some(loader) = &self.loader {
             return loader.set_read_only(name, read_only);
         }
@@ -464,27 +488,39 @@ impl Admin {
             Some(loader) => loader.while_idle(&entry.name, promote)?,
             None => promote()?,
         };
-        tracing::info!(
-            target: "graphersal_server",
-            "database '{}' promoted to a base (read-only, frozen)",
-            promoted.name
-        );
+        self.audit.record(AuditEvent::DatabasePromoted {
+            name: promoted.name.clone(),
+        });
         Ok(promoted)
     }
 
     /// Sets whether the database `name` is loaded at server start ([`Registry::set_auto_load`]).
     pub fn set_auto_load(&self, name: &str, auto_load: bool) -> Result<DatabaseEntry, ServerError> {
-        self.registry.set_auto_load(name, auto_load)
+        let entry = self.registry.set_auto_load(name, auto_load)?;
+        self.audit.record(AuditEvent::AutoLoadSet {
+            name: entry.name.clone(),
+            on: auto_load,
+        });
+        Ok(entry)
     }
 
     /// Sets (or flips) the alias `alias` to the database `target` ([`Registry::alias_set`]).
     pub fn alias_set(&self, alias: &str, target: &str) -> Result<(), ServerError> {
-        self.registry.alias_set(alias, target)
+        self.registry.alias_set(alias, target)?;
+        self.audit.record(AuditEvent::AliasSet {
+            alias: crate::names::fold(alias),
+            target: crate::names::fold(target),
+        });
+        Ok(())
     }
 
     /// Removes the alias `alias` ([`Registry::alias_remove`]).
     pub fn alias_remove(&self, alias: &str) -> Result<(), ServerError> {
-        self.registry.alias_remove(alias)
+        self.registry.alias_remove(alias)?;
+        self.audit.record(AuditEvent::AliasRemoved {
+            alias: crate::names::fold(alias),
+        });
+        Ok(())
     }
 
     /// Renames the alias `old` to `new` ([`Registry::alias_rename`]); online, every MCP session
@@ -495,14 +531,12 @@ impl Admin {
         let renamed = self.registry.alias_rename(old, new, |old, new| {
             mcp.map_or(0, |mcp| mcp.rename_selection(old, new))
         })?;
-        tracing::info!(
-            target: "graphersal_server",
-            "alias '{}' renamed to '{}' (database '{}', {} MCP session(s) moved)",
-            renamed.old,
-            renamed.new,
-            renamed.target,
-            renamed.moved
-        );
+        self.audit.record(AuditEvent::AliasRenamed {
+            old: renamed.old.clone(),
+            new: renamed.new.clone(),
+            target: renamed.target.clone(),
+            moved: renamed.moved,
+        });
         Ok(renamed)
     }
 

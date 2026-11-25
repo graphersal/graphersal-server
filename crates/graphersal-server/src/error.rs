@@ -196,6 +196,19 @@ pub enum ServerError {
         /// The Store's reason.
         message: String,
     },
+    /// No user of `access.toml` has this name.
+    #[non_exhaustive]
+    UserNotFound {
+        /// The name given (folded to lower case).
+        name: String,
+    },
+    /// The operating system's random generator failed (a token or session id cannot be
+    /// made).
+    #[non_exhaustive]
+    Random {
+        /// The reason.
+        message: String,
+    },
     /// The running server refused an admin request (the console's admin client): its answer.
     #[non_exhaustive]
     Remote {
@@ -330,6 +343,12 @@ impl fmt::Display for ServerError {
                      is damaged (its bytes do not match its name): {message}"
                 ),
             },
+            ServerError::UserNotFound { name } => {
+                write!(f, "no user '{name}' in access.toml")
+            }
+            ServerError::Random { message } => {
+                write!(f, "cannot make a secret token: {message}")
+            }
             ServerError::Remote { message, .. } => f.write_str(message),
         }
     }

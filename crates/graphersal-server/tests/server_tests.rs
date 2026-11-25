@@ -119,6 +119,30 @@ fn wait_for_run_file(dir: &ServerDir) -> RunInfo {
     }
 }
 
+/// The token of the framed first-admin block that `stderr` must consist of (plain ASCII frame,
+/// no escape codes); fails the test otherwise.
+fn first_admin_token(stderr: &str) -> String {
+    assert!(!stderr.contains('\u{1b}'), "{stderr}");
+    let lines: Vec<&str> = stderr.trim().lines().collect();
+    assert!(lines.len() > 2, "no framed block: {stderr}");
+    assert!(lines[0].starts_with("+--"), "{stderr}");
+    assert_eq!(lines.last(), lines.first(), "{stderr}");
+    assert!(
+        lines[1..lines.len() - 1]
+            .iter()
+            .all(|l| l.starts_with("| ") && l.ends_with(" |")),
+        "{stderr}"
+    );
+    assert!(stderr.contains("shown once"), "{stderr}");
+    let tokens: Vec<String> = lines
+        .iter()
+        .filter_map(|l| l.strip_prefix("| token:"))
+        .map(|rest| rest.trim_end_matches('|').trim().to_string())
+        .collect();
+    assert_eq!(tokens.len(), 1, "{stderr}");
+    tokens[0].clone()
+}
+
 /// Sends `head` (and `body`) on a new connection and reads the answer: (status, body).
 fn exchange(address: SocketAddr, head: &str, body: &[u8]) -> (u16, String) {
     let mut stream = TcpStream::connect(address).unwrap();
@@ -170,7 +194,16 @@ fn init_creates_a_server_directory_and_refuses_a_foreign_one() {
             config_path.display()
         )
     );
-    assert!(out.stderr.is_empty(), "{}", text(&out.stderr));
+    // stderr: only the first admin's token, framed (plain ASCII: not a terminal), once.
+    let token = first_admin_token(&text(&out.stderr));
+    assert_eq!(
+        graphersal_server::access::AccessFile::read(&ServerDir::new(&root))
+            .unwrap()
+            .unwrap()
+            .user_by_token(&graphersal_server::access::TokenHash::of(&token))
+            .map(|(name, _)| name.to_string()),
+        Some("admin".to_string())
+    );
     for parts in [
         &["server.toml"][..],
         &["databases"],
@@ -2259,4 +2292,58 @@ fn bases_with_data_by_import_and_promote_offline_and_through_a_server() {
     let (code, _, err) = import(&[&root, graphson_arg, "--name", "srv-base", "--role", "base"]);
     assert_eq!(code, 0, "{err}");
     stop_and_wait(&mut server);
+}
+
+#[test]
+fn the_first_serve_without_access_toml_prints_the_admin_token_once() {
+    let temp = TempDir::new("first-admin");
+    let dir = ServerDir::init(temp.path()).unwrap().dir;
+    // A server directory without access.toml (made before access control) is closed: the
+    // first serve makes the admin and prints its token on stderr, framed; stdout keeps only
+    // the address line.
+    std::fs::remove_file(dir.access_path()).unwrap();
+    let root = temp.path().to_str().unwrap();
+    let mut server = ServerProcess::spawn(
+        Command::new(BIN)
+            .args(["serve", "--dir", root, "--listen", "127.0.0.1:0"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    );
+    let info = wait_for_run_file(&dir);
+    assert!(info.operator_token.is_some());
+    let (stdout, stderr) = stop_and_wait(&mut server);
+    assert_eq!(stdout, format!("Graphersal server: {}\n", info.url));
+    let start = stderr
+        .find("\n+--")
+        .unwrap_or_else(|| panic!("no frame: {stderr}"));
+    let block: String = stderr[start + 1..]
+        .lines()
+        .take_while(|l| l.starts_with('+') || l.starts_with('|'))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let token = first_admin_token(&block);
+    let file = graphersal_server::access::AccessFile::read(&dir)
+        .unwrap()
+        .unwrap();
+    assert!(
+        file.user_by_token(&graphersal_server::access::TokenHash::of(&token))
+            .is_some()
+    );
+    assert!(
+        !std::fs::read_to_string(dir.access_path())
+            .unwrap()
+            .contains(&token)
+    );
+    assert_eq!(stderr.matches(&token).count(), 1, "{stderr}");
+
+    // The next serve prints no token.
+    let mut server = ServerProcess::spawn(
+        Command::new(BIN)
+            .args(["serve", "--dir", root, "--listen", "127.0.0.1:0"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    );
+    wait_for_run_file(&dir);
+    let (_, stderr) = stop_and_wait(&mut server);
+    assert!(!stderr.contains("FIRST ADMIN TOKEN"), "{stderr}");
 }

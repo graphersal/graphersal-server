@@ -56,6 +56,10 @@ tokio = { version = "1", default-features = false, features = ["rt-multi-thread"
 # de-facto standard gzip crate, on its pure-Rust backend (miniz_oxide: no C toolchain, builds
 # the same on Windows and in CI). zstd is not offered: nothing in the tree brings it.
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+# The access core's secrets: SHA-256 of user tokens and browser session ids (only hashes at
+# rest) and 256-bit tokens from the OS's random generator (`ring::rand::SystemRandom`); one
+# audited crate for both, already in the tree (graphersal-mcp hashes its session ids with it).
+ring = "0.17"
 # Library logging (as in graphersal) and the binary's stderr log subscriber.
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std", "env-filter", "ansi"] }

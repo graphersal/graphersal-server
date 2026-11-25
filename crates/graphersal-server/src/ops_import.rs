@@ -56,6 +56,7 @@ use graphersal::storage::{BaseRef, LayeredGraph};
 #[cfg(test)]
 use super::FailPoint;
 use super::{Admin, store_error};
+use crate::audit::AuditEvent;
 use crate::database::{DatabaseConfig, DatabaseKind, DatabaseRole};
 use crate::error::ServerError;
 use crate::models::{ModelsDir, manifest_of};
@@ -313,14 +314,12 @@ impl Admin {
             None => {}
         }
         let entry = self.registry.commit(build)?;
-        tracing::info!(
-            target: "graphersal_server",
-            "database '{}' imported from {} ({}, {})",
-            entry.name,
-            path.display(),
-            format.as_str(),
-            entry.state
-        );
+        self.audit().record(AuditEvent::DatabaseImported {
+            name: entry.name.clone(),
+            source: path.to_path_buf(),
+            format: format.as_str().to_string(),
+            state: entry.state.to_string(),
+        });
         Ok(Imported {
             entry,
             format,
