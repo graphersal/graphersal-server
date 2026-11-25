@@ -13,7 +13,7 @@
 //! endpoint (`shared_mcp`): `/db/<name>/mcp` and the graphs of the server-wide `/mcp`
 //! (module `mcp`); a base's context has a read-only MCP profile.
 //!
-//! **Backup root** (`server.toml [jobs] backup_root`, resolved at start; [`Loader::with_backup_root`]):
+//! **Backup root** (`server.toml [jobs] backup_root`, resolved at start; `Loader::with_backup_root`):
 //! every context gets it as its file root (`ContextBuilder::file_root`): a backup job's path
 //! (`jobs/define`) is resolved under it and refused outside it, `catalog/load` refuses a
 //! catalog with a job writing outside it, and the `dir` of the Store panel's fork, attic fork

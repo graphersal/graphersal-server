@@ -33,8 +33,8 @@ verify it (`certutil -hashfile <zip> SHA256`, or `Get-FileHash` in PowerShell). 
 `graphersal-server.exe` from a console; Ctrl+C (or Ctrl+Break) stops it cleanly.
 
 **Every other platform** (Linux, macOS, ...) builds from source, with Rust 1.88 or newer. The
-Graphersal crates come from crates.io (exact pins in the root `Cargo.toml`, versions in the
-committed `Cargo.lock`; `--locked` builds exactly those); the published `graphersal-serve` crate
+Graphersal crates come from crates.io (exact pins in the root `Cargo.toml`, today `=0.8.0`,
+versions in the committed `Cargo.lock`; `--locked` builds exactly those); the published `graphersal-serve` crate
 also carries the playground built into the binary.
 
 ```bash
