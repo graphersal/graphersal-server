@@ -50,6 +50,18 @@
 //! [`Registry::alias_rename_with`]), each audited as a revoked grant, and reports how many.
 //! A restore therefore never brings a deleted database's grants back.
 //!
+//! Concurrent changes (round 3 B-CONCUR; the inventory of files, writers and locks is in
+//! `docs/server-dir.md` "Concurrent changes"): every change takes the lock of its file and
+//! holds it across read, change and write; the memory follows only a successful write. Lock
+//! order, never reversed: the loader's state lock ([`Loader`] `while_idle`), the loader's
+//! read-only flip lock, the registry (write or read), the access file ([`crate::access::Access`]),
+//! a session table; the models lock and the backup naming lock take none. So the grants of a
+//! deleted database or removed alias go under the registry's write lock
+//! ([`Registry::delete_with`], [`Registry::alias_remove_with`]) and a grant is written under its
+//! read lock while its name must exist ([`Admin::grant_set`]). [`Admin::expecting`] bases a
+//! change of a shared object on its revision ([`crate::revision`]): checked under the same lock,
+//! a stale one is [`ServerError::Conflict`].
+//!
 //! Database names are real names here (an alias is not followed): an operation on an alias's
 //! name answers [`ServerError::NotFound`].
 
@@ -195,6 +207,8 @@ pub struct Admin {
     access: Option<Arc<crate::access::Access>>,
     /// Who acts: the actor of the user and grant changes (default: the operator).
     principal: crate::access::Principal,
+    /// The revision the next change is based on ([`Admin::expecting`]; `None`: no check).
+    expected: Option<String>,
     #[cfg(test)]
     pub(crate) fail: Option<FailPoint>,
     /// Test hook: the shared models' hard links fail (the copy fallback).
@@ -211,6 +225,7 @@ impl Admin {
             audit: Audit::default(),
             access: None,
             principal: crate::access::Principal::operator(),
+            expected: None,
             #[cfg(test)]
             fail: None,
             #[cfg(test)]
@@ -227,6 +242,7 @@ impl Admin {
             audit: Audit::default(),
             access: None,
             principal: crate::access::Principal::operator(),
+            expected: None,
             #[cfg(test)]
             fail: None,
             #[cfg(test)]
@@ -248,6 +264,22 @@ impl Admin {
     pub fn with_audit(mut self, audit: Audit) -> Self {
         self.audit = audit;
         self
+    }
+
+    /// The admin whose changes of a shared object are based on its revision `expected`
+    /// ([`crate::revision`]): the users and grants ([`Admin::user_add`] ... [`Admin::grant_revoke`]),
+    /// the aliases ([`Admin::alias_set`], [`Admin::alias_remove`], [`Admin::alias_rename`]) or
+    /// one database's settings ([`Admin::set_read_only`], [`Admin::set_auto_load`]). A change
+    /// whose object has another revision now is [`ServerError::Conflict`] (nothing changed);
+    /// `None` (the default) checks nothing.
+    pub fn expecting(mut self, expected: Option<String>) -> Self {
+        self.expected = expected;
+        self
+    }
+
+    /// The revision the changes are based on ([`Admin::expecting`]).
+    pub(crate) fn expected(&self) -> Option<&str> {
+        self.expected.as_deref()
     }
 
     /// The audit handle events are recorded with.
@@ -358,15 +390,21 @@ impl Admin {
     /// After the database is gone: `access.toml` could not be rewritten (its grants stay,
     /// listed as `missing`; a new database or alias of that name removes them first).
     pub fn delete(&self, name: &str) -> Result<Deleted, ServerError> {
-        let (name, trash) = match &self.loader {
-            Some(loader) => loader.while_idle(name, || self.registry.delete(name))?,
-            None => self.registry.delete(name)?,
+        // The grants go under the registry's write lock: no new database or alias takes the
+        // name (and gets grants of its own) before the old ones are gone.
+        let delete = || {
+            self.registry
+                .delete_with(name, |name| self.drop_grants_on(name))
+        };
+        let (name, trash, grants) = match &self.loader {
+            Some(loader) => loader.while_idle(name, delete)?,
+            None => delete()?,
         };
         self.audit.record(AuditEvent::DatabaseDeleted {
             name: name.clone(),
             trash: trash.clone(),
         });
-        let grants = self.drop_grants_on(&name)?;
+        let grants = grants?;
         Ok(Deleted {
             name,
             trash,
@@ -493,7 +531,7 @@ impl Admin {
         read_only: bool,
     ) -> Result<DatabaseEntry, ServerError> {
         if let Some(loader) = &self.loader {
-            return loader.set_read_only(name, read_only);
+            return loader.set_read_only_expecting(name, read_only, self.expected());
         }
         let entry = self.registry.get(name)?;
         if !read_only
@@ -508,7 +546,8 @@ impl Admin {
                     .to_string(),
             });
         }
-        self.registry.set_read_only(name, read_only)
+        self.registry
+            .set_read_only_expecting(name, read_only, self.expected())
     }
 
     /// Promotes the UNLOADED plain database `name` to a base (`role = "base"`, read-only): the
@@ -559,7 +598,9 @@ impl Admin {
 
     /// Sets whether the database `name` is loaded at server start ([`Registry::set_auto_load`]).
     pub fn set_auto_load(&self, name: &str, auto_load: bool) -> Result<DatabaseEntry, ServerError> {
-        let entry = self.registry.set_auto_load(name, auto_load)?;
+        let entry = self
+            .registry
+            .set_auto_load_expecting(name, auto_load, self.expected())?;
         self.audit.record(AuditEvent::AutoLoadSet {
             name: entry.name.clone(),
             on: auto_load,
@@ -577,7 +618,9 @@ impl Admin {
     pub fn alias_set(&self, alias: &str, target: &str) -> Result<usize, ServerError> {
         let leftover = self
             .registry
-            .alias_set_with(alias, target, |name| self.drop_leftover_grants(name))?;
+            .alias_set_with(alias, target, self.expected(), |name| {
+                self.drop_leftover_grants(name)
+            })?;
         self.audit.record(AuditEvent::AliasSet {
             alias: crate::names::fold(alias),
             target: crate::names::fold(target),
@@ -593,11 +636,15 @@ impl Admin {
     /// name stay, listed as `missing`; revoke them by hand, or a new database or alias of that
     /// name removes them first).
     pub fn alias_remove(&self, alias: &str) -> Result<usize, ServerError> {
-        self.registry.alias_remove(alias)?;
+        // The grants go under the registry's write lock: no new alias or database takes the
+        // name (and gets grants of its own) before the old ones are gone.
+        let grants = self
+            .registry
+            .alias_remove_with(alias, self.expected(), |name| self.drop_grants_on(name))?;
         self.audit.record(AuditEvent::AliasRemoved {
             alias: crate::names::fold(alias),
         });
-        self.drop_grants_on(alias)
+        grants
     }
 
     /// Renames the alias `old` to `new` ([`Registry::alias_rename`]); online, every MCP session
@@ -616,6 +663,7 @@ impl Admin {
         let renamed = self.registry.alias_rename_with(
             old,
             new,
+            self.expected(),
             |new| self.drop_leftover_grants(new),
             |old, new| {
                 let sessions = mcp.map_or(0, |mcp| mcp.rename_selection(old, new));
@@ -786,6 +834,10 @@ mod tests;
 #[cfg(test)]
 #[path = "ops_transfer_tests.rs"]
 mod transfer_tests;
+
+#[cfg(test)]
+#[path = "ops_concurrency_tests.rs"]
+mod concurrency_tests;
 
 #[cfg(test)]
 #[path = "ops_import_tests.rs"]

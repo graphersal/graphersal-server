@@ -421,7 +421,8 @@ A deleted database, and the database a restore replaced, move to `trash/<name>-<
 
 New databases, backups, exports, upload bodies (imports and models) and unpacked model archives
 are written in `tmp/` and renamed into place (or streamed or read, then removed). The server empties it at every start; leave it alone while a server
-runs.
+runs. (The temporary files of the atomic writes of configuration files live beside their file,
+not here: [Concurrent changes](#concurrent-changes).)
 
 ## `imports/`
 
@@ -477,6 +478,54 @@ once, in memory and in these files, through the running server or with the conso
 directory (`graphersal-server user ...`). Deleting the files (while no server runs) logs every
 browser out and ends every MCP session. The MCP endpoint keeps at most `[mcp] max_sessions`
 sessions, the oldest forgotten first, restarts included.
+
+## Concurrent changes
+
+Many browsers, scripts and the console may change the server at the same time. The files stay
+whole and correct:
+
+- **Atomic writes.** Every configuration file is written to a temporary file beside it
+  (`<file>.tmp-<pid>-<n>`, a new name for every write, so two writers never share one), flushed
+  to the disk (`fsync`), renamed over the file, and on unix the directory is flushed too (not
+  for `server.run`, which a power loss makes stale anyway): a reader, a crash or a power loss
+  sees the old file or the whole new one, never a mix. A crash
+  between the write and the rename leaves the temporary file; the next `serve` (and the console
+  on a stopped server) removes it at start: only names this server makes
+  (`<file>.tmp-<pid>-<n>`, `<file>.tmp` of the files below as written by 0.2, `access.toml.new-<pid>`),
+  in the root, `sessions/`, `models/`, `databases/<name>/` and `backups/<name>/`.
+- **One lock per file, held across read, change and write.** The change is made on a copy, the
+  file is written, and only then does the server's memory take the new state: a failed write
+  changes nothing.
+- **Revisions against lost updates.** Users and grants, aliases and each database's settings
+  carry a `revision` that a change may name; a change based on an older state is refused
+  (`409`, help `changed by someone else: reload`; [`admin-api.md`](admin-api.md#revisions-concurrent-changes)).
+
+What writes which file at runtime, and under which lock:
+
+| File | Writers | Lock |
+|---|---|---|
+| `server.toml` | `init` only (no admin request changes it yet) | the server lock (`init` of an existing directory: none) |
+| `server.lock` | `serve`, the offline console, `start` | the OS file lock itself |
+| `server.run` | `serve` at start (removed at stop); `stop` removes a stale one | the server lock |
+| `access.toml` | user and grant changes (admin API, console), alias rename/remove and database delete (grants follow), a new name taking leftover grants, the first admin (`init`, `serve`: created new, never replaced) | the access file's lock (`Access`), online; offline the server lock (one console command) |
+| `aliases.toml` | alias set/flip, rename, remove | the registry's write lock |
+| `databases/<name>/database.toml` | read-only, auto-load, promote, the `needs_model` marker; a new database's file is written in its build in `tmp/` before the rename into `databases/` | the registry's write lock (read-only also the loader's flip lock) |
+| `databases/<name>/store/` | the graphersal engine (the Store, its WAL, the database's job definitions) | the engine's own (one open Store per database) |
+| `databases/` (add, remove), `trash/` | create, clone, import, restore (rename of a build), delete, restore over a database | the registry's write lock; delete, promote and a restore over a database also hold the loader's lock (nothing loads meanwhile) |
+| `sessions/browser.json` | login, logout, a session touched or ended | the browser session table's mutex |
+| `sessions/mcp.json` | MCP sessions (new, `use_graph`, rename note, end), token changes | its writer's mutex (the MCP endpoint writes snapshots in order) |
+| `models/blobs/`, `models/models.toml` | adopting blobs, the models listing (rebuilds the index), model add/remove | the models lock |
+| `backups/<name>/<time>.zip`, `<time>.toml` | backups (built in `tmp/`, then renamed) | the backup naming lock (two backups in one second get `-2`) |
+| `backups/jobs/` | backup jobs of the engine | the engine's job runner |
+| `tmp/` | builds, uploads, exports, unpacked models | none needed: every name is unique (a counter) |
+| `imports/` | nothing (created only; the admin fills it) | |
+| `logs/server.log` | `start` (one line, appended), then the server's stdout and stderr | append mode |
+
+Lock order (a thread holding one lock takes only those after it, so no two requests can
+deadlock): the loader's state lock, then the loader's read-only flip lock, then the registry
+(write or read), then the access file, then a session table (browser or MCP); the models lock
+and the backup naming lock take no other lock. The audit records go to the log, no file of
+their own.
 
 ## External backups of the whole directory
 

@@ -6,7 +6,8 @@
 // `GET api/admin/databases` (docs/admin-api.md):
 //   `{"databases": [{"name", "state", "kind", "role", "readOnly", "autoLoad", "description",
 //   "base"?, "created"?, "aliasOf"?, "reason"?, "model"?}], "aliases": {alias: database},
-//   "problems": [text]}` with `state` one of `DATABASE_STATES`. Checked by `databaseRows`; a
+//   "aliasesRevision", "problems": [text]}` with `state` one of `DATABASE_STATES`; each entry
+//   also carries its settings' `revision`. Checked by `databaseRows`; a
 //   malformed entry is skipped and counted, never shown half. The optional byte counts
 //   `sizeBytes` (on disk) and `memoryBytes` (when loaded) are shown when the server sends them;
 //   `pooled` + `pooledBy` (a base held in the shared pool by its loaded layers) and
@@ -43,8 +44,10 @@ export function databaseHref(name) {
 /**
  * The list's rows from a `GET /api/admin/databases` answer:
  * `{rows: [{name, href, state, stateText, tone, kind, role, readOnly, autoLoad, description,
- * base, created, aliasOf, reason, model, sizeBytes, memoryBytes, pooled, pooledBy, linkWarning}],
- * skipped, aliases: [{alias, target}], problems: [text]}`, sorted by name; `skipped` counts the
+ * base, created, aliasOf, reason, model, sizeBytes, memoryBytes, pooled, pooledBy, linkWarning,
+ * revision}], skipped, aliases: [{alias, target}], aliasesRevision, problems: [text]}`, sorted by
+ * name (`revision`, `aliasesRevision`: what a change of the row's settings or of the aliases
+ * sends, '' from an older server); `skipped` counts the
  * malformed entries. An unknown `state` is shown as it is (a newer server). Throws an Error when
  * the answer has no `databases` list.
  */
@@ -80,11 +83,13 @@ export function databaseRows(answer) {
       pooled: d.pooled === true,
       pooledBy: Array.isArray(d.pooledBy) ? d.pooledBy.filter((x) => typeof x === 'string' && x) : [],
       linkWarning: typeof d.linkWarning === 'string' ? d.linkWarning : '',
+      revision: typeof d.revision === 'string' ? d.revision : '',
     });
   }
   rows.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
   const problems = Array.isArray(answer.problems) ? answer.problems.filter((p) => typeof p === 'string' && p) : [];
-  return { rows, skipped, aliases: aliasRows(answer), problems };
+  const aliasesRevision = typeof answer.aliasesRevision === 'string' ? answer.aliasesRevision : '';
+  return { rows, skipped, aliases: aliasRows(answer), aliasesRevision, problems };
 }
 
 function byteCount(n) {

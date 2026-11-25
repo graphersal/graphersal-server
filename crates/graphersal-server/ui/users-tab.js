@@ -19,7 +19,9 @@ const freshAdd = () => ({ name: '', admin: false, problems: [], error: null, bus
 export default {
   props: { api: { type: Object, required: true }, params: { type: Object, default: () => ({}) } },
   setup() {
-    const s = reactive({ users: [], grants: [], read: false, error: null });
+    // `revision`: of the users and grants shown; every change sends it, so a change someone
+    // else made meanwhile refuses it (409: the notice says so and the tab reads them again).
+    const s = reactive({ users: [], grants: [], revision: '', read: false, error: null });
     const busy = reactive({});
     const notice = ref(null);
     const token = ref(null);
@@ -35,6 +37,7 @@ export default {
         const answer = await admin.users();
         s.users = userRows(answer);
         s.grants = grantRows(answer);
+        s.revision = typeof answer.revision === 'string' ? answer.revision : '';
         s.error = null;
       } catch (err) {
         s.error = errorNotice(err);
@@ -71,13 +74,13 @@ export default {
       return !text || window.confirm(text);
     }
 
-    const newToken = (u) => confirmed('newToken', u.name) && run(u.name, 'newToken', () => admin.newToken(u.name));
-    const revokeToken = (u) => confirmed('revokeToken', u.name) && run(u.name, 'revokeToken', () => admin.revokeToken(u.name));
+    const newToken = (u) => confirmed('newToken', u.name) && run(u.name, 'newToken', () => admin.newToken(u.name, s.revision));
+    const revokeToken = (u) => confirmed('revokeToken', u.name) && run(u.name, 'revokeToken', () => admin.revokeToken(u.name, s.revision));
     const toggleAdmin = (u) => (u.admin ? confirmed('demote', u.name) : true)
-      && run(u.name, 'setAdmin', () => admin.setAdmin(u.name, !u.admin));
-    const removeUser = (u) => confirmed('removeUser', u.name) && run(u.name, 'removeUser', () => admin.removeUser(u.name));
+      && run(u.name, 'setAdmin', () => admin.setAdmin(u.name, !u.admin, s.revision));
+    const removeUser = (u) => confirmed('removeUser', u.name) && run(u.name, 'removeUser', () => admin.removeUser(u.name, s.revision));
     const revokeGrant = (g) => confirmed('revokeGrant', g.subject, g.database)
-      && run(`${g.subject}/${g.database}`, 'revokeGrant', () => admin.revokeGrant(g.subject, g.database));
+      && run(`${g.subject}/${g.database}`, 'revokeGrant', () => admin.revokeGrant(g.subject, g.database, s.revision));
 
     async function openAdd() {
       Object.assign(add, freshAdd());
@@ -113,7 +116,7 @@ export default {
       grant.problems = form.problems || [];
       if (form.problems) return;
       grant.busy = true;
-      await run(`${form.subject}/${form.database}`, 'grant', () => admin.grant(form.subject, form.database, form.level));
+      await run(`${form.subject}/${form.database}`, 'grant', () => admin.grant(form.subject, form.database, form.level, s.revision));
       grant.busy = false;
     }
 

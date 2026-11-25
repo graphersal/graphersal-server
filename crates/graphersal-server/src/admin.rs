@@ -21,7 +21,7 @@ use crate::database::{DatabaseConfig, DatabaseKind, DatabaseRole, STORE_DIR};
 use crate::error::ServerError;
 use crate::limits::DatabaseLimits;
 use crate::names::{fold, validate_name, validate_new_name};
-use crate::registry::{DatabaseEntry, DbState, Inner, Registry, write_aliases};
+use crate::registry::{DatabaseEntry, DbState, Inner, Registry, aliases_revision, write_aliases};
 
 impl Registry {
     /// Every database, by name.
@@ -50,9 +50,40 @@ impl Registry {
             .ok_or_else(|| not_found(name_or_alias))
     }
 
+    /// Runs `f` while `name` names a database or an alias (case-insensitive), holding the
+    /// registry's read lock so that no delete, alias removal or rename runs meanwhile:
+    /// [`ServerError::NotFound`] when it names none (nothing run). `f` must not take the
+    /// registry's lock itself (lock order: registry, then access).
+    pub(crate) fn while_named<T>(
+        &self,
+        name: &str,
+        f: impl FnOnce() -> Result<T, ServerError>,
+    ) -> Result<T, ServerError> {
+        let key = fold(name);
+        let inner = self.read();
+        let target = inner.aliases.get(&key).unwrap_or(&key);
+        if !inner.entries.contains_key(target) {
+            return Err(not_found(name));
+        }
+        let out = f();
+        drop(inner);
+        out
+    }
+
     /// Every alias with its database.
     pub fn aliases(&self) -> BTreeMap<String, String> {
         self.read().aliases.clone()
+    }
+
+    /// Every alias with its database and their revision ([`crate::revision`]), read together.
+    pub fn aliases_with_revision(&self) -> (BTreeMap<String, String>, String) {
+        let inner = self.read();
+        (inner.aliases.clone(), aliases_revision(&inner.aliases))
+    }
+
+    /// The revision of the aliases now ([`crate::revision`]).
+    pub fn aliases_revision(&self) -> String {
+        aliases_revision(&self.read().aliases)
     }
 
     /// Sets the alias `alias` to the database `target` (a new alias, or a flip of an existing
@@ -60,7 +91,8 @@ impl Registry {
     /// that is not a database (an alias cannot name an alias: no chains, no cycles), a broken
     /// `aliases.toml`.
     pub fn alias_set(&self, alias: &str, target: &str) -> Result<(), ServerError> {
-        self.alias_set_with(alias, target, |_| Ok(0)).map(drop)
+        self.alias_set_with(alias, target, None, |_| Ok(0))
+            .map(drop)
     }
 
     /// [`Registry::alias_set`] with `claim`, run under the registry's write lock for a NEW
@@ -68,17 +100,20 @@ impl Registry {
     /// the server removes the grants left on that name there
     /// ([`crate::ops::Admin::alias_set`]), so no request sees the new alias with them. An
     /// `Err` of `claim` refuses the alias (nothing changed). Answers what `claim` returned (0
-    /// for a flip of an existing alias).
+    /// for a flip of an existing alias). `expected`: the aliases' revision the change is based
+    /// on ([`crate::revision`]; `None`: no check), checked under the same lock.
     pub fn alias_set_with(
         &self,
         alias: &str,
         target: &str,
+        expected: Option<&str>,
         claim: impl FnOnce(&str) -> Result<usize, ServerError>,
     ) -> Result<usize, ServerError> {
         validate_name(alias)?;
         let target_key = fold(target);
         let mut inner = self.write();
         refuse_broken_aliases(&inner)?;
+        check_aliases(&inner, expected)?;
         let new_alias = inner.holder_of(alias).is_none();
         match inner.holder_of(alias) {
             // A new alias may not take a reserved name; an existing one (made before the
@@ -113,9 +148,23 @@ impl Registry {
 
     /// Removes the alias `alias` (case-insensitive).
     pub fn alias_remove(&self, alias: &str) -> Result<(), ServerError> {
+        self.alias_remove_with(alias, None, |_| ()).map(drop)
+    }
+
+    /// [`Registry::alias_remove`] based on the aliases' revision `expected` (`None`: no
+    /// check), then `after` with the removed (folded) name, still under the registry's write
+    /// lock (the server removes the alias's grants there, so no new alias of that name can take
+    /// the name before they are gone): its result.
+    pub fn alias_remove_with<T>(
+        &self,
+        alias: &str,
+        expected: Option<&str>,
+        after: impl FnOnce(&str) -> T,
+    ) -> Result<T, ServerError> {
         let key = fold(alias);
         let mut inner = self.write();
         refuse_broken_aliases(&inner)?;
+        check_aliases(&inner, expected)?;
         if !inner.aliases.contains_key(&key) {
             return Err(not_found(alias));
         }
@@ -123,7 +172,7 @@ impl Registry {
         aliases.remove(&key);
         write_aliases(&self.dir.aliases_path(), &aliases)?;
         inner.aliases = aliases;
-        Ok(())
+        Ok(after(&key))
     }
 
     /// Renames the alias `old` (case-insensitive) to `new`, keeping its database: one atomic
@@ -139,24 +188,27 @@ impl Registry {
         new: &str,
         moved: impl FnOnce(&str, &str) -> T,
     ) -> Result<Renamed<T>, ServerError> {
-        self.alias_rename_with(old, new, |_| Ok(0), moved)
+        self.alias_rename_with(old, new, None, |_| Ok(0), moved)
     }
 
     /// [`Registry::alias_rename`] with `claim`, run under the registry's write lock after
     /// every check and before `aliases.toml` is written, with the new name: the server removes
     /// the grants left on that name there ([`crate::ops::Admin::alias_rename`]), so the renamed
     /// alias never inherits them. An `Err` of `claim` refuses the rename (nothing changed);
-    /// its count is [`Renamed::leftover`].
+    /// its count is [`Renamed::leftover`]. `expected`: the aliases' revision the rename is
+    /// based on ([`crate::revision`]; `None`: no check).
     pub fn alias_rename_with<T>(
         &self,
         old: &str,
         new: &str,
+        expected: Option<&str>,
         claim: impl FnOnce(&str) -> Result<usize, ServerError>,
         moved: impl FnOnce(&str, &str) -> T,
     ) -> Result<Renamed<T>, ServerError> {
         let old_key = fold(old);
         let mut inner = self.write();
         refuse_broken_aliases(&inner)?;
+        check_aliases(&inner, expected)?;
         let Some(target) = inner.aliases.get(&old_key).cloned() else {
             if inner.entries.contains_key(&old_key) {
                 return Err(ServerError::Refused {
@@ -194,7 +246,18 @@ impl Registry {
     /// Sets whether the database `name` is loaded at server start (persisted in its
     /// `database.toml`).
     pub fn set_auto_load(&self, name: &str, auto_load: bool) -> Result<DatabaseEntry, ServerError> {
-        self.update_config(name, |_, config| {
+        self.set_auto_load_expecting(name, auto_load, None)
+    }
+
+    /// [`Registry::set_auto_load`] based on the database's revision `expected`
+    /// ([`DatabaseEntry::revision`]; `None`: no check), checked under the same lock.
+    pub fn set_auto_load_expecting(
+        &self,
+        name: &str,
+        auto_load: bool,
+        expected: Option<&str>,
+    ) -> Result<DatabaseEntry, ServerError> {
+        self.update_config(name, expected, |_, config| {
             config.auto_load = auto_load;
             Ok(())
         })
@@ -204,7 +267,18 @@ impl Registry {
     /// this function does not change a loaded database's runtime mode). Refused: turning it off
     /// for a base database while a layer names it.
     pub fn set_read_only(&self, name: &str, read_only: bool) -> Result<DatabaseEntry, ServerError> {
-        self.update_config(name, |inner, config| {
+        self.set_read_only_expecting(name, read_only, None)
+    }
+
+    /// [`Registry::set_read_only`] based on the database's revision `expected`
+    /// ([`DatabaseEntry::revision`]; `None`: no check), checked under the same lock.
+    pub fn set_read_only_expecting(
+        &self,
+        name: &str,
+        read_only: bool,
+        expected: Option<&str>,
+    ) -> Result<DatabaseEntry, ServerError> {
+        self.update_config(name, expected, |inner, config| {
             if !read_only && config.role == DatabaseRole::Base && inner.has_layers_over(name) {
                 return Err(ServerError::Refused {
                     name: name.to_string(),
@@ -223,7 +297,7 @@ impl Registry {
     /// (the caller holds the loader idle meanwhile). One way: nothing turns a base back.
     pub fn promote_to_base(&self, name: &str) -> Result<DatabaseEntry, ServerError> {
         let state = self.get(name)?.state;
-        self.update_config(name, |_, config| {
+        self.update_config(name, None, |_, config| {
             if let Some(message) = promote_refusal(config, &state) {
                 return Err(ServerError::Refused {
                     name: fold(name),
@@ -244,7 +318,7 @@ impl Registry {
             .config
             .is_some_and(|config| config.needs_model.is_some());
         if marked {
-            self.update_config(name, |_, config| {
+            self.update_config(name, None, |_, config| {
                 config.needs_model = None;
                 Ok(())
             })?;
@@ -267,14 +341,21 @@ impl Registry {
     }
 
     /// Changes the configuration of the database `name` through `change`, then writes it.
+    /// `expected`: the revision the change is based on (`None`: no check). The file is written
+    /// before the memory changes, all under the registry's write lock.
     fn update_config(
         &self,
         name: &str,
+        expected: Option<&str>,
         change: impl FnOnce(&Inner, &mut DatabaseConfig) -> Result<(), ServerError>,
     ) -> Result<DatabaseEntry, ServerError> {
         let key = fold(name);
         let mut inner = self.write();
         let entry = inner.entries.get(&key).ok_or_else(|| not_found(name))?;
+        if expected.is_some() {
+            let current = entry.revision().unwrap_or_default();
+            crate::revision::check(expected, &current, &format!("settings of database '{key}'"))?;
+        }
         let Some(mut config) = entry.config.clone() else {
             return Err(ServerError::DatabaseFailed {
                 name: entry.name.clone(),
@@ -539,6 +620,19 @@ impl Registry {
     /// implicitly) and for a database that layers name as their base. A failed database may be
     /// deleted.
     pub fn delete(&self, name: &str) -> Result<(String, PathBuf), ServerError> {
+        self.delete_with(name, |_| ())
+            .map(|(name, trash, ())| (name, trash))
+    }
+
+    /// [`Registry::delete`], then `after` with the deleted (folded) name, still under the
+    /// registry's write lock (the server removes the database's grants there, so a new database
+    /// or alias of that name cannot take the name before they are gone): its result beside the
+    /// name and the trash path.
+    pub fn delete_with<T>(
+        &self,
+        name: &str,
+        after: impl FnOnce(&str) -> T,
+    ) -> Result<(String, PathBuf, T), ServerError> {
         let key = fold(name);
         let mut inner = self.write();
         let entry = inner.entries.get(&key).ok_or_else(|| not_found(name))?;
@@ -589,7 +683,8 @@ impl Registry {
             "database '{key}' moved to {}",
             target.display()
         );
-        Ok((key, target))
+        let out = after(&key);
+        Ok((key, target, out))
     }
 }
 
@@ -666,6 +761,14 @@ pub struct Renamed<T> {
     /// The grants left on the new name (from a deleted database or alias) removed before the
     /// alias took it (the `claim` of [`Registry::alias_rename_with`]).
     pub leftover: usize,
+}
+
+/// Refuses an alias change based on another revision of the aliases than theirs now.
+fn check_aliases(inner: &Inner, expected: Option<&str>) -> Result<(), ServerError> {
+    if expected.is_none() {
+        return Ok(());
+    }
+    crate::revision::check(expected, &aliases_revision(&inner.aliases), "aliases")
 }
 
 fn refuse_broken_aliases(inner: &Inner) -> Result<(), ServerError> {

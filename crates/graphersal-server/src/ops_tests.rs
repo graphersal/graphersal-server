@@ -580,7 +580,8 @@ fn every_admin_action_over_http() {
     assert_eq!(status, 200, "{answer}");
     assert_eq!(answer, json!({"alias": "current", "target": "acme-copy"}));
     let (_, aliases) = call(address, "GET", "/api/admin/aliases", None);
-    assert_eq!(aliases, json!({"aliases": {"current": "acme-copy"}}));
+    assert_eq!(aliases["aliases"], json!({"current": "acme-copy"}));
+    assert!(aliases["revision"].is_string(), "{aliases}");
     let (status, answer) = call(address, "DELETE", "/api/admin/databases/acme-copy", None);
     assert_eq!(status, 409, "{answer}");
     let help = answer["help"].as_str().unwrap_or_default();
@@ -670,7 +671,8 @@ fn an_alias_is_renamed_over_http() {
                "grantsMoved": 0})
     );
     let (_, aliases) = call(address, "GET", "/api/admin/aliases", None);
-    assert_eq!(aliases, json!({"aliases": {"live": "acme"}}));
+    assert_eq!(aliases["aliases"], json!({"live": "acme"}));
+    assert!(aliases["revision"].is_string(), "{aliases}");
     let (status, _) = call(address, "GET", "/db/current/api/info", None);
     assert_eq!(status, 404);
 
@@ -699,7 +701,8 @@ fn an_alias_is_renamed_over_http() {
     let (status, _) = call(address, "GET", "/api/admin/aliases/live/rename", None);
     assert_eq!(status, 405);
     let (_, aliases) = call(address, "GET", "/api/admin/aliases", None);
-    assert_eq!(aliases, json!({"aliases": {"live": "acme"}}));
+    assert_eq!(aliases["aliases"], json!({"live": "acme"}));
+    assert!(aliases["revision"].is_string(), "{aliases}");
     running.stop().unwrap();
 }
 

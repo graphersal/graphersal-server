@@ -5,7 +5,7 @@
 // role). Imports only `vue` and the profile's own files.
 
 import { reactive } from 'vue';
-import { createAdmin, sendAdmin } from './admin-api.js';
+import { createAdmin, sendAdmin, refusalNotice } from './admin-api.js';
 import {
   accessRequest, loginHref, principalOf, refusalAction, rootHref,
 } from './access-api.js';
@@ -59,23 +59,20 @@ export const requestOptions = Object.freeze({ base: ROOT, fetch: fetchFn, header
 /** The admin client (model: ./admin-api.js). */
 export const admin = createAdmin(requestOptions);
 
-/** A notice of a failure: the server's `error` and `help` verbatim. */
-export const errorNotice = (err) => ({
-  tone: 'error',
-  text: err && err.message ? err.message : String(err),
-  help: err && typeof err.help === 'string' ? err.help : '',
-});
+/** A notice of a failure: the server's `error` and `help` verbatim (a refused stale change: a
+ * warning saying the tab read its data again; ./admin-api.js `refusalNotice`). */
+export const errorNotice = (err) => refusalNotice(err);
 
 /** The CSS classes of a notice by its tone. */
 export const noticeClass = (n) => (n.tone === 'ok' ? 'info' : n.tone === 'warn' ? 'srv-warn-notice' : 'srv-error');
 
 /**
- * The database list: rows, aliases, problems, the count of malformed entries, the read error,
+ * The database list: rows, aliases (and their revision), problems, the count of malformed entries, the read error,
  * and `version` (bumped after every reload that leaves nothing loading: the Models tab reads
  * the models again).
  */
 export const list = reactive({
-  rows: [], aliases: [], problems: [], skipped: 0, error: null, loading: false, loaded: false, version: 0,
+  rows: [], aliases: [], aliasesRevision: '', problems: [], skipped: 0, error: null, loading: false, loaded: false, version: 0,
 });
 
 let timer = null;
@@ -90,6 +87,7 @@ export function reload() {
       const answer = await fetchDatabases(requestOptions);
       list.rows = answer.rows;
       list.aliases = answer.aliases;
+      list.aliasesRevision = answer.aliasesRevision;
       list.problems = answer.problems;
       list.skipped = answer.skipped;
       list.error = null;

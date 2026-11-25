@@ -12,7 +12,7 @@
 import { reactive, ref, computed, nextTick, onMounted } from 'vue';
 import {
   createBody, nameProblem, existingNameProblem, renameProblem, NAME_HINT, rowActions, confirmText, outcomeText, outcomeTone, loadAndWatch, baseNames, realRows,
-  bytesText, transferActions, needsModelHint, poolText, promoteAction,
+  bytesText, transferActions, needsModelHint, poolText, promoteAction, isConflict,
 } from './admin-api.js';
 import { admin, list, reload, patchRow, errorNotice, noticeClass, pageHref } from './shared.js';
 
@@ -72,7 +72,11 @@ export default {
     async function setFlag(row, flag, event) {
       const box = event.target;
       const value = box.checked;
-      const ok = await run(row.name, flag, () => (flag === 'readOnly' ? admin.readOnly(row.name, value) : admin.autoLoad(row.name, value)));
+      // Based on the row's revision: a change someone else made meanwhile refuses it (409), the
+      // list is read again and the checkbox shows the server's value.
+      const ok = await run(row.name, flag, () => (flag === 'readOnly'
+        ? admin.readOnly(row.name, value, row.revision)
+        : admin.autoLoad(row.name, value, row.revision)));
       // A refusal keeps the server's value: the checkbox shows it again.
       if (!ok) box.checked = !value;
     }
@@ -117,14 +121,16 @@ export default {
         const target = dialog.target;
         const was = list.aliases.find((a) => a.alias === subject);
         if (was && was.target !== target && !window.confirm(confirmText('flipAlias', subject, target))) return { cancelled: true };
-        return { subject, action: 'setAlias', send: () => admin.setAlias(subject, target) };
+        const revision = list.aliasesRevision;
+        return { subject, action: 'setAlias', send: () => admin.setAlias(subject, target, revision) };
       }
       if (dialog.mode === 'rename') {
         const problem = renameProblem(dialog.alias, dialog.newName);
         if (problem) return { problems: [problem] };
         const subject = dialog.newName.trim().toLowerCase();
         const alias = dialog.alias;
-        return { subject, action: 'renameAlias', send: () => admin.renameAlias(alias, subject) };
+        const revision = list.aliasesRevision;
+        return { subject, action: 'renameAlias', send: () => admin.renameAlias(alias, subject, revision) };
       }
       return { cancelled: true };
     }
@@ -141,8 +147,10 @@ export default {
         const answer = (await req.send()) || {};
         notice.value = { tone: outcomeTone(answer), text: outcomeText(req.action, req.subject, answer), help: '' };
       } catch (err) {
-        // The dialog stays open with the server's words, so the input can be fixed.
+        // The dialog stays open with the server's words, so the input can be fixed; a change
+        // someone else made meanwhile (409) reads the list again first.
         dialog.error = errorNotice(err);
+        if (isConflict(err)) await reload();
         return;
       } finally {
         dialog.busy = false;
@@ -152,7 +160,7 @@ export default {
     }
     function removeAlias(a) {
       if (!window.confirm(confirmText('removeAlias', a.alias))) return;
-      run(a.alias, 'removeAlias', () => admin.removeAlias(a.alias));
+      run(a.alias, 'removeAlias', () => admin.removeAlias(a.alias, list.aliasesRevision));
     }
 
     onMounted(reload);

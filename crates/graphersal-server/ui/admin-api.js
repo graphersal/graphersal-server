@@ -107,14 +107,38 @@ export const LOAD_POLL_LIMIT_MS = 10 * 60 * 1000;
  * the login page a `401` names (`{"error", "login": "/"}`), else ''.
  */
 export class AdminError extends Error {
-  constructor(message, { status = 0, help = '', state = '', login = '' } = {}) {
+  constructor(message, { status = 0, help = '', state = '', login = '', revision = '' } = {}) {
     super(message);
     this.name = 'AdminError';
     this.status = status;
     this.help = help;
     this.state = state;
     this.login = login;
+    this.revision = revision;
   }
+}
+
+/**
+ * Whether `err` is a refused stale change (`409` with the object's current `revision`: someone
+ * else changed it since the tab read it; docs/admin-api.md "Revisions"). The tab then reads its
+ * data again.
+ */
+export function isConflict(err) {
+  return !!err && err.status === 409 && typeof err.revision === 'string' && err.revision !== '';
+}
+
+/** What the notice of a refused stale change adds: the tab has read its data again. */
+export const CONFLICT_RELOADED = 'The tab shows the current state now: check it, then repeat the change if it is still wanted.';
+
+/**
+ * The notice of a failed action `{tone, text, help}`: the server's `error` and `help` verbatim;
+ * a refused stale change (`isConflict`) is a warning whose help also says the data was read again.
+ */
+export function refusalNotice(err) {
+  const text = err && err.message ? err.message : String(err);
+  const help = err && typeof err.help === 'string' ? err.help : '';
+  if (isConflict(err)) return { tone: 'warn', text, help: help ? `${help}. ${CONFLICT_RELOADED}` : CONFLICT_RELOADED };
+  return { tone: 'error', text, help };
 }
 
 /**
@@ -132,10 +156,14 @@ export function parseAdminError(status, text) {
   const help = data && typeof data.help === 'string' ? data.help : '';
   const state = data && typeof data.state === 'string' ? data.state : '';
   const login = data && typeof data.login === 'string' ? data.login : '';
-  return new AdminError(error, { status, help, state, login });
+  const revision = data && typeof data.revision === 'string' ? data.revision : '';
+  return new AdminError(error, { status, help, state, login, revision });
 }
 
 const seg = (name) => encodeURIComponent(String(name));
+
+/** `request` based on `revision` (sent as `If-Match`): unchanged without one. */
+const based = (request, revision) => (typeof revision === 'string' && revision ? { ...request, ifMatch: revision } : request);
 
 /**
  * The request of one admin action: `{method, path, body?}` with `path` relative to the server
@@ -151,7 +179,10 @@ const seg = (name) => encodeURIComponent(String(name));
  * run id is unique within its database only), the users and grants: users, addUser(name,
  * admin?) (its answer carries the new token, shown once), removeUser(name), newToken(name),
  * revokeToken(name), setAdmin(name, value), grant(subject, database, level), revokeGrant(subject,
- * database). The transfers that are not JSON requests are
+ * database). The changes of a shared object take its `revision` last (optional: readOnly,
+ * autoLoad, setAlias, removeAlias, renameAlias, removeUser, newToken, revokeToken, setAdmin,
+ * grant, revokeGrant): the request then carries `ifMatch` and `sendAdmin` sends it as the
+ * `If-Match` header, so a change based on a stale page is refused (`isConflict`). The transfers that are not JSON requests are
  * `exportPath` (a download) and `uploadImport` (the file as the body: an import, or a model
  * from `modelUploadRequest`).
  */
@@ -163,12 +194,12 @@ export const adminRequest = Object.freeze({
   clone: (name, newName) => ({ method: 'POST', path: `api/admin/databases/${seg(name)}/clone`, body: { name: newName } }),
   load: (name) => ({ method: 'POST', path: `api/admin/databases/${seg(name)}/load` }),
   unload: (name) => ({ method: 'POST', path: `api/admin/databases/${seg(name)}/unload` }),
-  readOnly: (name, value) => ({ method: 'PUT', path: `api/admin/databases/${seg(name)}/read-only`, body: { readOnly: !!value } }),
-  autoLoad: (name, value) => ({ method: 'PUT', path: `api/admin/databases/${seg(name)}/auto-load`, body: { autoLoad: !!value } }),
+  readOnly: (name, value, revision) => based({ method: 'PUT', path: `api/admin/databases/${seg(name)}/read-only`, body: { readOnly: !!value } }, revision),
+  autoLoad: (name, value, revision) => based({ method: 'PUT', path: `api/admin/databases/${seg(name)}/auto-load`, body: { autoLoad: !!value } }, revision),
   aliases: () => ({ method: 'GET', path: 'api/admin/aliases' }),
-  setAlias: (alias, target) => ({ method: 'PUT', path: `api/admin/aliases/${seg(alias)}`, body: { target } }),
-  removeAlias: (alias) => ({ method: 'DELETE', path: `api/admin/aliases/${seg(alias)}` }),
-  renameAlias: (alias, newName) => ({ method: 'POST', path: `api/admin/aliases/${seg(alias)}/rename`, body: { name: newName } }),
+  setAlias: (alias, target, revision) => based({ method: 'PUT', path: `api/admin/aliases/${seg(alias)}`, body: { target } }, revision),
+  removeAlias: (alias, revision) => based({ method: 'DELETE', path: `api/admin/aliases/${seg(alias)}` }, revision),
+  renameAlias: (alias, newName, revision) => based({ method: 'POST', path: `api/admin/aliases/${seg(alias)}/rename`, body: { name: newName } }, revision),
   backup: (name) => ({ method: 'POST', path: `api/admin/databases/${seg(name)}/backup` }),
   backups: (name) => ({ method: 'GET', path: `api/admin/databases/${seg(name)}/backups` }),
   restore: (name, backup, newName) => ({
@@ -184,12 +215,12 @@ export const adminRequest = Object.freeze({
   promote: (name) => ({ method: 'POST', path: `api/admin/databases/${seg(name)}/promote` }),
   users: () => ({ method: 'GET', path: 'api/admin/users' }),
   addUser: (name, isAdmin = false) => ({ method: 'POST', path: 'api/admin/users', body: isAdmin ? { name, admin: true } : { name } }),
-  removeUser: (name) => ({ method: 'DELETE', path: `api/admin/users/${seg(name)}` }),
-  newToken: (name) => ({ method: 'POST', path: `api/admin/users/${seg(name)}/token` }),
-  revokeToken: (name) => ({ method: 'DELETE', path: `api/admin/users/${seg(name)}/token` }),
-  setAdmin: (name, value) => ({ method: 'PUT', path: `api/admin/users/${seg(name)}/admin`, body: { admin: !!value } }),
-  grant: (subject, database, level) => ({ method: 'POST', path: 'api/admin/grants', body: { subject, database, level } }),
-  revokeGrant: (subject, database) => ({ method: 'DELETE', path: `api/admin/grants/${seg(subject)}/${seg(database)}` }),
+  removeUser: (name, revision) => based({ method: 'DELETE', path: `api/admin/users/${seg(name)}` }, revision),
+  newToken: (name, revision) => based({ method: 'POST', path: `api/admin/users/${seg(name)}/token` }, revision),
+  revokeToken: (name, revision) => based({ method: 'DELETE', path: `api/admin/users/${seg(name)}/token` }, revision),
+  setAdmin: (name, value, revision) => based({ method: 'PUT', path: `api/admin/users/${seg(name)}/admin`, body: { admin: !!value } }, revision),
+  grant: (subject, database, level, revision) => based({ method: 'POST', path: 'api/admin/grants', body: { subject, database, level } }, revision),
+  revokeGrant: (subject, database, revision) => based({ method: 'DELETE', path: `api/admin/grants/${seg(subject)}/${seg(database)}` }, revision),
   runs: (name) => ({ method: 'GET', path: name ? `api/admin/databases/${seg(name)}/runs` : 'api/admin/runs' }),
   cancelRun: (name, id) => ({ method: 'POST', path: `api/admin/databases/${seg(name)}/runs/cancel`, body: { id } }),
 });
@@ -216,6 +247,7 @@ export async function sendAdmin({ base, fetch, headers = {}, onRefusal = null },
     init.headers['Content-Type'] = 'application/json';
     init.body = JSON.stringify(request.body);
   }
+  if (typeof request.ifMatch === 'string' && request.ifMatch) init.headers['If-Match'] = `"${request.ifMatch}"`;
   let r;
   try {
     r = await fetch(new URL(request.path, base), init);

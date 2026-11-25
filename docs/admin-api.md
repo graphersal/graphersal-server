@@ -61,6 +61,10 @@ gets an empty list (`200`). Wrong credentials are `401`; any method but `GET`/`H
   16 MiB (else `413`); the one exception is an import upload (the file itself as the body, see
   Import). Unknown fields are refused (`400`), so a typo is never ignored.
 - Answers are JSON. An error is `{"error": "<sentence>", "help": "<what to do>"?}`.
+- Shared objects carry a `revision` (users and grants, aliases, each database's settings): a
+  change may name the revision it was based on and is then refused with `409` when someone else
+  changed the object since ([Revisions](#revisions-concurrent-changes)). Without a revision a
+  change is applied as before.
 - Every `GET` route but the export also answers `HEAD`.
 - The actions take **real database names**; an alias is not followed (`404`). Only
   `GET /api/admin/databases/<name>` also answers an alias. Names are case-insensitive and
@@ -104,6 +108,7 @@ The object describing one database (listing rows, and the answer of most actions
 | `pooled` | bool | listing rows of a pooled base | `true`: the base is held in memory in the shared pool (by its loaded layers or itself) |
 | `pooledBy` | [string] | with `pooled` | the loaded layers holding it (empty: only the base itself, loaded for reading) |
 | `linkWarning` | string | listing rows | some of its model blobs are copies, not hard links to `models/` (the file system has no links there: correct, no disk saving; unix only) |
+| `revision` | string | config readable | the revision of its settings (`database.toml`): send it with a read-only or auto-load change ([Revisions](#revisions-concurrent-changes)) |
 
 Listing rows are the answers of `GET /api/admin/databases` and `GET /api/admin/databases/<name>`.
 There is no `memoryBytes`: a loaded database's memory is known only inside its session thread,
@@ -115,16 +120,16 @@ A `failed` database whose `database.toml` cannot be read has only `name`, `state
 
 | Method | Path | Body | Answer |
 |---|---|---|---|
-| GET | `/api/admin/databases` | | `200 {"databases": [entry...], "aliases": {alias: database}, "problems": [string...]}` (rows sorted by name, alias rows included) |
+| GET | `/api/admin/databases` | | `200 {"databases": [entry...], "aliases": {alias: database}, "aliasesRevision", "problems": [string...]}` (rows sorted by name, alias rows included) |
 | POST | `/api/admin/databases` | `{"name", "kind"?, "role"?, "base"?, "schema"?, "description"?, "autoLoad"?, "readOnly"?}` | `201` entry (state `unloaded`) |
-| GET | `/api/admin/databases/<name>` | | `200` entry (`<name>` may be an alias: an alias row) |
+| GET | `/api/admin/databases/<name>` | | `200` entry (`<name>` may be an alias: an alias row); `ETag`: its `revision` |
 | DELETE | `/api/admin/databases/<name>` | | `200 {"name", "trash": "trash/<name>-<UTC time>", "grantsRemoved"}` (every grant on the database goes with it; a restore does not bring them back) |
 | POST | `/api/admin/databases/<name>/clone` | `{"name"}` | `201` entry of the new database |
 | POST | `/api/admin/databases/<name>/load` | | `202` entry + `"load": "started"` or `"already-loading"`; `200` entry + `"load": "already-loaded"` |
 | POST | `/api/admin/databases/<name>/unload` | | `200` entry + `"unloaded": true` (was loaded) or `false` (was not) |
 | POST | `/api/admin/databases/<name>/promote` | | `200` entry (`role: base`, `readOnly: true`; one way) |
-| PUT | `/api/admin/databases/<name>/read-only` | `{"readOnly": bool}` | `200` entry |
-| PUT | `/api/admin/databases/<name>/auto-load` | `{"autoLoad": bool}` | `200` entry |
+| PUT | `/api/admin/databases/<name>/read-only` | `{"readOnly": bool, "revision"?}` | `200` entry (with its new `revision`) |
+| PUT | `/api/admin/databases/<name>/auto-load` | `{"autoLoad": bool, "revision"?}` | `200` entry (with its new `revision`) |
 | POST | `/api/admin/databases/<name>/backup` | | `201` backup |
 | GET | `/api/admin/databases/<name>/backups` | | `200 {"database", "backups": [backup...]}` (oldest first; also for the name of a deleted database) |
 | POST | `/api/admin/databases/<name>/restore` | `{"backup", "name"?}` | `201` entry + `"restoredFrom": {"database", "backup"}`, `"replaced": bool`, `"trash"` (when replaced) |
@@ -136,26 +141,60 @@ A `failed` database whose `database.toml` cannot be read has only `name`, `state
 | POST | `/api/admin/models` | `{"path"?, "repo"?, "license"?}` | `201` (from a path) or `200` (a repository) `{"added": [model...], "resolved": [database...], "stillMissing": [{"database", "model"}...], "notes": [string...]}` |
 | POST | `/api/admin/models?repo=<r>&license=<l>&format=<gsnap\|tar>` | the file itself (anything but JSON): a `.gsnap` carrying model blobs or a `.tar` (or gzip-compressed `.tar.gz`/`.tgz`) of a Model2Vec model directory | `201`, the same answer |
 | DELETE | `/api/admin/models/<repo or blob hash>` | | `200 {"model", "removed": [blob...], "bytes"}` |
-| GET | `/api/admin/aliases` | | `200 {"aliases": {alias: database}}` |
-| PUT | `/api/admin/aliases/<alias>` | `{"target"}` | `200 {"alias", "target", "leftoverGrantsRemoved"?}` (new alias or flip) |
+| GET | `/api/admin/aliases` | | `200 {"aliases": {alias: database}, "revision"}` (`ETag`: the revision) |
+| PUT | `/api/admin/aliases/<alias>` | `{"target", "revision"?}` | `200 {"alias", "target", "leftoverGrantsRemoved"?}` (new alias or flip) |
 | DELETE | `/api/admin/aliases/<alias>` | | `200 {"alias", "removed": true, "grantsRemoved"}` (the grants on the alias go with it) |
-| POST | `/api/admin/aliases/<alias>/rename` | `{"name"}` | `200 {"alias", "renamedFrom", "target", "mcpSessionsMoved", "grantsMoved", "leftoverGrantsRemoved"?}` (see Aliases) |
+| POST | `/api/admin/aliases/<alias>/rename` | `{"name", "revision"?}` | `200 {"alias", "renamedFrom", "target", "mcpSessionsMoved", "grantsMoved", "leftoverGrantsRemoved"?}` (see Aliases) |
 | GET | `/api/admin/runs` | | `200 {"runs": [run...], "textHeadChars": 200}` (every loaded database) |
 | GET | `/api/admin/databases/<name>/runs` | | `200 {"database", "loaded": bool, "runs": [run...], "textHeadChars": 200}` |
 | POST | `/api/admin/databases/<name>/runs/cancel` | `{"id"}` | `200 {"database", "id", "cancelled": bool}` |
-| GET | `/api/admin/users` | | `200 {"users": [user...], "grants": [grant...]}` (users by name; every grant, also of `anonymous`) |
-| POST | `/api/admin/users` | `{"name", "admin"?}` | `201` user + `"token"` (shown once) |
+| GET | `/api/admin/users` | | `200 {"users": [user...], "grants": [grant...], "revision"}` (users by name; every grant, also of `anonymous`; `ETag`: the revision) |
+| POST | `/api/admin/users` | `{"name", "admin"?, "revision"?}` | `201` user + `"token"` (shown once) |
 | GET | `/api/admin/users/<name>` | | `200` user |
 | DELETE | `/api/admin/users/<name>` | | `200 {"name", "removed": true, "grantsRemoved", "mcpSessionsEnded"}` |
 | POST | `/api/admin/users/<name>/token` | | `200` user + `"token"` (shown once) + `"mcpSessionsEnded"` |
 | DELETE | `/api/admin/users/<name>/token` | | `200` user (`hasToken: false`) + `"mcpSessionsEnded"` |
-| PUT | `/api/admin/users/<name>/admin` | `{"admin": bool}` | `200` user |
-| PUT | `/api/admin/users/<name>/roles` | `{"roles": [string...]}` | `200` user |
-| GET | `/api/admin/grants` | | `200 {"grants": [grant...]}` |
-| POST | `/api/admin/grants` | `{"subject", "database", "level"}` | `200` grant (new, or its level replaced) |
+| PUT | `/api/admin/users/<name>/admin` | `{"admin": bool, "revision"?}` | `200` user |
+| PUT | `/api/admin/users/<name>/roles` | `{"roles": [string...], "revision"?}` | `200` user |
+| GET | `/api/admin/grants` | | `200 {"grants": [grant...], "revision"}` (`ETag`: the revision) |
+| POST | `/api/admin/grants` | `{"subject", "database", "level", "revision"?}` | `200` grant (new, or its level replaced) |
 | DELETE | `/api/admin/grants/<subject>/<database>` | | `200 {"subject", "database", "revoked": bool}` |
 | GET | `/api/admin/server` | | `200 {"server", "version", "pid", "address", "url", "directory", "startedAtMs", "uptimeSecs", "databases": {"total", "loaded": [name...], "loading": [name...]}, "aliases", "memory": {"liveBytes", "limitBytes", "availableBytes"}}` (see Server) |
 | POST | `/api/admin/shutdown` | | `202 {"stopping": true, "pid"}`, then the server stops (see Server) |
+
+### Revisions (concurrent changes)
+
+Several admins (browsers, scripts, the console) may change the server at once. Every change is
+serialized on the server and written atomically, so no change is ever half applied or torn.
+What a revision adds: a change made from a page that shows an OLD state (someone else changed
+the object meanwhile) is refused instead of silently overwriting the other change.
+
+| Object | File | Its revision | Changes that check it |
+|---|---|---|---|
+| users and grants | `access.toml` | `revision` of `GET users` and `GET grants` (and their `ETag`) | `POST users`, `DELETE users/<n>`, `POST`/`DELETE users/<n>/token`, `PUT users/<n>/admin`, `PUT users/<n>/roles`, `POST grants`, `DELETE grants/<s>/<d>` |
+| aliases | `aliases.toml` | `revision` of `GET aliases` (and its `ETag`), `aliasesRevision` of `GET databases` | `PUT aliases/<a>`, `DELETE aliases/<a>`, `POST aliases/<a>/rename` |
+| a database's settings | `databases/<name>/database.toml` | `revision` of its entry (every listing row; `GET databases/<name>` also as `ETag`) | `PUT databases/<name>/read-only`, `PUT databases/<name>/auto-load` |
+
+A revision is an opaque string (16 hex digits derived from the file's content: the same state
+has the same revision, also after a restart or a console change). Send it as the body's
+`revision` field, or as the `If-Match` header (`"<revision>"`; `If-Match: *` checks nothing);
+the body wins when both are given. When the object has another revision now, the change is
+refused and nothing changes:
+
+```json
+409 {"error": "the users and grants changed by someone else since you read them (now revision 3f9c0a17d2b84e61); nothing was changed",
+     "help": "changed by someone else: reload",
+     "revision": "3f9c0a17d2b84e61"}
+```
+
+Read the object again (it may already be what you wanted) and repeat the change with the new
+revision. A change WITHOUT a revision is applied to the current state, as before 0.3.0: the
+console's commands, scripts and older clients send none. The web UI sends the revision of what
+it shows with every change of an existing object (the Users tab, alias set/flip/rename/remove,
+the read-only and auto-load toggles) and on a `409` shows the notice and reads the tab's data
+again. Creating a database, deleting one, load/unload, promote, backups, restores, imports and
+models take no revision (they create or remove whole objects and refuse what is no longer
+possible on their own).
 
 ### Create
 

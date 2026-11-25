@@ -258,7 +258,7 @@ impl Access {
         old: &str,
         new: &str,
     ) -> Result<usize, ServerError> {
-        self.change(actor, |file| {
+        self.change(actor, None, |file| {
             let grants = file.rename_grants(old, new);
             let events = if grants == 0 {
                 Vec::new()
@@ -276,7 +276,7 @@ impl Access {
     /// Removes the grants on `name` itself (an alias removed): how many; each recorded as a
     /// revoked grant.
     pub fn drop_grants(&self, actor: &Principal, name: &str) -> Result<usize, ServerError> {
-        self.change(actor, |file| {
+        self.change(actor, None, |file| {
             let key = crate::names::fold(name);
             let events: Vec<AuditEvent> = file
                 .grants()
@@ -313,37 +313,18 @@ impl Access {
         name: &str,
         roles: Vec<String>,
     ) -> Result<Secret, ServerError> {
-        self.change(actor, |file| {
-            let token = file.add_user(name, roles.clone())?;
-            let event = AuditEvent::UserAdded {
-                name: crate::names::fold(name),
-                roles,
-                token_last4: token.last4(),
-            };
-            Ok((token, vec![event]))
-        })
+        self.edit(actor, None).add_user(name, roles)
     }
 
     /// Gives the user `name` a new token (show it once); its browser sessions end.
     pub fn issue_token(&self, actor: &Principal, name: &str) -> Result<Secret, ServerError> {
-        self.change(actor, |file| {
-            let token = file.issue_token(name)?;
-            let event = AuditEvent::TokenIssued {
-                name: crate::names::fold(name),
-                token_last4: token.last4(),
-            };
-            Ok((token, vec![event]))
-        })
+        self.edit(actor, None).issue_token(name)
     }
 
     /// Takes the user `name`'s token away; its browser sessions end. Refused for the last admin
     /// (`ServerError::LastAdmin`).
     pub fn revoke_token(&self, actor: &Principal, name: &str) -> Result<(), ServerError> {
-        self.change(actor, |file| {
-            refuse_last_admin(file, name, |file| file.revoke_token(name))?;
-            let name = crate::names::fold(name);
-            Ok(((), vec![AuditEvent::TokenRevoked { name }]))
-        })
+        self.edit(actor, None).revoke_token(name)
     }
 
     /// Sets the user `name`'s roles. Refused when it takes the admin role from the last admin
@@ -354,34 +335,18 @@ impl Access {
         name: &str,
         roles: Vec<String>,
     ) -> Result<(), ServerError> {
-        self.change(actor, |file| {
-            refuse_last_admin(file, name, |file| file.set_roles(name, roles.clone()))?;
-            let name = crate::names::fold(name);
-            Ok(((), vec![AuditEvent::RolesSet { name, roles }]))
-        })
+        self.edit(actor, None).set_roles(name, roles)
     }
 
     /// Removes the user `name`, its grants and its browser sessions. Refused for the last admin
     /// (`ServerError::LastAdmin`).
     pub fn remove_user(&self, actor: &Principal, name: &str) -> Result<(), ServerError> {
-        self.change(actor, |file| {
-            refuse_last_admin(file, name, |file| file.remove_user(name))?;
-            let name = crate::names::fold(name);
-            Ok(((), vec![AuditEvent::UserRemoved { name }]))
-        })
+        self.edit(actor, None).remove_user(name).map(drop)
     }
 
     /// Sets `grant`.
     pub fn grant(&self, actor: &Principal, grant: Grant) -> Result<(), ServerError> {
-        self.change(actor, |file| {
-            let event = AuditEvent::GrantSet {
-                subject: grant.subject.to_string(),
-                database: grant.database.clone(),
-                level: grant.level.as_str().to_string(),
-            };
-            file.grant(grant);
-            Ok(((), vec![event]))
-        })
+        self.edit(actor, None).grant(grant)
     }
 
     /// Removes the grant of `subject` on `database`: whether there was one.
@@ -391,16 +356,23 @@ impl Access {
         subject: &Subject,
         database: &str,
     ) -> Result<bool, ServerError> {
-        self.change(actor, |file| {
-            if !file.revoke(subject, database) {
-                return Ok((false, Vec::new()));
-            }
-            let event = AuditEvent::GrantRevoked {
-                subject: subject.to_string(),
-                database: database.to_string(),
-            };
-            Ok((true, vec![event]))
-        })
+        self.edit(actor, None).revoke(subject, database)
+    }
+
+    /// The revision of the users and grants as they are now ([`crate::revision`]).
+    pub fn revision(&self) -> String {
+        self.read().revision()
+    }
+
+    /// The user and grant changes made by `actor`, each refused with
+    /// [`ServerError::Conflict`] when the file is no longer at the revision `expected` (`None`:
+    /// no check). The check and the change run under the file's lock in one step.
+    pub fn edit<'a>(&'a self, actor: &'a Principal, expected: Option<&'a str>) -> AccessEdit<'a> {
+        AccessEdit {
+            access: self,
+            actor,
+            expected,
+        }
     }
 
     /// Applies `change` to a copy of the file, writes it, then makes it live; browser sessions
@@ -408,9 +380,13 @@ impl Access {
     fn change<T>(
         &self,
         actor: &Principal,
+        expected: Option<&str>,
         change: impl FnOnce(&mut AccessFile) -> Result<(T, Vec<AuditEvent>), ServerError>,
     ) -> Result<T, ServerError> {
         let mut live = self.file.write().unwrap_or_else(|p| p.into_inner());
+        if expected.is_some() {
+            crate::revision::check(expected, &live.revision(), "users and grants")?;
+        }
         let mut next = live.clone();
         let (value, events) = change(&mut next)?;
         if events.is_empty() {
@@ -435,6 +411,140 @@ impl Access {
 
     fn read(&self) -> std::sync::RwLockReadGuard<'_, AccessFile> {
         self.file.read().unwrap_or_else(|p| p.into_inner())
+    }
+}
+
+/// The user and grant changes of one actor based on one revision ([`Access::edit`]).
+pub struct AccessEdit<'a> {
+    access: &'a Access,
+    actor: &'a Principal,
+    expected: Option<&'a str>,
+}
+
+impl std::fmt::Debug for AccessEdit<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AccessEdit")
+            .field("actor", &self.actor.identity())
+            .field("expected", &self.expected)
+            .finish_non_exhaustive()
+    }
+}
+
+impl AccessEdit<'_> {
+    fn change<T>(
+        &self,
+        change: impl FnOnce(&mut AccessFile) -> Result<(T, Vec<AuditEvent>), ServerError>,
+    ) -> Result<T, ServerError> {
+        self.access.change(self.actor, self.expected, change)
+    }
+
+    /// [`Access::add_user`].
+    pub fn add_user(&self, name: &str, roles: Vec<String>) -> Result<Secret, ServerError> {
+        self.change(|file| {
+            let token = file.add_user(name, roles.clone())?;
+            let event = AuditEvent::UserAdded {
+                name: crate::names::fold(name),
+                roles,
+                token_last4: token.last4(),
+            };
+            Ok((token, vec![event]))
+        })
+    }
+
+    /// [`Access::issue_token`].
+    pub fn issue_token(&self, name: &str) -> Result<Secret, ServerError> {
+        self.change(|file| {
+            let token = file.issue_token(name)?;
+            let event = AuditEvent::TokenIssued {
+                name: crate::names::fold(name),
+                token_last4: token.last4(),
+            };
+            Ok((token, vec![event]))
+        })
+    }
+
+    /// [`Access::revoke_token`].
+    pub fn revoke_token(&self, name: &str) -> Result<(), ServerError> {
+        self.change(|file| {
+            refuse_last_admin(file, name, |file| file.revoke_token(name))?;
+            let name = crate::names::fold(name);
+            Ok(((), vec![AuditEvent::TokenRevoked { name }]))
+        })
+    }
+
+    /// [`Access::set_roles`].
+    pub fn set_roles(&self, name: &str, roles: Vec<String>) -> Result<(), ServerError> {
+        self.change(|file| {
+            refuse_last_admin(file, name, |file| file.set_roles(name, roles.clone()))?;
+            let name = crate::names::fold(name);
+            Ok(((), vec![AuditEvent::RolesSet { name, roles }]))
+        })
+    }
+
+    /// Gives the user `name` the `admin` role (`on`, first) or takes it away, keeping its other
+    /// roles: read and changed in ONE step under the file's lock (a concurrent role change is
+    /// never undone). Refused as [`Access::set_roles`].
+    pub fn set_admin(&self, name: &str, on: bool) -> Result<(), ServerError> {
+        self.change(|file| {
+            let user = file.user(name).ok_or_else(|| ServerError::UserNotFound {
+                name: crate::names::fold(name),
+            })?;
+            let mut roles: Vec<String> = user
+                .roles
+                .iter()
+                .filter(|role| *role != ADMIN_ROLE)
+                .cloned()
+                .collect();
+            if on {
+                roles.insert(0, ADMIN_ROLE.to_string());
+            }
+            refuse_last_admin(file, name, |file| file.set_roles(name, roles.clone()))?;
+            let name = crate::names::fold(name);
+            Ok(((), vec![AuditEvent::RolesSet { name, roles }]))
+        })
+    }
+
+    /// [`Access::remove_user`]: the number of grants of the user removed with it (counted in
+    /// the same step).
+    pub fn remove_user(&self, name: &str) -> Result<usize, ServerError> {
+        self.change(|file| {
+            let subject = Subject::User(crate::names::fold(name));
+            let grants = file
+                .grants()
+                .iter()
+                .filter(|grant| grant.subject == subject)
+                .count();
+            refuse_last_admin(file, name, |file| file.remove_user(name))?;
+            let name = crate::names::fold(name);
+            Ok((grants, vec![AuditEvent::UserRemoved { name }]))
+        })
+    }
+
+    /// [`Access::grant`].
+    pub fn grant(&self, grant: Grant) -> Result<(), ServerError> {
+        self.change(|file| {
+            let event = AuditEvent::GrantSet {
+                subject: grant.subject.to_string(),
+                database: grant.database.clone(),
+                level: grant.level.as_str().to_string(),
+            };
+            file.grant(grant);
+            Ok(((), vec![event]))
+        })
+    }
+
+    /// [`Access::revoke`].
+    pub fn revoke(&self, subject: &Subject, database: &str) -> Result<bool, ServerError> {
+        self.change(|file| {
+            if !file.revoke(subject, database) {
+                return Ok((false, Vec::new()));
+            }
+            let event = AuditEvent::GrantRevoked {
+                subject: subject.to_string(),
+                database: database.to_string(),
+            };
+            Ok((true, vec![event]))
+        })
     }
 }
 

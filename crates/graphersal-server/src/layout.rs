@@ -24,6 +24,7 @@
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::access::FirstAdmin;
 use crate::audit::Audit;
@@ -330,21 +331,47 @@ pub(crate) fn dir_bytes(dir: &Path) -> u64 {
 
 /// Writes `bytes` to `path` through a temporary file beside it and a rename, so a reader sees
 /// either the old file or the whole new one.
+///
+/// Safe for concurrent writers of the same file (several requests, several threads): every
+/// write has its OWN temporary name ([`temp_path`]: `<file>.tmp-<pid>-<n>`), created new
+/// (`create_new`), so two writers never share a temporary file; the last rename wins with a
+/// whole file. The temporary file is flushed to the disk (`fsync`) before the rename, and on
+/// unix the directory afterwards, so the new name survives a power loss too. A failure before
+/// the rename removes the temporary file and leaves `path` unchanged (`Err`); a failing
+/// directory `fsync` after the rename is only a warning (the new file is in place, which the
+/// caller's memory must follow). The callers serialize their read-modify-write cycles with
+/// their own lock (the inventory in `docs/server-dir.md`): this function only guarantees that
+/// the file is always one writer's whole content.
 pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), ServerError> {
     write_atomic_with(path, bytes, false)
 }
 
 /// [`write_atomic`] for a file only its owner may read (mode `0600` on unix; Windows: the
-/// directory's permissions): the run file with the operator token, `access.toml`.
+/// directory's permissions): `access.toml`, the session files.
 pub(crate) fn write_atomic_private(path: &Path, bytes: &[u8]) -> Result<(), ServerError> {
     write_atomic_with(path, bytes, true)
 }
 
-/// Creates (or truncates) `path` for writing; `private`: mode `0600` on unix, also when the
-/// file was there before.
-pub(crate) fn create_file(path: &Path, private: bool) -> io::Result<fs::File> {
+/// [`write_atomic_private`] without the directory's `fsync` after the rename: for the run file,
+/// which a power loss makes stale anyway (it describes a process that is gone), so its name
+/// need not be flushed, and the server answers its probes without waiting for the disk.
+pub(crate) fn write_atomic_private_volatile(path: &Path, bytes: &[u8]) -> Result<(), ServerError> {
+    write_atomic_file(path, bytes, true)
+}
+
+/// Creates the NEW file `path` (`AlreadyExists` when it is there); `private`: mode `0600` on
+/// unix.
+pub(crate) fn create_new_file(path: &Path, private: bool) -> io::Result<fs::File> {
     let mut options = fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
+    options.write(true).create_new(true);
+    open_with(options, path, private)
+}
+
+fn open_with(
+    #[cfg_attr(not(unix), allow(unused_mut))] mut options: fs::OpenOptions,
+    path: &Path,
+    private: bool,
+) -> io::Result<fs::File> {
     #[cfg(unix)]
     if private {
         use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -358,11 +385,76 @@ pub(crate) fn create_file(path: &Path, private: bool) -> io::Result<fs::File> {
     options.open(path)
 }
 
-fn write_atomic_with(path: &Path, bytes: &[u8], private: bool) -> Result<(), ServerError> {
+/// The marker of the temporary names [`temp_path`] makes: `<file>.tmp-<pid>-<n>`.
+pub(crate) const TEMP_MARK: &str = ".tmp-";
+
+/// Counts the temporary names of this process (unique with the process id).
+static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// A temporary name beside `path` that no other write uses: `<file>.tmp-<pid>-<n>` (`n`
+/// counts the temporary names of this process).
+pub(crate) fn temp_path(path: &Path) -> PathBuf {
+    let n = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
     let mut name = path.file_name().unwrap_or_default().to_os_string();
-    name.push(".tmp");
-    let tmp = path.with_file_name(name);
-    let written = create_file(&tmp, private).and_then(|mut file| {
+    name.push(format!("{TEMP_MARK}{}-{n}", std::process::id()));
+    path.with_file_name(name)
+}
+
+/// Flushes the directory `dir` itself to the disk (a rename or a new name in it survives a
+/// power loss). Unix only; elsewhere nothing to do (Windows cannot open a directory as a file;
+/// NTFS journals its metadata). A plain `fsync(2)`: on macOS `File::sync_all` is
+/// `F_FULLFSYNC`, a flush of the whole drive cache, far too slow for every small write (the
+/// file itself still gets `sync_all` before the rename).
+pub(crate) fn sync_dir(dir: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        let file = fs::File::open(dir)?;
+        // SAFETY: `file` is open for the whole call; fsync only reads the descriptor.
+        if unsafe { libc::fsync(file.as_raw_fd()) } == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = dir;
+        Ok(())
+    }
+}
+
+/// [`sync_dir`] of `path`'s directory after a rename into it: a failure is a warning (the file
+/// is in place).
+pub(crate) fn sync_parent(path: &Path) {
+    let Some(dir) = path.parent() else {
+        return;
+    };
+    let dir = if dir.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        dir
+    };
+    if let Err(err) = sync_dir(dir) {
+        tracing::warn!(
+            target: "graphersal_server",
+            "cannot flush the directory {} to the disk after writing {}: {err}",
+            dir.display(),
+            path.display()
+        );
+    }
+}
+
+fn write_atomic_with(path: &Path, bytes: &[u8], private: bool) -> Result<(), ServerError> {
+    write_atomic_file(path, bytes, private)?;
+    sync_parent(path);
+    Ok(())
+}
+
+/// The temporary file, its `fsync` and the rename of [`write_atomic`] (no directory `fsync`).
+fn write_atomic_file(path: &Path, bytes: &[u8], private: bool) -> Result<(), ServerError> {
+    let tmp = temp_path(path);
+    let written = create_new_file(&tmp, private).and_then(|mut file| {
         file.write_all(bytes)?;
         file.sync_all()
     });
@@ -374,6 +466,105 @@ fn write_atomic_with(path: &Path, bytes: &[u8], private: bool) -> Result<(), Ser
         let _ = fs::remove_file(&tmp);
         ServerError::io("write", path, err)
     })
+}
+
+/// The file names this server writes atomically (the legacy temporary names of earlier
+/// versions, `<name>.tmp`, are recognised for these only).
+const ATOMIC_FILES: &[&str] = &[
+    CONFIG_FILE,
+    RUN_FILE,
+    ALIASES_FILE,
+    ACCESS_FILE,
+    crate::database::DATABASE_FILE,
+    crate::sessions::BROWSER_FILE,
+    crate::sessions::MCP_FILE,
+    crate::models::MODELS_FILE,
+];
+
+/// Whether `name` is a temporary name this server makes (and nobody else): `<file>.tmp-<pid>-<n>`
+/// ([`temp_path`]), the fixed `<file>.tmp` of versions up to 0.2 for the files it writes
+/// atomically, and `access.toml.new-<pid>` (the first admin's file before it is linked).
+pub(crate) fn is_temp_name(name: &str) -> bool {
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    if let Some(at) = name.rfind(TEMP_MARK) {
+        let (base, rest) = (&name[..at], &name[at + TEMP_MARK.len()..]);
+        if !base.is_empty()
+            && let Some((pid, n)) = rest.split_once('-')
+            && digits(pid)
+            && digits(n)
+        {
+            return true;
+        }
+    }
+    if let Some(base) = name.strip_suffix(".tmp")
+        && ATOMIC_FILES.contains(&base)
+    {
+        return true;
+    }
+    name.strip_prefix(ACCESS_FILE)
+        .and_then(|rest| rest.strip_prefix(".new-"))
+        .is_some_and(digits)
+}
+
+/// Removes the temporary files of interrupted atomic writes ([`is_temp_name`]: only names this
+/// server makes) directly in `dir` (not below it): the paths removed. Call it while nothing
+/// writes there (the server lock held, before the server serves).
+pub(crate) fn remove_temps_in(dir: &Path) -> Vec<PathBuf> {
+    let Ok(listing) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut removed = Vec::new();
+    for item in listing.flatten() {
+        let is_file = item.file_type().is_ok_and(|kind| kind.is_file());
+        let name = item.file_name();
+        if !is_file || !name.to_str().is_some_and(is_temp_name) {
+            continue;
+        }
+        let path = item.path();
+        match fs::remove_file(&path) {
+            Ok(()) => removed.push(path),
+            Err(err) => tracing::warn!(
+                target: "graphersal_server",
+                "cannot remove the temporary file {}: {err}",
+                path.display()
+            ),
+        }
+    }
+    removed
+}
+
+impl ServerDir {
+    /// Removes the temporary files that interrupted atomic writes left (a crash between the
+    /// write and the rename) in every directory where this server writes files atomically:
+    /// the root, `sessions/`, `models/`, every `databases/<name>/` and `backups/<name>/`.
+    /// Only names this server makes are touched (`<file>.tmp-<pid>-<n>` and the legacy names of
+    /// `docs/server-dir.md` "Concurrent changes"). Run by the registry scan
+    /// at start, with the server lock held. Answers the paths removed (each logged).
+    pub fn remove_stale_temps(&self) -> Vec<PathBuf> {
+        let mut dirs = vec![self.root.clone(), self.sessions(), self.models()];
+        for parent in [self.databases(), self.backups()] {
+            if let Ok(listing) = fs::read_dir(&parent) {
+                dirs.extend(
+                    listing
+                        .flatten()
+                        .filter(|item| item.file_type().is_ok_and(|kind| kind.is_dir()))
+                        .map(|item| item.path()),
+                );
+            }
+        }
+        let mut removed = Vec::new();
+        for dir in dirs {
+            removed.extend(remove_temps_in(&dir));
+        }
+        for path in &removed {
+            tracing::info!(
+                target: "graphersal_server",
+                "removed the temporary file {} of an interrupted write",
+                path.display()
+            );
+        }
+        removed
+    }
 }
 
 #[cfg(test)]
@@ -494,6 +685,150 @@ mod tests {
         write_atomic(&path, b"a = 2\n").unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), "a = 2\n");
         assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 1);
+    }
+
+    /// The content one writer writes in one round: whole and recognisable (a torn or mixed
+    /// file does not parse back to the same writer and round).
+    fn payload(writer: usize, round: usize) -> String {
+        let pad = "x".repeat((writer * 37 + round * 11) % 3000);
+        format!("writer = {writer}\nround = {round}\npad = \"{pad}\"\nend = {writer}\n")
+    }
+
+    fn parse_payload(text: &str) -> Option<(usize, usize)> {
+        let value: toml::Value = toml::from_str(text).ok()?;
+        let writer = usize::try_from(value.get("writer")?.as_integer()?).ok()?;
+        let round = usize::try_from(value.get("round")?.as_integer()?).ok()?;
+        (text == payload(writer, round)).then_some((writer, round))
+    }
+
+    #[test]
+    fn concurrent_atomic_writes_of_one_file_never_mix_and_leave_no_temporary_file() {
+        let temp = TempDir::new("layout-atomic-concurrent");
+        let path = temp.path().join("shared.toml");
+        write_atomic(&path, payload(0, 0).as_bytes()).unwrap();
+        const WRITERS: usize = 8;
+        const ROUNDS: usize = 60;
+        let done = std::sync::atomic::AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            let reader = scope.spawn(|| {
+                let mut reads = 0usize;
+                while !done.load(std::sync::atomic::Ordering::Relaxed) {
+                    let text = fs::read_to_string(&path).unwrap();
+                    assert!(parse_payload(&text).is_some(), "a torn file: {text:?}");
+                    reads += 1;
+                }
+                reads
+            });
+            let writers: Vec<_> = (0..WRITERS)
+                .map(|writer| {
+                    let path = &path;
+                    scope.spawn(move || {
+                        for round in 0..ROUNDS {
+                            let private = round % 2 == 0;
+                            let bytes = payload(writer, round);
+                            if private {
+                                write_atomic_private(path, bytes.as_bytes()).unwrap();
+                            } else {
+                                write_atomic(path, bytes.as_bytes()).unwrap();
+                            }
+                        }
+                    })
+                })
+                .collect();
+            for writer in writers {
+                writer.join().unwrap();
+            }
+            done.store(true, std::sync::atomic::Ordering::Relaxed);
+            assert!(reader.join().unwrap() > 0);
+        });
+        let last = parse_payload(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            last.1,
+            ROUNDS - 1,
+            "the last file is some writer's last round"
+        );
+        let names: Vec<String> = fs::read_dir(temp.path())
+            .unwrap()
+            .map(|item| item.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["shared.toml".to_string()]);
+    }
+
+    #[test]
+    fn temporary_names_are_unique_and_recognised() {
+        let path = Path::new("dir").join("aliases.toml");
+        let a = temp_path(&path);
+        let b = temp_path(&path);
+        assert_ne!(a, b);
+        for name in [a, b] {
+            let name = name.file_name().unwrap().to_str().unwrap().to_string();
+            assert!(name.starts_with("aliases.toml.tmp-"), "{name}");
+            assert!(is_temp_name(&name), "{name}");
+        }
+        for ours in [
+            "access.toml.tmp-12-0",
+            "2026-11-26T10-00-00Z.toml.tmp-4-17",
+            "aliases.toml.tmp",
+            "database.toml.tmp",
+            "browser.json.tmp",
+            "access.toml.new-4711",
+        ] {
+            assert!(is_temp_name(ours), "{ours}");
+        }
+        for theirs in [
+            "notes.tmp",
+            "aliases.toml",
+            ".tmp-1-2",
+            "x.tmp-1",
+            "x.tmp-a-2",
+            "x.tmp-1-",
+            "access.toml.new-",
+            "access.toml.new-x",
+            "report.toml.tmp",
+        ] {
+            assert!(!is_temp_name(theirs), "{theirs}");
+        }
+    }
+
+    #[test]
+    fn stale_temporary_files_are_removed_and_nothing_else() {
+        let temp = TempDir::new("layout-stale-temps");
+        let root = temp.path().join("server");
+        ServerDir::init(&root).unwrap();
+        let dir = ServerDir::open(&root).unwrap();
+        let db = dir.databases().join("acme");
+        let backups = dir.backups().join("acme");
+        fs::create_dir_all(&db).unwrap();
+        fs::create_dir_all(&backups).unwrap();
+        let stale = [
+            root.join("aliases.toml.tmp-99-3"),
+            root.join("access.toml.tmp"),
+            root.join("access.toml.new-123"),
+            dir.sessions().join("browser.json.tmp-1-1"),
+            dir.models().join("models.toml.tmp"),
+            db.join("database.toml.tmp-7-0"),
+            backups.join("2026-11-26T10-00-00Z.toml.tmp-7-1"),
+        ];
+        let kept = [
+            root.join("notes.tmp"),
+            db.join("database.toml"),
+            db.join("mine.tmp-x"),
+            dir.imports().join("upload.toml.tmp-1-1"),
+        ];
+        for path in stale.iter().chain(kept.iter()) {
+            fs::write(path, "x").unwrap();
+        }
+        let mut removed = dir.remove_stale_temps();
+        removed.sort();
+        let mut expected = stale.to_vec();
+        expected.sort();
+        assert_eq!(removed, expected);
+        for path in &stale {
+            assert!(!path.exists(), "{}", path.display());
+        }
+        for path in &kept {
+            assert!(path.exists(), "{}", path.display());
+        }
     }
 
     #[test]

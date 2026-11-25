@@ -73,9 +73,9 @@ req() {
     ${auth[@]+"${auth[@]}"} "$@" "${URL}${path}") || fail "curl $method $path failed"
 }
 
-# jreq METHOD PATH JSON: a request with a JSON body.
+# jreq METHOD PATH JSON [curl args...]: a request with a JSON body.
 jreq() {
-  req "$1" "$2" -H 'Content-Type: application/json' --data-binary "$3"
+  req "$1" "$2" -H 'Content-Type: application/json' --data-binary "$3" "${@:4}"
 }
 
 # jget PATH [FILE]: the value at the dotted PATH (keys, list indexes) of the JSON body; strings
@@ -446,6 +446,25 @@ jreq PUT /api/admin/aliases/current '{"target": "acme-l"}'
 expect_status 200
 execute current 'g.v().has_label("person").count().next()'
 [ "$RESULT" = 2 ] || fail "current -> acme-l counts $RESULT"
+ok
+
+STEP="a stale revision is refused (409), the current one passes"
+req GET /api/admin/aliases
+expect_status 200
+REV=$(jget revision)
+[ "$(header ETag)" = "\"$REV\"" ] || fail "ETag $(header ETag), revision $REV"
+jreq PUT /api/admin/aliases/current "{\"target\": \"acme\", \"revision\": \"$REV\"}"
+expect_status 200
+jreq PUT /api/admin/aliases/current "{\"target\": \"acme-l\", \"revision\": \"$REV\"}"
+expect_status 409
+expect_json help "changed by someone else: reload"
+NEW=$(jget revision)
+req GET /api/admin/aliases
+expect_json aliases.current acme
+req DELETE /api/admin/aliases/current -H "If-Match: \"$REV\""
+expect_status 409
+jreq PUT /api/admin/aliases/current '{"target": "acme-l"}' -H "If-Match: \"$NEW\""
+expect_status 200
 ok
 
 STEP="read-only refuses a write"

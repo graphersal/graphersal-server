@@ -55,6 +55,7 @@ mod mounts;
 pub mod names;
 pub mod ops;
 pub mod registry;
+pub mod revision;
 mod router;
 pub mod run_file;
 pub mod security;

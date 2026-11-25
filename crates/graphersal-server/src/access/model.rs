@@ -349,6 +349,11 @@ impl AccessFile {
         }
     }
 
+    /// The revision of this state ([`crate::revision`]: of its file text).
+    pub fn revision(&self) -> String {
+        crate::revision::of(self.to_text().as_bytes())
+    }
+
     /// Writes `access.toml` of `dir` (atomically, mode `0600` on unix).
     pub fn write(&self, dir: &ServerDir) -> Result<(), ServerError> {
         crate::layout::write_atomic_private(&dir.access_path(), self.to_text().as_bytes())
@@ -606,10 +611,8 @@ fn new_token() -> Result<Secret, ServerError> {
 /// is never replaced; a file system without hard links gets a rename after a check.
 fn create_new(path: &Path, bytes: &[u8]) -> Result<bool, ServerError> {
     use std::io::Write;
-    let mut name = path.file_name().unwrap_or_default().to_os_string();
-    name.push(format!(".new-{}", std::process::id()));
-    let tmp: PathBuf = path.with_file_name(name);
-    let written = crate::layout::create_file(&tmp, true).and_then(|mut file| {
+    let tmp: PathBuf = crate::layout::temp_path(path);
+    let written = crate::layout::create_new_file(&tmp, true).and_then(|mut file| {
         file.write_all(bytes)?;
         file.sync_all()
     });
@@ -626,6 +629,9 @@ fn create_new(path: &Path, bytes: &[u8]) -> Result<bool, ServerError> {
             .map_err(|err| ServerError::io("write", path, err)),
     };
     let _ = fs::remove_file(&tmp);
+    if matches!(created, Ok(true)) {
+        crate::layout::sync_parent(path);
+    }
     created
 }
 
