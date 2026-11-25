@@ -8,7 +8,7 @@
 //!
 //! [[grant]]
 //! subject = "user:bob"      # or "anonymous"; later "group:<g>", "role:<r>"
-//! database = "acme"         # a database name or "*"
+//! database = "acme"         # a database name, an alias or "*"
 //! level = "read"            # or "write"
 //! ```
 //!
@@ -18,6 +18,11 @@
 //! `admin` role (and the operator) is `write` everywhere. The effective level is capped by the
 //! database's mode ([`effective_level`]): a read-only database or a base gives `read` at most.
 //! [`Level::None`] means the database does not exist for that principal.
+//!
+//! A grant may name an alias: it reaches the alias's CURRENT target, but only when the request
+//! names the alias ([`AccessFile::granted_level_via`]); asked by the real name, only the grants
+//! on that name (and `*`) count. An alias's rename moves its grants
+//! ([`AccessFile::rename_grants`]), its removal drops them ([`AccessFile::drop_grants`]).
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -242,8 +247,9 @@ struct RawGrant {
 
 const HEADER: &str = "# graphersal-server access: users (only SHA-256 hashes of their tokens), \
 roles and grants.\n# Written by the server and its console (atomically); a token is shown once, \
-when it is made.\n# grant: subject = \"user:<name>\" | \"anonymous\", database = <name> | \"*\", \
-level = \"read\" | \"write\".\n";
+when it is made.\n# grant: subject = \"user:<name>\" | \"anonymous\", database = <name> | <alias> | \
+\"*\", level = \"read\" | \"write\" (a grant on an alias reaches its current database, only \
+through the alias).\n";
 
 impl AccessFile {
     /// A file with no users and no grants (nobody but the operator gets in).
@@ -413,6 +419,60 @@ impl AccessFile {
             .map(|grant| grant.level)
             .max()
             .unwrap_or(Level::None)
+    }
+
+    /// The level `principal`'s grants give on the database `real` when the request names it
+    /// as `requested` (the database's own name, or an alias of it), before the database's
+    /// mode: [`AccessFile::granted_level`] on `real`, and, when `requested` is an alias, the
+    /// grants on the alias too (the higher of the two). A grant on an alias therefore reaches
+    /// its CURRENT target, but only through the alias's name: asked by the real name, only the
+    /// grants on the real name (and `*`) count.
+    pub fn granted_level_via(&self, principal: &Principal, requested: &str, real: &str) -> Level {
+        let own = self.granted_level(principal, real);
+        let requested = fold(requested);
+        if requested == fold(real) {
+            return own;
+        }
+        own.max(self.granted_level(principal, &requested))
+    }
+
+    /// How many grants name the database or alias `name` itself (`*` grants not counted).
+    pub fn grants_on(&self, name: &str) -> usize {
+        let name = fold(name);
+        self.grants.iter().filter(|g| g.database == name).count()
+    }
+
+    /// Moves every grant on `old` to `new` (an alias renamed): how many moved. A grant the
+    /// same subject already holds on `new` keeps the higher level.
+    pub fn rename_grants(&mut self, old: &str, new: &str) -> usize {
+        let (old, new) = (fold(old), fold(new));
+        let moving: Vec<Grant> = self
+            .grants
+            .iter()
+            .filter(|g| g.database == old)
+            .cloned()
+            .collect();
+        self.grants.retain(|g| g.database != old);
+        for mut grant in moving.iter().cloned() {
+            grant.database = new.clone();
+            match self
+                .grants
+                .iter_mut()
+                .find(|g| g.subject == grant.subject && g.database == grant.database)
+            {
+                Some(existing) => existing.level = existing.level.max(grant.level),
+                None => self.grants.push(grant),
+            }
+        }
+        moving.len()
+    }
+
+    /// Removes every grant on `name` itself (an alias removed; `*` grants stay): how many.
+    pub fn drop_grants(&mut self, name: &str) -> usize {
+        let name = fold(name);
+        let before = self.grants.len();
+        self.grants.retain(|g| g.database != name);
+        before - self.grants.len()
     }
 
     /// The effective level of `principal` on the database of `entry`: the granted level
@@ -633,6 +693,48 @@ mod tests {
         let analyst = Principal::user("dave", vec!["analyst".to_string()]);
         assert_eq!(roles.level(&analyst, &acme), Level::Read);
         assert_eq!(roles.level(&bob, &acme), Level::None);
+    }
+
+    #[test]
+    fn an_alias_grant_counts_only_through_the_alias_and_moves_or_goes_with_it() {
+        let mut file = AccessFile::new();
+        file.add_user("bob", Vec::new()).unwrap();
+        grant(&mut file, "user:bob", "prod", Level::Read);
+        grant(&mut file, "anonymous", "prod", Level::Write);
+        grant(&mut file, "user:bob", "*", Level::Read);
+        let bob = file.principal_of("bob").unwrap();
+        let carol = Principal::user("carol", Vec::new());
+        // Through the alias `prod` (-> `prod-2026-11`): the alias's grants and the target's.
+        assert_eq!(
+            file.granted_level_via(&bob, "PROD", "prod-2026-11"),
+            Level::Write
+        );
+        // By the real name: only the real name's grants and `*`.
+        assert_eq!(
+            file.granted_level_via(&bob, "prod-2026-11", "prod-2026-11"),
+            Level::Read
+        );
+        assert_eq!(
+            file.granted_level_via(&carol, "prod", "prod-2026-11"),
+            Level::Write,
+            "the anonymous grant on the alias"
+        );
+        assert_eq!(
+            file.granted_level_via(&carol, "prod-2026-11", "prod-2026-11"),
+            Level::None
+        );
+        assert_eq!(file.grants_on("prod"), 2);
+        // A rename moves them; a grant already on the new name keeps the higher level.
+        grant(&mut file, "user:bob", "live", Level::Write);
+        assert_eq!(file.rename_grants("Prod", "live"), 2);
+        assert_eq!(file.grants_on("prod"), 0);
+        assert_eq!(file.grants_on("live"), 2);
+        assert_eq!(file.granted_level_via(&bob, "live", "x"), Level::Write);
+        assert_eq!(file.rename_grants("nothing", "other"), 0);
+        // A removal drops them; `*` stays.
+        assert_eq!(file.drop_grants("LIVE"), 2);
+        assert_eq!(file.grants().len(), 1);
+        assert_eq!(file.grants()[0].database, "*");
     }
 
     #[test]

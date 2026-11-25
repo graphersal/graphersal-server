@@ -100,7 +100,7 @@ pub(crate) struct Directory<'a> {
 }
 
 impl Directory<'_> {
-    /// The level granted to the caller on the real database `name`.
+    /// The level granted to the caller on the real database `name`, asked by that name.
     fn granted(&self, name: &str) -> Level {
         self.access.granted_level(self.principal, name)
     }
@@ -114,40 +114,45 @@ impl Directory<'_> {
 impl GraphDirectory for Directory<'_> {
     fn list(&self) -> Result<Vec<GraphEntry>, McpError> {
         let registry = self.loader.registry();
-        let entries: Vec<(DatabaseEntry, Level)> = registry
+        let mut graphs: Vec<GraphEntry> = registry
             .list()
             .into_iter()
-            .map(|e| {
+            .filter_map(|e| {
                 let level = self.granted(&e.name);
-                (e, level)
+                (level != Level::None).then(|| graph_entry(&e.name, &e, level))
             })
-            .filter(|(_, level)| *level != Level::None)
             .collect();
-        let mut graphs: Vec<GraphEntry> = entries
-            .iter()
-            .map(|(e, level)| graph_entry(&e.name, e, *level))
-            .collect();
-        for (alias, target) in registry.aliases() {
-            if let Some((entry, level)) = entries.iter().find(|(e, _)| e.name == target) {
-                graphs.push(graph_entry(&alias, entry, *level).with_alias_of(&target));
+        // An alias is listed when it reaches its target for the caller: a grant on the target
+        // or on the alias itself (`Access::reach`).
+        for (alias, _) in registry.aliases() {
+            if let Some((entry, level)) = self.access.reach(registry, self.principal, &alias) {
+                graphs.push(graph_entry(&alias, &entry, level).with_alias_of(&entry.name));
             }
         }
         Ok(graphs)
     }
 
+    /// The route of `name`: the real database's name when the caller may reach it by that
+    /// name, else (a grant on the alias only) the alias's own name, so the real name stays
+    /// hidden and [`GraphDirectory::host`] resolves the alias again on every call (a flip
+    /// moves the session along).
     fn resolve(&self, name: &str) -> Result<String, McpError> {
-        match self.loader.registry().resolve(name) {
-            Ok(entry) if self.granted(&entry.name) != Level::None => Ok(entry.name),
-            _ => Err(Self::unknown(name)),
+        let registry = self.loader.registry();
+        match self.access.reach(registry, self.principal, name) {
+            Some((entry, _)) if self.granted(&entry.name) != Level::None => Ok(entry.name),
+            Some(_) => Ok(crate::names::fold(name)),
+            None => Err(Self::unknown(name)),
         }
     }
 
     fn host(&self, route: &str) -> Result<(Arc<dyn Host>, Profile), McpError> {
-        let level = self.granted(route);
-        if level == Level::None {
+        let Some((entry, level)) = self
+            .access
+            .reach(self.loader.registry(), self.principal, route)
+        else {
             return Err(Self::unknown(route));
-        }
-        if let Some(context) = self.loader.context(route) {
+        };
+        if let Some(context) = self.loader.context(&entry.name) {
             let profile = context.mcp_profile().cloned().unwrap_or_default();
             let profile = if level == Level::Read {
                 profile.with_read_only(true)
@@ -157,12 +162,7 @@ impl GraphDirectory for Directory<'_> {
             let host: Arc<dyn Host> = context;
             return Ok((host, profile));
         }
-        match self.loader.registry().get(route) {
-            Ok(entry) => Err(McpError::Unavailable(not_loaded_text(&entry))),
-            Err(_) => Err(McpError::Failed(format!(
-                "no database '{route}' (it was deleted)"
-            ))),
-        }
+        Err(McpError::Unavailable(not_loaded_text(&entry)))
     }
 }
 

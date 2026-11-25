@@ -316,3 +316,93 @@ fn user_requests_name_the_admin_routes() {
         assert_eq!((m, p.as_str()), (method, path));
     }
 }
+
+#[test]
+fn grants_on_aliases_are_marked_and_follow_the_alias_offline() {
+    let temp = TempDir::new("console-users-alias");
+    let dir = server(&temp);
+    let admin = crate::ops::Admin::offline(crate::registry::Registry::scan(&dir).unwrap());
+    admin.create("prod-2026-11", &CreateSpec::plain()).unwrap();
+    admin.create("acme", &CreateSpec::plain()).unwrap();
+    drop(admin);
+    ok(
+        &dir,
+        DbCommand::AliasSet {
+            alias: user("prod"),
+            target: user("prod-2026-11"),
+        },
+    );
+    ok(
+        &dir,
+        DbCommand::UserAdd {
+            name: user("bob"),
+            admin: false,
+        },
+    );
+    let grant = |database: &str, subject: &str| DbCommand::UserGrant {
+        subject: user(subject),
+        database: user(database),
+        level: user("read"),
+    };
+    // A grant on an alias is taken (it was refused before) and says so.
+    let (answer, _) = ok(&dir, grant("prod", "bob"));
+    assert_eq!(answer["kind"], "alias", "{answer}");
+    assert_eq!(answer["target"], "prod-2026-11", "{answer}");
+    let text = render(&grant("prod", "bob"), &answer, dir.root());
+    assert!(
+        text.contains("alias of: 'prod-2026-11' now; the grant follows the alias"),
+        "{text}"
+    );
+    ok(&dir, grant("acme", "anonymous"));
+    ok(&dir, grant("prod", "anonymous"));
+    // `user list` marks the alias with its target and the real database by its name.
+    let (list, _) = ok(&dir, DbCommand::UserList);
+    let text = render(&DbCommand::UserList, &list, dir.root());
+    assert!(text.contains("prod → prod-2026-11 (alias) read"), "{text}");
+    assert!(text.contains("acme"), "{text}");
+    assert!(!text.contains("acme (alias)"), "{text}");
+    // Rename: the grants move to the new name in access.toml.
+    let rename = DbCommand::AliasRename {
+        alias: user("prod"),
+        name: user("live"),
+    };
+    let (renamed, _) = ok(&dir, rename.clone());
+    assert_eq!(renamed["grantsMoved"], 2, "{renamed}");
+    let text = render(&rename, &renamed, dir.root());
+    assert!(
+        text.lines()
+            .any(|line| line.trim_start().starts_with("grants moved:") && line.ends_with(" 2")),
+        "{text}"
+    );
+    let access = file(&dir);
+    assert_eq!(access.grants_on("prod"), 0);
+    assert_eq!(access.grants_on("live"), 2);
+    // Remove: the alias's grants go with it (a later alias of that name inherits nothing).
+    let remove = DbCommand::AliasRemove {
+        alias: user("live"),
+    };
+    let (removed, _) = ok(&dir, remove.clone());
+    assert_eq!(removed["grantsRemoved"], 2, "{removed}");
+    let text = render(&remove, &removed, dir.root());
+    assert!(
+        text.lines().any(|line| line.trim() == "grants removed: 2"),
+        "{text}"
+    );
+    let access = file(&dir);
+    assert_eq!(access.grants_on("live"), 0);
+    assert_eq!(access.grants().len(), 1, "{:?}", access.grants());
+    // A grant left on a name that names nothing now is listed as missing.
+    let mut stale = file(&dir);
+    stale.grant(
+        crate::access::Grant::new(
+            crate::access::Subject::Anonymous,
+            "gone",
+            crate::access::Level::Read,
+        )
+        .unwrap(),
+    );
+    stale.write(&dir).unwrap();
+    let (list, _) = ok(&dir, DbCommand::UserList);
+    let text = render(&DbCommand::UserList, &list, dir.root());
+    assert!(text.contains("gone (missing)"), "{text}");
+}

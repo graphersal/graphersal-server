@@ -9,8 +9,9 @@ import http from 'node:http';
 import {
   adminRequest, createAdmin, tokenText, userRows, grantRows, subjectText, usableAdmins, userActions,
   userNameProblem, addUserForm, grantForm, userConfirmText, userOutcomeText, shownToken,
-  LAST_ADMIN_TITLE, RESERVED_USER_NAMES,
+  LAST_ADMIN_TITLE, RESERVED_USER_NAMES, grantKind, grantDatabaseText, grantChoices, GRANT_KINDS,
 } from '../admin-api.js';
+import { readFileSync } from 'node:fs';
 
 const LAST_ADMIN_HELP = 'make another user an admin first';
 
@@ -128,7 +129,7 @@ test('rows: the token as …last4, grants sorted with anonymous first', () => {
     { roles: [] },
   ] });
   assert.deepEqual(rows.map((u) => [u.name, u.admin, u.tokenText]), [['bob', false, '…c3d4'], ['zed', true, 'none']]);
-  assert.deepEqual(rows[0].grants, [{ database: 'acme', level: 'read' }], 'an invalid level is dropped');
+  assert.deepEqual(rows[0].grants, [{ database: 'acme', level: 'read', kind: 'database', target: null, databaseText: 'acme' }], 'an invalid level is dropped');
   const grants = grantRows({ grants: [
     { subject: 'user:bob', database: 'b', level: 'write' },
     { subject: 'user:bob', database: 'a', level: 'read' },
@@ -213,7 +214,7 @@ test('a round against the mock: add (token once), grant, new token, revoke, the 
     // An anonymous grant, then its revoke.
     const g = grantForm({ subject: 'anonymous', database: 'demo', level: 'read' });
     await admin.grant(g.subject, g.database, g.level);
-    assert.deepEqual(grantRows(await admin.users())[0], { subject: 'anonymous', subjectText: 'everyone (anonymous)', database: 'demo', databaseText: 'demo', level: 'read' });
+    assert.deepEqual(grantRows(await admin.users())[0], { subject: 'anonymous', subjectText: 'everyone (anonymous)', database: 'demo', databaseText: 'demo', kind: 'database', target: null, level: 'read' });
     assert.equal((await admin.revokeGrant('anonymous', 'demo')).revoked, true);
     assert.equal((await admin.revokeGrant('anonymous', 'demo')).revoked, false);
     // A new token replaces the old one; a revoke leaves none.
@@ -239,4 +240,56 @@ test('a round against the mock: add (token once), grant, new token, revoke, the 
   } finally {
     await srv.close();
   }
+});
+
+test('grants on aliases: every grant table marks an alias with its target, a real database, every database and a missing name', () => {
+  assert.deepEqual(GRANT_KINDS, ['database', 'alias', 'all', 'missing']);
+  assert.deepEqual(grantKind({ database: 'prod', kind: 'alias', target: 'prod-2026-11' }), { kind: 'alias', target: 'prod-2026-11' });
+  assert.deepEqual(grantKind({ database: '*', kind: 'database' }), { kind: 'all', target: null });
+  assert.deepEqual(grantKind({ database: 'acme' }), { kind: 'database', target: null }, 'an older server without kind');
+  assert.deepEqual(grantKind({ database: 'acme', kind: 'database', target: 'x' }), { kind: 'database', target: null });
+  assert.equal(grantDatabaseText({ database: 'prod', kind: 'alias', target: 'prod-2026-11' }), 'prod → prod-2026-11 (alias)');
+  assert.equal(grantDatabaseText({ database: 'acme', kind: 'database' }), 'acme');
+  assert.equal(grantDatabaseText({ database: 'gone', kind: 'missing' }), 'gone (no such database)');
+  assert.equal(grantDatabaseText({ database: '*', kind: 'all' }), 'every database');
+  // The "Grants" table and the users' grants.
+  const grants = grantRows({ grants: [
+    { subject: 'user:bob', database: 'prod', level: 'read', kind: 'alias', target: 'prod-2026-11' },
+    { subject: 'user:bob', database: 'acme', level: 'write', kind: 'database', target: null },
+    { subject: 'anonymous', database: 'gone', level: 'read', kind: 'missing', target: null },
+  ] });
+  assert.deepEqual(grants.map((g) => [g.subject, g.databaseText, g.kind, g.target]), [
+    ['anonymous', 'gone (no such database)', 'missing', null],
+    ['user:bob', 'acme', 'database', null],
+    ['user:bob', 'prod → prod-2026-11 (alias)', 'alias', 'prod-2026-11'],
+  ]);
+  const [bob] = userRows({ users: [{ name: 'bob', roles: [], hasToken: true, tokenLast4: 'c3d4', grants: [
+    { database: 'prod', level: 'read', kind: 'alias', target: 'prod-2026-11' },
+  ] }] });
+  assert.deepEqual(bob.grants, [{ database: 'prod', level: 'read', kind: 'alias', target: 'prod-2026-11', databaseText: 'prod → prod-2026-11 (alias)' }]);
+  // The grant form's picker offers the aliases too, marked, after the real databases.
+  const choices = grantChoices([
+    { name: 'prod', aliasOf: 'prod-2026-11' },
+    { name: 'prod-2026-11', aliasOf: null },
+    { name: 'acme' },
+    { name: 'cur', aliasOf: 'acme' },
+  ]);
+  assert.deepEqual(choices, [
+    { value: 'acme', text: 'acme', kind: 'database' },
+    { value: 'prod-2026-11', text: 'prod-2026-11', kind: 'database' },
+    { value: 'cur', text: 'cur → acme (alias)', kind: 'alias' },
+    { value: 'prod', text: 'prod → prod-2026-11 (alias)', kind: 'alias' },
+  ]);
+  assert.deepEqual(grantChoices(null), []);
+  assert.equal(
+    userOutcomeText('grant', 'user:bob', { subject: 'user:bob', database: 'prod', level: 'read', kind: 'alias', target: 'prod-2026-11' }),
+    'bob can read "prod" (an alias of "prod-2026-11" now: reachable only through "prod").',
+  );
+  assert.equal(userOutcomeText('grant', 'user:bob', { subject: 'user:bob', database: 'acme', level: 'write', kind: 'database' }), 'bob can read and write "acme".');
+  // The Users tab renders the marked texts and the picker's choices.
+  const tab = readFileSync(new URL('../users-tab.js', import.meta.url), 'utf8');
+  assert.ok(tab.includes('grantChoices(list.rows)'), 'the picker is built from grantChoices');
+  assert.ok(tab.includes('{{ c.text }}'), 'the picker shows the marked text');
+  assert.ok(tab.includes('{{ g.databaseText }}'), 'the grants table shows the marked text');
+  assert.ok(tab.includes('${g.databaseText}: ${g.level}'), 'a user\'s grants show the marked text');
 });

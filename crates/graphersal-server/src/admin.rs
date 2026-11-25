@@ -153,6 +153,7 @@ impl Registry {
             new: new.to_string(),
             target,
             moved,
+            grants: 0,
         })
     }
 
@@ -625,6 +626,9 @@ pub struct Renamed<T> {
     pub target: String,
     /// What the `moved` callback returned.
     pub moved: T,
+    /// The grants on the alias that moved to the new name with it ([`crate::ops::Admin::alias_rename`];
+    /// 0 from the registry itself).
+    pub grants: usize,
 }
 
 fn refuse_broken_aliases(inner: &Inner) -> Result<(), ServerError> {

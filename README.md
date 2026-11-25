@@ -154,19 +154,19 @@ databases and missing models. Paths and commands are never wrapped.
 | `db load NAME [--no-wait]`, `db unload NAME` | running server only; a loaded database's note shows its URL (`served at: http://.../db/NAME/`) |
 | `db promote NAME` | an unloaded plain database becomes a base (read-only, frozen for good) |
 | `db read-only NAME on\|off`, `db auto-load NAME on\|off` | flags, persisted; read-only applies at once |
-| `db alias set ALIAS DATABASE`, `db alias remove ALIAS`, `db alias rename OLD NEW` | aliases (a flip takes effect at once; a rename moves open MCP sessions with it) |
+| `db alias set ALIAS DATABASE`, `db alias remove ALIAS`, `db alias rename OLD NEW` | aliases (a flip takes effect at once, also for the grants on the alias; a rename moves open MCP sessions and the alias's grants with it; a removal removes its grants) |
 | `db backup NAME`, `db backups NAME` | verified ZIP backups in `DIR/backups/NAME/` |
 | `db restore NAME BACKUP [--name NEW]` | over NAME (unloaded) or into the new database NEW |
 | `db export NAME --out FILE [--no-models] [--materialize]` | a packed snapshot (`.gsnap`) |
 | `import DIR SOURCE --name NAME [--base BASE] [--format F] [--description TEXT] [--role normal\|base]` | a new database from a `.gsnap`, a Store (directory or `.gstore`), GraphSON or GraphML; an embedding model it names without carrying comes from `models/` (else the database is `needs-model` until `models add`); a model blob a Store lacks is filled from `models/` (else the database is `needs-model` until `models add`, like a snapshot); `--role base` makes a base of a plain source |
 | `import DIR --inbox FILE --name NAME [...]`, `import DIR --list` | the same from the import inbox `DIR/imports/` (FILE: one entry name there; a link leading outside is refused), and its listing |
 | `models list`, `models add SOURCE [--repo R] [--license L]`, `models remove REPO` | the shared embedding models; SOURCE: a Model2Vec model directory, a `.tar` or `.tar.gz` of one, a `.gsnap` carrying models, or a repository `models/` holds |
-| `user list` | the users of `access.toml`: roles, the last 4 characters of each token (`…a1b2`), what each reaches; then the grants of `anonymous` and roles |
+| `user list` | the users of `access.toml`: roles, the last 4 characters of each token (`…a1b2`), what each reaches; then the grants of `anonymous` and roles; an alias is shown with its current database (`prod → prod-2026-11 (alias)`) |
 | `user add NAME [--admin]` | a new user; its token is printed once on stdout (only a SHA-256 hash is kept) |
 | `user token NAME [--revoke]` | a new token for NAME, printed once (the old one stops working), or with `--revoke` none; the user's browser and MCP sessions end at once |
 | `user remove NAME` | the user and its grants (its sessions end) |
 | `user admin NAME on\|off` | give or take the `admin` role |
-| `user grant SUBJECT DATABASE read\|write`, `user revoke SUBJECT DATABASE` | grants; SUBJECT: a user name or `anonymous` (everyone, also without a token), DATABASE: a name or `*`. The last admin (role and token) cannot be removed, demoted or revoked |
+| `user grant SUBJECT DATABASE read\|write`, `user revoke SUBJECT DATABASE` | grants; SUBJECT: a user name or `anonymous` (everyone, also without a token), DATABASE: a database, an alias (reached only through the alias, at its current database: `docs/access.md` "Grants on aliases") or `*`. The last admin (role and token) cannot be removed, demoted or revoked |
 
 `graphersal-server --help` has the details. Exit codes: `0` ok, `1` failed (`Error: ...` and a
 `Help: ...` line on stderr; where the admin API's help names a route, the console names the
@@ -202,7 +202,7 @@ server) and `runs-tab.js` (the run administration: the queries that wait or run 
 databases, whatever their client, refreshed every 2 s, with a Stop button per run; a loaded
 database's row opens it filtered by "Runs…") and `users-tab.js` (users with the token
 shown once and as `…last4` after, new token, revoke, admin role, remove; grants, anonymous
-included), the views of non-admins `login-tab.js` (paste a token; then the page's `?next=`
+included, on databases and aliases, each alias marked with its current database), the views of non-admins `login-tab.js` (paste a token; then the page's `?next=`
 path, only a path from the server root, or the root) and `mine-tab.js` ("My databases"), the
 top bar's `header.js` (who is signed in, "Log out"), the pure models
 `admin-api.js`, `databases.js` and `access-api.js`, the tabs' shared state `shared.js` and the style sheet

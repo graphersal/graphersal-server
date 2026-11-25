@@ -131,6 +131,14 @@ A session that selected an alias keeps the alias's name:
   name). A `use_graph` call before it drops the note.
 - A session that selected a database by its own name stays on it (databases have no rename).
 
+**Grants on aliases** (`docs/access.md` "Grants on aliases"): a principal whose only grant names
+the alias reaches the alias's current database through the alias alone. `list_graphs` lists the
+alias (with `aliasOf`) but not the database as a graph of its own; `use_graph {"name": "prod"}`
+answers `"graph": "prod"` (the alias's own name instead of the database's), and `use_graph` or
+`"graph"` with the database's real name answer like an unknown name. A flip moves such a
+session too; a rename carries the grant with the alias; a removal ends the access (the grant goes
+with the alias).
+
 The per-database endpoint `/db/<name>/mcp` resolves `<name>` per request: after a rename of an
 alias, `/db/<old name>/mcp` answers `404`.
 

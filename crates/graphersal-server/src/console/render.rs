@@ -152,19 +152,29 @@ fn render_with(command: &DbCommand, answer: &Value, dir: &Path, server: Option<&
         ))
         .text(),
         DbCommand::AliasRemove { .. } => {
-            Note::new(format!("Removed alias '{}'", s("alias"))).text()
+            let note = Note::new(format!("Removed alias '{}'", s("alias")));
+            match answer["grantsRemoved"].as_u64().unwrap_or(0) {
+                0 => note.text(),
+                grants => note.detail("grants removed", grants.to_string()).text(),
+            }
         }
-        DbCommand::AliasRename { .. } => Note::new(format!(
-            "Renamed alias '{}' to '{}' -> database '{}'",
-            s("renamedFrom"),
-            s("alias"),
-            s("target")
-        ))
-        .detail(
-            "MCP sessions moved",
-            answer["mcpSessionsMoved"].as_u64().unwrap_or(0).to_string(),
-        )
-        .text(),
+        DbCommand::AliasRename { .. } => {
+            let note = Note::new(format!(
+                "Renamed alias '{}' to '{}' -> database '{}'",
+                s("renamedFrom"),
+                s("alias"),
+                s("target")
+            ));
+            let note = match answer["grantsMoved"].as_u64().unwrap_or(0) {
+                0 => note,
+                grants => note.detail("grants moved", grants.to_string()),
+            };
+            note.detail(
+                "MCP sessions moved",
+                answer["mcpSessionsMoved"].as_u64().unwrap_or(0).to_string(),
+            )
+            .text()
+        }
         DbCommand::Backup { .. } => {
             let name = s("database");
             Note::new(format!("Backed up database '{name}'"))
@@ -275,13 +285,27 @@ fn render_with(command: &DbCommand, answer: &Value, dir: &Path, server: Option<&
                     .text()
             }
         }
-        DbCommand::UserGrant { .. } => Note::new(format!(
-            "Granted {} on {} to {}",
-            s("level"),
-            database_word(&s("database")),
-            s("subject")
-        ))
-        .text(),
+        DbCommand::UserGrant { .. } => {
+            let note = Note::new(format!(
+                "Granted {} on {} to {}",
+                s("level"),
+                database_word(&s("database")),
+                s("subject")
+            ));
+            if answer["kind"] == "alias" {
+                note.detail(
+                    "alias of",
+                    format!(
+                        "'{}' now; the grant follows the alias (reachable only through '{}')",
+                        s("target"),
+                        s("database")
+                    ),
+                )
+                .text()
+            } else {
+                note.text()
+            }
+        }
         DbCommand::UserRevoke { .. } => {
             let database = database_word(&s("database"));
             if answer["revoked"] == Value::Bool(true) {
@@ -345,6 +369,21 @@ fn database_word(database: &str) -> String {
     }
 }
 
+/// The database of the grant `g` as `user list` shows it: a real database by its name, an
+/// alias with its current target (`prod → prod-2026-11 (alias)`), a name that names nothing
+/// now `old (missing)`, `*` as it is.
+fn grant_database(g: &Value) -> String {
+    let database = g["database"].as_str().unwrap_or_default();
+    match g["kind"].as_str() {
+        Some("alias") => format!(
+            "{database} → {} (alias)",
+            g["target"].as_str().unwrap_or("?")
+        ),
+        Some("missing") => format!("{database} (missing)"),
+        _ => database.to_string(),
+    }
+}
+
 /// A user's grants of `row` (`acme read, * write`), `nothing` without one.
 fn grants_text(row: &Value) -> String {
     let grants: Vec<String> = row["grants"]
@@ -355,7 +394,7 @@ fn grants_text(row: &Value) -> String {
                 .map(|g| {
                     format!(
                         "{} {}",
-                        g["database"].as_str().unwrap_or_default(),
+                        grant_database(g),
                         g["level"].as_str().unwrap_or_default()
                     )
                 })
@@ -424,10 +463,11 @@ fn render_users(answer: &Value, dir_arg: &str) -> String {
                         .starts_with("user:")
                 })
                 .map(|g| {
-                    ["subject", "database", "level"]
-                        .iter()
-                        .map(|key| g[*key].as_str().unwrap_or_default().to_string())
-                        .collect()
+                    vec![
+                        g["subject"].as_str().unwrap_or_default().to_string(),
+                        grant_database(g),
+                        g["level"].as_str().unwrap_or_default().to_string(),
+                    ]
                 })
                 .collect()
         })

@@ -18,12 +18,19 @@
 //!
 //! A user: `name`, `roles`, `admin` (has the `admin` role), `hasToken`, `tokenLast4` (the last
 //! four characters of its token, `null` without one), `grants` (`[{"database", "level"}...]`,
-//! its own `user:<name>` grants). A grant: `subject` (`user:<name>`, `anonymous`, `role:<r>`,
-//! `group:<g>`; a bare user name is taken as `user:<name>`), `database` (a name or `*`),
-//! `level` (`read` | `write`). Path segments may be percent-encoded (`user%3Abob`).
+//! its own `user:<name>` grants, each with `kind` and `target` as below). A grant: `subject`
+//! (`user:<name>`, `anonymous`, `role:<r>`, `group:<g>`; a bare user name is taken as
+//! `user:<name>`), `database` (a database's name, an alias or `*`), `level` (`read` |
+//! `write`), and in answers what `database` names NOW: `kind` (`database`: a real database;
+//! `alias`: an alias, `target` its current database; `all`: `*`; `missing`: no database or
+//! alias of that name, e.g. a deleted database's) and `target` (`null` unless an alias). A grant
+//! on an alias reaches its current target only through the alias's name. Path segments may be
+//! percent-encoded (`user%3Abob`).
 //!
-//! Errors: `400` (invalid name, subject or level), `404` (no such user or database), `409` (a
-//! name taken or reserved, a grant on an alias, the last admin).
+//! Errors: `400` (invalid name, subject or level), `404` (no such user, database or alias),
+//! `409` (a name taken or reserved, the last admin).
+
+use std::collections::BTreeMap;
 
 use graphersal_serve::{HttpError, Method, Request, Response};
 use serde::Deserialize;
@@ -69,12 +76,17 @@ pub(super) fn route(
     };
     let answer = match (method, parts.as_slice()) {
         (_, ["users"]) if read => admin.users().map(|file| {
+            let aliases = admin.registry().aliases();
             let users: Vec<Value> = file
                 .users()
                 .keys()
-                .filter_map(|name| user_json(&file, name))
+                .filter_map(|name| user_json(admin, &aliases, &file, name))
                 .collect();
-            let grants: Vec<Value> = file.grants().iter().map(grant_json).collect();
+            let grants: Vec<Value> = file
+                .grants()
+                .iter()
+                .map(|grant| grant_json(admin, &aliases, grant))
+                .collect();
             Response::json(200, &json!({ "users": users, "grants": grants }))
         }),
         (Method::Post, ["users"]) => {
@@ -140,7 +152,12 @@ pub(super) fn route(
                 .map(|user| Response::json(200, &user))
         }
         (_, ["grants"]) if read => admin.users().map(|file| {
-            let grants: Vec<Value> = file.grants().iter().map(grant_json).collect();
+            let aliases = admin.registry().aliases();
+            let grants: Vec<Value> = file
+                .grants()
+                .iter()
+                .map(|grant| grant_json(admin, &aliases, grant))
+                .collect();
             Response::json(200, &json!({ "grants": grants }))
         }),
         (Method::Post, ["grants"]) => {
@@ -150,7 +167,10 @@ pub(super) fn route(
             };
             admin
                 .grant_set(&body.subject, &body.database, &body.level)
-                .map(|grant| Response::json(200, &grant_json(&grant)))
+                .map(|grant| {
+                    let aliases = admin.registry().aliases();
+                    Response::json(200, &grant_json(admin, &aliases, &grant))
+                })
         }
         (Method::Delete, ["grants", subject, database])
             if !subject.is_empty() && !database.is_empty() =>
@@ -205,11 +225,19 @@ fn help_of(err: &ServerError) -> Option<String> {
 /// The user `name` as JSON (module docs), `NotFound` when there is none.
 fn one_user(admin: &Admin, name: &str) -> Result<Value, ServerError> {
     let file = admin.users()?;
-    user_json(&file, name).ok_or_else(|| ServerError::UserNotFound { name: fold(name) })
+    let aliases = admin.registry().aliases();
+    user_json(admin, &aliases, &file, name)
+        .ok_or_else(|| ServerError::UserNotFound { name: fold(name) })
 }
 
-/// The user `name` of `file` as JSON (module docs).
-fn user_json(file: &AccessFile, name: &str) -> Option<Value> {
+/// The user `name` of `file` as JSON (module docs); `aliases`: the registry's, for the
+/// grants' `kind` and `target`.
+fn user_json(
+    admin: &Admin,
+    aliases: &BTreeMap<String, String>,
+    file: &AccessFile,
+    name: &str,
+) -> Option<Value> {
     let key = fold(name);
     let user = file.user(&key)?;
     let subject = Subject::User(key.clone());
@@ -217,7 +245,11 @@ fn user_json(file: &AccessFile, name: &str) -> Option<Value> {
         .grants()
         .iter()
         .filter(|grant| grant.subject == subject)
-        .map(|grant| json!({ "database": grant.database, "level": grant.level.as_str() }))
+        .map(|grant| {
+            let mut value = json!({ "database": grant.database, "level": grant.level.as_str() });
+            add_kind(admin, aliases, &grant.database, &mut value);
+            value
+        })
         .collect();
     Some(json!({
         "name": key,
@@ -230,12 +262,31 @@ fn user_json(file: &AccessFile, name: &str) -> Option<Value> {
 }
 
 /// A grant as JSON (module docs).
-fn grant_json(grant: &Grant) -> Value {
-    json!({
+fn grant_json(admin: &Admin, aliases: &BTreeMap<String, String>, grant: &Grant) -> Value {
+    let mut value = json!({
         "subject": grant.subject.to_string(),
         "database": grant.database,
         "level": grant.level.as_str(),
-    })
+    });
+    add_kind(admin, aliases, &grant.database, &mut value);
+    value
+}
+
+/// Adds what the grant's `database` names now to `value` (module docs): `kind` (`all` for
+/// `*`, `alias`, `database`, `missing`) and `target` (the alias's current database, else
+/// `null`).
+fn add_kind(admin: &Admin, aliases: &BTreeMap<String, String>, database: &str, value: &mut Value) {
+    let (kind, target) = if database == "*" {
+        ("all", None)
+    } else if let Some(target) = aliases.get(database) {
+        ("alias", Some(target.clone()))
+    } else if admin.registry().get(database).is_ok() {
+        ("database", None)
+    } else {
+        ("missing", None)
+    };
+    value["kind"] = json!(kind);
+    value["target"] = json!(target);
 }
 
 /// `POST users`.

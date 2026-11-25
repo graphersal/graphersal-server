@@ -3993,3 +3993,80 @@ fn names_made_before_the_new_rule_are_still_served_and_grantable() {
     );
     running.stop().unwrap();
 }
+
+#[test]
+fn a_grant_on_an_alias_follows_its_flip_through_the_console_and_http() {
+    let temp = TempDir::new("alias-grant");
+    let root = temp.path().join("srv");
+    let out = run(&["init", root.to_str().unwrap()]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let dir = ServerDir::new(&root);
+    for name in ["prod-2026-10", "prod-2026-11"] {
+        modern_db(&dir, name);
+    }
+    let (code, _, err) = db(&root, &["alias", "set", "prod", "prod-2026-10"]);
+    assert_eq!(code, 0, "{err}");
+    let (code, out, err) = user(&root, &["add", "reader"]);
+    assert_eq!(code, 0, "{err}");
+    let token = printed_token(&out);
+    // Offline: the grant on the alias is taken (0.2.0 refused it) and listed with its target.
+    let (code, out, err) = user(&root, &["grant", "reader", "prod", "read"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("alias of: 'prod-2026-10' now"), "{out}");
+    let (code, out, err) = user(&root, &["list"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("prod → prod-2026-10 (alias) read"), "{out}");
+
+    let running = serve::start(
+        &root,
+        ServeOptions::new().with_listen("127.0.0.1:0".parse().unwrap()),
+    )
+    .unwrap();
+    let address = running.address();
+    let loader = running.loader();
+    for name in ["prod-2026-10", "prod-2026-11"] {
+        loader.load(name).unwrap();
+        assert_eq!(
+            loader.wait(name, Duration::from_secs(120)).unwrap(),
+            DbState::Loaded
+        );
+    }
+    let bearer = format!("Authorization: Bearer {token}\r\n");
+    let info = |name: &str| {
+        send(
+            address,
+            "GET",
+            &format!("/db/{name}/api/info"),
+            &[],
+            &bearer,
+            "",
+        )
+    };
+    let (status, _, body) = info("prod");
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(json(&body)["database"], "prod-2026-10");
+    for real in ["prod-2026-10", "prod-2026-11"] {
+        let (status, _, body) = info(real);
+        assert_eq!(status, 404, "{real} is hidden: {body}");
+    }
+    // The flip (through the running server) moves the access at once.
+    let (code, _, err) = db(&root, &["alias", "set", "prod", "prod-2026-11"]);
+    assert_eq!(code, 0, "{err}");
+    let (status, _, body) = info("prod");
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(json(&body)["database"], "prod-2026-11");
+    let (status, _, _) = info("prod-2026-10");
+    assert_eq!(status, 404);
+    let (code, out, err) = user(&root, &["list"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("prod → prod-2026-11 (alias) read"), "{out}");
+    // "My databases" lists the alias only, marked.
+    let (status, _, body) = send(address, "GET", "/api/databases", &[], &bearer, "");
+    assert_eq!(status, 200, "{body}");
+    let rows = json(&body)["databases"].clone();
+    assert_eq!(rows.as_array().unwrap().len(), 1, "{rows}");
+    assert_eq!(rows[0]["name"], "prod");
+    assert_eq!(rows[0]["kind"], "alias");
+    assert_eq!(rows[0]["aliasOf"], "prod-2026-11");
+    running.stop().unwrap();
+}
