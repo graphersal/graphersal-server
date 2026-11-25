@@ -8,7 +8,75 @@ are in [`server-dir.md`](server-dir.md), the routes in [`admin-api.md`](admin-ap
 Access control is on by default. Every request except the health probes (`/healthz`,
 `/readyz`), the root `GET /api/info` and the files of the web UI needs a principal that is
 allowed to make it. Tokens and session cookies travel in clear text over plain HTTP (see
-[Modes](#modes)).
+[Modes](#modes)). On the server's machine, the boundary is the OS permissions of the server
+directory (see [The security model](#the-security-model)).
+
+## The security model
+
+The OS user that owns the server directory is the operator (as PostgreSQL's peer
+authentication trusts the OS user). Whoever can write the directory can edit `access.toml` and
+make themselves an admin, read `server.run` and use the operator token, or copy the Stores,
+whatever the server checks over HTTP. So the console needs no credentials on the directory:
+the OS already decided who may touch it. graphersal-server enforces that the directory really
+is private, the way ssh treats `~/.ssh`:
+
+- `init` creates the directory with mode `0700`, `sessions/` with `0700` and every secret
+  file (`access.toml`, `server.run`, `sessions/*.json`) with `0600`. Every later write keeps
+  these modes. `init` on an existing server directory owned by you tightens the modes it finds
+  too open and lists them under `owner only` (the upgrade path for a directory made before
+  0.3.0).
+- `serve` and every console command (`db`, `import`, `models`, `user`; offline and through a
+  running server with the operator token) check first, and refuse with exit code 1 when:
+  - the directory, or any file checked in it, is owned by another OS user than the effective
+    user of the process. `root` on a directory owned by another user is refused too: run the
+    command as the owner (`sudo -u OWNER graphersal-server ...`);
+  - the directory, `server.toml` or `aliases.toml` is writable by group or others;
+  - `access.toml`, `server.run`, `sessions/` or a file in it is readable or writable by group
+    or others.
+
+  The error names each problem and the exact command fixing it:
+
+  ```text
+  Error: refused: the server directory /srv/graphs is not private to its owner: /srv/graphs/access.toml is open to group or others (mode 0644) (it holds token hashes or tokens)
+  Help: the OS user owning the server directory is its operator: whoever else can change it, or read its secrets, could make themselves an admin; keep it private (as ssh keeps ~/.ssh)
+    # owner only: mode 0600
+    chmod 600 /srv/graphs/access.toml
+    # or let init set every mode at once
+    graphersal-server init /srv/graphs
+  ```
+
+  A directory readable (not writable) by group or others passes the check, but lets them read
+  the databases' files; `init` sets `0700`.
+- Run a shared server under a dedicated service account (for example `graphersal`) that owns
+  the directory; administrators act as that user (`sudo -u graphersal graphersal-server user
+  add bob --dir /srv/graphs`) or with an admin token (below).
+- Windows: no permission check (it would need the Win32 security API). The directory's ACL is
+  the boundary: create the directory where only the account running the server may write, and
+  the files inherit its ACL.
+
+Provisional (may change): root is refused on a directory it does not own, even though root
+could read it anyway; the check runs only when the console or `serve` starts, not while the
+server runs.
+
+### The console with an admin token
+
+`--token TOKEN` (or the environment variable `GRAPHERSAL_SERVER_TOKEN`, which keeps the token
+out of the process list) sends a console command (`db`, `import`, `models`, `user`) to the
+running server with that user's token, instead of acting as the operator. The server's address
+is `--server ADDRESS` (`IP:PORT` or `http://IP:PORT/`), else the address in the directory's
+`server.run`. Nothing in the directory is written, so the permission checks do not apply: the
+token is the credential, and the server checks it like any request (a wrong token is refused
+with `401`; a user without the admin role sees no admin API). The audit names the token's user.
+Without a running server a token is refused (no command acts on the directory offline with a
+token). `--server` without a token is a usage error. `--dir DIR` is still required; with
+`--server` it only names the directory in the printed text.
+
+```bash
+# another OS user, or another machine through an SSH tunnel to the loopback address
+export GRAPHERSAL_SERVER_TOKEN=<an admin's token>
+graphersal-server db list --dir /srv/graphs --server 127.0.0.1:8484
+graphersal-server user grant bob acme read --dir /srv/graphs --server 127.0.0.1:8484
+```
 
 ## Principals
 
@@ -17,7 +85,7 @@ Every request is answered for ONE principal:
 | Principal | Who | Identity (audit, MCP sessions) |
 |---|---|---|
 | a user | a request with `Authorization: Bearer <user token>`, or with the browser's `gs_session` cookie after a login | `user:<name>` |
-| the operator | the console on the server's machine, with the per-run operator token from `server.run` (`Authorization: Bearer`); an admin | `operator` |
+| the operator | the console of the OS user owning the server directory: offline on the directory, or through the server with the per-run operator token from `server.run` (`Authorization: Bearer`); an admin | `operator`; the audit adds the OS user: `operator (os:<name>)` |
 | anonymous | a request without credentials | none |
 | everyone | every request while access control is off (`[access] enabled = false`); an admin | `everyone` |
 
@@ -27,8 +95,9 @@ admin}`.
 
 The operator token is made fresh at every `serve` and written to `server.run` (mode `0600` on
 unix; removed at a clean stop). The console reads it from there, so whoever can read
-`server.run` can act as an admin while the server runs. The operator token cannot log in
-through the browser.
+`server.run` can act as an admin while the server runs: only the directory's owner can
+([The security model](#the-security-model)). The operator token cannot log in through the
+browser.
 
 ## Grants and levels
 
@@ -121,7 +190,9 @@ graphersal-server user list --dir ./srv
 ```
 
 With a server running on the directory, these commands go through its admin API (actor
-`operator`) and take effect at once. Without one, they edit `access.toml` directly. A new
+`operator`) and take effect at once. Without one, they edit `access.toml` directly. Either way
+only the OS user owning the directory can run them ([The security model](#the-security-model));
+anyone else needs an admin token (`--token`). A new
 token, a revoke and a user's removal end that user's browser and MCP sessions at once.
 
 Send a token as `Authorization: Bearer <token>`:
@@ -235,13 +306,18 @@ the table):
 ## Audit
 
 Every administrative event is one log line on the tracing target `graphersal_server::audit`,
-with the actor (`user:<name>`, `operator`, `everyone`, or `-` when unknown). Events are logged
+with the actor (`user:<name>`, `operator (os:<name>)`, `everyone`, or `-` when unknown). The
+operator's lines name the OS user who acted: the console's own user offline, and through the
+server the user the server runs as (only the directory's owner can read the operator token).
+A command sent with `--token` is logged as the token's user. Events are logged
 at `info`; refusals, such as a failed login, at `warn`. The events cover databases (create,
 delete, clone, import, restore, promote, backup), the read-only and auto-load flags, aliases
 (set, remove, rename), users (add, remove, roles, the first admin), tokens (issued, showing
 only `…last4`, and revoked), grants (set, revoked), and logins (succeeded, refused, logout).
 No line carries a token or a session id. The lines go to stderr with the rest of the log
-(redirect it to keep a file). `RUST_LOG` selects them like any target:
+(redirect it to keep a file). An offline console command writes its audit lines to its stderr
+only when `RUST_LOG` is set (for example `RUST_LOG=graphersal_server::audit=info`): there is no
+audit journal yet. `RUST_LOG` selects them like any target:
 
 ```bash
 # warnings, plus every audit line

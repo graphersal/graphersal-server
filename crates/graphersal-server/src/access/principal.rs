@@ -3,6 +3,9 @@
 /// The role that gives full rights: every database read-write, the admin API, Runs, Users.
 pub const ADMIN_ROLE: &str = "admin";
 
+/// The operator's identity ([`Principal::identity`] of [`Principal::operator`]).
+pub const OPERATOR: &str = "operator";
+
 /// What kind of principal sent a request.
 ///
 /// `#[non_exhaustive]`: later authenticators (JWT) may add kinds.
@@ -109,7 +112,7 @@ impl Principal {
     /// without identity as anonymous, so no user name can collide with it).
     pub fn identity(&self) -> Option<String> {
         match self.kind {
-            PrincipalKind::Operator => Some("operator".to_string()),
+            PrincipalKind::Operator => Some(OPERATOR.to_string()),
             PrincipalKind::User => Some(format!("user:{}", self.id)),
             PrincipalKind::Everyone => Some("everyone".to_string()),
             PrincipalKind::Anonymous => None,

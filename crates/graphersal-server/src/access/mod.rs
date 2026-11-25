@@ -38,7 +38,7 @@ pub use model::{
     AccessFile, FIRST_ADMIN, Grant, Level, RESERVED_USER_NAMES, Subject, User, database_read_only,
     effective_level,
 };
-pub use principal::{ADMIN_ROLE, Principal, PrincipalKind};
+pub use principal::{ADMIN_ROLE, OPERATOR, Principal, PrincipalKind};
 pub use token::{Secret, TokenHash};
 
 use crate::audit::{Audit, AuditEvent};

@@ -76,7 +76,7 @@ No timeout covers a whole request: an upload streams as long as it keeps sending
 a body waits at most 120 s for the next piece).
 
 A first session from the console (in a second terminal while the server runs). The console
-on the server's machine needs no token (it uses the run's operator token from
+of the OS user owning `./srv` needs no token (it uses the run's operator token from
 `./srv/server.run`); HTTP clients send a user token, here the first admin's, printed once by
 `init` (`docs/access.md`):
 
@@ -99,6 +99,17 @@ graphersal-server user grant bob acme read --dir ./srv
 ```
 
 ## Console
+
+The console acts as the operator without credentials: the OS user that owns the server
+directory is its operator. `init` makes the directory private (mode `0700`, the secret files
+`0600`), and `serve` and every console command refuse a directory or secret owned by another
+user or open to group or others, naming the `chmod`/`chown` that fixes it
+([`docs/access.md`](docs/access.md#the-security-model)). Run a shared server under a dedicated
+service user; other administrators run the console as that user, or send an admin token:
+`--token TOKEN` (or `GRAPHERSAL_SERVER_TOKEN`) goes through the running server (address
+`--server ADDRESS`, else from `DIR/server.run`) and touches no file of the directory. The
+audit names the OS user of the operator's actions (`operator (os:<name>)`) and the token's
+user otherwise.
 
 Every command takes `--dir DIR`; `--json` prints the admin API's JSON answer instead of text.
 With a server running on `DIR` the command goes to its admin API (address from
@@ -213,7 +224,7 @@ a build first, else these two tests are skipped).
                   sessions, access control on/off, public scheme and host names, backup root
   access.toml     users (token hashes and last 4 characters), roles, grants
   server.lock     one running server per directory
-  server.run      the running server's address and operator token (only while it runs)
+  server.run      the running server's address and operator token (mode 0600, only while it runs)
   aliases.toml    current = "acme-2026.3"
   databases/<name>/database.toml + store/
   models/         one copy of every embedding model, hard-linked into the databases
@@ -223,7 +234,9 @@ a build first, else these two tests are skipped).
   trash/  tmp/
 ```
 
-There is no registry file: the databases are the directories under `databases/`. Details of
+The directory is mode `0700` and its secrets (`access.toml`, `server.run`, `sessions/`) are
+owner only; `init DIR` on an older directory tightens them. There is no registry file: the
+databases are the directories under `databases/`. Details of
 every file and key: [`docs/server-dir.md`](docs/server-dir.md).
 
 ## Documentation
@@ -240,6 +253,8 @@ every file and key: [`docs/server-dir.md`](docs/server-dir.md).
   sessions, a clean stop); needs only bash, curl and python3 (Unix).
 - `scripts/smoke.ps1`: the smoke test of a built binary in PowerShell 7 for Windows (CI and
   the release build): `pwsh scripts/smoke.ps1 -Bin <path to graphersal-server.exe>`.
+- [`docs/release-notes-0.3.0.md`](docs/release-notes-0.3.0.md): what the next version changes
+  (unreleased draft).
 - [`docs/release-notes-0.2.0.md`](docs/release-notes-0.2.0.md): what 0.2.0 changes (access
   control and the rest); [`docs/release-notes-0.1.0.md`](docs/release-notes-0.1.0.md): what
   0.1.0 is and its known limits. CI (`.github/workflows/ci.yml`) and the release build (`release.yml`) run on Windows
@@ -271,6 +286,8 @@ every file and key: [`docs/server-dir.md`](docs/server-dir.md).
   memory is known only inside its session thread.
 - No admin tools over MCP. Browser and MCP sessions survive a restart (`sessions/`, hashes
   only; `docs/server-dir.md`).
+- **Windows: no permission check of the server directory** (unix only): its ACL is the
+  boundary; create it where only the account running the server may write.
 - **Plain HTTP** (HTTP/1.1 and h2c, no TLS, so no HTTP/2 negotiation by ALPN): tokens and
   session cookies travel in clear text; keep the server on the loopback or put a TLS reverse
   proxy in front (`[http] public_scheme = "https"`). On HTTP/2 an answer of a request whose body

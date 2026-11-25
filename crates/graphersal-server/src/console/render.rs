@@ -932,22 +932,35 @@ pub fn init_text(report: &InitReport, dir: &Path) -> String {
                 below(dir, "server.toml")
             ),
         )
-    } else if report.created.is_empty() {
+    } else if report.created.is_empty() && report.secured.is_empty() {
         Note::new(format!(
             "{} is already a server directory: nothing to do",
             dir.display()
         ))
     } else {
-        let created: Vec<String> = report
-            .created
-            .iter()
-            .map(|path| path.display().to_string())
-            .collect();
-        Note::new(format!(
-            "{} is already a server directory: created the missing parts",
+        let lines = |paths: &[std::path::PathBuf]| {
+            paths
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<String>>()
+                .join("\n")
+        };
+        let what = match (report.created.is_empty(), report.secured.is_empty()) {
+            (false, true) => "created the missing parts",
+            (true, false) => "made it private to its owner",
+            _ => "created the missing parts and made it private to its owner",
+        };
+        let mut note = Note::new(format!(
+            "{} is already a server directory: {what}",
             dir.display()
-        ))
-        .detail("created", created.join("\n"))
+        ));
+        if !report.created.is_empty() {
+            note = note.detail("created", lines(&report.created));
+        }
+        if !report.secured.is_empty() {
+            note = note.detail("owner only", lines(&report.secured));
+        }
+        note
     };
     note.command("start it", format!("{BIN} serve --dir {dir_arg}"))
         .command(
@@ -964,6 +977,17 @@ pub fn error_text(err: &ServerError) -> String {
         ServerError::Remote {
             help: Some(help), ..
         } => format!("Error: {err}\nHelp: {help}"),
+        ServerError::InsecureDir { fixes, .. } => {
+            let mut text = format!(
+                "Error: {err}\nHelp: the OS user owning the server directory is its operator: \
+                 whoever else can change it, or read its secrets, could make themselves an \
+                 admin; keep it private (as ssh keeps ~/.ssh)"
+            );
+            for (what, command) in fixes {
+                text.push_str(&format!("\n  # {what}\n  {command}"));
+            }
+            text
+        }
         _ => format!("Error: {err}"),
     }
 }

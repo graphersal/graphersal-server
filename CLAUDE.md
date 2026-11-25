@@ -42,7 +42,10 @@ from published files). When this file disagrees with the code, the code wins: sa
   (`Running::take_first_admin`) on a directory without `access.toml`; `console::first_admin_text`
   frames the token, printed once on stderr by `main.rs`); `Access::granted_level` (before the
   database mode) and `audit_as(principal)`; enforcement is the router's (B3)),
-  `audit` (`AuditEvent` typed, `Audit` handle = sink + actor, `TracingAudit` on target
+  `audit` (`AuditEvent` typed, `Audit` handle = sink + actor + OS user (round 3 B1:
+  `with_os_user`; a record whose actor is `access::OPERATOR` carries `AuditRecord::os_user`,
+  `actor_text()` = `operator (os:<name>)`; `serve::start` passes its own process user, the
+  offline console and `init` theirs), `TracingAudit` on target
   `graphersal_server::audit`; `Admin::with_audit` records create/delete/clone/import/restore/
   promote/backup, read-only, auto-load, aliases), `config` (`server.toml`, `ServerConfig`, `parse_listen`, `[limits]
   upload_bytes` (default 4 GiB), `max_connections`, `header_timeout_secs`, `idle_timeout_secs`
@@ -73,7 +76,18 @@ from published files). When this file disagrees with the code, the code wins: sa
   hashes only, `write_atomic_private`, `sessions/` created on the first write; a missing file =
   empty, an unreadable/broken one (or another version) = a warning + empty, overwritten by the
   next change), `layout`
-  (`ServerDir`, `init` (creates `sessions/` and the import inbox `imports/` too), file names, `write_atomic`), `lock` (`ServerLock`, fd-lock on
+  (`ServerDir`, `init` (creates `sessions/` and the import inbox `imports/` too; the root `0700`,
+  `security::tighten` at the end: `InitReport::secured` = old paths whose mode it tightened; an
+  existing directory of another OS user refused by `security::check_owner`), file names,
+  `write_atomic`), `security` (round 3 B1: the OS user owning the server directory is the
+  operator; `check(dir)` before `serve::start` and `console::run` (and `main.rs` before
+  `ServerDir::open`): root + `server.toml` + `aliases.toml` owned by the euid and not g/o
+  writable, `access.toml`, `server.run`, `sessions/` and its files owned and not g/o
+  readable/writable; refusal `ServerError::InsecureDir {dir, problems, fixes}` (`error_text`
+  prints `Help:` + `# what` / command lines: `chmod`, `sudo -u`, `sudo chown -R`, `init`);
+  `check_as(dir, euid)` for tests; `os_user()` (`getpwuid_r` via `libc`, unix only dependency;
+  Windows `USERNAME`); `create_private_dir` (`sessions/` on first write); Windows: no check,
+  documented), `lock` (`ServerLock`, fd-lock on
   `server.lock`), `run_file` (`RunInfo`, `server.run`, mode 0600: it carries the per-run `operator_token`), `serve` (`start` -> `Running`, the
   listener: hyper 1.x `http1` server connections, and `http2` ones for h2c with prior
   knowledge (`sniff` peeks the preface; the HTTP/1 path is unchanged otherwise), on a tokio
@@ -233,8 +247,12 @@ from published files). When this file disagrees with the code, the code wins: sa
   and `ops_import_tests.rs` (uploads over a real listener: a 72 MiB
   generated GraphSON body, the 413 paths) (tiny synthetic model in `test_models.rs`, copied from graphersal's
   `model_fixture.rs`), also over a real listener), `console` (`DbCommand` -> one admin API request;
-  `run`: offline = the SAME `admin_api::route` over an offline `Admin` with a built `Request`,
+  `run`: `security::check` first; offline = the SAME `admin_api::route` over an offline `Admin`
+  (audit actor `operator` + this OS user) with a built `Request`,
   locked = `client` to `RunInfo.address` (503 retried 10 s; `load` polls until not loading);
+  `run_with_token(dir, command, token, address)` (B1 `--token`): through the running server
+  with a user's token (`through_server`, shared with `run`), address given or from
+  `server.run`, no check, no file written; no `server.run` -> `Connect` refusal;
   refusals = `ServerError::Remote {status, message, help}`; the text in `console/render.rs`
   (`render(command, answer, dir)`, `init_text`, `error_text` (`Error:` + `Help:`),
   `usage_error_text` (`Error:` + `# show the usage` + `graphersal-server --help`),
@@ -356,7 +374,10 @@ from published files). When this file disagrees with the code, the code wins: sa
   --dir DIR [--json]` (`DbCommand::Models*`; SOURCE absolute when it exists, else a repo),
   `user list|add NAME [--admin]|token NAME [--revoke]|remove NAME|admin NAME on|off|grant SUBJECT
   DATABASE read|write|revoke SUBJECT DATABASE --dir DIR [--json]` (`DbCommand::User*`; tests in
-  `console/user_tests.rs`, both paths)
+  `console/user_tests.rs`, both paths; `db`/`import`/`models`/`user` take `--token TOKEN`
+  (env `GRAPHERSAL_SERVER_TOKEN`) and `--server ADDRESS` (`Remote::of`; `--server` without a
+  token = usage error; `print_outcome` -> `console::run_with_token`); a console command
+  installs the log subscriber only when `RUST_LOG` is set (offline audit lines))
   (`DbCommand::Import`: the JSON path form, SOURCE made absolute;
   offline the same route over the offline admin) (`db export` offline writes the file through
   `Admin::export_to_file`, through a server streams the download into `FILE.part`) (prints `note: ... sent to its admin API at ADDR` on stderr when it went through a
@@ -397,7 +418,8 @@ from published files). When this file disagrees with the code, the code wins: sa
   (the access model: principals, grants/levels, 401/404/303, tokens, login and sessions, MCP
   with a token, modes, limits as ceilings, backup root, inbox, audit), and the release notes
   `docs/release-notes-<version>.md` (release.yml uses the file of the tagged version as the
-  release text; 0.2.0 = the access series, on Graphersal 0.8.0).
+  release text; 0.2.0 = the access series, on Graphersal 0.8.0; 0.3.0 = the unreleased draft
+  of round 3, extended by every change).
 - `scripts/smoke.sh`: the end-to-end smoke test (bash + curl + python3 only): builds, inits a
   temp server dir, serves on `127.0.0.1:0` (URL from `server.run`), walks create/load/execute/
   alias/read-only/backup/restore/export/upload import/promote + layer/models/MCP/unload/delete,

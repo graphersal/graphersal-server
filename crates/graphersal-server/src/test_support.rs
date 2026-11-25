@@ -23,6 +23,14 @@ impl TempDir {
         ));
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).expect("create a test directory");
+        // Owner only, whatever the umask: a server directory in it must be private to its owner
+        // (`serve` and the console refuse a group-writable one).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
+                .expect("make the test directory private");
+        }
         DIRS.lock()
             .unwrap_or_else(|p| p.into_inner())
             .push(path.clone());

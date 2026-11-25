@@ -285,6 +285,9 @@ pub fn start(
     root: impl Into<std::path::PathBuf>,
     options: ServeOptions,
 ) -> Result<Running, ServerError> {
+    // The directory must be private to this OS user before anything in it is read or written.
+    let root = root.into();
+    crate::security::check(&ServerDir::new(&root))?;
     let dir = ServerDir::open(root)?;
     let config = dir.load_config()?;
     let listen = match options.listen {
@@ -400,7 +403,9 @@ pub fn start(
         Some(operator_hash),
         browser,
         config.sessions.limits(),
-        Audit::default(),
+        // The operator token is readable only by the directory's owner, the user this server
+        // runs as: the operator's records name it.
+        Audit::default().with_os_user(crate::security::os_user()),
     ) {
         Ok((access, first_admin)) => {
             running.access = Some(Arc::new(access));

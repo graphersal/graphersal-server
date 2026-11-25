@@ -92,16 +92,17 @@ fn parse_rows<R: for<'de> Deserialize<'de>>(text: &str, path: &Path, what: &str)
 }
 
 /// Writes `rows` as the session file `path` (atomically, private; `sessions/` created when
-/// missing).
+/// missing, owner only: mode `0700` on unix).
 fn write_rows<R: Serialize>(path: &Path, rows: &[R]) -> Result<(), ServerError> {
     #[derive(Serialize)]
     struct File<'a, R> {
         version: u64,
         sessions: &'a [R],
     }
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|err| ServerError::io("create directory", parent, err))?;
+    if let Some(parent) = path.parent()
+        && !parent.is_dir()
+    {
+        crate::security::create_private_dir(parent)?;
     }
     let mut text = serde_json::to_string_pretty(&File {
         version: FORMAT_VERSION,

@@ -360,6 +360,19 @@ grep -q "^Help: unload it first: graphersal-server db unload acme --dir " "$WORK
 if grep -q "/api/admin" "$WORK/delete.err"; then fail "the console help names a route"; fi
 ok
 
+STEP="the server directory is private to its owner; --token goes through the server"
+[ "$(stat -c %a "$DIR" 2>/dev/null || stat -f %Lp "$DIR")" = 700 ] || fail "init did not make $DIR 0700"
+chmod 770 "$DIR"
+"$BIN" db list --dir "$DIR" >"$WORK/perm.out" 2>"$WORK/perm.err" &&
+  fail "db list on a group-writable directory succeeded"
+grep -q "^  chmod 700 " "$WORK/perm.err" || fail "the refusal names no chmod: $(cat "$WORK/perm.err")"
+# An admin token needs no file access: it goes through the running server.
+GRAPHERSAL_SERVER_TOKEN=$ADMIN_TOKEN "$BIN" db list --dir "$DIR" --server "${URL#http://}" --json \
+  >"$WORK/token.json" 2>"$WORK/token.err" || fail "db list --token: $(cat "$WORK/token.err")"
+[ "$(jget databases.0.name "$WORK/token.json")" = acme ] || fail "db list --token: $(head -c 300 "$WORK/token.json")"
+chmod 700 "$DIR"
+ok
+
 STEP="users: the console adds a user, the API grants, a new token ends the old"
 "$BIN" user add smokey --dir "$DIR" >"$WORK/user.out" 2>"$WORK/user.err" ||
   fail "user add: $(cat "$WORK/user.err")"

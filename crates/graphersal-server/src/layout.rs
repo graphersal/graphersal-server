@@ -76,6 +76,9 @@ pub struct InitReport {
     pub created: Vec<PathBuf>,
     /// The first admin, when the directory had no `access.toml`: its token, to be shown ONCE.
     pub first_admin: Option<FirstAdmin>,
+    /// The paths that were there before whose mode `init` tightened to owner only (unix: the
+    /// directory `0700`, `sessions/` `0700`, the secret files `0600`: [`crate::security`]).
+    pub secured: Vec<PathBuf>,
 }
 
 impl ServerDir {
@@ -109,6 +112,11 @@ impl ServerDir {
     /// A directory without `access.toml` then gets its first admin
     /// ([`crate::access::ensure_first_admin`]): [`InitReport::first_admin`] holds its token,
     /// for the caller to show once.
+    ///
+    /// The directory is made private to its owner (unix: mode `0700`, `sessions/` `0700`, the
+    /// secret files `0600`; [`crate::security`]); an existing directory must be owned by the
+    /// current OS user ([`ServerError::InsecureDir`] otherwise), and the modes it finds too
+    /// open are tightened ([`InitReport::secured`]).
     pub fn init(root: impl Into<PathBuf>) -> Result<InitReport, ServerError> {
         let dir = Self::new(root);
         let mut created = Vec::new();
@@ -118,6 +126,8 @@ impl ServerDir {
                 return Err(ServerError::NotEmpty { path: dir.root });
             }
             Ok(_) => {
+                // Only the owner makes (or completes) a server directory of it.
+                crate::security::check_owner(&dir)?;
                 if dir.config_path().is_file() {
                     config = Some(dir.load_config()?);
                     true
@@ -131,8 +141,7 @@ impl ServerDir {
                 }
             }
             Err(err) if err.kind() == io::ErrorKind::NotFound => {
-                fs::create_dir_all(&dir.root)
-                    .map_err(|err| ServerError::io("create directory", &dir.root, err))?;
+                crate::security::create_private_dir(&dir.root)?;
                 created.push(dir.root.clone());
                 false
             }
@@ -161,11 +170,20 @@ impl ServerDir {
             dir.ensure_backup_root(&root)?;
             created.push(root);
         }
-        // Last: a directory without `access.toml` is closed; its first admin is made here.
-        let first_admin = crate::access::ensure_first_admin(&dir, &Audit::default())?;
+        // Last: a directory without `access.toml` is closed; its first admin is made here (by
+        // the operator: the OS user running `init`).
+        let audit = Audit::default()
+            .with_actor(Some(crate::access::OPERATOR.to_string()))
+            .with_os_user(crate::security::os_user());
+        let first_admin = crate::access::ensure_first_admin(&dir, &audit)?;
         if let Some(first) = &first_admin {
             created.push(first.path.clone());
         }
+        // Owner-only modes on everything that holds secrets (new and old directories alike).
+        let secured: Vec<PathBuf> = crate::security::tighten(&dir)?
+            .into_iter()
+            .filter(|path| !created.contains(path))
+            .collect();
         tracing::info!(
             target: "graphersal_server",
             "init {}: {} created",
@@ -177,6 +195,7 @@ impl ServerDir {
             existed,
             created,
             first_admin,
+            secured,
         })
     }
 

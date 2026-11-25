@@ -61,6 +61,10 @@ ring = "0.17"
 # Library logging (as in graphersal) and the binary's stderr log subscriber.
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std", "env-filter", "ansi"] }
+# The server directory's owner check (unix): the process's effective uid (`geteuid`) and the
+# OS user names in refusals and audit records (`getpwuid_r`); already in the tree (tokio, ring,
+# fd-lock's rustix all depend on it). Unix only.
+libc = "0.2"
 # SIGINT/SIGTERM stop the server cleanly; the same crate and features as the graphersal CLI.
 ctrlc = { version = "3.4", features = ["termination"] }
 

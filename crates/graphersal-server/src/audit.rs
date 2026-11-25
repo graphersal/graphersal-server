@@ -6,6 +6,11 @@
 //! [`AuditSink`]. The one sink today is [`TracingAudit`]: a log line on the target
 //! `graphersal_server::audit` (an audit journal can be another sink later; nothing else
 //! changes). Events never carry a secret: a token shows only its last four characters.
+//!
+//! A record of the operator (the console on the server directory, or the operator token of
+//! `server.run` through the server: both only the OS user owning the directory can use,
+//! [`crate::security`]) also names that OS user ([`AuditRecord::os_user`]); the log line's
+//! `actor` reads `operator (os:<name>)`.
 
 use std::fmt;
 use std::path::PathBuf;
@@ -326,8 +331,22 @@ pub struct AuditRecord {
     /// The actor's identity (`user:<name>`, `operator`); `None` when unknown (the console on
     /// the directory, the server itself) or anonymous.
     pub actor: Option<String>,
+    /// The OS user who acted, for a record of the operator (`None` for every other actor).
+    pub os_user: Option<String>,
     /// The event.
     pub event: AuditEvent,
+}
+
+impl AuditRecord {
+    /// The actor as the log line shows it: `user:<name>`, `operator (os:<name>)` (`operator`
+    /// when the OS user is unknown), `-` for no actor.
+    pub fn actor_text(&self) -> String {
+        match (&self.actor, &self.os_user) {
+            (Some(actor), Some(os)) => format!("{actor} (os:{os})"),
+            (Some(actor), None) => actor.clone(),
+            (None, _) => "-".to_string(),
+        }
+    }
 }
 
 /// Where audit records go.
@@ -343,7 +362,8 @@ pub struct TracingAudit;
 
 impl AuditSink for TracingAudit {
     fn record(&self, record: &AuditRecord) {
-        let actor = record.actor.as_deref().unwrap_or("-");
+        let actor = record.actor_text();
+        let actor = actor.as_str();
         if record.event.is_refusal() {
             tracing::warn!(target: "graphersal_server::audit", actor, "{}", record.event);
         } else {
@@ -357,6 +377,7 @@ impl AuditSink for TracingAudit {
 pub struct Audit {
     sink: Arc<dyn AuditSink>,
     actor: Option<String>,
+    os_user: Option<String>,
 }
 
 impl Default for Audit {
@@ -368,22 +389,42 @@ impl Default for Audit {
 
 impl fmt::Debug for Audit {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Audit").field("actor", &self.actor).finish()
+        f.debug_struct("Audit")
+            .field("actor", &self.actor)
+            .field("os_user", &self.os_user)
+            .finish()
     }
 }
 
 impl Audit {
     /// Records into `sink`, no actor.
     pub fn new(sink: Arc<dyn AuditSink>) -> Self {
-        Self { sink, actor: None }
+        Self {
+            sink,
+            actor: None,
+            os_user: None,
+        }
     }
 
     /// The same sink, recording as `actor` (a principal's identity; `None` = unknown or
-    /// anonymous).
+    /// anonymous); the OS user is kept.
     pub fn with_actor(&self, actor: Option<String>) -> Self {
         Self {
             sink: self.sink.clone(),
             actor,
+            os_user: self.os_user.clone(),
+        }
+    }
+
+    /// The same handle naming `os_user` as the OS user behind the operator: records whose
+    /// actor is the operator carry it ([`AuditRecord::os_user`]); `None` = unknown. The server
+    /// passes its own process's user (only the directory's owner can read the operator token),
+    /// the console on the directory its own ([`crate::security::os_user`]).
+    pub fn with_os_user(&self, os_user: Option<String>) -> Self {
+        Self {
+            sink: self.sink.clone(),
+            actor: self.actor.clone(),
+            os_user,
         }
     }
 
@@ -394,8 +435,10 @@ impl Audit {
 
     /// Records `event`.
     pub fn record(&self, event: AuditEvent) {
+        let operator = self.actor.as_deref() == Some(crate::access::OPERATOR);
         self.sink.record(&AuditRecord {
             actor: self.actor.clone(),
+            os_user: self.os_user.clone().filter(|_| operator),
             event,
         });
     }
@@ -424,7 +467,7 @@ impl MemoryAudit {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .iter()
-            .map(|r| format!("{}: {}", r.actor.as_deref().unwrap_or("-"), r.event))
+            .map(|r| format!("{}: {}", r.actor_text(), r.event))
             .collect()
     }
 }
@@ -479,6 +522,39 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    #[test]
+    fn operator_records_name_the_os_user() {
+        let memory = Arc::new(MemoryAudit::default());
+        let audit = Audit::new(memory.clone()).with_os_user(Some("alice".to_string()));
+        let event = || AuditEvent::AliasRemoved {
+            alias: "prod".to_string(),
+        };
+        audit
+            .with_actor(Some(crate::access::OPERATOR.to_string()))
+            .record(event());
+        // Only the operator's records carry the OS user: a user's or the server's own do not.
+        audit
+            .with_actor(Some("user:bob".to_string()))
+            .record(event());
+        audit.record(event());
+        // An operator whose OS user is unknown.
+        Audit::new(memory.clone())
+            .with_actor(Some(crate::access::OPERATOR.to_string()))
+            .record(event());
+        assert_eq!(
+            memory.lines(),
+            [
+                "operator (os:alice): alias 'prod' removed",
+                "user:bob: alias 'prod' removed",
+                "-: alias 'prod' removed",
+                "operator: alias 'prod' removed",
+            ]
+        );
+        let records = memory.0.lock().unwrap();
+        assert_eq!(records[0].os_user.as_deref(), Some("alice"));
+        assert_eq!(records[1].os_user, None);
     }
 
     #[test]
