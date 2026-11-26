@@ -12,7 +12,7 @@
 //!   `openapi/engine-patch.json` (what graphersal-serve's description gained after the pinned
 //!   version: the `409` of a request marked read-only on every writing route, the file root's
 //!   `403`/`500`) and then for this server ([`database_spec`]): `servers` = the request's URL
-//!   + `/db/<name>` (an alias's name stays the alias's), the security schemes `bearerAuth` and
+//!   followed by `/db/<name>` (an alias's name stays the alias's), the security schemes `bearerAuth` and
 //!   `sessionCookie` (plus `{}` when the name is open to anonymous: an anonymous grant, or
 //!   access control off), the access layer's answers on every operation (`401` anonymous, `404`
 //!   hidden or unknown, `409` not loaded, a read grant on a writing route), and
