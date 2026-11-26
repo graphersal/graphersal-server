@@ -22,6 +22,9 @@
 // backup instead; above the table the last unclean shutdown (`GET api/admin/recovery`: the
 // databases the server had open when it was killed, each with its recovery and verify result).
 // B-OPENAPI: each row's menu links its database's OpenAPI description (`db/<name>/openapi.json`).
+// Round 4 B-LAYER: "Reset layer…" (layer rows only, `resetLayerAction`) discards the layer's
+// changes over its base after a confirmation naming what is lost and what is kept; the outcome
+// is a toast (`resetLayerOutcomeText`).
 // Round 4 B-UI: every row action (and the OpenAPI link) sits behind ONE "…" button per row
 // (./shared.js `ActionMenu`), so the table fits its width without a horizontal scroll; the
 // table sorts by name until another column is chosen; outcomes and failures of row actions are
@@ -30,7 +33,7 @@
 import { reactive, ref, computed, nextTick } from 'vue';
 import {
   createBody, nameProblem, existingNameProblem, renameProblem, NAME_HINT, rowActions, confirmText, outcomeText, outcomeTone, loadAndWatch, baseNames, realRows,
-  bytesText, transferActions, needsModelHint, poolText, promoteAction, isConflict, kindHelp, BASE_HELP, PROMOTE_HELP, KIND_HELP,
+  bytesText, transferActions, needsModelHint, poolText, promoteAction, resetLayerAction, isConflict, kindHelp, BASE_HELP, PROMOTE_HELP, KIND_HELP,
   isOpenState, damageActions, verifyText, verifyVerdict, verifyHelp, verifyAllText, verifyAllLabel, runVerifyAll, verifyBadge, repairSummary, repairedName, uncleanRows, REPAIR_HELP, RESTORE_HINT,
   MCP_NEW_HELP,
 } from './admin-api.js';
@@ -54,7 +57,7 @@ const DATABASE_COLUMNS = Object.freeze({
 
 /** What the State badge says while an action of the row runs. */
 const BUSY_TEXT = Object.freeze({
-  load: 'loading…', unload: 'unloading…', verify: 'verifying…', promote: 'promoting…', delete: 'deleting…',
+  load: 'loading…', unload: 'unloading…', verify: 'verifying…', promote: 'promoting…', resetLayer: 'resetting…', delete: 'deleting…',
 });
 
 /** The sortable columns of the alias table. */
@@ -101,6 +104,7 @@ export default {
     const acts = (row) => rowActions(row, { busy: !!busy[row.name], aliasTargets: aliasTargets.value });
     const more = (row) => transferActions(row, { busy: !!busy[row.name] });
     const promo = (row) => promoteAction(row, { busy: !!busy[row.name] });
+    const resetAct = (row) => resetLayerAction(row, { busy: !!busy[row.name] });
     const dmg = (row) => damageActions(row, { busy: !!busy[row.name] });
     const databaseNames = computed(() => realRows(list.rows).map((r) => r.name));
     const bases = computed(() => baseNames(list.rows));
@@ -134,6 +138,11 @@ export default {
     function promoteDb(row) {
       if (!window.confirm(confirmText('promote', row.name))) return;
       run(row.name, 'promote', () => admin.promote(row.name));
+    }
+    /** "Reset layer…": confirmed (what is lost, what is kept), then the outcome as a toast. */
+    function resetLayerDb(row) {
+      if (!window.confirm(confirmText('resetLayer', row.name, row.base || ''))) return;
+      run(row.name, 'resetLayer', () => admin.resetLayer(row.name));
     }
     /** Verifies one database: the result as a toast, its problems as lines. */
     async function verifyDb(row) {
@@ -324,6 +333,7 @@ export default {
       const m = more(row);
       const d = dmg(row);
       const p = promo(row);
+      const r = resetAct(row);
       const open = isOpenState(row.state);
       return [
         open
@@ -339,6 +349,7 @@ export default {
         { key: 'verify', text: 'Verify', enabled: d.verify.enabled, title: d.verify.title, run: () => verifyDb(row) },
         { key: 'repair', text: 'Repair…', enabled: d.repair.enabled, title: d.repair.title, run: () => openRepair(row) },
         { key: 'promote', text: 'Promote to base…', enabled: p.enabled, title: p.title, run: () => promoteDb(row) },
+        ...(row.kind === 'layer' ? [{ key: 'resetLayer', text: 'Reset layer…', danger: true, enabled: r.enabled, title: r.title, run: () => resetLayerDb(row) }] : []),
         { key: 'sep-api', separator: true },
         { key: 'openapi', text: 'OpenAPI description', href: openapiHref(row), title: "The OpenAPI description of this database's HTTP API (to generate a client)" },
         { key: 'sep-delete', separator: true },

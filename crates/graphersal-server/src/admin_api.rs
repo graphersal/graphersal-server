@@ -11,6 +11,7 @@
 //! | POST | `databases/<name>/load` | | `202` entry + `"load": "started" \| "already-loading"`, `200` + `"already-loaded"` |
 //! | POST | `databases/<name>/unload` | | `200` entry + `"unloaded": bool` |
 //! | POST | `databases/<name>/promote` | | `200` entry (now `role: base`, read-only; one way) |
+//! | POST | `databases/<name>/reset-layer` | `{"confirm": true}` | `200` entry + `"base"`, `"trash"`, `"discarded"` (`{"added", "modified", "removed"}`, each `{"vertices", "edges"}`), `"jobsKept"`, `"reloaded"`: a layer's changes discarded ([`crate::ops::Admin::reset_layer`]); `400` without the confirmation, `409` for a plain, base or failed database |
 //! | PUT | `databases/<name>/read-only` | `{"readOnly": bool, "revision"?}` | `200` entry |
 //! | PUT | `databases/<name>/auto-load` | `{"autoLoad": bool, "revision"?}` | `200` entry |
 //! | POST | `databases/<name>/backup` | | `201` backup |
@@ -297,6 +298,23 @@ pub(crate) fn route(
                 let help = promote_help(registry, name, &err);
                 (err, help)
             }),
+        (Method::Post, ["databases", name, "reset-layer"]) => {
+            let body: ResetLayerBody = body_of(request)?;
+            if !body.confirm {
+                return Err(HttpError::bad_request(format!(
+                    "a layer reset discards every change of the layer '{}' over its base (the \
+                     old layer moves to trash/): confirm it with \"confirm\": true",
+                    fold(name)
+                )));
+            }
+            admin
+                .reset_layer(name)
+                .map(|done| Response::json(200, &reset_layer_json(registry, &done)))
+                .map_err(|err| {
+                    let help = reset_layer_help(registry, name, &err);
+                    (err, help)
+                })
+        }
         (Method::Put, ["databases", name, "read-only"]) => {
             let body: ReadOnlyBody = body_of(request)?;
             expecting(body.revision.clone())
@@ -491,7 +509,7 @@ pub(crate) fn route(
                 "databases",
                 _,
                 "clone" | "load" | "unload" | "promote" | "read-only" | "auto-load" | "backup"
-                | "backups" | "restore" | "export" | "runs",
+                | "backups" | "restore" | "export" | "runs" | "reset-layer",
             ],
         )
         | (_, ["databases", _, "runs", "cancel"])
@@ -954,6 +972,14 @@ struct CloneBody {
     mcp: Option<bool>,
 }
 
+/// `POST databases/<name>/reset-layer`.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct ResetLayerBody {
+    #[serde(default)]
+    confirm: bool,
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct ReadOnlyBody {
@@ -1164,6 +1190,61 @@ fn unload_help(admin: &Admin, name: &str, err: &ServerError) -> Option<String> {
 }
 
 /// The help of a refused promotion: unload it first, or what a layer can do instead.
+/// The answer of a layer reset: the entry + `"base"`, `"trash"`, `"discarded"`
+/// (`{"added", "modified", "removed"}`, each `{"vertices", "edges"}`), `"jobsKept"`,
+/// `"reloaded"`.
+fn reset_layer_json(registry: &Registry, done: &crate::ops::LayerResetDone) -> Value {
+    let counts = |(vertices, edges): (u64, u64)| json!({ "vertices": vertices, "edges": edges });
+    let mut entry = entry_json(&done.entry, None);
+    entry["base"] = Value::String(done.base.clone());
+    entry["trash"] = Value::String(relative(registry.dir().root(), &done.trash));
+    entry["discarded"] = json!({
+        "added": counts(done.discarded.added),
+        "modified": counts(done.discarded.modified),
+        "removed": counts(done.discarded.removed),
+    });
+    entry["jobsKept"] = json!(done.jobs_kept);
+    entry["reloaded"] = Value::Bool(done.reloaded);
+    entry
+}
+
+/// The help of a refused layer reset.
+fn reset_layer_help(registry: &Registry, name: &str, err: &ServerError) -> Option<String> {
+    if !matches!(err, ServerError::Refused { .. }) {
+        return None;
+    }
+    let key = fold(name);
+    let entry = registry.get(&key).ok()?;
+    let config = entry.config.as_ref()?;
+    match (config.kind, config.role) {
+        (DatabaseKind::Layer, _) => None,
+        (_, DatabaseRole::Base) => {
+            let layers: Vec<String> = registry
+                .list()
+                .into_iter()
+                .filter(|e| {
+                    e.config.as_ref().is_some_and(|c| {
+                        c.kind == DatabaseKind::Layer && c.base.as_deref() == Some(key.as_str())
+                    })
+                })
+                .map(|e| e.name)
+                .collect();
+            Some(match layers.first() {
+                Some(layer) => format!(
+                    "reset a layer over it instead (layers: {}): POST \
+                     /api/admin/databases/{layer}/reset-layer {{\"confirm\": true}}",
+                    layers.join(", ")
+                ),
+                None => "no layer uses it as its base; there is nothing to reset".to_string(),
+            })
+        }
+        _ => Some(format!(
+            "restore a backup instead: GET /api/admin/databases/{key}/backups, then POST \
+             /api/admin/databases/{key}/restore {{\"backup\": \"<backup>\"}}"
+        )),
+    }
+}
+
 fn promote_help(registry: &Registry, name: &str, err: &ServerError) -> Option<String> {
     if !matches!(err, ServerError::Refused { .. }) {
         return None;

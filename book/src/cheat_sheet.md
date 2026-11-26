@@ -77,6 +77,7 @@ graphersal-server db unload acme --dir ./srv && graphersal-server db load acme -
 
 ```bash
 graphersal-server db promote products --dir ./srv                      # an unloaded plain database becomes a base, for good
+graphersal-server db reset-layer scratch --yes --dir ./srv             # discard a layer's changes; base untouched, old layer to trash/
 graphersal-server db create products --role base --dir ./srv           # an empty base
 graphersal-server db create acme --base products --dir ./srv           # a layer over the base
 graphersal-server db export acme --out acme-full.gsnap --materialize --dir ./srv   # a layer as a standalone snapshot
@@ -208,6 +209,7 @@ curl -s -X POST http://127.0.0.1:8484/api/admin/databases/acme/load -H "Authoriz
 | Publish a new version of a database without changing clients | `db clone acme acme-v2`, change `acme-v2`, then `db alias set prod acme-v2` |
 | Make a database public | `user grant anonymous demo read` |
 | Freeze a database as a base for layers | `db unload products`, `db promote products`, `db create acme --base products` |
+| Throw away everything a layer changed, keep its settings | `db reset-layer scratch --yes` ([Reset a layer](guide/databases.md#reset-a-layer)) |
 | Move a server to a new machine | `backup --with-databases --out FILE`, copy FILE, `restore FILE --dir NEWDIR`, `serve --dir NEWDIR` ([recipe](guide/backups.md#move-a-server-to-a-new-machine)) |
 | A database is in `maintenance` | `db repair NAME`, `db verify NAME-repaired`, `db swap NAME NAME-repaired --yes` ([recipe](troubleshooting.md#a-database-is-in-maintenance)) |
 | A database is `needs-model` | `models add <repo or file>` ([recipe](troubleshooting.md#a-database-needs-a-model)) |

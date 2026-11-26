@@ -175,7 +175,7 @@ const based = (request, revision) => (typeof revision === 'string' && revision ?
  * over the database itself), importPath({path | inbox, name, base?, format?, description?, role?}),
  * imports (the import inbox `imports/` of the server directory), models,
  * addModel({path?, repo?, license?}), removeModel(repo or blob hash), promote(name) (no body;
- * one way: a base is frozen forever), runs(name?) (one loaded database's queued and running runs,
+ * one way: a base is frozen forever), resetLayer(name) (a layer's changes discarded, confirmed), runs(name?) (one loaded database's queued and running runs,
  * or every loaded database's without a name), cancelRun(name, id) (the run administration: a
  * run id is unique within its database only), the users and grants: users, addUser(name,
  * admin?) (its answer carries the new token, shown once), removeUser(name), newToken(name),
@@ -221,6 +221,7 @@ export const adminRequest = Object.freeze({
   addModel: (body) => ({ method: 'POST', path: 'api/admin/models', body }),
   removeModel: (id) => ({ method: 'DELETE', path: `api/admin/models/${modelSegs(id)}` }),
   promote: (name) => ({ method: 'POST', path: `api/admin/databases/${seg(name)}/promote` }),
+  resetLayer: (name) => ({ method: 'POST', path: `api/admin/databases/${seg(name)}/reset-layer`, body: { confirm: true } }),
   users: () => ({ method: 'GET', path: 'api/admin/users' }),
   addUser: (name, isAdmin = false) => ({ method: 'POST', path: 'api/admin/users', body: isAdmin ? { name, admin: true } : { name } }),
   removeUser: (name, revision) => based({ method: 'DELETE', path: `api/admin/users/${seg(name)}` }, revision),
@@ -738,6 +739,8 @@ export function confirmText(action, subject, extra = '') {
       return `Promote "${subject}" to a base? ${BASE_IS_FROZEN}\n\n${BASE_HELP}\n\n${PROMOTE_HELP}`;
     case 'cancelRun':
       return `Stop run ${extra} of "${subject}"? Its query ends at its next check and its changes roll back; its client gets an error.`;
+    case 'resetLayer':
+      return resetLayerConfirmText(subject, extra);
     case 'swap':
       return `Let "${extra}" take the name "${subject}"? The current "${subject}" moves to the server's trash/ directory (recoverable by hand only) and the name "${extra}" goes away; the grants, aliases and settings of "${subject}" stay. Both are unloaded first; "${subject}" is loaded again if it was loaded.`;
     default:
@@ -836,6 +839,7 @@ function baseOutcomeText(action, subject, answer) {
       : `Run ${answer.id} of "${subject}" had already ended.`;
     case 'promote': return `"${answer.name || subject}" is now a base (read-only, frozen); create layers over it with "New database…".`;
     case 'verify': return verifyText(answer);
+    case 'resetLayer': return resetLayerOutcomeText(subject, answer);
     case 'swap': return `"${answer.swappedWith || ''}" took the name "${answer.name || subject}"; the old one moved to ${answer.trash || "the server's trash/ directory"}${answer.reloaded ? '; loaded again' : ''}.`;
     default: return '';
   }
@@ -1413,6 +1417,48 @@ export function promoteAction(row, { busy = false } = {}) {
   if (row.state === 'needs-model') return off('Add its model first: a base cannot get a model later');
   if (row.state !== 'unloaded') return off(`Only an unloaded database can be promoted (it is ${row.state})`);
   return { enabled: true, title: `Turn it into a base. ${BASE_HELP} ${BASE_IS_FROZEN}` };
+}
+
+// ------------------------------------------------------------------ reset a layer (B-LAYER)
+
+/**
+ * Whether a row's layer may be reset (`POST .../reset-layer`): `{enabled, title}`. Only a layer
+ * database whose config is readable; a loaded one is unloaded and loaded again by the server.
+ * Every other row is disabled with the reason (the server refuses the same with `409`).
+ */
+export function resetLayerAction(row, { busy = false } = {}) {
+  const off = (title) => ({ enabled: false, title });
+  if (row.aliasOf) return off(`An alias of ${row.aliasOf}: use that database's row`);
+  if (busy) return off('Wait until the running action ends');
+  if (row.state === 'failed' || !row.kind) return off('A failed database cannot be reset');
+  if (row.role === 'base') return off('A base has no changes of its own: reset the layers over it');
+  if (row.kind !== 'layer') return off('Only a layer can be reset (its changes over its base are discarded); a plain database goes back with a restore');
+  if (row.state === 'loading') return off('Loading…: try again once it is loaded');
+  return { enabled: true, title: `Discard every change of this layer over its base "${row.base || ''}"; the base stays unchanged` };
+}
+
+/** The confirmation of a layer reset: what is lost and what is kept. */
+export function resetLayerConfirmText(name, base = '') {
+  const over = base ? ` over its base "${base}"` : ' over its base';
+  return `Reset the layer "${name}"? Every change it made${over} is discarded: the vertices and edges it added, changed and removed, its own schema and saved queries, and its history. The base and the other layers stay unchanged.\n\n`
+    + `The old layer moves to the server's trash/ directory (recoverable by hand only).\n\n`
+    + `Kept: the name, base, description, read-only and auto-load flags, query limits, grants, aliases, MCP settings and scheduled jobs. A loaded layer is unloaded and loaded again.`;
+}
+
+/** The outcome of a layer reset (`POST .../reset-layer` answer). */
+export function resetLayerOutcomeText(name, answer = {}) {
+  const d = answer.discarded && typeof answer.discarded === 'object' ? answer.discarded : {};
+  const n = (part) => {
+    const c = d[part] && typeof d[part] === 'object' ? d[part] : {};
+    return (Number(c.vertices) || 0) + (Number(c.edges) || 0);
+  };
+  const [added, modified, removed] = [n('added'), n('modified'), n('removed')];
+  const what = added + modified + removed === 0
+    ? 'it had no data changes'
+    : `discarded ${counted(added, 'added element')}, ${counted(modified, 'changed element')} and ${counted(removed, 'removal')}`;
+  const base = answer.base ? ` "${answer.base}"` : '';
+  const trash = answer.trash || "the server's trash/ directory";
+  return `"${answer.name || name}" was reset and reads exactly its base${base} now: ${what}; the old layer moved to ${trash}${answer.reloaded ? '; loaded again' : ''}.`;
 }
 
 // ------------------------------------------------------------------ the run administration

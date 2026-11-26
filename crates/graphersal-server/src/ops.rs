@@ -33,6 +33,10 @@
 //! - [`Admin::promote`]: an UNLOADED plain database becomes a base (`role = "base"`,
 //!   read-only), one way (a base is frozen forever, user decision U11); an import with
 //!   [`DatabaseRole::Base`] ([`Admin::import_as`]) makes a base holding the imported data.
+//! - [`Admin::reset_layer`]: a layer database's changes over its base are discarded: a new
+//!   empty layer Store over the same base takes the old one's place (the old one to
+//!   `trash/`), name, settings, grants, aliases, MCP settings and job definitions kept
+//!   (round 4 B-LAYER, `ops_layer.rs`).
 //! - [`Admin::runs`], [`Admin::cancel_run`]: the queued and running runs of the loaded
 //!   databases, whatever their client, and the cancel of one by its id (online only;
 //!   `ops_runs.rs`).
@@ -909,6 +913,10 @@ mod damage;
 pub(crate) use damage::repair_json;
 pub use damage::{Repaired, Swapped, Verified};
 
+#[path = "ops_layer.rs"]
+mod layer;
+pub use layer::{DiscardedChanges, LayerResetDone};
+
 #[path = "ops_server_backup.rs"]
 mod server_backup;
 
@@ -928,6 +936,10 @@ mod transfer_tests;
 #[cfg(test)]
 #[path = "ops_concurrency_tests.rs"]
 mod concurrency_tests;
+
+#[cfg(test)]
+#[path = "ops_layer_tests.rs"]
+mod layer_tests;
 
 #[cfg(test)]
 #[path = "ops_import_tests.rs"]

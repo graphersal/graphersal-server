@@ -60,6 +60,30 @@ Restore](guide/backups.md#restore-one-database).
 `Error: database 'acme' has no backup '...'`: the name is the one `db backups` prints (the UTC
 time with dashes), without the `.zip`.
 
+## Throw away a layer's changes, or get a reset layer back
+
+A layer (a database made with `--base`) collected changes you do not want: reset it. The base
+and the other layers are untouched; the name, settings, grants, aliases, MCP settings and
+scheduled jobs stay:
+
+```bash
+graphersal-server db reset-layer scratch --yes --dir ./srv
+```
+
+Reset by mistake? The old layer is in `trash/scratch-<UTC time>/` (the output names it). Bring
+it back as another database, then copy what you need or point the alias at it:
+
+```bash
+graphersal-server stop --dir ./srv
+mv ./srv/trash/scratch-2026-11-26T10-00-00Z ./srv/databases/scratch-old
+graphersal-server start --dir ./srv
+graphersal-server db alias set current scratch-old --dir ./srv    # if clients use an alias
+```
+
+The recovered `scratch-old` has no grants of its own (grant them on the Users tab or with `user
+grant`). A plain database cannot be reset: restore a backup ([Restore a database from a
+backup](#restore-a-database-from-a-backup)).
+
 ## Restore a whole server on a new machine
 
 From a full server backup (`backup --with-databases`):

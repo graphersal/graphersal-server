@@ -7,7 +7,7 @@
 //! graphersal-server start --dir DIR [serve options] [--timeout SECS]
 //! graphersal-server stop --dir DIR [--timeout SECS]
 //! graphersal-server status --dir DIR [--json]
-//! graphersal-server db list|create|delete|clone|load|unload|promote|read-only|auto-load|alias|backup|backups|restore|verify|repair|swap|export ... --dir DIR [--json]
+//! graphersal-server db list|create|delete|clone|load|unload|promote|reset-layer|read-only|auto-load|alias|backup|backups|restore|verify|repair|swap|export ... --dir DIR [--json]
 //! graphersal-server import DIR SOURCE --name NAME [--base BASE] [--format F] [--description TEXT] [--role normal|base] [--mcp|--no-mcp] [--json]
 //! graphersal-server import DIR --inbox FILE --name NAME [...] | import DIR --list [--json]
 //! graphersal-server models list|add|remove ... --dir DIR [--json]
@@ -137,6 +137,12 @@ Usage:
             The unloaded plain database NAME becomes a base (role=base, read-only): the
             frozen graph layers are made over (db create L --base NAME). One way: a base
             is frozen forever; nothing turns it back into an ordinary database.
+        db reset-layer NAME --yes
+            Discards every change of the layer database NAME over its base (the base and
+            other layers are untouched): a new empty layer over the same base takes its
+            place, the old layer moves to DIR/trash/ (recoverable by hand). Name, base,
+            description, flags, query limits, grants, aliases, MCP settings and scheduled
+            job definitions stay. A loaded layer is unloaded and loaded again.
         db read-only NAME on|off
         db auto-load NAME on|off
         db info NAME             everything about NAME (or the database an alias names):
@@ -1536,6 +1542,17 @@ fn parse_db(
                 with: with.to_string(),
             }
         }
+        ["reset-layer", name] => {
+            if !switch("--yes") {
+                return Err(usage(&format!(
+                    "db reset-layer discards every change of the layer '{name}' over its base \
+                     (the old layer moves to trash/): confirm it with --yes"
+                )));
+            }
+            DbCommand::ResetLayer {
+                name: name.to_string(),
+            }
+        }
         ["alias", "set", alias, target] => DbCommand::AliasSet {
             alias: alias.to_string(),
             target: target.to_string(),
@@ -1612,8 +1629,13 @@ fn parse_db(
     if switch("--all") && !matches!(command, DbCommand::Verify { name: None }) {
         return Err(usage("--all belongs to db verify"));
     }
-    if switch("--yes") && !matches!(command, DbCommand::Swap { .. }) {
-        return Err(usage("--yes belongs to db swap"));
+    if switch("--yes")
+        && !matches!(
+            command,
+            DbCommand::Swap { .. } | DbCommand::ResetLayer { .. }
+        )
+    {
+        return Err(usage("--yes belongs to db swap and db reset-layer"));
     }
     let export = matches!(command, DbCommand::Export { .. });
     if !export && value("--out").is_some() {

@@ -148,6 +148,49 @@ Refused: a loaded database (unload it first); a layer (export it with `--materia
 import the file with `--role base`); a `needs-model` database (add the model first: a base
 cannot get a model later).
 
+## Reset a layer
+
+```bash
+graphersal-server db reset-layer scratch --yes --dir ./srv
+```
+
+Discards every change the layer database `scratch` made over its base, and only those: the
+vertices and edges it added, the base elements it changed or removed, and its own schema and
+catalog changes (saved queries, index definitions) go back to the base's. The base and every
+other layer over it stay exactly as they were. Afterwards `scratch` reads exactly its base.
+
+**Kept:** the name, kind and base, the description, the read-only and auto-load flags, the
+query limit overrides (`database.toml` is not touched), the grants (also those given through an
+alias), the aliases, the MCP settings, and the layer's scheduled job definitions. A loaded
+layer is unloaded, reset and loaded again (`loaded: again`); queries running on it get up to
+30 s, as with an unload, and its pages answer "not loaded" for that moment. `--yes` is required:
+the command discards data.
+
+**The old layer goes to `trash/`.** graphersal 0.8.0 has no reset inside a Store, so the server
+builds a new empty layer Store over the same base and swaps it in. The old one moves to
+`trash/scratch-<UTC time>/` with a copy of its `database.toml`, so the trash entry is a whole
+database directory. To get it back (as another database, here `scratch-old`): stop the server,
+move it into `databases/`, and start again:
+
+```bash
+graphersal-server stop --dir ./srv
+mv ./srv/trash/scratch-2026-11-26T10-00-00Z ./srv/databases/scratch-old
+graphersal-server start --dir ./srv
+```
+
+(To have it under its own name again, delete or move away the reset `databases/scratch/` first.
+`trash/` is never emptied automatically.) Its history, its workload statistics and its last
+verify stay with the old Store: a rollback of the reset layer's Store (the graphersal CLI's
+`graphersal store rollback`) cannot go back before the reset.
+
+A kill in the middle leaves either the old layer or the new one, never none: the new Store is
+built beside the old one (`store-reset/`), and the next start finishes or discards an
+interrupted swap.
+
+Refused: a plain database (restore a backup instead), a base (reset the layers over it), a
+failed database, and a layer that is being loaded. Web UI: "Reset layer…" in the row's "…"
+menu (layer rows only), with a confirmation naming what is lost and what is kept.
+
 ## Delete
 
 ```bash

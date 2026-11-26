@@ -23,7 +23,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
-use crate::database::{DatabaseConfig, DatabaseKind, DatabaseRole, STORE_DIR};
+use crate::database::{DatabaseConfig, DatabaseKind, DatabaseRole, RESET_STORE_DIR, STORE_DIR};
 use crate::error::ServerError;
 use crate::layout::{ServerDir, write_atomic};
 use crate::names::{fold, validate_name};
@@ -245,6 +245,9 @@ impl Registry {
             clean_tmp(&dir.tmp(), &mut inner.problems);
             dir.remove_stale_temps();
         }
+        if clean {
+            finish_layer_resets(&dir.databases(), &mut inner.problems);
+        }
         scan_databases(&dir.databases(), &mut inner)?;
         scan_aliases(&dir.aliases_path(), &mut inner);
         for problem in &inner.problems {
@@ -339,6 +342,51 @@ fn clean_tmp(tmp: &Path, problems: &mut Vec<String>) {
                 path.display()
             ),
             Err(err) => problems.push(format!("cannot remove {}: {err}", path.display())),
+        }
+    }
+}
+
+/// Finishes or discards the layer resets a crash interrupted (round 4 B-LAYER,
+/// [`Registry::reset_layer_store`]): a `databases/<name>/store-reset/` beside a `store/` was
+/// never swapped in and is removed (the old layer stays); one WITHOUT `store/` was interrupted
+/// between its two renames (the old layer is in `trash/` already) and is renamed to `store/`.
+fn finish_layer_resets(databases: &Path, problems: &mut Vec<String>) {
+    let Ok(listing) = fs::read_dir(databases) else {
+        return;
+    };
+    for item in listing.flatten() {
+        let dir = item.path();
+        let fresh = dir.join(RESET_STORE_DIR);
+        if !fresh.is_dir() {
+            continue;
+        }
+        let store = dir.join(STORE_DIR);
+        if store.exists() {
+            match fs::remove_dir_all(&fresh) {
+                Ok(()) => tracing::warn!(
+                    target: "graphersal_server",
+                    "removed {}: a layer reset was interrupted before it took effect; the \
+                     layer is unchanged",
+                    fresh.display()
+                ),
+                Err(err) => problems.push(format!("cannot remove {}: {err}", fresh.display())),
+            }
+        } else {
+            match fs::rename(&fresh, &store) {
+                Ok(()) => {
+                    crate::layout::sync_parent(&store);
+                    tracing::warn!(
+                        target: "graphersal_server",
+                        "finished the interrupted layer reset of {} (the old layer is in \
+                         trash/)",
+                        dir.display()
+                    );
+                }
+                Err(err) => problems.push(format!(
+                    "cannot finish the interrupted layer reset of {}: {err}",
+                    dir.display()
+                )),
+            }
         }
     }
 }

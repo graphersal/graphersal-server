@@ -21,6 +21,10 @@ What this version does not do, or does differently than you might expect.
   is unique within its database only.
 - A model archive is a **ustar `.tar`**, uncompressed or gzip-compressed (`tar -cf model.tar
   -C <model dir> .`, `tar -czf model.tar.gz ...`); zstd, bzip2, xz and `.zip` are not taken.
+- **A layer reset replaces the layer's Store** (graphersal 0.8.0 has no reset inside a Store):
+  the old Store with its history goes to `trash/`, so a Store rollback of the reset layer
+  cannot go back before the reset, and a loaded layer is unloaded for the moment of the reset.
+  A later graphersal release resets inside the Store; the server will use it then.
 - A **layer `.gsnap` export carries no models** (an engine rule); export the layer with
   `materialize=true` (`--materialize`) for a standalone snapshot with the models.
 - **A query limit change applies at the database's next load** (unload + load, or a restart):

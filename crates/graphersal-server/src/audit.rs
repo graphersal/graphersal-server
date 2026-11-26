@@ -330,6 +330,17 @@ pub enum AuditEvent {
         /// Where the replaced database went.
         trash: PathBuf,
     },
+    /// A layer database was reset (round 4 B-LAYER `db reset-layer`): its changes over its
+    /// base were discarded; the old layer Store went to `trash/`.
+    #[non_exhaustive]
+    LayerReset {
+        /// The layer database.
+        name: String,
+        /// Its base database.
+        base: String,
+        /// Where the old layer Store went (`trash/<name>-<UTC time>/`).
+        trash: PathBuf,
+    },
 }
 
 impl AuditEvent {
@@ -527,6 +538,11 @@ impl fmt::Display for AuditEvent {
             AuditEvent::DatabaseSwapped { name, with, trash } => write!(
                 f,
                 "database '{with}' took the name '{name}'; the old '{name}' moved to {}",
+                trash.display()
+            ),
+            AuditEvent::LayerReset { name, base, trash } => write!(
+                f,
+                "layer database '{name}' reset to its base '{base}'; the old layer moved to {}",
                 trash.display()
             ),
         }

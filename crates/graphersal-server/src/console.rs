@@ -175,6 +175,12 @@ pub enum DbCommand {
         /// The database that takes it.
         with: String,
     },
+    /// `db reset-layer NAME --yes`: discard every change of the layer database NAME over its
+    /// base; the old layer moves to `trash/` (round 4 B-LAYER).
+    ResetLayer {
+        /// The layer database.
+        name: String,
+    },
     /// `db alias set ALIAS TARGET [--mcp|--no-mcp]`.
     AliasSet {
         /// The alias.
@@ -488,6 +494,11 @@ impl DbCommand {
                 Method::Post,
                 format!("databases/{}/swap", segment(name)),
                 Some(json!({ "with": with, "confirm": true })),
+            ),
+            DbCommand::ResetLayer { name } => (
+                Method::Post,
+                format!("databases/{}/reset-layer", segment(name)),
+                Some(json!({ "confirm": true })),
             ),
             DbCommand::AliasSet { alias, target, mcp } => (
                 Method::Put,

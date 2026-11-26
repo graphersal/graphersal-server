@@ -993,6 +993,139 @@
         }
       }
     },
+    "/api/admin/databases/{name}/reset-layer": {
+      "post": {
+        "operationId": "resetLayer",
+        "summary": "Reset a layer: discard its changes",
+        "description": "Discards every change of the layer database `{name}` over its base; the base and other layers are untouched. A new empty layer over the same base takes the old one's place, the old layer Store moves to `trash/<name>-<UTC time>/` (recoverable by hand). Kept: name, base, description, read-only and auto-load flags, query limit overrides, grants (also via aliases), aliases, MCP settings and the layer's scheduled job definitions. Discarded: data changes, the layer's own schema and other catalog changes, its history. A loaded layer is unloaded and loaded again (`reloaded`). Needs `confirm: true`. `409` for a plain, base or failed database.",
+        "tags": [
+          "databases"
+        ],
+        "x-graphersal-access": "admin",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "A database's real name (case-insensitive; an alias is not followed unless the operation says so)."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "confirm": {
+                    "const": true
+                  }
+                },
+                "required": [
+                  "confirm"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Reset.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Entry"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "base": {
+                          "type": "string"
+                        },
+                        "trash": {
+                          "type": "string"
+                        },
+                        "discarded": {
+                          "type": "object",
+                          "properties": {
+                            "added": {
+                              "type": "object",
+                              "properties": {
+                                "vertices": {
+                                  "type": "integer"
+                                },
+                                "edges": {
+                                  "type": "integer"
+                                }
+                              }
+                            },
+                            "modified": {
+                              "type": "object",
+                              "properties": {
+                                "vertices": {
+                                  "type": "integer"
+                                },
+                                "edges": {
+                                  "type": "integer"
+                                }
+                              }
+                            },
+                            "removed": {
+                              "type": "object",
+                              "properties": {
+                                "vertices": {
+                                  "type": "integer"
+                                },
+                                "edges": {
+                                  "type": "integer"
+                                }
+                              }
+                            }
+                          }
+                        },
+                        "jobsKept": {
+                          "type": "integer"
+                        },
+                        "reloaded": {
+                          "type": "boolean"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/HostRefused"
+          },
+          "404": {
+            "$ref": "#/components/responses/AdminNotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Refused"
+          },
+          "500": {
+            "$ref": "#/components/responses/Failure"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
     "/api/admin/databases/{name}/read-only": {
       "put": {
         "operationId": "setReadOnly",
