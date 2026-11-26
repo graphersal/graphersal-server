@@ -31,6 +31,7 @@ graphersal-server db create notes --mcp --dir DIR      # a new database offered 
 [mcp]
 enabled = true          # default; false: no MCP endpoint, /mcp and every /db/<name>/mcp answer 404
 max_sessions = 256      # MCP sessions remembered, the oldest forgotten first (at least 1)
+max_sessions_per_identity = 16  # MCP sessions one principal holds; a new one ends its own oldest
 ```
 
 ### Switches at runtime: the MCP tab, `mcp.toml`
@@ -125,7 +126,9 @@ claude mcp add --transport http --header "Authorization: Bearer <token>" \
 ```
 
 Without the header the agent is anonymous: `/mcp` serves it the databases granted to
-`anonymous` (often none), `/db/<name>/mcp` answers `401`.
+`anonymous` and answers `401` while `access.toml` grants anonymous nothing (so a client
+without credentials cannot open sessions at all); `/db/<name>/mcp` answers `401` without an
+anonymous grant on that name. An anonymous request body is at most 1 MiB.
 
 Other clients: any MCP client with the Streamable HTTP transport; the URL is the endpoint's.
 Requests go through the same `Host`/`Origin` checks as the rest of the server: a browser page
@@ -230,7 +233,10 @@ alias, `/db/<old name>/mcp` answers `404`.
 The selection belongs to the MCP session. A client that reconnects (a new `initialize`) starts
 without a selection and calls `use_graph` again; the error of its first call says so. The
 server remembers at most `max_sessions` sessions: the oldest is forgotten first, its client gets
-`404` for its unknown session id, initializes again and selects its database again. A server
+`404` for its unknown session id, initializes again and selects its database again. One
+principal (a user, the operator, anonymous as one) holds at most `max_sessions_per_identity`
+sessions (default 16) on `/mcp` and every `/db/<name>/mcp` together: its next `initialize`
+first ends its own oldest session, never another principal's. A server
 restart keeps the sessions (and their selections). `DELETE
 /mcp` with the session id ends a session. `GET /mcp` (a server-sent event stream) is not
 offered: `405`.
