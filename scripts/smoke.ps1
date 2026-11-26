@@ -124,6 +124,29 @@ function Req([string]$method, [string]$path, [string]$Json = $null, [string]$InF
     }
 }
 
+# One GET without following a redirect, through HttpClient (Invoke-WebRequest with
+# -MaximumRedirection 0 throws "Operation is not valid due to the current state of the object"
+# on a 3xx in PowerShell 7): the status in $script:Status, the headers in $script:Head.
+function Req-NoRedirect([string]$path) {
+    $handler = New-Object System.Net.Http.HttpClientHandler
+    $handler.AllowAutoRedirect = $false
+    $client = New-Object System.Net.Http.HttpClient($handler)
+    try {
+        $response = $client.GetAsync("$($script:url)$path").GetAwaiter().GetResult()
+    } catch {
+        Fail "request GET $path failed: $($_.Exception.Message)"
+    } finally {
+        $client.Dispose()
+    }
+    $script:Status = [int]$response.StatusCode
+    $head = @{}
+    foreach ($pair in $response.Headers) { $head[$pair.Key] = @($pair.Value) }
+    foreach ($pair in $response.Content.Headers) { $head[$pair.Key] = @($pair.Value) }
+    $script:Head = $head
+    $script:Body = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+    $script:Json = $null
+}
+
 function JsonOf($object) { ConvertTo-Json -InputObject $object -Compress -Depth 20 }
 
 function J([string]$path) { Get-J $script:Json $path }
@@ -331,7 +354,7 @@ try {
     Expect-Json login /
     Req GET /db/acme/api/info -Auth ""
     Expect-Status 401
-    Req GET /db/acme/ -Auth ""
+    Req-NoRedirect /db/acme/
     Expect-Status 303
     Expect ((Header Location) -ceq "/?next=/db/acme/") "no login redirect: $(Header Location)"
     Req GET /api/info
