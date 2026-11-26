@@ -124,7 +124,7 @@ from published files). When this file disagrees with the code, the code wins: sa
   carries it; the admin API takes the body's `revision`, else `If-Match`
   (`from_if_match`; `*` = none); GET answers carry `revision`/`aliasesRevision`/entry `revision`
   and `ETag`; no revision = applied as before; inventory of files/writers/locks and the lock
-  order in `docs/server-dir.md` "Concurrent changes" and `ops.rs` module docs; tests
+  order in `book/src/reference/server_directory.md` "Concurrent changes" and `ops.rs` module docs; tests
   `ops_concurrency_tests.rs` (409s; the 8 x 50 stress over HTTP: models, files parse, no temps,
   memory = fresh scan)), `security` (round 3 B1: the OS user owning the server directory is the
   operator; `check(dir)` before `serve::start` and `console::run` (and `main.rs` before
@@ -239,7 +239,7 @@ from published files). When this file disagrees with the code, the code wins: sa
   rewrites `aliases.toml` and, under the registry's write lock, calls `Mcp::rename_selection` so
   open `/mcp` sessions move to the new name with one note; answer `mcpSessionsMoved`); JSON bodies `deny_unknown_fields`; core errors -> `{"error","help"?}` via
   `status_of` (400 invalid name/input, 404, 409 rule refusals, 500); the route table is in its
-  module docs and `docs/admin-api.md` (the web UI's contract, `ui/admin-api.js`: keep them in sync);
+  module docs and `book/src/reference/admin_api.md` (the web UI's contract, `ui/admin-api.js`: keep them in sync);
   the run administration (V25, graphersal-serve 0.7.1 #32): `GET runs` (every loaded
   database), `GET databases/<name>/runs` (`loaded`), `POST databases/<name>/runs/cancel {"id"}`
   over `Admin::runs` / `Admin::cancel_run` (`ops_runs.rs`: each context's OWN `Runs`
@@ -446,8 +446,9 @@ from published files). When this file disagrees with the code, the code wins: sa
   `ops_damage_tests.rs` (a snapshot segment damaged by hand: maintenance, repair, swap; open
   set), `server_tests.rs` `a_server_killed_mid_writes_is_checked_at_the_next_start` (unix,
   SIGKILL of a child mid-writes) and `a_damaged_database_is_in_maintenance_and_is_repaired_and_swapped`,
-  `ui/tests/recovery.test.mjs`. Docs: `docs/server-dir.md` "`server.open` and
-  `recovery.json`" and "After a crash", `docs/admin-api.md` "Verify, repair and swap".
+  `ui/tests/recovery.test.mjs`. Docs: `book/src/reference/server_directory.md` "`server.open` and
+  `recovery.json`", `book/src/troubleshooting.md` "A server was killed by force" and "A database
+  is in maintenance", `book/src/reference/admin_api.md` "Verify, repair and swap".
 - `server_backup` (round 3 B-CONF, public): the backup of the whole server in ONE ZIP and its
   restore into a NEW directory. Container `archive` (private: stored entries, zip64 always,
   CRC-32 + SHA-256 (`ring`) per entry; `ZipWriter::add_bytes/add_file/finish`, one-pass
@@ -486,9 +487,9 @@ from published files). When this file disagrees with the code, the code wins: sa
   `archive::tests`, `server_backup::tests`, `ops_server_backup_tests.rs`, `router_access_tests.rs`
   `the_server_backup_download_is_for_admins_only_and_audited`, `server_tests.rs`
   `a_server_backup_restores_on_a_new_directory_and_serves_the_same_users_and_data`,
-  `ui/tests/server-backup.test.mjs`, smoke step. Docs: `docs/server-dir.md` "Server backups" +
-  "Move a server to a new machine", `docs/access.md` "Server backups are secrets",
-  `docs/admin-api.md` "Server backup". No scheduled server backup (the job mechanism is per
+  `ui/tests/server-backup.test.mjs`, smoke step. Docs: `book/src/guide/backups.md` "Back up the whole server" +
+  "Move a server to a new machine", `book/src/guide/security.md` "Server backups are secrets",
+  `book/src/reference/admin_api.md` "Server backup". No scheduled server backup (the job mechanism is per
   database in the engine).
 - `model_archive` (private, V18): `is_tar` (ustar magic + checksum) and `unpack(archive, dir)`,
   the safe unpack of a model directory's tar (rules in its module docs; tests beside it, their
@@ -544,7 +545,7 @@ from published files). When this file disagrees with the code, the code wins: sa
   load it`). `route` adapts the request (as graphersal-serve's `mcp.rs`) to
   `Mcp::handle_directory` (POST/DELETE; GET 405). `/db/<name>/mcp` is graphersal-serve's own
   route behind the mount, on the same `Mcp`. The endpoint never loads/unloads. Contract:
-  `docs/mcp.md`. E2E in `tests/server_tests.rs` (`mcp_*`).
+  `book/src/guide/mcp.md`. E2E in `tests/server_tests.rs` (`mcp_*`).
 - `mcp_control` (round 3 B6, private): the runtime MCP switches in `mcp.toml`
   (`McpSettings {enabled, databases: {name: NameSettings {exposed, read_only}}}`, names folded,
   defaults not written, canonical text + `revision`; `McpControl` = `RwLock` held across
@@ -611,8 +612,8 @@ from published files). When this file disagrees with the code, the code wins: sa
   server), the tracing subscriber (ANSI colours only when stderr is a terminal), the ctrlc
   handler; it only WRITES the console's text (`out`/`err`, never `println!`: a closed pipe
   must not panic). stdout = results (`serve`: the address line only), stderr =
-  diagnostics/log; exit codes 0 ok, 1 failed, 2 usage, 141 stdout closed. No `logs/`: the
-  server logs to stderr.
+  diagnostics/log; exit codes 0 ok, 1 failed, 2 usage, 3 `status` stopped, 141 stdout closed.
+  `serve` logs to stderr; `start` appends the detached server's output to `logs/server.log`.
 - `crates/graphersal-server/ui/`: the server's web UI, the playground UI profile `server`
   (the graphersal-memory `memory` profile's pattern; the engine's playground mechanism: its
   `playground/CLAUDE.md` "UI profiles"): `profile.json` (the admin's: module tabs Databases, Backups, Import,
@@ -646,15 +647,21 @@ from published files). When this file disagrees with the code, the code wins: sa
   the admin API; the profile checked with the engine's `validateProfile` from
   `GRAPHERSAL_PLAYGROUND`, else the registry copy of graphersal-serve's `ui/` found through
   `cargo metadata`; skipped when absent, failed on CI).
-- Docs (the contract for readers who did not follow the code; keep them in sync with it):
-  `README.md` (what it is, run, console, HTTP, known limitations), `docs/server-dir.md` (every
-  file and key of the server directory), `docs/admin-api.md` (every admin route, checked
-  against `admin_api.rs`), `docs/mcp.md` (endpoints, request headers, flow), `docs/access.md`
-  (the access model: principals, grants/levels, 401/404/303, tokens, login and sessions, MCP
-  with a token, modes, limits as ceilings, backup root, inbox, audit), and the release notes
-  `docs/release-notes-<version>.md` (release.yml uses the file of the tagged version as the
-  release text; 0.2.0 = the access series, on Graphersal 0.8.0; 0.3.0 = the unreleased draft
-  of round 3, extended by every change).
+- Docs: the mdBook in `book/` is the ONE place of the documentation (the contract for readers
+  who did not follow the code; keep it in sync with it; its structure and style rules:
+  `book/CLAUDE.md`; not published, no CI: `mdbook build book`). `README.md` is only an overview,
+  the quick start and a link to the book. Pages code and tests cite: `book/src/reference/
+  admin_api.md` (every admin route, checked against `admin_api.rs`; the web UI's contract),
+  `book/src/reference/server_directory.md` (every file of the directory, the "Concurrent
+  changes" inventory), `book/src/reference/configuration.md` (every key of `server.toml`,
+  `access.toml`, `aliases.toml`, `mcp.toml`, `database.toml`), `book/src/guide/mcp.md`,
+  `book/src/guide/access.md`, `book/src/guide/security.md`, `book/src/guide/http_clients.md`,
+  `book/src/troubleshooting.md` (task recipes, incl. "A server was killed by force"),
+  `book/src/cheat_sheet.md` (every console command: a new command or option goes there and into
+  `reference/console.md`), and the release notes `book/src/release_notes/<version>.md`
+  (release.yml uses the page of the tagged version as the release text; 0.2.0 = the access
+  series, on Graphersal 0.8.0; 0.3.0 = the unreleased draft of round 3, extended by every
+  change).
 - `scripts/smoke.sh`: the end-to-end smoke test (bash + curl + python3 only): builds, inits a
   temp server dir, serves on `127.0.0.1:0` (URL from `server.run`), walks create/load/execute/
   alias/read-only/backup/restore/export/upload import/promote + layer/models/MCP/unload/delete,
@@ -679,6 +686,7 @@ node --test crates/graphersal-server/ui/tests/*.test.mjs   # the web UI's module
 ../graphersal/ai/bench/watchdog.sh cargo clippy --all-targets -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps -p graphersal-server
 WD_TIMEOUT=600 ../graphersal/ai/bench/watchdog.sh scripts/smoke.sh   # end to end, ok/FAIL lines
+mdbook build book                            # the book (book/CLAUDE.md); must build without warnings
 ```
 
 ## Rules (graphersal's rules in spirit)
@@ -699,7 +707,7 @@ WD_TIMEOUT=600 ../graphersal/ai/bench/watchdog.sh scripts/smoke.sh   # end to en
   registry, access, session tables; models/naming/MCP settings/`server.open` writer/recovery
   report locks are leaves; the `server.open` writer reads the loader's state inside its own
   lock, so it is never taken while the loader's state lock is held). A new runtime writer goes
-  into the inventory of `docs/server-dir.md`; a new editable shared object gets a revision.
+  into the inventory of `book/src/reference/server_directory.md`; a new editable shared object gets a revision.
 - Tokens and session ids: only hashes at rest, never logged (`Secret`'s `Debug` is redacted;
   audit events show `token_last4` only).
 - Access is enforced by the router (B3, module docs of `router.rs`): authentication right after

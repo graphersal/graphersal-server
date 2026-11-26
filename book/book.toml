@@ -1,0 +1,27 @@
+[book]
+authors = ["Aleksandr Dederer"]
+language = "en"
+multilingual = false
+src = "src"
+title = "The graphersal-server Documentation"
+
+[build]
+# A chapter in SUMMARY.md without its file is an error, not a new empty page.
+create-missing = false
+
+# Not published anywhere (user decision 2026-11-26): read it with `mdbook serve book` or as
+# Markdown on GitHub. No CI, no deploy.
+
+[output.html]
+git-repository-url = "https://github.com/graphersal/graphersal-server"
+edit-url-template = "https://github.com/graphersal/graphersal-server/edit/main/book/{path}"
+
+# No "Run" button on code blocks: the book has no Rust examples to run.
+[output.html.playground]
+runnable = false
+
+# The sidebar shows the parts and their chapters; pages below a chapter are folded until it is
+# open.
+[output.html.fold]
+enable = true
+level = 0

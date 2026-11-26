@@ -55,7 +55,7 @@
 //! `409` (a rule refuses it: name taken, loaded, named by an alias, base of layers, offline,
 //! failed database, a stale revision), `413` (body too large), `415` (an import source of no known format),
 //! `500` (a Store or file failed). The repository's
-//! `docs/admin-api.md` documents the routes for clients.
+//! `book/src/reference/admin_api.md` documents the routes for clients.
 //!
 //! A backup: `database`, `backup` (its name, the UTC time with dashes), `file`
 //! (`backups/<name>/<backup>.zip`), `bytes`, and from its sidecar `created`, `kind`, `role`,

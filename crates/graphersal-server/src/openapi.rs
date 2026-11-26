@@ -1,5 +1,5 @@
 //! The OpenAPI descriptions the server hands to HTTP clients (round 3 B-OPENAPI; the repository's
-//! `docs/http-clients.md`):
+//! `book/src/guide/http_clients.md`):
 //!
 //! - `GET /openapi.json`: the server's own routes (the probes, login/logout, `/api/info`,
 //!   `/api/databases`, the whole admin API), the hand-written `openapi/server.json` with

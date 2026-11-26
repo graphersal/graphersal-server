@@ -4,7 +4,7 @@
 // ui/backups-tab.js, ui/export-tab.js, ui/import-tab.js, ui/models-tab.js); moved here from the
 // engine's playground, where it was the landing view's admin panel.
 //
-// The contract is docs/admin-api.md (EXPERIMENTAL): every route below `api/admin/`, JSON bodies
+// The contract is book/src/reference/admin_api.md (EXPERIMENTAL): every route below `api/admin/`, JSON bodies
 // with `Content-Type: application/json` (unknown fields are refused, so the builders send only
 // the documented ones), errors `{"error": <sentence>, "help"?: <text>}` shown verbatim
 // (`AdminError`). Actions take REAL database names; an alias is changed only through the alias
@@ -120,7 +120,7 @@ export class AdminError extends Error {
 
 /**
  * Whether `err` is a refused stale change (`409` with the object's current `revision`: someone
- * else changed it since the tab read it; docs/admin-api.md "Revisions"). The tab then reads its
+ * else changed it since the tab read it; book/src/reference/admin_api.md "Revisions"). The tab then reads its
  * data again.
  */
 export function isConflict(err) {
@@ -1315,7 +1315,7 @@ export function cancelRunAction(run, { busy = false } = {}) {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Users and grants (the Users tab, ./users-tab.js; docs/admin-api.md "Users and grants")
+// Users and grants (the Users tab, ./users-tab.js; book/src/reference/admin_api.md "Users and grants")
 // ---------------------------------------------------------------------------------------------
 
 /** The user names the server reserves (grant subjects and the console's principal). */

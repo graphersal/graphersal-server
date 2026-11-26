@@ -3,7 +3,7 @@
 // headers and a browser download of a Blob. Moved here from the engine's playground
 // (js/server-mode.js), where the landing view used it.
 //
-// `GET api/admin/databases` (docs/admin-api.md):
+// `GET api/admin/databases` (book/src/reference/admin_api.md):
 //   `{"databases": [{"name", "state", "kind", "role", "readOnly", "autoLoad", "description",
 //   "base"?, "created"?, "aliasOf"?, "reason"?, "model"?, "damage"? (state `maintenance`: the
 //   damage report)}], "aliases": {alias: database},
@@ -148,7 +148,7 @@ export function memoryTitle(row) {
 }
 
 /**
- * The memory summary of `GET api/admin/server` (its `memory`, docs/admin-api.md): rows
+ * The memory summary of `GET api/admin/server` (its `memory`, book/src/reference/admin_api.md): rows
  * `[{key, label, text, title}]` in the order process, databases, machine, limit, free; a
  * figure the server does not know reads "unknown". `[]` without a `memory` object (an older
  * server).

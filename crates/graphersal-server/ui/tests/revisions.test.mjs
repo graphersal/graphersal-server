@@ -1,4 +1,4 @@
-// Node tests of the revisions the web UI sends with its changes (docs/admin-api.md "Revisions
+// Node tests of the revisions the web UI sends with its changes (book/src/reference/admin_api.md "Revisions
 // (concurrent changes)"): the requests carry `If-Match` only when a revision is given, a `409`
 // with the current `revision` is a conflict (a warning notice saying the tab read its data
 // again), the database rows and the alias list carry their revisions, and a round against a

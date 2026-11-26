@@ -1,9 +1,9 @@
-# MCP endpoints
+# MCP
 
 **EXPERIMENTAL.** graphersal-server serves its databases to AI agents over the Model Context
 Protocol (Streamable HTTP transport, JSON answers). There are two kinds of endpoint, served by
 ONE endpoint object (the same MCP sessions and statistics for both), each answering per
-principal ([`access.md`](access.md)):
+principal ([Users, Tokens and Grants](access.md)):
 
 | Endpoint | Serves | Tools |
 |---|---|---|
@@ -28,7 +28,7 @@ max_sessions = 256      # MCP sessions remembered, the oldest forgotten first (a
 `server.toml [mcp] enabled` decides at start whether the endpoints exist at all. While they do,
 an admin switches them at runtime, with no restart, in the web UI's **MCP** tab, with the admin
 API (`GET`/`PUT /api/admin/mcp`, `PUT /api/admin/mcp/databases/<name>`;
-[`admin-api.md`](admin-api.md#mcp)) or the console:
+[Admin API](../reference/admin_api.md#mcp)) or the console:
 
 ```bash
 graphersal-server mcp status --dir DIR                 # switches, databases, usage
@@ -37,7 +37,7 @@ graphersal-server mcp db acme off --dir DIR            # hide acme from MCP | ..
 graphersal-server mcp db acme read-only on --dir DIR   # MCP only reads acme | ... off
 ```
 
-The server keeps them in `mcp.toml` of the server directory ([`server-dir.md`](server-dir.md#mcptoml)):
+The server keeps them in `mcp.toml` of the server directory ([Configuration Reference](../reference/configuration.md#mcptoml)):
 
 - **MCP off** (whole server): `/mcp` and every `/db/<name>/mcp` answer `503 {"error": "MCP is
   switched off on this server", "help"}` at once. Open MCP sessions are kept, not ended: their
@@ -76,7 +76,7 @@ when MCP is off. A database's `GET /db/<name>/api/info` announces its own endpoi
 ### Adding the endpoint to an agent
 
 Claude Code (the server on its default address), with a user token (`graphersal-server user
-add NAME`, then grants; [`access.md`](access.md)):
+add NAME`, then grants; [Users, Tokens and Grants](access.md)):
 
 ```bash
 claude mcp add --transport http --header "Authorization: Bearer <token>" \
@@ -176,7 +176,7 @@ A session that selected an alias keeps the alias's name:
   name). A `use_graph` call before it drops the note.
 - A session that selected a database by its own name stays on it (databases have no rename).
 
-**Grants on aliases** (`docs/access.md` "Grants on aliases"): a principal whose only grant names
+**Grants on aliases** ([Grants on aliases](access.md#grants-on-aliases)): a principal whose only grant names
 the alias reaches the alias's current database through the alias alone. `list_graphs` lists the
 alias (with `aliasOf`) but not the database as a graph of its own; `use_graph {"name": "prod"}`
 answers `"graph": "prod"` (the alias's own name instead of the database's), and `use_graph` or
@@ -211,8 +211,8 @@ The MCP endpoint never loads or unloads a database: only an operator does, throu
 API, the console or the server's web UI. A database unloaded while a session has it
 selected answers the same error until it is loaded again (the session keeps its selection).
 
-A per-database endpoint of a database that is not loaded answers the mount's `409` (see
-`docs/admin-api.md`), an unknown name `404`.
+A per-database endpoint of a database that is not loaded answers the mount's `409` (see the
+[Admin API](../reference/admin_api.md#load-and-unload)), an unknown name `404`.
 
 ### Read-only
 
@@ -231,6 +231,6 @@ A per-database endpoint of a database that is not loaded answers the mount's `40
   MCP session belongs to the principal that initialized it: another principal using its id
   gets `404`. Tokens travel in clear text over plain HTTP.
 - MCP sessions survive a restart: they are kept in the server directory's `sessions/mcp.json`
-  (hashes of the ids only; `server-dir.md`), so a client goes on with its session id, its
+  (hashes of the ids only; [sessions/](../reference/server_directory.md#sessions)), so a client goes on with its session id, its
   selection and a pending rename note. Revoking or reissuing a user's token, or removing the
   user, ends that user's MCP sessions at once (their clients get `404` and initialize again).

@@ -1,7 +1,7 @@
 // Node tests of the admin panel's model (ui/admin-api.js and the admin fields of
 // ui/databases.js `databaseRows`): request builders, every action against a stateful mock of
 // a multi-database server's admin API (node:http on port 0, shaped after graphersal-server's
-// docs/admin-api.md), error parsing with `help`, the form checks, the row rules and the poll of
+// book/src/reference/admin_api.md), error parsing with `help`, the form checks, the row rules and the poll of
 // a load.
 // Run: node --test crates/graphersal-server/ui/tests/*.test.mjs
 import { test } from 'node:test';

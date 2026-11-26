@@ -1,6 +1,6 @@
 // Node tests of the Import tab's import inbox (ui/admin-api.js): `adminRequest.imports`, the
 // listing model `inboxRows`, the inbox name rule `inboxNameProblem` and `importRequest` with
-// `source: 'inbox'`, against a mock (node:http on port 0) shaped after docs/admin-api.md
+// `source: 'inbox'`, against a mock (node:http on port 0) shaped after book/src/reference/admin_api.md
 // (`GET /api/admin/imports`, `POST /api/admin/import {"inbox", ...}`).
 // Run: node --test crates/graphersal-server/ui/tests/*.test.mjs
 import { test } from 'node:test';

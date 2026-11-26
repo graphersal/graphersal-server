@@ -1,7 +1,7 @@
 // Node tests of the MCP tab's model (ui/mcp-api.js, round 3 B6): the requests (with the
 // revision as If-Match), the status, the per-database rows, the usage tables, how to connect,
 // and a round against a stateful mock of `/api/admin/mcp` (node:http on port 0, shaped after
-// docs/admin-api.md "MCP"): switch off, hide a database, make it read-only, a stale revision
+// book/src/reference/admin_api.md "MCP"): switch off, hide a database, make it read-only, a stale revision
 // refused (409) and read again.
 // Run: node --test crates/graphersal-server/ui/tests/*.test.mjs
 import { test } from 'node:test';

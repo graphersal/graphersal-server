@@ -375,7 +375,7 @@ pub(crate) fn dir_bytes(dir: &Path) -> u64 {
 /// the rename removes the temporary file and leaves `path` unchanged (`Err`); a failing
 /// directory `fsync` after the rename is only a warning (the new file is in place, which the
 /// caller's memory must follow). The callers serialize their read-modify-write cycles with
-/// their own lock (the inventory in `docs/server-dir.md`): this function only guarantees that
+/// their own lock (the inventory in `book/src/reference/server_directory.md`): this function only guarantees that
 /// the file is always one writer's whole content.
 pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), ServerError> {
     write_atomic_with(path, bytes, false)
@@ -575,7 +575,7 @@ impl ServerDir {
     /// write and the rename) in every directory where this server writes files atomically:
     /// the root, `sessions/`, `models/`, every `databases/<name>/` and `backups/<name>/`.
     /// Only names this server makes are touched (`<file>.tmp-<pid>-<n>` and the legacy names of
-    /// `docs/server-dir.md` "Concurrent changes"). Run by the registry scan
+    /// `book/src/reference/server_directory.md` "Concurrent changes"). Run by the registry scan
     /// at start, with the server lock held. Answers the paths removed (each logged).
     pub fn remove_stale_temps(&self) -> Vec<PathBuf> {
         let mut dirs = vec![self.root.clone(), self.sessions(), self.models()];

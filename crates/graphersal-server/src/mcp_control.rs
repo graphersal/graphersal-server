@@ -508,7 +508,7 @@ impl McpUsage {
         (sessions, counter.calls, counter.errors)
     }
 
-    /// The statistics as JSON (`GET /api/admin/mcp` `usage`; docs/admin-api.md).
+    /// The statistics as JSON (`GET /api/admin/mcp` `usage`; book/src/reference/admin_api.md).
     pub(crate) fn to_json(&self) -> Value {
         let state = self.lock();
         let mut identities: BTreeMap<String, u64> = BTreeMap::new();

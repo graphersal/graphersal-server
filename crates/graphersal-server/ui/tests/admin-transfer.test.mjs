@@ -2,7 +2,7 @@
 // export download, import by upload (progress, size pre-check, 413) and by server path, the
 // models (list, add, remove, the databases waiting for one), the `needs-model` hint and the
 // listing fields `sizeBytes`, `pooled`/`pooledBy`, `linkWarning`, all against a stateful mock
-// (node:http on port 0) shaped after docs/admin-api.md.
+// (node:http on port 0) shaped after book/src/reference/admin_api.md.
 // Run: node --test crates/graphersal-server/ui/tests/*.test.mjs
 import { test } from 'node:test';
 import assert from 'node:assert/strict';

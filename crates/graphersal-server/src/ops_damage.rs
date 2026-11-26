@@ -318,7 +318,7 @@ fn frozen(
     found.is_some_and(|found| !found.is_empty()) && policy == Some(DamagePolicy::Maintenance)
 }
 
-/// A repair report as JSON (`docs/admin-api.md`, "Verify, repair and swap").
+/// A repair report as JSON (`book/src/reference/admin_api.md`, "Verify, repair and swap").
 pub(crate) fn repair_json(report: &RepairReport) -> Value {
     let element = |e: &graphersal::changes::ElementRef| {
         let kind = match e.kind {

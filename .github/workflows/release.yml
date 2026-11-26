@@ -7,7 +7,7 @@ name: Release
 # `graphersal-server-v<version>-windows-x86_64.zip` (the binary, LICENSE-APACHE, NOTICE,
 # README.md and THIRD-PARTY-LICENSES.html from cargo-about, about.toml) plus `SHA256SUMS`, uploaded
 # as the artifact `graphersal-server-windows-x86_64`. On a release tag it also creates a DRAFT
-# GitHub Release with both files; its text is `docs/release-notes-<version>.md`. The maintainer
+# GitHub Release with both files; its text is `book/src/release_notes/<version>.md`. The maintainer
 # checks the draft and publishes it by hand. Nothing goes to crates.io (`publish = false`).
 #
 # Triggers:
@@ -80,7 +80,7 @@ jobs:
             echo "::error::The tag $tag does not match the workspace version $version"
             exit 1
           fi
-          notes="docs/release-notes-$version.md"
+          notes="book/src/release_notes/$version.md"
           test -f "$notes" || { echo "::error::$notes (the release text) is missing"; exit 1; }
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
@@ -168,7 +168,7 @@ jobs:
         run: |
           set -euo pipefail
           {
-            cat "docs/release-notes-$VERSION.md"
+            cat "book/src/release_notes/$VERSION.md"
             echo
             echo "---"
             echo
