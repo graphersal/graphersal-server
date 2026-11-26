@@ -357,6 +357,22 @@ impl Registry {
         })
     }
 
+    /// Sets the `needs_model` marker of the database `name` to `repo` (a verify found only
+    /// that model's blob missing); nothing is written when it is set already.
+    pub(crate) fn set_needs_model(&self, name: &str, repo: &str) -> Result<(), ServerError> {
+        let marked = self
+            .get(name)?
+            .config
+            .is_some_and(|config| config.needs_model.as_deref() == Some(repo));
+        if !marked {
+            self.update_config(name, None, |_, config| {
+                config.needs_model = Some(repo.to_string());
+                Ok(())
+            })?;
+        }
+        Ok(())
+    }
+
     /// Clears the `needs_model` marker of the database `name` (a load found every model it
     /// needs); nothing is written when it has none.
     pub fn clear_needs_model(&self, name: &str) -> Result<(), ServerError> {

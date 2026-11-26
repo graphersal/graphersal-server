@@ -123,6 +123,7 @@ The object describing one database (listing rows, and the answer of most actions
 | `pooledBy` | [string] | with `pooled` | the loaded layers holding it (empty: only the base itself, loaded for reading) |
 | `linkWarning` | string | listing rows | some of its model blobs are copies, not hard links to `models/` (the file system has no links there: correct, no disk saving; unix only) |
 | `revision` | string | config readable | the revision of its settings (`database.toml`): send it with a read-only or auto-load change ([Revisions](#revisions-concurrent-changes)) |
+| `lastVerify` | object \| null | listing rows | the database's last verify (kept in `databases/<name>/verify.json`, also across restarts): `atMs`, `verdict` (`ok`, `needs-model`, `damaged`, `failed`), `problemCount`, `modelsMissing`; `null` = never verified ([Verify, repair and swap](#verify-repair-and-swap)) |
 
 Listing rows are the answers of `GET /api/admin/databases` and `GET /api/admin/databases/<name>`.
 A listing never waits for a graph: a database a writer holds answers its last measured memory.
@@ -322,7 +323,7 @@ Database settings tab, `graphersal-server db info NAME`); `<name>` may be an ali
 | `admins` | the users with the admin role: they reach every database |
 | `backups` | `count`, `bytes`, `latest` (the newest backup row, or `null`) |
 | `store`, `storeError` | the Store's creation parameters (fixed for its life) and position, read with the engine's `Store::inspect` (works while it is loaded): `storeId`, `graphId`, `damagePolicy` (`maintenance` \| `continue`), `chunkBytes`, `createdAt` (RFC 3339 UTC), `formatVersion`, `backend` (`directory`), `commitSeq`, `lastCommitAt`, `layerBase` (a layer Store's base identity), `snapshots`, `walBytes`, `clean`; read-only. `storeError` instead when the Store cannot be read |
-| `recovery` | round 3: `maintenance` (bool), `damage` (the damage report of a database in maintenance, else `null`), `help` (in maintenance: repair or restore), `uncleanShutdown` (`null`, or `{"detectedAtMs", "previousPid", "check"}` when the last unclean shutdown's check covered this database: `check` is its entry of `uncleanShutdown.databases`, see Server) |
+| `recovery` | round 3: `maintenance` (bool), `damage` (the damage report of a database in maintenance, else `null`), `needsModel` (the missing model's repository of a `needs-model` database, else `null`), `lastVerify` (`null` = never verified, or the last verify: `version`, `atMs`, `verdict`, `how`, `problemCount`, `problems` (the first 100, as in a verify result), `modelsMissing`, `error` (verdict `failed`), `headline` (in words)), `help` (in maintenance: repair or restore), `uncleanShutdown` (`null`, or `{"detectedAtMs", "previousPid", "check"}` when the last unclean shutdown's check covered this database: `check` is its entry of `uncleanShutdown.databases`, see Server) |
 
 `PUT /api/admin/databases/<name>/settings` changes what can change at runtime, all given fields
 in ONE atomic write of `database.toml`, based on the `revision` (else `If-Match`; stale: `409`
@@ -785,13 +786,43 @@ commit continuity, lineage, models and blobs). A loaded plain or layer database:
 (found damage under the damage policy `maintenance` freezes it: the state becomes
 `maintenance`); anything else (unloaded, failed, needs-model, a base, the console on a stopped
 server): its files without opening it (a layer's without its base). A verify result:
-`database`, `state` (afterwards), `ok`, `how` (`open store` \| `files`), `problems`
-(`[{"path", "offset", "reason"}]`, paths relative to the Store), `notes`, `snapshotsChecked`,
-`segmentsChecked`, `recordsChecked`, `firstCommit`, `lastCommit`, `modelsChecked`,
-`blobsChecked`, `damage` (in maintenance) and, when it is not ok or in maintenance, `help`
-(repair, or restore a backup). Audited (`database 'x' checked: ok|damaged (...)`). `POST
-/api/admin/verify` verifies every database (`"ok"`: all of them are; a verify that failed is
-`{"database", "ok": false, "error"}`).
+`database`, `state` (afterwards), `ok` (no problem at all), `verdict`, `how` (`open store` \|
+`files`), `problems` (`[{"path", "offset", "reason", "kind", ...}]`, paths relative to the
+Store), `modelsMissing`, `notes`, `snapshotsChecked`, `segmentsChecked`, `recordsChecked`,
+`firstCommit`, `lastCommit`, `modelsChecked`, `blobsChecked`, `damage` (in maintenance) and,
+when it is not ok, `help`. Audited (`database 'x' checked: ok|needs-model|damaged (...)`).
+`POST /api/admin/verify` verifies every database (`"ok"`: all of them are; a verify that failed
+is `{"database", "ok": false, "error"}`). The web UI's Verify all calls the per-database route
+for one database after the other instead (its button shows `x/y`, Cancel stops before the next
+one).
+
+**Missing embedding models.** A missing blob that belongs to an embedding model is reported as
+that model: `kind` `model`, `model` (the repository, `owner/name`), `blob` (its SHA-256),
+`shared` (`true` when the server's shared `models/` hold the model, so it only has to be added to
+the database again) and `remedy` (download or import the model: Models tab or `graphersal-server
+models add SOURCE`; `models add NAME` when `models/` holds it). The server finds the model by the
+blob's hash in the loaded database's catalog or in `models/`, else by elimination among the
+models the verify reports missing (several missing blobs and as many missing models: each names
+the `candidates`). Any other problem, also a missing blob that is no model, has `kind` `damage`.
+The `verdict`:
+
+| `verdict` | Meaning | `help` |
+|---|---|---|
+| `ok` | no problem | none |
+| `needs-model` | the only problems are missing model blobs: the graph data is intact, this is not damage | add the model(s) |
+| `damaged` | damage (also in maintenance) | repair into a new database, or restore a backup |
+
+A plain, not loaded database whose verdict is `needs-model` gets the state `needs-model` (its
+`database.toml` `needs_model` marker is set, as an import does), so adding the model on the
+Models tab or with `models add` gives it the blob back and makes it `unloaded`; a `needs-model`
+database that verifies `ok` is `unloaded` again. A loaded database, a layer and a base keep their
+state.
+
+**The last verify.** Every verify (this route, Verify all, `db verify`, the check after an
+unclean shutdown; also a verify that failed, verdict `failed`) is kept as the database's last
+verify in `databases/<name>/verify.json`: the listing rows' `lastVerify` and the database
+settings' `recovery.lastVerify` (with its first 100 problems) show it, also after a restart. A
+new database has none (never verified); a swap's directory brings its own.
 
 `POST /api/admin/databases/<name>/repair` builds a repaired copy of the plain database `<name>`
 as a NEW database: the engine's repair (`Store::repair_to` of the open Store, else
@@ -870,7 +901,9 @@ exit code `2`); a loaded database's text names the unload and load that apply a 
 Offline both work on the directory (`database.toml` written atomically under the server lock).
 
 `db verify NAME` is `POST databases/NAME/verify`, `db verify --all` `POST verify` (a table of
-every database, then the damaged ones in full); exit code `1` when damage is found. `db repair
+every database, then the damaged ones in full; a database lacking only a model blob says `needs
+model`, names the model and prints the `models add` command that fixes it, not a repair); exit
+code `1` when damage or a missing model is found. `db repair
 NAME [--name NEW]` is `POST databases/NAME/repair` (the text lists what was rebuilt, lost,
 diverged and never carried, and the next commands); `db swap NAME WITH --yes` is `POST
 databases/NAME/swap {"with": WITH, "confirm": true}` (without `--yes` a usage error, exit code

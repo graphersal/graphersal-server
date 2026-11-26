@@ -74,7 +74,13 @@ memory (hover for the exact bytes and a layer's shared base).
 - **Damage:** a database in the state `maintenance` shows its damage report. "Verify" per row,
   "Verify all", and "Repair…" for a plain database: a repaired copy as a new database, then "Let
   it take the name…" (confirmed; the damaged one moves to `trash/`) or "Keep both", with the hint
-  to restore a backup instead. Above the table: the last unclean shutdown and the check of each
+  to restore a backup instead. "Verify all" verifies one database after the other and shows its
+  progress on the button (`Verifying 3/10…`); "Cancel" beside it stops before the next database
+  (the one being verified finishes). Its result is one notice listing each database with
+  problems and its problem lines. A missing blob of an embedding model is named as that model
+  ("the embedding model acme/tiny (blob f0ed7648) is missing") with the remedy: download or import
+  the model on the Models tab; such a database is `needs-model`, not damaged. A row whose last
+  verify found something shows a small badge ("verify: 3 problems", "verify: needs model"). Above the table: the last unclean shutdown and the check of each
   database ([A server killed by force](../troubleshooting.md#a-server-was-killed-by-force)).
 
 Programs talking to the server's HTTP API: [HTTP Clients and OpenAPI](http_clients.md).
@@ -149,8 +155,12 @@ One database, picked in the tab or opened by a Databases row's "Settings…":
   and, while loaded, the value in effect; each override edited in place; "Unload and load now…"
   when the values differ;
 - MCP, grants and backups, with links to those tabs;
-- "Damage and recovery": a database in maintenance with its damage report, and its check after
-  the last unclean shutdown;
+- "Damage and recovery": a database in maintenance with its damage report; its last verify in
+  one wording ("Last verify <time>: no problem found", "…: the embedding model NAME is missing
+  (the graph data is intact; not damage)" with the remedy and a link to the Models tab, "…: N
+  problems: its Store is damaged" with the first problems, or "Never verified: Verify … checks
+  the whole Store"); a `needs-model` database names its missing model there too; and its check
+  after the last unclean shutdown;
 - the Store's creation parameters, read-only.
 
 Every change is based on the view's revision.

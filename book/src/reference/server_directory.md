@@ -130,6 +130,13 @@ name limit keeps the server's part short; keep the server directory itself short
 (e.g. `C:\gs\srv`, not a deep folder under the user profile). A directory whose `database.toml` or Store is broken is listed as `failed`
 with the reason; it never stops the server.
 
+`databases/<name>/verify.json` is the database's last verify (JSON, `version` 1: when it ended,
+the verdict `ok` / `needs-model` / `damaged` / `failed`, the problem count and the first 100
+problems, the missing models), written atomically after every verify. It goes with the
+directory (a delete moves it to `trash/`, a swap brings the other directory's); a missing file
+means "never verified", a broken one is ignored with a warning and replaced by the next verify.
+A server backup does not carry it.
+
 Every create, clone, import and restore builds the new database in `tmp/` and renames it into
 `databases/` in one step: a failure leaves no database, and the debris of a crash in `tmp/` is
 removed at the next start.
@@ -286,6 +293,7 @@ What writes which file at runtime, and under which lock:
 | `aliases.toml` | alias set/flip, rename, remove | the registry's write lock |
 | `mcp.toml` | the MCP switches (admin API, MCP tab, console `mcp`), alias rename (settings move) and remove, database delete and a new name (settings dropped) | the MCP settings' write lock (a leaf: it takes no other lock; a change of a name's settings holds the registry's read lock around it while the name must exist) |
 | `databases/<name>/database.toml` | read-only, auto-load, promote, the `needs_model` marker, the settings change (description, read-only, auto-load and the `[limits.query]` overrides in ONE write: `PUT /api/admin/databases/<name>/settings`, `db set`, the Database settings tab); a new database's file is written in its build in `tmp/` before the rename into `databases/` | the registry's write lock, held across the revision check, the read of the file's current limits, the write and the memory update (read-only, also through the settings, also the loader's flip lock, taken before the registry) |
+| `databases/<name>/verify.json` | every verify of the database (the last one replaces it) | none needed: each write is one whole file (`write_atomic`), the last verify wins |
 | `databases/<name>/store/` | the graphersal engine (the Store, its WAL, the database's job definitions) | the engine's own (one open Store per database) |
 | `databases/` (add, remove), `trash/` | create, clone, import, restore (rename of a build), repair (a new database built in `tmp/`), delete, restore over a database, swap (the old directory to `trash/`, the copy renamed) | the registry's write lock; delete, promote and a restore over a database also hold the loader's lock (nothing loads meanwhile) |
 | `sessions/browser.json` | login, logout, a session touched or ended | the browser session table's mutex |

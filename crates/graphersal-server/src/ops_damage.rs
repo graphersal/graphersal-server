@@ -22,7 +22,7 @@
 //!   and MCP settings removed; refused while an alias names it). Grants, aliases and MCP
 //!   settings of `<name>` stay. Both must be plain normal databases.
 
-use graphersal::persist::{DamagePolicy, RepairReport, Store};
+use graphersal::persist::{DamagePolicy, ModelState, RepairReport, Store};
 use serde_json::{Value, json};
 
 use super::{Admin, store_error};
@@ -31,7 +31,7 @@ use crate::database::{DatabaseConfig, DatabaseKind, DatabaseRole};
 use crate::error::ServerError;
 use crate::loader::OpenStoreRef;
 use crate::names::fold;
-use crate::recovery::VerifyFacts;
+use crate::recovery::{LastVerify, VERDICT_DAMAGED, VERDICT_NEEDS_MODEL, VERDICT_OK, VerifyFacts};
 use crate::registry::{DatabaseEntry, DbState};
 
 /// How many diverged elements a repair answer lists (the count is always given).
@@ -95,22 +95,45 @@ impl Admin {
         let failed = |err: graphersal::persist::PersistError| {
             store_error(&key, &format!("cannot verify it: {err}"))
         };
-        let (facts, frozen) = match open {
-            Some((_context, OpenStoreRef::Plain(store))) => {
-                let report = store.verify().map_err(failed)?;
+        let verified = match open {
+            Some((_context, OpenStoreRef::Plain(store))) => store.verify().map(|report| {
                 let frozen = frozen(store.damage_found().ok(), store.damage_policy().ok());
-                (VerifyFacts::of(&report, "open store"), frozen)
-            }
-            Some((_context, OpenStoreRef::Layer(store))) => {
-                let report = store.verify().map_err(failed)?;
+                (report, "open store", frozen, catalog_blobs(&store))
+            }),
+            Some((_context, OpenStoreRef::Layer(store))) => store.verify().map(|report| {
                 let frozen = frozen(store.damage_found().ok(), store.damage_policy().ok());
-                (VerifyFacts::of(&report, "open store"), frozen)
-            }
-            None => {
-                let report = Store::verify_dir(entry.store_dir().as_path()).map_err(failed)?;
-                (VerifyFacts::of(&report, "files"), false)
+                (report, "open store", frozen, Vec::new())
+            }),
+            None => Store::verify_dir(entry.store_dir().as_path())
+                .map(|report| (report, "files", false, Vec::new())),
+        };
+        let (report, how, frozen, catalog) = match verified {
+            Ok(verified) => verified,
+            Err(err) => {
+                let err = failed(err);
+                self.keep_last_verify(&key, &LastVerify::failed(&err.to_string(), now_ms()));
+                return Err(err);
             }
         };
+        let mut facts = VerifyFacts::of(&report, how);
+        if !facts.ok {
+            // A missing blob of an embedding model is named as that model (B-VERIFY).
+            let models = self.models();
+            let missing: Vec<String> = report
+                .models
+                .iter()
+                .filter(|m| matches!(m.state, ModelState::Missing))
+                .map(|m| m.repo.clone())
+                .collect();
+            let known = |hash: &str| {
+                catalog
+                    .iter()
+                    .find(|(h, _)| h == hash)
+                    .map(|(_, repo)| repo.clone())
+                    .or_else(|| models.repo_of_blob(hash))
+            };
+            facts.name_models(&known, &missing, &|repo| models.holds(repo));
+        }
         if frozen && entry.state == DbState::Loaded {
             let damage = format!(
                 "verify found {} problem(s):\n{}",
@@ -125,12 +148,14 @@ impl Admin {
                  (maintenance)"
             );
         }
+        self.follow_models(&key, &facts);
         let state = self.registry.get(&key)?.state;
-        let outcome = if !facts.ok || matches!(state, DbState::Maintenance { .. }) {
-            "damaged"
+        let outcome = if matches!(state, DbState::Maintenance { .. }) {
+            VERDICT_DAMAGED
         } else {
-            "ok"
+            facts.verdict()
         };
+        self.keep_last_verify(&key, &LastVerify::of(&facts, now_ms()));
         self.audit.record(AuditEvent::DatabaseChecked {
             name: key.clone(),
             outcome: outcome.to_string(),
@@ -141,6 +166,81 @@ impl Admin {
             facts,
             state,
         })
+    }
+
+    /// The database state follows a verify's models (B-VERIFY): a plain, not loaded database
+    /// whose only problems are missing embedding model blobs becomes `needs-model` (its
+    /// `needs_model` marker is set, so `models add` resolves it, as for an import); a
+    /// `needs-model` database that verifies without a problem is `unloaded` again (marker
+    /// cleared). A loaded database, a layer or a base is left as it is. A failure is a warning.
+    fn follow_models(&self, key: &str, facts: &VerifyFacts) {
+        let Ok(entry) = self.registry.get(key) else {
+            return;
+        };
+        let Some(config) = &entry.config else {
+            return;
+        };
+        if config.kind != DatabaseKind::Plain || config.role == DatabaseRole::Base {
+            return;
+        }
+        let change = match (facts.verdict(), &entry.state) {
+            (VERDICT_NEEDS_MODEL, DbState::Unloaded | DbState::NeedsModel { .. }) => {
+                let Some(repo) = facts.models_missing.first().cloned() else {
+                    return;
+                };
+                if config.needs_model.as_deref() == Some(repo.as_str())
+                    && entry.state == DbState::needs_model(repo.clone())
+                {
+                    return;
+                }
+                Some(repo)
+            }
+            (VERDICT_OK, DbState::NeedsModel { .. }) => None,
+            _ => return,
+        };
+        let apply = || match &change {
+            Some(repo) => {
+                self.registry.set_needs_model(key, repo)?;
+                self.registry
+                    .set_state(key, DbState::needs_model(repo.clone()))
+            }
+            None => {
+                self.registry.clear_needs_model(key)?;
+                self.registry.set_state(key, DbState::Unloaded)
+            }
+        };
+        let applied = match &self.loader {
+            Some(loader) => loader.while_idle(key, apply),
+            None => apply(),
+        };
+        match (applied, &change) {
+            (Ok(()), Some(repo)) => tracing::warn!(
+                target: "graphersal_server",
+                "database '{key}': the verify found the blob of the embedding model '{repo}' \
+                 missing: needs-model (add the model: graphersal-server models add ...)"
+            ),
+            (Ok(()), None) => tracing::info!(
+                target: "graphersal_server",
+                "database '{key}': the verify found its models complete: unloaded"
+            ),
+            (Err(err), _) => tracing::warn!(
+                target: "graphersal_server",
+                "database '{key}': cannot follow the verify's models: {err}"
+            ),
+        }
+    }
+
+    /// Keeps `last` as the database `key`'s last verify (a failure is a warning).
+    fn keep_last_verify(&self, key: &str, last: &LastVerify) {
+        let Ok(entry) = self.registry.get(key) else {
+            return;
+        };
+        if let Err(err) = last.write(&entry.dir) {
+            tracing::warn!(
+                target: "graphersal_server",
+                "database '{key}': cannot keep the last verify: {err}"
+            );
+        }
     }
 
     /// Verifies every database ([`Admin::verify`] each, in name order): each one's result,
@@ -308,6 +408,26 @@ impl Admin {
             grants_removed: grants.unwrap_or(0),
         })
     }
+}
+
+/// The model blobs of an open Store's catalog: `(blob hash, repository)`.
+fn catalog_blobs(store: &Store) -> Vec<(String, String)> {
+    use graphersal::prelude::GraphStorage;
+    let Ok(graph) = store.graph().read_checked() else {
+        return Vec::new();
+    };
+    let Ok(definitions) = graph.definitions() else {
+        return Vec::new();
+    };
+    definitions
+        .filter_map(|d| d.as_model())
+        .map(|m| (m.blob().hash_hex(), m.repo().to_string()))
+        .collect()
+}
+
+/// Now in Unix milliseconds.
+fn now_ms() -> u64 {
+    crate::control::unix_ms(std::time::SystemTime::now())
 }
 
 /// Whether found damage froze the open Store (the damage policy `maintenance`).

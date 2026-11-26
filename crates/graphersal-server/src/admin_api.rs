@@ -131,7 +131,9 @@
 //! graph; a layer: its own changes; a base: the frozen base graph), `null` when it is not
 //! loaded (or was never measurable: a writer held it from the start); a layer adds
 //! `sharedMemoryBytes`, its base's memory, shared with the base and the other layers
-//! (`Loader::memory`, never waiting for a graph).
+//! (`Loader::memory`, never waiting for a graph); `lastVerify` (B-VERIFY): `null` (never
+//! verified) or `{"atMs", "verdict" (ok | needs-model | damaged | failed), "problemCount",
+//! "modelsMissing"}`.
 //!
 //! An entry: `name`, `state` (`unloaded` | `loading` | `loaded` | `needs-model` | `failed` |
 //! `maintenance`: loaded read-only because its Store is damaged, with `damage`, the report),
@@ -1562,6 +1564,8 @@ impl Extras {
     fn row(&self, entry: &DatabaseEntry, alias: Option<&str>) -> Value {
         let mut row = entry_json(entry, alias);
         row["sizeBytes"] = json!(crate::usage::disk_bytes(&entry.dir));
+        row["lastVerify"] = crate::recovery::LastVerify::read(&entry.dir)
+            .map_or(Value::Null, |last| last_verify_brief(&last));
         let memory = self.memory.databases.get(&entry.name);
         row["memoryBytes"] = json!(memory.and_then(|m| m.bytes));
         if let Some(shared) = memory.and_then(|m| m.shared_bytes) {
@@ -1776,6 +1780,17 @@ struct ModelAddBody {
 }
 
 /// One entry of the listing (module docs); `alias`: the row of that alias of `entry`.
+/// A database's last verify in a list row: `{"atMs", "verdict", "problemCount",
+/// "modelsMissing"}` (the settings show it whole).
+pub(crate) fn last_verify_brief(last: &crate::recovery::LastVerify) -> Value {
+    json!({
+        "atMs": last.at_ms,
+        "verdict": last.verdict,
+        "problemCount": last.problem_count,
+        "modelsMissing": last.models_missing,
+    })
+}
+
 pub(crate) fn entry_json(entry: &DatabaseEntry, alias: Option<&str>) -> Value {
     let mut out = Map::new();
     out.insert(

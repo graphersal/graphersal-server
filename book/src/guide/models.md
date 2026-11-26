@@ -85,6 +85,14 @@ graphersal-server models add org/model --dir ./srv
 graphersal-server db load acme --dir ./srv
 ```
 
+**Verify finds a missing model blob.** A Store that lost a model's blob (a link removed by hand,
+an older import) fails to load with `needs-model`. `db verify NAME` (or Verify on the Databases
+tab) names it: "the embedding model org/model (blob f0ed7648) is missing", with the command that
+adds it (`models add org/model` when `models/` holds it, else `models add SOURCE`). This is not
+damage: the graph data is intact and no repair is needed. A plain database that is not loaded
+becomes `needs-model` (marked in its `database.toml`), so adding the model resolves it as for an
+import. The Database settings tab shows the last verify and the missing model.
+
 **A base cannot get a model later.** An import with `--role base` of a source naming a model
 that neither it nor `models/` carries is refused. Add the model first and import again, or
 import it as an ordinary database, add the model, then promote it.

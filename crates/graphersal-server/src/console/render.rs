@@ -491,9 +491,24 @@ fn verify_note(answer: &Value, dir_arg: &str) -> Note {
                 format!("{BIN} db backups {name} --dir {dir_arg}"),
             );
     }
+    let needs_model = !maintenance && answer["verdict"] == "needs-model";
+    let models_missing = || {
+        answer["modelsMissing"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
     let headline = match (ok, maintenance) {
         (true, false) => format!("Database '{name}' verifies: no problem found"),
         (true, true) => format!("Database '{name}' is in maintenance (read-only)"),
+        (false, _) if needs_model => format!(
+            "Database '{name}' needs its embedding model: {} is missing (the graph data is \
+             intact)",
+            models_missing()
+        ),
         (false, _) => format!(
             "Database '{name}' is DAMAGED: {} problem(s)",
             answer["problems"].as_array().map(Vec::len).unwrap_or(0)
@@ -504,7 +519,8 @@ fn verify_note(answer: &Value, dir_arg: &str) -> Note {
         .detail(
             "checked",
             format!(
-                "{} snapshot(s), {} WAL segment(s), {} record(s) (commits {}..{}), {} model(s),                  {} blob(s)",
+                "{} snapshot(s), {} WAL segment(s), {} record(s) (commits {}..{}), {} model(s), \
+                 {} blob(s)",
                 n("snapshotsChecked"),
                 n("segmentsChecked"),
                 n("recordsChecked"),
@@ -515,24 +531,47 @@ fn verify_note(answer: &Value, dir_arg: &str) -> Note {
             ),
         )
         .detail("state", answer["state"].as_str().unwrap_or_default());
+    let mut model_commands: Vec<(String, String)> = Vec::new();
     for problem in answer["problems"].as_array().into_iter().flatten() {
-        let at = problem["offset"]
-            .as_u64()
-            .map(|o| format!(" at byte {o}"))
-            .unwrap_or_default();
-        note = note.detail(
-            "problem",
-            format!(
-                "{}{at}: {}",
-                problem["path"].as_str().unwrap_or_default(),
-                problem["reason"].as_str().unwrap_or_default()
-            ),
-        );
+        note = note.detail("problem", problem_text(problem));
+        if problem["kind"] == "model" {
+            let command = match (problem["model"].as_str(), problem["shared"] == true) {
+                (Some(model), true) => (
+                    format!("the shared models hold {model}: add it to the database again"),
+                    format!("{BIN} models add {model} --dir {dir_arg}"),
+                ),
+                (Some(model), false) => (
+                    format!(
+                        "download the model {model} (a Model2Vec directory), then import it \
+                         (a directory, .tar/.tar.gz or a .gsnap carrying it)"
+                    ),
+                    format!("{BIN} models add SOURCE --dir {dir_arg}"),
+                ),
+                (None, _) => (
+                    "import the missing model (a directory, .tar/.tar.gz or .gsnap)".to_string(),
+                    format!("{BIN} models add SOURCE --dir {dir_arg}"),
+                ),
+            };
+            if !model_commands.contains(&command) {
+                model_commands.push(command);
+            }
+        }
     }
     if let Some(damage) = answer["damage"].as_str() {
         note = note.detail("damage", damage);
     }
-    if !ok || maintenance {
+    if needs_model {
+        for (why, command) in model_commands {
+            note = note.command(&why, command);
+        }
+        note = note.command(
+            "then load it",
+            format!("{BIN} db load {name} --dir {dir_arg}"),
+        );
+    } else if !ok || maintenance {
+        for (why, command) in model_commands {
+            note = note.command(&why, command);
+        }
         note = note
             .command(
                 "repair it into a new database (it is not changed)",
@@ -544,6 +583,37 @@ fn verify_note(answer: &Value, dir_arg: &str) -> Note {
             );
     }
     note
+}
+
+/// One verify problem in words: `path at byte N: reason`; a missing model blob: `the
+/// embedding model NAME (blob f0ed7648) is missing`.
+fn problem_text(problem: &Value) -> String {
+    if problem["kind"] == "model" {
+        let blob = problem["blob"].as_str().unwrap_or("?");
+        let short = crate::recovery::short_hash(blob);
+        return match problem["model"].as_str() {
+            Some(model) => format!("the embedding model {model} (blob {short}) is missing"),
+            None => format!(
+                "the blob {short} of one of the embedding models {} is missing",
+                problem["candidates"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        };
+    }
+    let at = problem["offset"]
+        .as_u64()
+        .map(|o| format!(" at byte {o}"))
+        .unwrap_or_default();
+    format!(
+        "{}{at}: {}",
+        problem["path"].as_str().unwrap_or_default(),
+        problem["reason"].as_str().unwrap_or_default()
+    )
 }
 
 /// `db verify --all`.
@@ -559,6 +629,8 @@ fn render_verify_all(answer: &Value, dir_arg: &str) -> String {
                 "verify failed".to_string()
             } else if r["ok"] == Value::Bool(true) && r["state"] != "maintenance" {
                 "ok".to_string()
+            } else if r["verdict"] == "needs-model" && r["state"] != "maintenance" {
+                "needs model".to_string()
             } else {
                 format!(
                     "DAMAGED ({} problem(s))",
@@ -1137,8 +1209,8 @@ fn render_info(answer: &Value, dir_arg: &str) -> String {
             store.row("layer base", base);
         }
     }
-    // Round 3 B-CRASH: the damage state and this database's unclean-shutdown check (left out
-    // when there is neither).
+    // Round 3 B-CRASH: the damage state and this database's unclean-shutdown check; B-VERIFY:
+    // the needs-model state and the last verify (always a row: "never verified").
     let recovery = &answer["recovery"];
     let mut damage = Section::new("Damage and recovery");
     if recovery["maintenance"] == Value::Bool(true) {
@@ -1153,6 +1225,47 @@ fn render_info(answer: &Value, dir_arg: &str) -> String {
             "repair",
             format!("{BIN} db repair {name} --dir {dir_arg} (or db backups {name})"),
         );
+    }
+    // B-VERIFY: the needs-model state and the last verify, in the web UI's words.
+    if let Some(repo) = recovery["needsModel"].as_str() {
+        damage.row(
+            "needs model",
+            format!("the embedding model {repo} is missing (the graph data is intact)"),
+        );
+        damage.unwrapped(
+            "add it",
+            format!(
+                "{BIN} models add SOURCE --dir {dir_arg} (or models add {repo} when the shared \
+                 models hold it)"
+            ),
+        );
+    }
+    match recovery["lastVerify"].as_object() {
+        Some(last) => {
+            let headline = last
+                .get("headline")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            damage.row(
+                "last verify",
+                headline.strip_prefix("Last verify ").unwrap_or(headline),
+            );
+            for problem in last
+                .get("problems")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .take(5)
+            {
+                damage.row("problem", problem_text(problem));
+            }
+        }
+        None => damage.row(
+            "last verify",
+            format!(
+                "never verified ({BIN} db verify {name} --dir {dir_arg} checks the whole Store)"
+            ),
+        ),
     }
     let unclean = &recovery["uncleanShutdown"];
     if let Some(check) = unclean.get("check").filter(|c| c.is_object()) {
@@ -1922,6 +2035,71 @@ mod tests {
 
     fn dir() -> PathBuf {
         PathBuf::from("srv")
+    }
+
+    #[test]
+    fn db_verify_names_a_missing_model_and_the_command_that_adds_it() {
+        let hash = "f0ed7648aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let answer = json!({
+            "database": "kb", "ok": false, "verdict": "needs-model", "state": "needs-model",
+            "how": "files", "modelsMissing": ["acme/tiny"],
+            "problems": [{"path": format!("blobs/f0/{hash}"), "offset": null,
+                          "reason": "the blob is missing", "kind": "model",
+                          "model": "acme/tiny", "blob": hash, "remedy": "..."}],
+        });
+        let command = DbCommand::Verify {
+            name: Some("kb".to_string()),
+        };
+        let text = render(&command, &answer, &dir());
+        let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            flat.contains("Database 'kb' needs its embedding model: acme/tiny is missing"),
+            "{text}"
+        );
+        assert!(
+            flat.contains("the embedding model acme/tiny (blob f0ed7648) is missing"),
+            "{text}"
+        );
+        assert!(
+            flat.contains("graphersal-server models add SOURCE --dir srv"),
+            "{text}"
+        );
+        assert!(
+            flat.contains("graphersal-server db load kb --dir srv"),
+            "{text}"
+        );
+        assert!(!flat.contains("db repair"), "{text}");
+        assert!(
+            failed(&command, &answer),
+            "a needs-model verify is not a success"
+        );
+        // Shared: the command adds it by its repository; verify --all says "needs model".
+        let mut shared = answer.clone();
+        shared["problems"][0]["shared"] = json!(true);
+        let text = render(&command, &shared, &dir());
+        assert!(text.contains("models add acme/tiny --dir srv"), "{text}");
+        let all = render(
+            &DbCommand::Verify { name: None },
+            &json!({"ok": false, "results": [answer]}),
+            &dir(),
+        );
+        assert!(all.contains("needs model"), "{all}");
+        // A generic missing blob keeps its path and the repair commands.
+        let generic = json!({
+            "database": "kb", "ok": false, "verdict": "damaged", "state": "unloaded",
+            "how": "files",
+            "problems": [{"path": "blobs/aa/aa11", "offset": null,
+                          "reason": "the blob is missing", "kind": "damage"}],
+        });
+        let text = render(&command, &generic, &dir());
+        assert!(
+            text.contains("blobs/aa/aa11: the blob is missing"),
+            "{text}"
+        );
+        assert!(
+            text.contains("is DAMAGED") && text.contains("db repair kb"),
+            "{text}"
+        );
     }
 
     #[test]

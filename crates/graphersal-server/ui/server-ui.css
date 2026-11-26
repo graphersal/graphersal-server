@@ -163,3 +163,9 @@ p.srv-problems { padding-left: 0; }
 @media (hover: none) { .srv-toast-close { opacity: 1; } }
 @keyframes srv-toast-in { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: none; } }
 @media (prefers-reduced-motion: reduce) { .srv-toast { animation: none; } }
+/* B-VERIFY: the last verify in the Database settings' "Damage and recovery". */
+.srv-verify { margin: 8px 0; }
+.srv-verify-warn, .srv-verify-error { padding: 6px 10px; border-left: 3px solid var(--warn); background: var(--warn-soft); }
+.srv-verify-error { border-left-color: var(--danger); background: var(--danger-soft); }
+.srv-verify .srv-problems { margin-top: 4px; }
+.srv-verify-warn .srv-problems { color: var(--warn); }

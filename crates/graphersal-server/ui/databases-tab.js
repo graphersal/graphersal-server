@@ -31,7 +31,7 @@ import { reactive, ref, computed, nextTick } from 'vue';
 import {
   createBody, nameProblem, existingNameProblem, renameProblem, NAME_HINT, rowActions, confirmText, outcomeText, outcomeTone, loadAndWatch, baseNames, realRows,
   bytesText, transferActions, needsModelHint, poolText, promoteAction, isConflict, kindHelp, BASE_HELP, PROMOTE_HELP, KIND_HELP,
-  isOpenState, damageActions, verifyText, verifyDamaged, verifyAllText, problemLines, repairSummary, repairedName, uncleanRows, REPAIR_HELP, RESTORE_HINT,
+  isOpenState, damageActions, verifyText, verifyVerdict, verifyHelp, verifyAllText, verifyAllLabel, runVerifyAll, verifyBadge, repairSummary, repairedName, uncleanRows, REPAIR_HELP, RESTORE_HINT,
   MCP_NEW_HELP,
 } from './admin-api.js';
 import {
@@ -135,10 +135,11 @@ export default {
       busy[row.name] = 'verify';
       try {
         const answer = await admin.verify(row.name);
+        const verdict = verifyVerdict(answer);
         notify({
-          tone: verifyDamaged(answer) ? 'error' : 'ok',
+          tone: verdict === 'ok' ? 'ok' : verdict === 'needs-model' ? 'warn' : 'error',
           text: verifyText(answer),
-          help: verifyDamaged(answer) ? `${problemLines(answer).join('\n')}${problemLines(answer).length ? '\n' : ''}Repair… builds a repaired copy as a new database. ${RESTORE_HINT}` : '',
+          help: verifyHelp(answer, RESTORE_HINT),
         });
       } catch (err) {
         notify(errorNotice(err));
@@ -147,19 +148,30 @@ export default {
         await reload();
       }
     }
-    const verifyingAll = ref(false);
+    // Verify all (B-VERIFY): the databases one after the other through the per-database route,
+    // so the button shows `x/y` and Cancel stops before the next one (the running verify ends);
+    // the result is ONE toast with every problem line.
+    const verifyRun = reactive({ running: false, done: 0, total: 0, cancel: false });
+    const verifyingAll = computed(() => verifyRun.running);
     async function verifyAll() {
-      verifyingAll.value = true;
+      if (verifyRun.running) return;
+      const names = realRows(rows.value).map((r) => r.name);
+      Object.assign(verifyRun, { running: true, done: 0, total: names.length, cancel: false });
       try {
-        const summary = verifyAllText(await admin.verifyAll());
+        const run = await runVerifyAll(names, (name) => admin.verify(name), {
+          progress: (done, total) => Object.assign(verifyRun, { done, total }),
+          cancelled: () => verifyRun.cancel,
+        });
+        const summary = verifyAllText(run.results, { total: names.length, cancelled: run.cancelled });
         notify({ tone: summary.tone, text: summary.text, help: summary.lines.join('\n') });
       } catch (err) {
         notify(errorNotice(err));
       } finally {
-        verifyingAll.value = false;
+        Object.assign(verifyRun, { running: false, cancel: false });
         await reload();
       }
     }
+    const cancelVerifyAll = () => { if (verifyRun.running) verifyRun.cancel = true; };
     const openRepair = (row) => openDialog('repair', { source: row.name, newName: repairedName(row.name) });
     /** "Let it take the name…": the confirmed swap of the repaired copy into the damaged database's name. */
     async function swapRepaired() {
@@ -346,7 +358,7 @@ export default {
     return {
       list, rows, aliases, memory, diskTitle, memoryText, memoryTitle, dbSort, aliasSort, kindHelp, baseHelp: BASE_HELP, mcpHelp: MCP_NEW_HELP, promoteHelp: PROMOTE_HELP, kindHelpOf: KIND_HELP, busy, dlg, dialog, acts, bases, databaseNames, showSize, showMemory,
       bytesText, needsModelHint, poolText, badgeText, rowItems, href: pageHref, reload, nameHint: NAME_HINT,
-      unclean, hideUnclean, isOpenState, verifyDb, verifyAll, verifyingAll, openRepair, swapRepaired, keepBoth, repairHelp: REPAIR_HELP, restoreHint: RESTORE_HINT,
+      unclean, hideUnclean, isOpenState, verifyDb, verifyAll, verifyingAll, verifyRun, cancelVerifyAll, verifyAllLabel, verifyBadge, openRepair, swapRepaired, keepBoth, repairHelp: REPAIR_HELP, restoreHint: RESTORE_HINT,
       loadDb, unloadDb, deleteDb, promoteDb, setFlag, openCreate, openClone, openAlias, openRename, closeDialog, submitDialog, removeAlias,
       openBackups: (name) => props.api.navigate('backups', name ? { db: name } : {}),
       openExport: (row) => props.api.navigate('export', { db: row.name }),
@@ -371,7 +383,8 @@ export default {
       <span class="spacer"></span>
       <button class="btn" type="button" @click="reload" :disabled="list.loading">{{ list.loading ? 'Loading…' : 'Refresh' }}</button>
       <button class="btn" type="button" @click="openBackups('')" :disabled="!list.loaded || !!list.error" title="The backups of any database, also of a deleted one">Backups…</button>
-      <button class="btn" type="button" @click="verifyAll" :disabled="!list.loaded || !!list.error || verifyingAll" title="Verify the Store of every database (after a crash, or regularly: it finds damage while older snapshots can still repair it)">{{ verifyingAll ? 'Verifying…' : 'Verify all' }}</button>
+      <button class="btn" type="button" @click="verifyAll" :disabled="!list.loaded || !!list.error || verifyingAll" :aria-busy="verifyingAll ? 'true' : null" data-verify-all title="Verify the Store of every database, one after the other (after a crash, or regularly: it finds damage while older snapshots can still repair it)">{{ verifyAllLabel(verifyRun) }}</button>
+      <button v-if="verifyRun.running" class="btn" type="button" @click="cancelVerifyAll" :disabled="verifyRun.cancel" data-verify-cancel title="Stop after the database being verified now">Cancel</button>
       <button class="btn" type="button" @click="openImport" :disabled="!list.loaded || !!list.error">Import…</button>
       <button class="btn primary" type="button" @click="openCreate" :disabled="!list.loaded || !!list.error">New database…</button>
     </div>
@@ -416,7 +429,8 @@ export default {
             <details v-if="row.damage" class="srv-sub srv-damage"><summary>Damage report</summary><pre class="mono">{{ row.damage }}</pre></details>
             <div v-if="row.model" class="muted srv-sub mono">{{ row.model }}</div>
             <div v-if="needsModelHint(row)" class="srv-sub srv-hint" :title="needsModelHint(row)">Add the model in the <a href="#" @click.prevent="openModels">Models</a> tab.</div>
-            <div v-if="row.linkWarning" class="srv-sub srv-warn" :title="row.linkWarning">{{ row.linkWarning }}</div></td>
+            <div v-if="row.linkWarning" class="srv-sub srv-warn" :title="row.linkWarning">{{ row.linkWarning }}</div>
+            <div v-if="!row.aliasOf && verifyBadge(row)" class="srv-sub" data-verify-badge><span class="badge" :class="verifyBadge(row).tone" :title="verifyBadge(row).title">{{ verifyBadge(row).text }}</span></div></td>
           <td :title="kindHelp(row) || null">{{ kindText(row) }}<div v-if="row.base" class="muted srv-sub">over {{ row.base }}</div></td>
           <td><input type="checkbox" :checked="row.readOnly" :disabled="!acts(row).readOnly.enabled" :title="acts(row).readOnly.title"
                      :aria-label="'Read-only: ' + row.name" @change="setFlag(row, 'readOnly', $event)"></td>

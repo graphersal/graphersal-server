@@ -47,7 +47,7 @@ use crate::ops::Admin;
 use crate::registry::DbState;
 use crate::run_file::RunInfo;
 
-pub use crate::layout::{OPEN_FILE, RECOVERY_FILE};
+pub use crate::layout::{LAST_VERIFY_FILE, OPEN_FILE, RECOVERY_FILE};
 
 /// How long the check waits for one database's load.
 const LOAD_WAIT: Duration = Duration::from_secs(3600);
@@ -359,6 +359,103 @@ pub struct ProblemFacts {
     pub offset: Option<u64>,
     /// What is wrong.
     pub reason: String,
+    /// What kind of problem it is: `damage` (damage or an inconsistency of the Store's files;
+    /// also a missing blob that is not a known embedding model) or `model` (the blob of an
+    /// embedding model is missing: [`ProblemFacts::model`]). Older reports have none
+    /// (`damage`).
+    #[serde(default = "damage_kind")]
+    pub kind: String,
+    /// `kind` `model`: the embedding model (its repository, `owner/name`) whose blob is
+    /// missing; `None` when the blob is one of several missing models ([`Self::candidates`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// `kind` `model` without a [`Self::model`]: the models the blob may belong to.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub candidates: Vec<String>,
+    /// `kind` `model`: the blob's SHA-256 (hex).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blob: Option<String>,
+    /// `kind` `model`: whether the server's shared models (`models/`) hold the model (then it
+    /// only has to be added to the database again: `models add <repo>`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub shared: bool,
+    /// What fixes it, in words (`kind` `model`: add the model).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remedy: Option<String>,
+}
+
+/// The default [`ProblemFacts::kind`].
+fn damage_kind() -> String {
+    KIND_DAMAGE.to_string()
+}
+
+/// [`ProblemFacts::kind`] of damage.
+pub const KIND_DAMAGE: &str = "damage";
+/// [`ProblemFacts::kind`] of a missing embedding model blob.
+pub const KIND_MODEL: &str = "model";
+/// [`VerifyFacts::verdict`]: no problem found.
+pub const VERDICT_OK: &str = "ok";
+/// [`VerifyFacts::verdict`]: the only problems are missing embedding model blobs.
+pub const VERDICT_NEEDS_MODEL: &str = "needs-model";
+/// [`VerifyFacts::verdict`]: damage found.
+pub const VERDICT_DAMAGED: &str = "damaged";
+
+impl ProblemFacts {
+    /// The problem in one line: `blobs/f0/f0ed...: the blob is missing`; a missing model's
+    /// blob: `the embedding model acme/tiny (blob f0ed7648) is missing`.
+    pub fn text(&self) -> String {
+        if self.kind == KIND_MODEL {
+            let short = self.blob.as_deref().map_or("?", short_hash);
+            return match (&self.model, self.candidates.as_slice()) {
+                (Some(model), _) => {
+                    format!("the embedding model {model} (blob {short}) is missing")
+                }
+                (None, candidates) => format!(
+                    "the blob {short} of one of the embedding models {} is missing",
+                    candidates.join(", ")
+                ),
+            };
+        }
+        match self.offset {
+            Some(offset) => format!("{} at byte {offset}: {}", self.path, self.reason),
+            None => format!("{}: {}", self.path, self.reason),
+        }
+    }
+}
+
+/// The first 8 hex digits of a blob hash.
+pub fn short_hash(hash: &str) -> &str {
+    hash.get(..8).unwrap_or(hash)
+}
+
+/// What fixes a missing model blob: add the model (`shared`: `models/` holds it already).
+pub fn model_remedy(model: Option<&str>, shared: bool) -> String {
+    match (model, shared) {
+        (Some(model), true) => format!(
+            "the server's shared models hold {model}: add it to the database again (Models \
+             tab, or graphersal-server models add {model}); the database is then ready to load"
+        ),
+        (Some(model), false) => format!(
+            "download the model {model} (a Model2Vec directory) and import it on the Models tab \
+             (a model directory as .tar/.tar.gz, or a .gsnap carrying it) or with \
+             graphersal-server models add SOURCE; the database gets it and is ready to load"
+        ),
+        (None, _) => "import the missing model on the Models tab (a model directory as \
+                      .tar/.tar.gz, or a .gsnap carrying it) or with graphersal-server models \
+                      add SOURCE"
+            .to_string(),
+    }
+}
+
+/// The verify problem of a missing blob: its hash (`blobs/<2 hex>/<hash>`, the engine's text
+/// "the blob is missing"), else `None`.
+fn missing_blob_hash(problem: &ProblemFacts) -> Option<&str> {
+    if problem.reason != "the blob is missing" {
+        return None;
+    }
+    let rest = problem.path.strip_prefix("blobs/")?;
+    let hash = rest.rsplit('/').next()?;
+    (!hash.is_empty() && hash.bytes().all(|b| b.is_ascii_hexdigit())).then_some(hash)
 }
 
 /// What a verify of a Store found (from the engine's [`VerifyReport`]).
@@ -391,6 +488,14 @@ pub struct VerifyFacts {
     /// What was verified: `open store` (the loaded database's open Store) or `files` (its
     /// files without opening it: an unloaded, failed or base database).
     pub how: String,
+    /// The verdict: `ok` (no problem), `needs-model` (the only problems are missing embedding
+    /// model blobs: the database needs its model added, its graph data is intact) or `damaged`.
+    /// Older reports have none: [`VerifyFacts::verdict`] derives it.
+    #[serde(default)]
+    pub verdict: String,
+    /// The embedding models whose blobs are missing (repositories, sorted).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub models_missing: Vec<String>,
 }
 
 impl VerifyFacts {
@@ -405,6 +510,12 @@ impl VerifyFacts {
                     path: p.path.clone(),
                     offset: p.offset,
                     reason: p.reason.clone(),
+                    kind: damage_kind(),
+                    model: None,
+                    candidates: Vec::new(),
+                    blob: None,
+                    shared: false,
+                    remedy: None,
                 })
                 .collect(),
             notes: report.notes.clone(),
@@ -416,23 +527,114 @@ impl VerifyFacts {
             models_checked: report.models_checked,
             blobs_checked: report.blobs_checked,
             how: how.to_string(),
+            verdict: if report.is_ok() {
+                VERDICT_OK
+            } else {
+                VERDICT_DAMAGED
+            }
+            .to_string(),
+            models_missing: Vec::new(),
         }
     }
 
-    /// The problems in words, one per line.
+    /// The verdict ([`Self::verdict`], derived for a report without one).
+    pub fn verdict(&self) -> &str {
+        if !self.verdict.is_empty() {
+            &self.verdict
+        } else if self.ok {
+            VERDICT_OK
+        } else {
+            VERDICT_DAMAGED
+        }
+    }
+
+    /// Names the embedding models of the missing blobs among the problems (`kind` `model`)
+    /// and sets the verdict `needs-model` when they are the only problems.
+    ///
+    /// - `known(hash)`: the model of a blob known exactly (the loaded database's catalog, or
+    ///   the manifest of the same blob in the server's shared models);
+    /// - `missing`: the models the engine reports missing (`ModelState::Missing` of the
+    ///   verify's models): a missing blob no `known` names belongs to one of them, by
+    ///   elimination (one left: that one; as many blobs as models left: one of them, listed);
+    /// - `shared(repo)`: whether the shared models hold `repo` (the remedy differs).
+    ///
+    /// A missing blob that no model can account for stays `damage` (generic text).
+    pub fn name_models(
+        &mut self,
+        known: &dyn Fn(&str) -> Option<String>,
+        missing: &[String],
+        shared: &dyn Fn(&str) -> bool,
+    ) {
+        let mut named: BTreeSet<String> = BTreeSet::new();
+        let mut unnamed: Vec<usize> = Vec::new();
+        for (i, problem) in self.problems.iter_mut().enumerate() {
+            let Some(hash) = missing_blob_hash(problem).map(str::to_string) else {
+                continue;
+            };
+            match known(&hash) {
+                Some(model) => {
+                    problem.kind = KIND_MODEL.to_string();
+                    problem.blob = Some(hash);
+                    named.insert(model.clone());
+                    problem.model = Some(model);
+                }
+                None => unnamed.push(i),
+            }
+        }
+        let left: Vec<String> = missing
+            .iter()
+            .filter(|m| !named.contains(*m))
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        if !unnamed.is_empty() && unnamed.len() == left.len() {
+            for i in unnamed {
+                let problem = &mut self.problems[i];
+                problem.blob = missing_blob_hash(problem).map(str::to_string);
+                problem.kind = KIND_MODEL.to_string();
+                if left.len() == 1 {
+                    problem.model = Some(left[0].clone());
+                    named.insert(left[0].clone());
+                } else {
+                    problem.candidates = left.clone();
+                }
+            }
+            if left.len() > 1 {
+                named.extend(left);
+            }
+        }
+        for problem in &mut self.problems {
+            if problem.kind != KIND_MODEL {
+                continue;
+            }
+            problem.shared = problem.model.as_deref().is_some_and(shared);
+            problem.remedy = Some(model_remedy(problem.model.as_deref(), problem.shared));
+        }
+        self.models_missing = named.into_iter().collect();
+        if !self.problems.is_empty() && self.problems.iter().all(|p| p.kind == KIND_MODEL) {
+            self.verdict = VERDICT_NEEDS_MODEL.to_string();
+        }
+    }
+
+    /// The problems in words, one per line ([`ProblemFacts::text`]).
     pub fn problems_text(&self) -> String {
         self.problems
             .iter()
-            .map(|p| match p.offset {
-                Some(offset) => format!("{} at byte {offset}: {}", p.path, p.reason),
-                None => format!("{}: {}", p.path, p.reason),
-            })
+            .map(ProblemFacts::text)
             .collect::<Vec<_>>()
             .join("\n")
     }
 
     /// The facts in one line.
     pub fn summary(&self) -> String {
+        if self.verdict() == VERDICT_NEEDS_MODEL {
+            return format!(
+                "verify: the graph data is intact; the blob of the embedding model(s) {} is \
+                 missing (needs-model)",
+                self.models_missing.join(", ")
+            );
+        }
         if self.ok {
             format!(
                 "verify ok ({} snapshot(s), {} WAL record(s), commits {}..{})",
@@ -444,6 +646,143 @@ impl VerifyFacts {
                 self.problems.len(),
                 self.problems_text().lines().next().unwrap_or_default()
             )
+        }
+    }
+}
+
+/// The most problems [`LastVerify`] keeps (the count is always kept).
+const LAST_VERIFY_PROBLEMS: usize = 100;
+
+/// The last verify of a database (B-VERIFY), kept in its directory as [`LAST_VERIFY_FILE`]
+/// (`databases/<name>/verify.json`, JSON, written atomically after every verify: the admin
+/// verify, `db verify`, Verify all, the check after an unclean shutdown). It moves and goes
+/// with the database's directory (a delete or a swap takes it along; a new database has
+/// none: "never verified"). A missing file is "never verified"; an unreadable one is a warning
+/// and "never verified" too, overwritten by the next verify.
+///
+/// `#[non_exhaustive]`: further fields may be added (readers ignore unknown keys).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct LastVerify {
+    /// The file format's version (`1`).
+    pub version: u32,
+    /// When the verify ended, in Unix milliseconds.
+    pub at_ms: u64,
+    /// [`VerifyFacts::verdict`]: `ok`, `needs-model` or `damaged`; `failed` when the verify
+    /// itself failed ([`Self::error`]).
+    pub verdict: String,
+    /// What was verified (`open store` | `files`).
+    #[serde(default)]
+    pub how: String,
+    /// How many problems it found.
+    #[serde(default)]
+    pub problem_count: usize,
+    /// The first problems (at most 100).
+    #[serde(default)]
+    pub problems: Vec<ProblemFacts>,
+    /// The embedding models whose blobs were missing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub models_missing: Vec<String>,
+    /// Why the verify failed (verdict `failed`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl LastVerify {
+    /// The last verify of `facts`, ended at `at_ms`.
+    pub fn of(facts: &VerifyFacts, at_ms: u64) -> Self {
+        Self {
+            version: 1,
+            at_ms,
+            verdict: facts.verdict().to_string(),
+            how: facts.how.clone(),
+            problem_count: facts.problems.len(),
+            problems: facts
+                .problems
+                .iter()
+                .take(LAST_VERIFY_PROBLEMS)
+                .cloned()
+                .collect(),
+            models_missing: facts.models_missing.clone(),
+            error: None,
+        }
+    }
+
+    /// A verify that failed with `error` at `at_ms`.
+    pub fn failed(error: &str, at_ms: u64) -> Self {
+        Self {
+            version: 1,
+            at_ms,
+            verdict: "failed".to_string(),
+            how: String::new(),
+            problem_count: 0,
+            problems: Vec::new(),
+            models_missing: Vec::new(),
+            error: Some(error.to_string()),
+        }
+    }
+
+    /// Reads the last verify of the database directory `db_dir`: `None` when it was never
+    /// verified (or the file cannot be read: a warning).
+    pub fn read(db_dir: &std::path::Path) -> Option<Self> {
+        let path = db_dir.join(LAST_VERIFY_FILE);
+        let text = match fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return None,
+            Err(err) => {
+                tracing::warn!(target: "graphersal_server", "cannot read {}: {err}", path.display());
+                return None;
+            }
+        };
+        match serde_json::from_str::<Self>(&text) {
+            Ok(last) if last.version == 1 => Some(last),
+            Ok(last) => {
+                tracing::warn!(
+                    target: "graphersal_server",
+                    "{}: version {} is not known: ignored",
+                    path.display(),
+                    last.version
+                );
+                None
+            }
+            Err(err) => {
+                tracing::warn!(target: "graphersal_server", "cannot read {}: {err}", path.display());
+                None
+            }
+        }
+    }
+
+    /// Writes it into the database directory `db_dir` atomically.
+    ///
+    /// `Err`: [`ServerError::Io`] (the directory is gone, the disk refuses).
+    pub fn write(&self, db_dir: &std::path::Path) -> Result<(), ServerError> {
+        let path = db_dir.join(LAST_VERIFY_FILE);
+        let text = serde_json::to_string_pretty(self).map_err(|err| ServerError::Config {
+            path: path.clone(),
+            message: err.to_string(),
+        })?;
+        write_atomic(&path, text.as_bytes())
+    }
+
+    /// The last verify in words: `Last verify 2026-11-26 10:00:00 UTC: no problem found`.
+    pub fn headline(&self) -> String {
+        let when = crate::database::utc_text(self.at_ms / 1000);
+        match self.verdict.as_str() {
+            VERDICT_OK => format!("Last verify {when}: no problem found"),
+            VERDICT_NEEDS_MODEL => format!(
+                "Last verify {when}: the graph data is intact; the embedding model(s) {} \
+                 missing (needs-model)",
+                self.models_missing.join(", ")
+            ),
+            "failed" => format!(
+                "Last verify {when}: the verify failed: {}",
+                self.error.as_deref().unwrap_or_default()
+            ),
+            _ => format!(
+                "Last verify {when}: {} problem(s), DAMAGED",
+                self.problem_count
+            ),
         }
     }
 }
@@ -748,6 +1087,19 @@ fn check_one(loader: &Arc<Loader>, admin: &Admin, name: &str) -> DatabaseCheck {
                 }
                 DbState::NeedsModel { repo } => {
                     check.message = Some(format!("it needs the embedding model '{repo}'"));
+                    CheckOutcome::NeedsModel
+                }
+                _ if check
+                    .verify
+                    .as_ref()
+                    .is_some_and(|v| v.verdict() == VERDICT_NEEDS_MODEL) =>
+                {
+                    let models = check
+                        .verify
+                        .as_ref()
+                        .map(|v| v.models_missing.join(", "))
+                        .unwrap_or_default();
+                    check.message = Some(format!("it needs the embedding model '{models}'"));
                     CheckOutcome::NeedsModel
                 }
                 _ if check.verify.as_ref().is_some_and(|v| !v.ok) => CheckOutcome::Damaged,

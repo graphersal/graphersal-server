@@ -43,6 +43,9 @@ pub const RUN_FILE: &str = "server.run";
 pub const OPEN_FILE: &str = "server.open";
 /// The file of the last unclean shutdown's check (round 3 B-CRASH: [`crate::recovery`]).
 pub const RECOVERY_FILE: &str = "recovery.json";
+/// The file of a database's last verify, `databases/<name>/verify.json` (B-VERIFY:
+/// [`crate::recovery::LastVerify`]).
+pub const LAST_VERIFY_FILE: &str = "verify.json";
 /// The alias file's name.
 pub const ALIASES_FILE: &str = "aliases.toml";
 /// The access file's name (users, token hashes, grants: [`crate::access`]).

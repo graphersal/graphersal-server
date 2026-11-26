@@ -1091,3 +1091,259 @@ fn a_gzip_compressed_model_archive_is_added_and_bombs_and_broken_files_are_refus
     assert_eq!(added.added[0].repo.as_deref(), Some("acme/tiny"));
     assert!(tmp_is_empty(&dir));
 }
+
+// ---------------------------------------------------------------- B-VERIFY: missing model blobs
+
+/// The problems of a verify answer.
+fn problems_of(answer: &Value) -> Vec<Value> {
+    answer["problems"].as_array().cloned().unwrap_or_default()
+}
+
+#[test]
+fn a_verify_names_a_missing_model_blob_and_its_remedy_and_keeps_the_last_result() {
+    let temp = TempDir::new("models-verify");
+    let dir = server(&temp);
+    let admin = offline(&dir);
+    let (with, without) = snapshots(&temp, &admin);
+    // A database that never got its model blob (an import of a snapshot without models, the
+    // shared models lack it): verify names the model by elimination, not shared.
+    admin
+        .import(&ImportSource::new(&without), "kb", None, None)
+        .unwrap();
+    assert!(crate::recovery::LastVerify::read(&admin.registry().get("kb").unwrap().dir).is_none());
+    let (status, answer) = route(&admin, Method::Post, "databases/kb/verify", None);
+    assert_eq!(status, 200, "{answer}");
+    assert_eq!(answer["ok"], false, "{answer}");
+    assert_eq!(answer["verdict"], "needs-model", "{answer}");
+    assert_eq!(answer["state"], "needs-model", "{answer}");
+    assert_eq!(answer["modelsMissing"], json!(["acme/tiny"]), "{answer}");
+    let problems = problems_of(&answer);
+    assert_eq!(problems.len(), 1, "{answer}");
+    let problem = &problems[0];
+    assert_eq!(problem["kind"], "model", "{problem}");
+    assert_eq!(problem["model"], "acme/tiny", "{problem}");
+    assert!(problem.get("shared").is_none(), "{problem}");
+    let blob = problem["blob"].as_str().unwrap();
+    assert!(
+        problem["path"].as_str().unwrap().ends_with(blob),
+        "{problem}"
+    );
+    let remedy = problem["remedy"].as_str().unwrap();
+    assert!(
+        remedy.contains("download the model acme/tiny")
+            && remedy.contains("Models tab")
+            && remedy.contains("graphersal-server models add SOURCE"),
+        "{remedy}"
+    );
+    let help = answer["help"].as_str().unwrap();
+    assert!(
+        help.contains("not damage") && !help.contains("/repair"),
+        "{help}"
+    );
+    // The text of a verify problem names the model.
+    let verified = admin.verify("kb").unwrap();
+    assert_eq!(
+        verified.facts.problems_text(),
+        format!(
+            "the embedding model acme/tiny (blob {}) is missing",
+            &blob[..8]
+        )
+    );
+    // The last verify is kept: in the list row and the settings, also after a restart.
+    let restarted = offline(&dir);
+    let entry = restarted.registry().get("kb").unwrap();
+    assert_eq!(entry.state, DbState::needs_model("acme/tiny"));
+    let last = crate::recovery::LastVerify::read(&entry.dir).expect("kept");
+    assert_eq!(last.verdict, "needs-model");
+    assert_eq!(last.problem_count, 1);
+    assert_eq!(last.problems[0].model.as_deref(), Some("acme/tiny"));
+    assert!(
+        last.headline().starts_with("Last verify 20"),
+        "{}",
+        last.headline()
+    );
+    let (status, settings) = route(&restarted, Method::Get, "databases/kb/settings", None);
+    assert_eq!(status, 200, "{settings}");
+    let recovery = &settings["recovery"];
+    assert_eq!(recovery["needsModel"], "acme/tiny", "{recovery}");
+    assert_eq!(recovery["maintenance"], false, "{recovery}");
+    assert_eq!(
+        recovery["lastVerify"]["verdict"], "needs-model",
+        "{recovery}"
+    );
+    assert_eq!(
+        recovery["lastVerify"]["problems"][0]["kind"], "model",
+        "{recovery}"
+    );
+    assert!(
+        recovery["lastVerify"]["headline"]
+            .as_str()
+            .unwrap()
+            .contains("acme/tiny"),
+        "{recovery}"
+    );
+    let (status, list) = route(&restarted, Method::Get, "databases", None);
+    assert_eq!(status, 200, "{list}");
+    let row = list["databases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["name"] == "kb")
+        .cloned()
+        .unwrap();
+    assert_eq!(row["lastVerify"]["verdict"], "needs-model", "{row}");
+    assert_eq!(row["lastVerify"]["problemCount"], 1, "{row}");
+
+    // The remedy works: the model added, the database resolved, the verify clean.
+    let added = restarted.model_add(&ModelAddSpec::path(&with)).unwrap();
+    assert_eq!(added.resolved, ["kb"], "{added:?}");
+    let verified = restarted.verify("kb").unwrap();
+    assert!(verified.facts.ok, "{:?}", verified.facts);
+    assert_eq!(verified.facts.verdict(), "ok");
+    let entry = restarted.registry().get("kb").unwrap();
+    assert_eq!(
+        crate::recovery::LastVerify::read(&entry.dir)
+            .unwrap()
+            .verdict,
+        "ok"
+    );
+
+    // Its link removed while the shared models hold the blob: named exactly, `shared`, and the
+    // database is needs-model (marked) until `models add acme/tiny` gives it back.
+    let (hash, path, _) = db_blobs(&restarted, "kb").remove(0);
+    fs::remove_file(&path).unwrap();
+    let (_, answer) = route(&restarted, Method::Post, "databases/kb/verify", None);
+    assert_eq!(answer["verdict"], "needs-model", "{answer}");
+    let problem = &problems_of(&answer)[0];
+    assert_eq!(problem["model"], "acme/tiny", "{problem}");
+    assert_eq!(problem["blob"], hash, "{problem}");
+    assert_eq!(problem["shared"], true, "{problem}");
+    assert!(
+        problem["remedy"]
+            .as_str()
+            .unwrap()
+            .contains("graphersal-server models add acme/tiny"),
+        "{problem}"
+    );
+    let entry = restarted.registry().get("kb").unwrap();
+    assert_eq!(entry.state, DbState::needs_model("acme/tiny"));
+    assert_eq!(
+        entry.config.unwrap().needs_model.as_deref(),
+        Some("acme/tiny")
+    );
+    let added = restarted
+        .model_add(&ModelAddSpec::repo("acme/tiny"))
+        .unwrap();
+    assert_eq!(added.resolved, ["kb"], "{added:?}");
+    assert!(restarted.verify("kb").unwrap().facts.ok);
+}
+
+#[test]
+fn name_models_by_catalog_elimination_and_leaves_other_blobs_as_damage() {
+    use crate::recovery::{ProblemFacts, VerifyFacts};
+    let problem = |path: &str, reason: &str| {
+        serde_json::from_value::<ProblemFacts>(json!({
+            "path": path, "offset": null, "reason": reason
+        }))
+        .unwrap()
+    };
+    let facts = |problems: Vec<ProblemFacts>| {
+        serde_json::from_value::<VerifyFacts>(json!({
+            "ok": false, "problems": problems, "notes": [], "snapshotsChecked": 1,
+            "segmentsChecked": 0, "recordsChecked": 0, "firstCommit": 0, "lastCommit": 0,
+            "modelsChecked": 0, "blobsChecked": 2, "how": "files"
+        }))
+        .unwrap()
+    };
+    let a = "blobs/aa/aa00000000000000000000000000000000000000000000000000000000000000";
+    let b = "blobs/bb/bb00000000000000000000000000000000000000000000000000000000000000";
+    let missing = "the blob is missing";
+    // A missing blob no model accounts for stays damage (a blob property's blob).
+    let mut f = facts(vec![problem(a, missing)]);
+    assert_eq!(f.verdict(), "damaged");
+    f.name_models(&|_| None, &[], &|_| false);
+    assert_eq!(f.problems[0].kind, "damage");
+    assert_eq!(f.verdict(), "damaged");
+    // Known by hash (the catalog or models/), the other by elimination: needs-model.
+    let mut f = facts(vec![problem(a, missing), problem(b, missing)]);
+    let known = |hash: &str| hash.starts_with("aa").then(|| "x/one".to_string());
+    f.name_models(&known, &["x/one".to_string(), "x/two".to_string()], &|r| {
+        r == "x/one"
+    });
+    assert_eq!(f.problems[0].model.as_deref(), Some("x/one"));
+    assert!(f.problems[0].shared);
+    assert_eq!(f.problems[1].model.as_deref(), Some("x/two"));
+    assert!(!f.problems[1].shared);
+    assert_eq!(f.verdict(), "needs-model");
+    assert_eq!(f.models_missing, ["x/one", "x/two"]);
+    // Two unknown blobs, two missing models: each names the candidates.
+    let mut f = facts(vec![problem(a, missing), problem(b, missing)]);
+    f.name_models(
+        &|_| None,
+        &["x/one".to_string(), "x/two".to_string()],
+        &|_| false,
+    );
+    assert_eq!(f.problems[0].model, None);
+    assert_eq!(f.problems[0].candidates, ["x/one", "x/two"]);
+    assert!(
+        f.problems_text()
+            .contains("one of the embedding models x/one, x/two")
+    );
+    assert_eq!(f.verdict(), "needs-model");
+    // Damage beside a missing model: damaged, the model still named.
+    let mut f = facts(vec![
+        problem(a, missing),
+        problem("snapshots/1/chunk-0", "the CRC-32C check failed"),
+    ]);
+    f.name_models(&|_| None, &["x/one".to_string()], &|_| false);
+    assert_eq!(f.problems[0].model.as_deref(), Some("x/one"));
+    assert_eq!(f.problems[1].kind, "damage");
+    assert_eq!(f.verdict(), "damaged");
+    // An old report (no kind, no verdict) reads as before.
+    let f = facts(vec![problem(a, missing)]);
+    assert_eq!(f.problems[0].kind, "damage");
+}
+
+#[test]
+fn a_loaded_database_names_a_vanished_model_blob_from_its_catalog_and_stays_loaded() {
+    let temp = TempDir::new("models-verify-loaded");
+    let dir = server(&temp);
+    let admin = offline(&dir);
+    let entry = admin.create("kb", &CreateSpec::plain()).unwrap();
+    let store = Store::open(entry.store_dir(), StoreOptions::new()).unwrap();
+    store
+        .import_model(
+            ModelSource::Files(crate::test_models::tiny_model(1, "acme/tiny")),
+            ImportModelOptions::new(),
+        )
+        .unwrap();
+    store.close().unwrap();
+    let loader = loader_of(&dir);
+    let online = Admin::online(loader.clone());
+    loader.load("kb").unwrap();
+    assert_eq!(loader.wait("kb", WAIT).unwrap(), DbState::Loaded);
+    // The blob file vanishes under the open Store; models/ never held it: the catalog names it.
+    let (hash, path, _) = db_blobs(&online, "kb").remove(0);
+    assert!(online.models().repo_of_blob(&hash).is_none());
+    fs::remove_file(&path).unwrap();
+    let verified = online.verify("kb").unwrap();
+    assert_eq!(verified.facts.how, "open store");
+    assert_eq!(
+        verified.facts.verdict(),
+        "needs-model",
+        "{:?}",
+        verified.facts
+    );
+    assert_eq!(
+        verified.facts.problems[0].model.as_deref(),
+        Some("acme/tiny")
+    );
+    assert_eq!(
+        verified.state,
+        DbState::Loaded,
+        "a loaded database is left as it is"
+    );
+    let config = online.registry().get("kb").unwrap().config.unwrap();
+    assert_eq!(config.needs_model, None);
+    loader.shutdown().unwrap();
+}

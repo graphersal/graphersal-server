@@ -16,7 +16,7 @@ import { reactive, computed, watch } from 'vue';
 import {
   createSettings, limitRows, limitsNote, limitValueProblem, limitSetBody, limitClearBody, limitText,
   descriptionProblem, identityRows, stateRows, storeRows, settingsGrantRows, settingsMcpRows, mcpText,
-  backupsText, changedText, readOnlyLocked, recoveryView, MAX_DESCRIPTION_CHARS,
+  backupsText, changedText, readOnlyLocked, recoveryView, verifyView, MAX_DESCRIPTION_CHARS,
 } from './settings-api.js';
 import { realRows, BASE_IS_FROZEN } from './admin-api.js';
 import {
@@ -192,11 +192,12 @@ export default {
 
     return {
       s, db, names, limits, grants, mcpNames, loaded, limitSort, grantSort, mcpSort,
-      identityRows, stateRows, storeRows, recoveryView, limitsNote, limitText, mcpText, backupsText, readOnlyLocked, noticeClass,
+      identityRows, stateRows, storeRows, recoveryView, verifyView, limitsNote, limitText, mcpText, backupsText, readOnlyLocked, noticeClass,
       maxDescription: MAX_DESCRIPTION_CHARS, baseFrozen: BASE_IS_FROZEN,
       refresh, pick, saveDescription, setFlag, setLimit, clearLimit, reloadNow,
       openMcp: () => props.api.navigate('mcp'),
       openUsers: () => props.api.navigate('users'),
+      openModels: () => props.api.navigate('models'),
       openBackups: () => props.api.navigate('backups', { db: s.answer ? s.answer.name : s.name }),
     };
   },
@@ -309,7 +310,14 @@ export default {
         <div class="srv-notice-text"><span>Maintenance: its Store is damaged, so it is served read-only (queries read the intact data, writes are refused). Repair it into a new database (Databases tab: Repair…), or restore a backup.</span>
           <details class="srv-damage"><summary>Damage report</summary><pre class="mono">{{ recoveryView(s.answer).damage }}</pre></details></div>
       </div>
-      <p v-else class="muted">No damage known (Verify on the Databases tab checks the whole Store).</p>
+      <div class="srv-verify" :class="verifyView(s.answer).tone ? 'srv-verify-' + verifyView(s.answer).tone : ''" data-settings-verify>
+        <p :class="verifyView(s.answer).tone ? null : 'muted'">{{ verifyView(s.answer).text }}</p>
+        <ul v-if="verifyView(s.answer).problems.length" class="srv-problems mono">
+          <li v-for="(p, i) in verifyView(s.answer).problems" :key="i">{{ p }}</li>
+          <li v-if="verifyView(s.answer).more" class="muted">… and {{ verifyView(s.answer).more }} more</li>
+        </ul>
+        <p v-if="verifyView(s.answer).remedy" class="srv-help">{{ verifyView(s.answer).remedy }} <a v-if="verifyView(s.answer).tone === 'warn'" href="#models" @click.prevent="openModels">Models tab…</a></p>
+      </div>
       <template v-if="recoveryView(s.answer).unclean">
         <p>Checked after the last unclean shutdown{{ recoveryView(s.answer).unclean.when ? ' (' + recoveryView(s.answer).unclean.when + ')' : '' }}{{ recoveryView(s.answer).unclean.pid ? ', the server with pid ' + recoveryView(s.answer).unclean.pid + ' was killed or crashed' : '' }}:</p>
         <dl class="srv-facts">

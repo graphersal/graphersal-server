@@ -492,9 +492,59 @@ export function repairedName(name) {
   return n ? `${n}${suffix}` : 'repaired';
 }
 
-/** Whether a verify result (`POST .../verify`, or one of `POST verify`) reports damage. */
+/**
+ * The verdict of a verify result (`POST .../verify`, one of `POST verify`, or a failure
+ * `{database, error}`): `ok`, `needs-model` (only embedding model blobs are missing: the graph
+ * data is intact, add the model), `damaged` or `failed` (the verify itself failed). An older
+ * server sends no `verdict`: `ok` decides.
+ */
+export function verifyVerdict(result) {
+  if (!result || typeof result !== 'object') return 'failed';
+  if (typeof result.error === 'string') return 'failed';
+  if (result.state === 'maintenance') return 'damaged';
+  if (['ok', 'needs-model', 'damaged'].includes(result.verdict)) return result.verdict;
+  return result.ok === true ? 'ok' : 'damaged';
+}
+
+/** Whether a verify result reports something to fix (damage, a missing model, a failure). */
 export function verifyDamaged(result) {
-  return !result || result.ok !== true || result.state === 'maintenance' || typeof result.error === 'string';
+  return verifyVerdict(result) !== 'ok';
+}
+
+/** The short hash of a blob (8 hex digits). */
+const shortHash = (hash) => (typeof hash === 'string' ? hash.slice(0, 8) : '?');
+
+/**
+ * One verify problem in words: `path at byte N: reason`; a missing model's blob: `the embedding
+ * model NAME (blob f0ed7648) is missing`.
+ */
+export function problemText(p) {
+  if (!p || typeof p !== 'object') return '';
+  if (p.kind === 'model') {
+    if (typeof p.model === 'string' && p.model) return `the embedding model ${p.model} (blob ${shortHash(p.blob)}) is missing`;
+    const candidates = Array.isArray(p.candidates) ? p.candidates.filter((c) => typeof c === 'string') : [];
+    return `the blob ${shortHash(p.blob)} of one of the embedding models ${candidates.join(', ')} is missing`;
+  }
+  return `${p.path}${typeof p.offset === 'number' ? ` at byte ${p.offset}` : ''}: ${p.reason}`;
+}
+
+/** The models a verify result (or a last verify) names missing. */
+function modelsMissing(result) {
+  const listed = result && Array.isArray(result.modelsMissing) ? result.modelsMissing.filter((m) => typeof m === 'string' && m) : [];
+  if (listed.length) return listed;
+  const problems = result && Array.isArray(result.problems) ? result.problems : [];
+  return [...new Set(problems.filter((p) => p && p.kind === 'model' && typeof p.model === 'string').map((p) => p.model))];
+}
+
+/** What adds the missing models of a verify result, in words (the Models tab, the console). */
+export function modelRemedy(result) {
+  const problems = result && Array.isArray(result.problems) ? result.problems : [];
+  const models = modelsMissing(result);
+  const shared = problems.some((p) => p && p.kind === 'model' && p.shared === true);
+  const which = models.length ? models.join(', ') : 'the missing model';
+  return shared
+    ? `The server's shared models hold ${which}: add it again on the Models tab (or graphersal-server models add ${models[0] || 'NAME'}); the database is then ready to load.`
+    : `Download ${which} (a Model2Vec directory) and import it on the Models tab (a model directory as .tar/.tar.gz, or a .gsnap carrying it), or graphersal-server models add SOURCE; the database is then ready to load.`;
 }
 
 /** One verify result in words (a notice). */
@@ -505,29 +555,103 @@ export function verifyText(result) {
   const problems = Array.isArray(result.problems) ? result.problems : [];
   const n = (k) => (typeof result[k] === 'number' ? result[k] : 0);
   const checked = `${counted(n('snapshotsChecked'), 'snapshot')}, ${counted(n('recordsChecked'), 'journal record')}`;
-  if (result.ok === true && result.state !== 'maintenance') return `"${name}" verifies: no problem found (${checked}).`;
+  const verdict = verifyVerdict(result);
+  if (verdict === 'ok') return `"${name}" verifies: no problem found (${checked}).`;
   if (result.ok === true) return `"${name}" is in maintenance (read-only): its Store opened with damage.`;
-  const first = problems[0] ? `; first: ${problems[0].path}: ${problems[0].reason}` : '';
+  if (verdict === 'needs-model') return `"${name}" needs its embedding model: ${modelsMissing(result).join(', ') || 'a model'} is missing (the graph data is intact).`;
+  const p0 = problems[0];
+  const first = !p0 ? '' : p0.kind === 'model' ? `; first: ${problemText(p0)}` : `; first: ${p0.path}: ${p0.reason}`;
   return `"${name}" is DAMAGED: ${counted(problems.length, 'problem')}${first}.`;
 }
 
-/** The problems of a verify result as lines (`path at byte N: reason`). */
+/** The problems of a verify result as lines ([`problemText`]). */
 export function problemLines(result) {
   const problems = result && Array.isArray(result.problems) ? result.problems : [];
-  return problems.map((p) => `${p.path}${typeof p.offset === 'number' ? ` at byte ${p.offset}` : ''}: ${p.reason}`);
+  return problems.map(problemText);
 }
 
-/** The text of `POST verify` (every database): `{tone, text, lines}`. */
-export function verifyAllText(answer) {
-  const results = answer && Array.isArray(answer.results) ? answer.results : [];
-  const damaged = results.filter(verifyDamaged);
-  if (!results.length) return { tone: 'ok', text: 'No databases to verify.', lines: [] };
-  if (!damaged.length) return { tone: 'ok', text: `Every database verifies (${results.length}).`, lines: [] };
-  return {
-    tone: 'error',
-    text: `${counted(damaged.length, 'database')} of ${results.length} damaged or not verifiable: ${damaged.map((r) => r.database).join(', ')}. Repair one into a new database, or restore a backup.`,
-    lines: damaged.map(verifyText),
-  };
+/** What to do about one verify result: the help under its toast ('' when it is ok). */
+export function verifyHelp(result, restoreHint = '') {
+  const verdict = verifyVerdict(result);
+  if (verdict === 'ok' || verdict === 'failed') return '';
+  const lines = problemLines(result);
+  const head = lines.length ? `${lines.join('\n')}\n` : '';
+  if (verdict === 'needs-model') return `${head}${modelRemedy(result)}`;
+  return `${head}Repair… builds a repaired copy as a new database. ${restoreHint}`.trim();
+}
+
+/**
+ * The text of Verify all from its results (each a verify result or `{database, error}`):
+ * `{tone, text, lines}`; `total`: how many databases were to be verified, `cancelled`: whether
+ * the run stopped early. Accepts the answer of `POST verify` (`{results}`) too.
+ */
+export function verifyAllText(answer, { total, cancelled = false } = {}) {
+  const results = Array.isArray(answer) ? answer : answer && Array.isArray(answer.results) ? answer.results : [];
+  const of = typeof total === 'number' ? total : results.length;
+  const stopped = cancelled ? ` Cancelled after ${results.length} of ${of}.` : '';
+  if (!results.length) return { tone: cancelled ? 'warn' : 'ok', text: cancelled ? `Verify all cancelled before the first database.` : 'No databases to verify.', lines: [] };
+  const bad = results.filter(verifyDamaged);
+  const verified = cancelled ? `${results.length} of ${of}` : `${results.length}`;
+  if (!bad.length) {
+    const who = cancelled ? 'Every database verified so far verifies' : 'Every database verifies';
+    return { tone: cancelled ? 'warn' : 'ok', text: `${who} (${verified}).${stopped}`, lines: [] };
+  }
+  const damaged = bad.filter((r) => ['damaged', 'failed'].includes(verifyVerdict(r)));
+  const models = bad.filter((r) => verifyVerdict(r) === 'needs-model');
+  const parts = [];
+  if (damaged.length) parts.push(`${counted(damaged.length, 'database')} of ${verified} damaged or not verifiable: ${damaged.map((r) => r.database).join(', ')}. Repair one into a new database, or restore a backup.`);
+  if (models.length) parts.push(`${counted(models.length, 'database')} of ${verified} need${models.length === 1 ? 's' : ''} an embedding model: ${models.map((r) => r.database).join(', ')}. Add the missing model on the Models tab.`);
+  const lines = [];
+  for (const r of bad) {
+    lines.push(verifyText(r));
+    for (const line of problemLines(r).slice(0, 5)) lines.push(`  ${line}`);
+    if (verifyVerdict(r) === 'needs-model') lines.push(`  ${modelRemedy(r)}`);
+  }
+  return { tone: damaged.length ? 'error' : 'warn', text: `${parts.join(' ')}${stopped}`, lines };
+}
+
+/** The Verify all button's text: `Verify all`, `Verifying 3/10…`, `Cancelling…`. */
+export function verifyAllLabel(run) {
+  if (!run || !run.running) return 'Verify all';
+  if (run.cancel) return 'Cancelling…';
+  return `Verifying ${run.done}/${run.total}…`;
+}
+
+/**
+ * Verifies the databases `names` one after the other through `verifyOne(name)` (the
+ * per-database route): `progress(done, total)` after each; `cancelled()` is asked before each
+ * next database (the one running finishes). A failure of one database is its result
+ * `{database, error}`, the run goes on. Answers `{results, cancelled}`.
+ */
+export async function runVerifyAll(names, verifyOne, { progress = () => {}, cancelled = () => false } = {}) {
+  const results = [];
+  const total = names.length;
+  progress(0, total);
+  for (const name of names) {
+    if (cancelled()) return { results, cancelled: true };
+    try {
+      results.push(await verifyOne(name));
+    } catch (err) {
+      results.push({ database: name, ok: false, error: (err && err.message) || String(err) });
+    }
+    progress(results.length, total);
+  }
+  return { results, cancelled: false };
+}
+
+/**
+ * The small badge of a database row whose last verify found something (`lastVerify` of the
+ * row): `{text, tone, title}`, or null (never verified, or the last verify was clean).
+ */
+export function verifyBadge(row) {
+  const last = row && row.lastVerify;
+  if (!last || last.verdict === 'ok') return null;
+  const when = typeof last.atMs === 'number' ? new Date(last.atMs).toISOString().replace(/\.\d{3}Z$/, 'Z') : '';
+  if (last.verdict === 'needs-model') {
+    return { text: 'verify: needs model', tone: 'warn', title: `Last verify ${when}: the embedding model ${last.modelsMissing.join(', ')} is missing; add it on the Models tab` };
+  }
+  if (last.verdict === 'failed') return { text: 'verify failed', tone: 'danger', title: `Last verify ${when}: the verify failed` };
+  return { text: `verify: ${counted(last.problemCount, 'problem')}`, tone: 'danger', title: `Last verify ${when}: ${counted(last.problemCount, 'problem')}; the Database settings show them` };
 }
 
 /**
