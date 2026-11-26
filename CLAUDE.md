@@ -39,8 +39,10 @@ cited from tracked files). When this file disagrees with the code, the code wins
   SHA-256, constant-time compare, redacted `Debug`), the authenticator chain
   (`Authenticator` trait: `OperatorToken` (per run, `server.run`), `UserTokens` (Bearer),
   `SessionCookie` (`gs_session`, `SessionTable` trait, `MemorySessions`; a session ends when
-  its user's token changes or it expires: `SessionLimits` (lifetime, idle timeout, default
-  unlimited; `last_seen` touched at most every 60 s or a quarter of the idle timeout));
+  its user's token changes or it expires: `SessionLimits` (lifetime, idle timeout;
+  `last_seen` touched at most every 60 s or a quarter of the idle timeout); SEC L3: `login`
+  inserts with `SessionTable::insert_capped` (`MAX_BROWSER_SESSIONS_PER_USER` 32, the oldest
+  dropped, one write));
   wrong credentials are `AuthError`, never anonymous), `Access` (`open_with_limits` prunes a
   restored table: dead or expired sessions)
   (open/authenticate/login/logout, user and grant changes audited), the first admin
@@ -55,8 +57,9 @@ cited from tracked files). When this file disagrees with the code, the code wins
   `graphersal_server::audit`; `Admin::with_audit` records create/delete/clone/import/restore/
   promote/backup, read-only, auto-load, aliases), `config` (`server.toml`, `ServerConfig`, `parse_listen`, `[limits]
   upload_bytes` (default 4 GiB), `max_connections`, `header_timeout_secs`, `idle_timeout_secs`
-  = `Limits`; `[sessions] lifetime_secs`, `idle_timeout_secs` = `SessionsConfig` (optional, >= 1,
-  missing = no limit) -> `SessionLimits`, read at start; B6: `[access] enabled` = `AccessConfig`
+  = `Limits`; `[sessions] lifetime_secs`, `idle_timeout_secs` = `SessionsConfig` (SEC L4: missing = 30 d
+  / 7 d, `0` = no limit; `effective_*_secs`) -> `SessionLimits`, read at start; `[mcp]
+  max_sessions_per_identity` (SEC M2, default 16, restart key); B6: `[access] enabled` = `AccessConfig`
   (default true), `[http] public_scheme` (`PublicScheme` http|https) and `allowed_hosts`
   (normalized by `parse`: lower case, port dropped, IPv6 in brackets) = `HttpConfig`, read at
   start; `Running::config()` = the config the server started with; B8: `[limits] memory_limit`
@@ -847,7 +850,7 @@ mdbook build book                            # the book (book/CLAUDE.md); must b
   granted level (none: anonymous 401 for every name, a page GET 303 `/?next=`, logged in = the
   unknown-name 404; read = `Request::mark_read_only` on the forwarded request; the database
   mode applies in its context); `/mcp` per principal (`mcp::Directory`); `POST /api/login
-  {"token"}` (`gs_session` cookie `Max-Age=<[sessions] lifetime_secs, else 400 days>;
+  {"token"}` (`gs_session` cookie `Max-Age=<the effective session lifetime, else 400 days>;
   HttpOnly; SameSite=Strict; Path=/`, `; Secure` with `public_scheme = "https"`;
   `router::Modes`) and `POST /api/logout`
   run before authentication; root `/api/info` minimal for anonymous (`server`, `protocol`,
@@ -861,3 +864,19 @@ mdbook build book                            # the book (book/CLAUDE.md); must b
   `[http] allowed_hosts`). `[access] enabled = false` (B6): `router::open_principal` replaces
   the refusals: valid admin credentials keep their identity, everything else is `everyone`
   (tests `router_access_tests.rs` `access_off_*`, `the_login_cookie_*`, `allowed_hosts_*`).
+- Security hardening (SEC-FIX; book `guide/security.md`): `everyone` is refused shutdown,
+  server backup, `POST users` and `POST users/<n>/token` (`admin_api::issues_credentials`);
+  `/mcp` refuses anonymous without an anonymous grant (`Access::anonymous_has_grant`), every
+  `initialize` first runs `mcp::make_room` (per-identity quota; plain ids of this run's sessions
+  kept in `McpUsage`, redacted `Debug`), anonymous MCP bodies <= 1 MiB (`mcp::body_limit`);
+  `mounts::forward` replaces `X-Graphersal-Client` with `<HMAC tag of the identity>-<id>`
+  (`mounts::client_tag`, per-process key) and `mounts::own_changes` masks other identities in
+  `GET /db/<n>/api/changes`; the login body <= 4 KiB (`router::MAX_LOGIN_BODY`); `serve`
+  gives bodies of requests that may run without credentials
+  (`Router::may_run_without_credentials`) `UNAUTHENTICATED_BODY_DEADLINE` (10 s) and every
+  drain 5 s, answers the probes on the async task (also over the cap), bounds the blocking pool
+  (`serve::blocking_threads`); every answer gets `X-Frame-Options: DENY` and
+  `router::CONTENT_SECURITY_POLICY` (`framing_refused`); a console token without `--server`
+  uses `server.run` only via `RunInfo::read_live` (lock held, owner's file); `--token-file`
+  (`main.rs` `token_args`) and a warning for `--token`. Tests: `router_access_tests.rs` (end),
+  `serve_tests.rs` (end), `server_tests.rs` `a_token_*`.
