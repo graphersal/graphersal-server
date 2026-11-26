@@ -95,12 +95,15 @@ pub enum DbCommand {
         /// The database.
         name: String,
     },
-    /// `db clone SOURCE NAME`.
+    /// `db clone SOURCE NAME [--mcp|--no-mcp]`.
     Clone {
         /// The database cloned.
         source: String,
         /// The new database's name.
         name: String,
+        /// Offer the new database to MCP (`--mcp`: `Some(true)`, `--no-mcp`: `Some(false)`; `None`:
+        /// the server's default, `mcp.toml`'s `expose_new`).
+        mcp: Option<bool>,
     },
     /// `db load NAME [--no-wait]`.
     Load {
@@ -170,12 +173,15 @@ pub enum DbCommand {
         /// The database that takes it.
         with: String,
     },
-    /// `db alias set ALIAS TARGET`.
+    /// `db alias set ALIAS TARGET [--mcp|--no-mcp]`.
     AliasSet {
         /// The alias.
         alias: String,
         /// The database it names.
         target: String,
+        /// Offer the new alias (a flip keeps its settings) to MCP (`--mcp`: `Some(true)`, `--no-mcp`: `Some(false)`; `None`:
+        /// the server's default, `mcp.toml`'s `expose_new`).
+        mcp: Option<bool>,
     },
     /// `db alias remove ALIAS`.
     AliasRemove {
@@ -207,6 +213,9 @@ pub enum DbCommand {
         backup: String,
         /// The database restored into (default: `name`, which must be unloaded).
         target: Option<String>,
+        /// Offer the new database of a restore into a new name (a restore over a database keeps its settings) to MCP (`--mcp`: `Some(true)`, `--no-mcp`: `Some(false)`; `None`:
+        /// the server's default, `mcp.toml`'s `expose_new`).
+        mcp: Option<bool>,
     },
     /// `import DIR SOURCE --name NAME [--base BASE] [--format F] [--description TEXT] [--role
     /// normal|base]`: the file or directory `source` (absolute: a running server reads it on
@@ -224,6 +233,9 @@ pub enum DbCommand {
         description: Option<String>,
         /// The new database's role ([`DatabaseRole::Base`]: a base of a plain source).
         role: DatabaseRole,
+        /// Offer the new database to MCP (`--mcp`: `Some(true)`, `--no-mcp`: `Some(false)`; `None`:
+        /// the server's default, `mcp.toml`'s `expose_new`).
+        mcp: Option<bool>,
     },
     /// `import DIR --inbox FILE --name NAME [--base BASE] [--format F] [--description TEXT]
     /// [--role normal|base]`: the entry `file` of the import inbox `DIR/imports/` (read where
@@ -241,6 +253,9 @@ pub enum DbCommand {
         description: Option<String>,
         /// The new database's role ([`DatabaseRole::Base`]: a base of a plain source).
         role: DatabaseRole,
+        /// Offer the new database to MCP (`--mcp`: `Some(true)`, `--no-mcp`: `Some(false)`; `None`:
+        /// the server's default, `mcp.toml`'s `expose_new`).
+        mcp: Option<bool>,
     },
     /// `import DIR --list`: the entries of the import inbox `DIR/imports/`.
     InboxList,
@@ -324,6 +339,12 @@ pub enum DbCommand {
         /// On or off.
         on: bool,
     },
+    /// `mcp expose-new on|off`: whether a new database or alias is offered to MCP when its
+    /// creator does not say (`mcp.toml`'s `expose_new`, default off).
+    McpExposeNew {
+        /// On or off.
+        on: bool,
+    },
     /// `mcp db NAME on|off` (exposure) or `mcp db NAME read-only on|off`.
     McpDatabase {
         /// A database or an alias.
@@ -388,13 +409,16 @@ impl DbCommand {
                 body.insert("description".into(), json!(spec.description));
                 body.insert("autoLoad".into(), json!(spec.auto_load));
                 body.insert("readOnly".into(), json!(spec.read_only));
+                if let Some(mcp) = spec.mcp {
+                    body.insert("mcp".into(), json!(mcp));
+                }
                 (Method::Post, "databases".into(), Some(Value::Object(body)))
             }
             DbCommand::Delete { name } => (Method::Delete, format!("databases/{name}"), None),
-            DbCommand::Clone { source, name } => (
+            DbCommand::Clone { source, name, mcp } => (
                 Method::Post,
                 format!("databases/{source}/clone"),
-                Some(json!({ "name": name })),
+                Some(with_mcp(json!({ "name": name }), *mcp)),
             ),
             DbCommand::Load { name, .. } => (Method::Post, format!("databases/{name}/load"), None),
             DbCommand::Unload { name } => (Method::Post, format!("databases/{name}/unload"), None),
@@ -449,10 +473,10 @@ impl DbCommand {
                 format!("databases/{}/swap", segment(name)),
                 Some(json!({ "with": with, "confirm": true })),
             ),
-            DbCommand::AliasSet { alias, target } => (
+            DbCommand::AliasSet { alias, target, mcp } => (
                 Method::Put,
                 format!("aliases/{alias}"),
-                Some(json!({ "target": target })),
+                Some(with_mcp(json!({ "target": target }), *mcp)),
             ),
             DbCommand::AliasRemove { alias } => (Method::Delete, format!("aliases/{alias}"), None),
             DbCommand::AliasRename { alias, name } => (
@@ -466,6 +490,7 @@ impl DbCommand {
                 name,
                 backup,
                 target,
+                mcp,
             } => {
                 let mut body = Map::new();
                 body.insert("backup".into(), json!(backup));
@@ -475,7 +500,7 @@ impl DbCommand {
                 (
                     Method::Post,
                     format!("databases/{name}/restore"),
-                    Some(Value::Object(body)),
+                    Some(with_mcp(Value::Object(body), *mcp)),
                 )
             }
             DbCommand::Import {
@@ -485,10 +510,11 @@ impl DbCommand {
                 format,
                 description,
                 role,
+                mcp,
             } => {
                 let source = ("path", json!(source.to_string_lossy()));
                 let body = import_body(source, name, base, format, description, *role);
-                (Method::Post, "import".into(), Some(body))
+                (Method::Post, "import".into(), Some(with_mcp(body, *mcp)))
             }
             DbCommand::ImportInbox {
                 file,
@@ -497,10 +523,11 @@ impl DbCommand {
                 format,
                 description,
                 role,
+                mcp,
             } => {
                 let source = ("inbox", json!(file));
                 let body = import_body(source, name, base, format, description, *role);
-                (Method::Post, "import".into(), Some(body))
+                (Method::Post, "import".into(), Some(with_mcp(body, *mcp)))
             }
             DbCommand::InboxList => (Method::Get, "imports".into(), None),
             DbCommand::ModelsList => (Method::Get, "models".into(), None),
@@ -559,6 +586,9 @@ impl DbCommand {
             DbCommand::McpStatus => (Method::Get, "mcp".into(), None),
             DbCommand::McpSwitch { on } => {
                 (Method::Put, "mcp".into(), Some(json!({ "enabled": on })))
+            }
+            DbCommand::McpExposeNew { on } => {
+                (Method::Put, "mcp".into(), Some(json!({ "exposeNew": on })))
             }
             DbCommand::McpDatabase {
                 name,
@@ -928,6 +958,14 @@ pub(crate) fn answer_of(status: u16, json: Value) -> Result<Value, ServerError> 
 
 /// The JSON body of `POST import`: the source (`("path", ..)` or `("inbox", ..)`), then the
 /// fields that are set (`role` only when not normal).
+/// `body` with `"mcp": mcp` when given (the MCP exposure of a new name).
+fn with_mcp(mut body: Value, mcp: Option<bool>) -> Value {
+    if let Some(mcp) = mcp {
+        body["mcp"] = json!(mcp);
+    }
+    body
+}
+
 fn import_body(
     (key, source): (&str, Value),
     name: &str,

@@ -5,10 +5,12 @@
 //! | Method | Path | Body | Answer |
 //! |---|---|---|---|
 //! | GET | `mcp` | | `200` the MCP state (below; + `ETag`) |
-//! | PUT | `mcp` | `{"enabled": bool, "revision"?}` | `200` the MCP state |
+//! | PUT | `mcp` | `{"enabled"?: bool, "exposeNew"?: bool, "revision"?}` (at least one) | `200` the MCP state |
 //! | PUT | `mcp/databases/<name>` | `{"exposed"?: bool, "readOnly"?: bool, "revision"?}` | `200` the MCP state + `"changed": {"name", "exposed", "readOnly"}` |
 //!
-//! The MCP state: `enabled` (the switch of `mcp.toml`), `endpointBuilt` (`server.toml [mcp]
+//! The MCP state: `enabled` (the switch of `mcp.toml`), `exposeNew` (whether a new database
+//! or alias is offered to MCP when its creator does not say; `mcp.toml`'s `expose_new`,
+//! default `false`), `endpointBuilt` (`server.toml [mcp]
 //! enabled`: `false` = no MCP endpoint at all until a restart with it on), `serving`
 //! (`enabled && endpointBuilt`), `online` (a running server answered; offline the statistics
 //! are `null`), `endpoint` (`/mcp`), `maxSessions`, `revision` (of the settings), `databases`
@@ -24,7 +26,8 @@
 //! `recentErrors` (`[{atMs, tool, user, database, message}]`, newest first), or `null`
 //! offline).
 //!
-//! Errors: `400` (a body without `exposed` or `readOnly`), `404` (no such database or alias),
+//! Errors: `400` (a body without `exposed` or `readOnly`; a `PUT mcp` without `enabled` or
+//! `exposeNew`), `404` (no such database or alias),
 //! `409` (a stale revision, with the current `revision`), `500` (`mcp.toml` cannot be read or
 //! written).
 
@@ -41,9 +44,12 @@ use crate::ops::Admin;
 
 /// `PUT mcp`.
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct SwitchBody {
-    enabled: bool,
+    #[serde(default)]
+    enabled: Option<bool>,
+    #[serde(default)]
+    expose_new: Option<bool>,
     #[serde(default)]
     revision: Option<String>,
 }
@@ -86,10 +92,23 @@ pub(super) fn route(
                 Ok(body) => body,
                 Err(err) => return Some(Err(err)),
             };
-            expecting(body.revision)
-                .mcp_set_enabled(body.enabled)
-                .and_then(|_| state(admin))
-                .map(answer)
+            if body.enabled.is_none() && body.expose_new.is_none() {
+                return Some(Err(HttpError::bad_request(
+                    "send \"enabled\" and/or \"exposeNew\" (true or false)",
+                )));
+            }
+            // Both in one request: the second change is based on the first one's result.
+            let mut expected = expecting(body.revision);
+            let mut changed = Ok(());
+            if let Some(on) = body.expose_new {
+                changed = expected.mcp_set_expose_new(on).map(|settings| {
+                    expected = admin.clone().expecting(Some(settings.revision()));
+                });
+            }
+            if let (Ok(()), Some(on)) = (&changed, body.enabled) {
+                changed = expected.mcp_set_enabled(on).map(drop);
+            }
+            changed.and_then(|()| state(admin)).map(answer)
         }
         (Method::Put, ["mcp", "databases", name]) if !name.is_empty() => {
             let body: NameBody = match body_of(request) {
@@ -165,6 +184,7 @@ pub(crate) fn state(admin: &Admin) -> Result<Value, ServerError> {
         .ok();
     Ok(json!({
         "enabled": settings.enabled,
+        "exposeNew": settings.expose_new,
         "endpointBuilt": built,
         "serving": settings.enabled && built,
         "online": admin.is_online(),

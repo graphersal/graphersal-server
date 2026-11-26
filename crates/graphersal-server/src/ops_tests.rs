@@ -578,7 +578,10 @@ fn every_admin_action_over_http() {
         Some(json!({"target": "acme-copy"})),
     );
     assert_eq!(status, 200, "{answer}");
-    assert_eq!(answer, json!({"alias": "current", "target": "acme-copy"}));
+    assert_eq!(
+        answer,
+        json!({"alias": "current", "target": "acme-copy", "mcpExposed": false})
+    );
     let (_, aliases) = call(address, "GET", "/api/admin/aliases", None);
     assert_eq!(aliases["aliases"], json!({"current": "acme-copy"}));
     assert!(aliases["revision"].is_string(), "{aliases}");

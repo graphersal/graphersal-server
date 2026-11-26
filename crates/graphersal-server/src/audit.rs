@@ -154,6 +154,13 @@ pub enum AuditEvent {
         /// The new value.
         on: bool,
     },
+    /// Whether new databases and aliases are offered to MCP was changed (`mcp.toml`
+    /// `expose_new`).
+    #[non_exhaustive]
+    McpExposeNewSet {
+        /// The new value.
+        on: bool,
+    },
     /// A database's (or alias's) MCP settings were changed (`mcp.toml`).
     #[non_exhaustive]
     McpDatabaseSet {
@@ -420,6 +427,11 @@ impl fmt::Display for AuditEvent {
             }
             AuditEvent::AliasRemoved { alias } => write!(f, "alias '{alias}' removed"),
             AuditEvent::McpSwitched { on } => write!(f, "MCP {}", on_off(*on)),
+            AuditEvent::McpExposeNewSet { on } => write!(
+                f,
+                "MCP exposure of new databases and aliases {}",
+                on_off(*on)
+            ),
             AuditEvent::McpDatabaseSet {
                 name,
                 exposed,

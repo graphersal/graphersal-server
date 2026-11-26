@@ -13,6 +13,16 @@ principal ([Users, Tokens and Grants](access.md)):
 Configure an agent once with `/mcp`; use a per-database endpoint when an agent should only ever
 see one database.
 
+**Off by default.** A new server (`graphersal-server init`) has MCP switched off, and every new
+database or alias is hidden from MCP until an admin exposes it (see
+[New servers and new databases](#new-servers-and-new-databases)). To let agents in:
+
+```bash
+graphersal-server mcp on --dir DIR                     # switch MCP on (the server directory)
+graphersal-server mcp db acme on --dir DIR             # offer acme to MCP
+graphersal-server db create notes --mcp --dir DIR      # a new database offered at once
+```
+
 ## Configuration
 
 `server.toml`, read when the server starts (restart it after a change):
@@ -25,8 +35,10 @@ max_sessions = 256      # MCP sessions remembered, the oldest forgotten first (a
 
 ### Switches at runtime: the MCP tab, `mcp.toml`
 
-`server.toml [mcp] enabled` decides at start whether the endpoints exist at all. While they do,
-an admin switches them at runtime, with no restart, in the web UI's **MCP** tab, with the admin
+`server.toml [mcp] enabled` decides at start whether the endpoints exist at all (`init` writes
+`true`). While they do, `mcp.toml`'s `enabled` is the switch operators use: MCP answers only when
+both are on (`server.toml` off wins: no endpoint is built). An admin switches it at runtime, with
+no restart, in the web UI's **MCP** tab, with the admin
 API (`GET`/`PUT /api/admin/mcp`, `PUT /api/admin/mcp/databases/<name>`;
 [Admin API](../reference/admin_api.md#mcp)) or the console:
 
@@ -35,6 +47,7 @@ graphersal-server mcp status --dir DIR                 # switches, databases, us
 graphersal-server mcp off --dir DIR                    # | mcp on
 graphersal-server mcp db acme off --dir DIR            # hide acme from MCP | ... on
 graphersal-server mcp db acme read-only on --dir DIR   # MCP only reads acme | ... off
+graphersal-server mcp expose-new on --dir DIR          # offer NEW databases and aliases | ... off
 ```
 
 The server keeps them in `mcp.toml` of the server directory ([Configuration Reference](../reference/configuration.md#mcptoml)):
@@ -56,7 +69,32 @@ The server keeps them in `mcp.toml` of the server directory ([Configuration Refe
   narrows its database, never widens it. A session that selected an alias with settings of its own
   answers `use_graph` with the alias's name as `graph`, so the settings apply on every call. A
   renamed alias keeps its settings; a deleted database or removed alias loses them (a new one of
-  that name starts with the defaults).
+  that name starts hidden, as every new name).
+
+### New servers and new databases
+
+- **A new server has MCP off.** `init` writes `mcp.toml` with `enabled = false` and `expose_new =
+  false`. Switch it on in the MCP tab, with `PUT /api/admin/mcp {"enabled": true}` or with
+  `graphersal-server mcp on`.
+- **A new name is hidden from MCP.** Every database the server creates (create, import, clone, a
+  restore into a new name, repair) and every new alias gets an entry `exposed = false` in
+  `mcp.toml` at birth, unless it is created with "expose through MCP": the console's `--mcp`
+  (`db create`, `db clone`, `db alias set`, `db restore`, `import`), the admin API's `"mcp":
+  true` (an upload import: `?mcp=true`), the checkbox "Expose through MCP" in the web UI's forms.
+  `--no-mcp` (`"mcp": false`) hides it whatever the default. The answer carries `"mcpExposed"`
+  and the console prints the command that exposes it.
+- **The server-wide default** is `mcp.toml`'s `expose_new` (default `false`): the MCP tab's
+  checkbox "Expose new databases and aliases", `PUT /api/admin/mcp {"exposeNew": true}`,
+  `graphersal-server mcp expose-new on`. It applies to names created from now on; the names there
+  keep their settings. `mcp status` shows it.
+- **What keeps its setting**: a restore over an existing database, a promotion to a base and a
+  swap keep the name and so its setting; a renamed alias carries its setting; flipping an alias to
+  another database keeps the alias's setting.
+- **A name without an entry is offered.** That is the rule of every earlier version, kept so that
+  an upgraded server directory offers exactly what it offered before: its databases and aliases
+  have no entries, so they stay offered, and a directory without `mcp.toml` keeps MCP on. Only
+  the names created after the upgrade are hidden (unless `expose_new` is on). A database copied
+  into `databases/` by hand also has no entry: hide it with `mcp db NAME off`.
 
 ### Usage statistics
 

@@ -330,6 +330,7 @@ fn grants_on_aliases_are_marked_and_follow_the_alias_offline() {
         DbCommand::AliasSet {
             alias: user("prod"),
             target: user("prod-2026-11"),
+            mcp: None,
         },
     );
     ok(

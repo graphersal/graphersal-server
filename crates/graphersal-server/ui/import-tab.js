@@ -16,6 +16,7 @@ import { reactive, ref, computed, watch } from 'vue';
 import {
   importRequest, uploadImport, uploadLimit, uploadSizeProblem, progressText, suggestName, NAME_HINT,
   outcomeText, outcomeTone, needsModelHint, bytesText, baseNames, inboxRows, IMPORT_FORMATS, BASE_IS_FROZEN,
+  MCP_NEW_HELP,
 } from './admin-api.js';
 import {
   admin, ROOT, headers, list, reload, notify, useFreshData, useSort, SortTh, FormError,
@@ -30,7 +31,7 @@ const INBOX_COLUMNS = Object.freeze({
 });
 import { hostInfo } from './databases.js';
 
-const freshForm = (source = 'upload') => ({ source, file: null, path: '', inbox: '', name: '', base: '', format: '', description: '', role: 'normal' });
+const freshForm = (source = 'upload') => ({ source, file: null, path: '', inbox: '', name: '', base: '', format: '', description: '', role: 'normal', mcp: false });
 
 export default {
   components: { SortTh, FormError },
@@ -150,7 +151,7 @@ export default {
 
     return {
       form, s, inbox, inboxSort, inboxList, loadInbox, pickInbox, fileInput, bases, limit, fileProblem, percent, cancel, submit, pickFile, pathChanged,
-      progressText, bytesText, formats: IMPORT_FORMATS, frozen: BASE_IS_FROZEN, nameHint: NAME_HINT,
+      progressText, bytesText, formats: IMPORT_FORMATS, frozen: BASE_IS_FROZEN, nameHint: NAME_HINT, mcpHelp: MCP_NEW_HELP,
       touchName: () => { nameTouched = true; },
       openDatabases: () => props.api.navigate('databases'),
       openModels: () => props.api.navigate('models'),
@@ -198,6 +199,7 @@ export default {
       <label class="inline"><input type="checkbox" name="role" :checked="form.role === 'base'" :disabled="s.busy"
           @change="form.role = $event.target.checked ? 'base' : 'normal'">
         Import as a base (from a full snapshot, a plain Store, GraphSON or GraphML; layers are built over it)</label>
+      <label class="inline" :title="mcpHelp"><input type="checkbox" name="mcp" v-model="form.mcp" :disabled="s.busy" data-import-mcp> Expose through MCP</label>
       <p v-if="form.role === 'base'" class="muted srv-sub">{{ frozen }}</p>
       <label v-if="bases.length && form.role !== 'base'">Base (a layer snapshot or layer Store; empty: the base with its identity)
         <select v-model="form.base" name="base" :disabled="s.busy">

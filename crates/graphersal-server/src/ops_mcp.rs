@@ -51,6 +51,39 @@ impl Admin {
         Ok(settings)
     }
 
+    /// Sets whether a new database or alias is offered to MCP when its creator does not say
+    /// (`mcp.toml`'s `expose_new`; names already there keep their settings): the new
+    /// settings.
+    ///
+    /// `Err`: [`ServerError::Conflict`] for a stale revision; [`ServerError::Io`] when
+    /// `mcp.toml` cannot be written (nothing changed).
+    pub(crate) fn mcp_set_expose_new(&self, on: bool) -> Result<McpSettings, ServerError> {
+        let settings = self.mcp_control()?.change(self.expected(), |settings| {
+            settings.expose_new = on;
+            Ok(())
+        })?;
+        self.audit.record(AuditEvent::McpExposeNewSet { on });
+        Ok(settings)
+    }
+
+    /// Gives the name `name` this admin is creating (a database or an alias; under the build's
+    /// reservation or the registry's write lock) its MCP settings: hidden from MCP unless
+    /// [`Admin::exposing`] or `mcp.toml`'s `expose_new` says otherwise
+    /// ([`McpControl::claim_new`]).
+    ///
+    /// `Err`: `mcp.toml` cannot be read or written (the creation is refused).
+    pub(crate) fn claim_mcp_settings(&self, name: &str) -> Result<NameSettings, ServerError> {
+        self.mcp_control()?.claim_new(name, self.expose)
+    }
+
+    /// Whether MCP offers the name `name` now by its own settings (`mcp.toml`; `None` when the
+    /// file cannot be read).
+    pub(crate) fn mcp_exposed(&self, name: &str) -> Option<bool> {
+        self.mcp_control()
+            .ok()
+            .map(|control| control.settings().of(name).exposed)
+    }
+
     /// Changes the MCP settings of the database or alias `name` (`None` keeps a value): its
     /// folded name, its settings and the new settings of the file. The name must be a database
     /// or an alias, or have settings already (one left on a name that is gone, to reset it);

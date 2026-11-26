@@ -58,6 +58,8 @@ fn fixture(name: &str) -> Fixture {
 fn fixture_with(name: &str, allowed: Vec<String>, modes: Modes) -> Fixture {
     let temp = TempDir::new(name);
     let dir = server(&temp);
+    // MCP on (a new server starts with it off: round 4 B-MCPDEF).
+    std::fs::write(dir.mcp_settings_path(), "enabled = true\n").unwrap();
     for db in ["w", "r", "h"] {
         let path = dir.databases().join(db);
         std::fs::create_dir_all(&path).unwrap();
@@ -2546,7 +2548,13 @@ fn mcp_switches_turn_off_hide_and_force_read_only() {
         200,
     );
     expect(
-        put(&fx, alice, "/api/admin/aliases/ww", json!({"target": "w"})),
+        // Offered to MCP at birth (a new alias is hidden by default: round 4 B-MCPDEF).
+        put(
+            &fx,
+            alice,
+            "/api/admin/aliases/ww",
+            json!({"target": "w", "mcp": true}),
+        ),
         200,
     );
     expect(

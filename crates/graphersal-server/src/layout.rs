@@ -175,6 +175,19 @@ impl ServerDir {
             // interrupted `init` is completed by the next one.
             write_atomic(&dir.config_path(), default_config_text().as_bytes())?;
             created.push(dir.config_path());
+            // A new server offers nothing to MCP until an admin switches it on (round 4
+            // B-MCPDEF): `mcp.toml` with `enabled = false`, `expose_new = false`.
+            if !dir.mcp_settings_path().exists() {
+                let text =
+                    crate::mcp_control::McpSettings::initial()
+                        .text()
+                        .map_err(|message| ServerError::Config {
+                            path: dir.mcp_settings_path(),
+                            message,
+                        })?;
+                write_atomic(&dir.mcp_settings_path(), text.as_bytes())?;
+                created.push(dir.mcp_settings_path());
+            }
         }
         for components in SUBDIRS {
             let mut path = dir.root.clone();

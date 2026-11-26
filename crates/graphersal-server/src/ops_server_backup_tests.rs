@@ -498,3 +498,29 @@ fn a_restore_never_writes_into_an_existing_directory() {
     restore(&archive, &empty, RestoreOptions::new()).expect("into an empty directory");
     assert!(empty.join("server.toml").is_file());
 }
+
+/// Round 4 B-MCPDEF: the databases a server backup restores are not new names: they keep the
+/// MCP exposure the source had, also when the archive has no `mcp.toml` (a directory of an
+/// older version: every name offered, MCP on).
+#[test]
+fn a_restored_server_keeps_its_mcp_exposure_without_mcp_toml() {
+    let temp = TempDir::new("conf-mcp");
+    let dir = server(&temp);
+    offline(&dir)
+        .exposing(Some(true))
+        .create("acme", &CreateSpec::plain())
+        .unwrap();
+    add_plain(&dir, "acme", 2);
+    fs::remove_file(dir.mcp_settings_path()).unwrap();
+    let archive = temp.path().join("full.zip");
+    offline(&dir)
+        .server_backup_to_file(true, &archive)
+        .expect("a full backup");
+    let new = temp.path().join("moved");
+    let report = restore(&archive, &new, RestoreOptions::new()).expect("restored");
+    assert_eq!(report.databases, ["acme"]);
+    let new_dir = ServerDir::new(&new);
+    let control = crate::mcp_control::McpControl::open(&new_dir).unwrap();
+    assert!(control.enabled(), "{:?}", control.settings());
+    assert!(control.exposed("acme", "acme"), "{:?}", control.settings());
+}

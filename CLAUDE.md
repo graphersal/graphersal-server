@@ -547,8 +547,22 @@ from published files). When this file disagrees with the code, the code wins: sa
   route behind the mount, on the same `Mcp`. The endpoint never loads/unloads. Contract:
   `book/src/guide/mcp.md`. E2E in `tests/server_tests.rs` (`mcp_*`).
 - `mcp_control` (round 3 B6, private): the runtime MCP switches in `mcp.toml`
-  (`McpSettings {enabled, databases: {name: NameSettings {exposed, read_only}}}`, names folded,
-  defaults not written, canonical text + `revision`; `McpControl` = `RwLock` held across
+  (`McpSettings {enabled, expose_new, databases: {name: NameSettings {exposed, read_only}}}`, names folded,
+  defaults not written, canonical text + `revision`; round 4 B-MCPDEF: `ServerDir::init` (new
+  directory only, not a server-backup restore) writes `McpSettings::initial()` = `enabled =
+  false`, `expose_new = false`; a missing file/key = `enabled = true`, `expose_new = false`; a
+  name WITHOUT an entry is exposed (the old rule: an upgraded directory offers what it did); every
+  NEW name gets its entry at birth via `McpControl::claim_new(name, expose)` called by
+  `Admin::claim_mcp_settings` from `Admin::commit_new` (create/import/clone/restore-new/repair;
+  after `drop_leftover_grants`, before `Registry::commit`, forgotten again if the commit fails; a
+  write failure refuses the creation) and from `Admin::alias_set`'s claim closure (new alias only);
+  the choice: `Admin::exposing(Option<bool>)` (API body `"mcp"`, upload `?mcp=`, console
+  `--mcp`/`--no-mcp`), `CreateSpec::mcp` for create, else `expose_new`; answers carry
+  `mcpExposed` (`admin_api::with_mcp`); `Admin::mcp_set_expose_new` (audited `McpExposeNewSet`),
+  `PUT mcp {"enabled"?, "exposeNew"?}`, console `mcp expose-new on|off`, UI MCP-tab checkbox +
+  "Expose through MCP" in create/clone/new alias/import forms; tests
+  `server_tests.rs` `a_new_server_has_mcp_off_and_new_names_are_hidden_from_mcp`,
+  `an_older_server_directory_keeps_its_mcp_exposure`, `ui/tests/mcp-defaults.test.mjs`; `McpControl` = `RwLock` held across
   check/write/memory (a LEAF lock), `open(dir)` (missing = defaults, a bad file = `Config`,
   stops `serve`), `change(expected, f)`, `forget_name`/`rename` (called from
   `Admin::drop_grants_on`/`move_alias_grants`: delete, alias remove, a new name drop; rename

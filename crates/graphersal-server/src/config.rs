@@ -4,7 +4,8 @@
 //! listen = "127.0.0.1:8484"   # IP:PORT (or localhost:PORT); port 0 picks a free port
 //!
 //! [mcp]
-//! enabled = true              # /mcp over every database, /db/<name>/mcp per loaded database
+//! enabled = true              # the endpoints exist: /mcp, /db/<name>/mcp (the runtime switch
+//!                             # is mcp.toml's `enabled`, written off by init)
 //! max_sessions = 256          # MCP sessions remembered (the oldest forgotten first)
 //!
 //! [defaults]                  # the creation parameters of new databases
@@ -316,8 +317,11 @@ pub const DEFAULT_MCP_SESSIONS: usize = 256;
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct McpConfig {
-    /// Whether the server offers its MCP endpoints: `/mcp` over every database and
-    /// `/db/<name>/mcp` per loaded database (default `true`).
+    /// Whether the server builds its MCP endpoints: `/mcp` over every database and
+    /// `/db/<name>/mcp` per loaded database (default `true`). The hard switch: MCP answers
+    /// only when this AND `mcp.toml`'s runtime `enabled` are on; `init` leaves this `true` and
+    /// writes the runtime switch off (round 4 B-MCPDEF), so an admin switches MCP on without a
+    /// restart.
     #[serde(default = "default_true")]
     pub enabled: bool,
     /// How many MCP sessions the server remembers, the oldest forgotten first (its client
@@ -612,7 +616,10 @@ pub fn default_config_text() -> String {
          \n\
          [mcp]\n\
          # The MCP endpoints: /mcp over every database (list_graphs, use_graph) and\n\
-         # /db/<name>/mcp per loaded database. Read when the server starts.\n\
+         # /db/<name>/mcp per loaded database. Read when the server starts. false: no\n\
+         # endpoint at all. While true, the switch an admin uses is mcp.toml's enabled (the\n\
+         # MCP tab, `graphersal-server mcp on|off`): a new server starts with it off, and new\n\
+         # databases and aliases are not offered to MCP unless created with --mcp.\n\
          enabled = true\n\
          # How many MCP sessions are remembered (the oldest forgotten first).\n\
          max_sessions = {}\n\

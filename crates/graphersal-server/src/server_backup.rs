@@ -780,7 +780,9 @@ pub fn restore(
     }
     // 4. The databases: bases and plain ones first, then the layers over them.
     let (admin, lock) = crate::ops::Admin::open_offline(&target)?;
-    let admin = admin.with_audit(
+    // A restored database is no NEW name: it gets no MCP entry here (none = offered); the
+    // archive's `mcp.toml`, written below, brings back what the server had (round 4 B-MCPDEF).
+    let admin = admin.exposing(Some(true)).with_audit(
         crate::audit::Audit::default()
             .with_actor(Some(crate::access::OPERATOR.to_string()))
             .with_os_user(crate::security::os_user()),

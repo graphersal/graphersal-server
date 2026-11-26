@@ -25,7 +25,8 @@ defaults:
 listen = "127.0.0.1:8484"   # IP:PORT or localhost:PORT; port 0 = a free port
 
 [mcp]
-enabled = true              # /mcp and /db/<name>/mcp (false: both answer 404)
+enabled = true              # /mcp and /db/<name>/mcp exist (false: both answer 404); the
+                            # runtime switch is mcp.toml's enabled (init writes it off)
 max_sessions = 256          # MCP sessions remembered, the oldest forgotten first
 
 [defaults]                  # creation parameters of NEW databases
@@ -165,20 +166,26 @@ alias whose target is missing is dropped at start and reported in the listing's 
 
 The runtime switches of the MCP endpoints ([MCP](../guide/mcp.md#switches-at-runtime-the-mcp-tab-mcptoml)),
 written by the server (the web UI's MCP tab, `PUT /api/admin/mcp...`, `graphersal-server mcp
-...`), whole and atomically; a missing file means the defaults (MCP on, every database
-offered, nothing forced read-only). A file that does not parse (an unknown key included) stops
-`serve` and the console with the line it points at.
+...`), whole and atomically. `init` writes it with `enabled = false` and `expose_new = false`:
+a new server offers nothing to MCP. A missing file (a server directory made by an older
+version) means MCP on, every database offered, new names hidden, nothing forced read-only. A
+file that does not parse (an unknown key included) stops `serve` and the console with the line
+it points at.
 
 ```toml
 enabled = true          # false: /mcp and every /db/<name>/mcp answer 503 (sessions kept)
+expose_new = false      # whether a NEW database or alias is offered to MCP (default false)
 
 [databases.acme]        # a database or an alias, by name
 exposed = false         # hidden from MCP (list_graphs, use_graph, /db/acme/mcp)
 read_only = true        # MCP sessions only read it, whatever their grant
 ```
 
-A name with the defaults is not written. A renamed alias keeps its settings; a deleted database
-or removed alias loses them. `server.toml [mcp] enabled = false` overrides `enabled = true` here
+A name without an entry is offered (the rule of older versions, so an upgraded directory offers
+what it offered before); a name offered and not read-only is not written. Every database or
+alias the server creates gets its entry at birth: `exposed = false` unless `expose_new` is true
+or it was created with `--mcp` / `"mcp": true` ([MCP](../guide/mcp.md#new-servers-and-new-databases)).
+A renamed alias keeps its settings; a deleted database or removed alias loses them. `server.toml [mcp] enabled = false` overrides `enabled = true` here
 (no endpoint at all).
 
 ## `database.toml`

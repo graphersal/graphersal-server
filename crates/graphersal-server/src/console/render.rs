@@ -82,12 +82,16 @@ fn render_with(command: &DbCommand, answer: &Value, dir: &Path, server: Option<&
     let dir_arg = shell_word(dir);
     match command {
         DbCommand::List => render_list(answer, &dir_arg),
-        DbCommand::Create { .. } => leftover_note(
-            entry_note(
-                Note::new(format!("Created database '{}'", s("name"))),
+        DbCommand::Create { .. } => mcp_note(
+            leftover_note(
+                entry_note(
+                    Note::new(format!("Created database '{}'", s("name"))),
+                    answer,
+                ),
                 answer,
             ),
             answer,
+            &dir_arg,
         )
         .text(),
         DbCommand::Delete { .. } => {
@@ -108,12 +112,16 @@ fn render_with(command: &DbCommand, answer: &Value, dir: &Path, server: Option<&
                     .text(),
             }
         }
-        DbCommand::Clone { source, .. } => leftover_note(
-            entry_note(
-                Note::new(format!("Cloned database '{source}' into '{}'", s("name"))),
+        DbCommand::Clone { source, .. } => mcp_note(
+            leftover_note(
+                entry_note(
+                    Note::new(format!("Cloned database '{source}' into '{}'", s("name"))),
+                    answer,
+                ),
                 answer,
             ),
             answer,
+            &dir_arg,
         )
         .text(),
         DbCommand::Load { name, .. } => match answer["state"].as_str() {
@@ -196,13 +204,17 @@ fn render_with(command: &DbCommand, answer: &Value, dir: &Path, server: Option<&
             .text()
         }
         DbCommand::Set { name, setting } => render_set(name, setting, answer, &dir_arg),
-        DbCommand::AliasSet { .. } => leftover_note(
-            Note::new(format!(
-                "Alias '{}' -> database '{}'",
-                s("alias"),
-                s("target")
-            )),
+        DbCommand::AliasSet { .. } => mcp_note(
+            leftover_note(
+                Note::new(format!(
+                    "Alias '{}' -> database '{}'",
+                    s("alias"),
+                    s("target")
+                )),
+                answer,
+            ),
             answer,
+            &dir_arg,
         )
         .text(),
         DbCommand::AliasRemove { .. } => {
@@ -270,7 +282,7 @@ fn render_with(command: &DbCommand, answer: &Value, dir: &Path, server: Option<&
                     );
                 }
             }
-            leftover_note(note, answer).text()
+            mcp_note(leftover_note(note, answer), answer, &dir_arg).text()
         }
         DbCommand::Import { source, .. } => render_import(source, answer, &dir_arg),
         DbCommand::ImportInbox { file, .. } => {
@@ -295,6 +307,21 @@ fn render_with(command: &DbCommand, answer: &Value, dir: &Path, server: Option<&
         .text(),
         DbCommand::UserList => render_users(answer, &dir_arg),
         DbCommand::McpStatus => render_mcp(answer, &dir_arg),
+        DbCommand::McpExposeNew { .. } => {
+            let on = answer["exposeNew"] == Value::Bool(true);
+            Note::new(if on {
+                "New databases and aliases are offered to MCP"
+            } else {
+                "New databases and aliases are not offered to MCP"
+            })
+            .detail(
+                "applies to",
+                "databases and aliases created from now on (create, import, clone, a restore \
+                 into a new name, repair, alias set); --mcp or --no-mcp on such a command wins; \
+                 the names there now keep their settings",
+            )
+            .text()
+        }
         DbCommand::McpSwitch { .. } => {
             let on = answer["enabled"] == Value::Bool(true);
             let note = Note::new(format!("MCP is switched {}", on_off(on)));
@@ -800,6 +827,17 @@ fn render_mcp(answer: &Value, dir_arg: &str) -> String {
         },
     );
     status.row("endpoint", answer["endpoint"].as_str().unwrap_or("/mcp"));
+    status.row(
+        "new databases",
+        if answer["exposeNew"] == Value::Bool(true) {
+            format!("offered to MCP (change it: {BIN} mcp expose-new off --dir {dir_arg})")
+        } else {
+            format!(
+                "not offered to MCP unless created with --mcp (change it: {BIN} mcp expose-new \
+                 on --dir {dir_arg})"
+            )
+        },
+    );
     let usage = &answer["usage"];
     if usage.is_object() {
         status.row(
@@ -1255,6 +1293,26 @@ fn leftover_note(note: Note, answer: &Value) -> Note {
     }
 }
 
+/// `note` with the MCP exposure of a new database or alias (the answer's `mcpExposed`; round
+/// 4 B-MCPDEF): how to offer a hidden one to MCP.
+fn mcp_note(note: Note, answer: &Value, dir_arg: &str) -> Note {
+    let name = answer["alias"]
+        .as_str()
+        .or_else(|| answer["name"].as_str())
+        .unwrap_or_default();
+    match answer["mcpExposed"].as_bool() {
+        Some(true) => note.detail("MCP", "offered (when MCP is on)"),
+        Some(false) => note.detail("MCP", "not offered").command(
+            "offer it to MCP",
+            format!(
+                "{BIN} mcp db {} on --dir {dir_arg}",
+                shell_word(Path::new(name))
+            ),
+        ),
+        None => note,
+    }
+}
+
 /// `note` with the state of `entry` and, for a failed or needs-model one, its reason.
 fn state_details(note: Note, entry: &Value) -> Note {
     let note = note.detail("state", entry["state"].as_str().unwrap_or("?"));
@@ -1561,7 +1619,7 @@ fn render_import(source: &Path, answer: &Value, dir_arg: &str) -> String {
     if let Some(layer_base) = import["layerBase"].as_str() {
         note = note.detail("layer base", layer_base);
     }
-    let mut note = entry_note(note, answer);
+    let mut note = mcp_note(entry_note(note, answer), answer, dir_arg);
     let skipped = import["skipped"].as_u64().unwrap_or_default();
     if skipped > 0 {
         note = note.detail("skipped", text::count(skipped as usize, "element"));
@@ -1743,13 +1801,21 @@ fn render_models_add(answer: &Value, dir_arg: &str) -> String {
 pub fn init_text(report: &InitReport, dir: &Path) -> String {
     let dir_arg = shell_word(dir);
     let note = if !report.existed {
-        Note::new(format!("Created the server directory {}", dir.display())).detail(
-            "config",
-            format!(
-                "{} (listen {DEFAULT_LISTEN}, MCP on: edit it before serving)",
-                below(dir, "server.toml")
-            ),
-        )
+        Note::new(format!("Created the server directory {}", dir.display()))
+            .detail(
+                "config",
+                format!(
+                    "{} (listen {DEFAULT_LISTEN}: edit it before serving)",
+                    below(dir, "server.toml")
+                ),
+            )
+            .detail(
+                "MCP",
+                format!(
+                    "off, and new databases are not offered to it (switch it on: {BIN} mcp on \
+                     --dir {dir_arg})"
+                ),
+            )
     } else if report.created.is_empty() && report.secured.is_empty() {
         Note::new(format!(
             "{} is already a server directory: nothing to do",
@@ -1977,6 +2043,7 @@ mod tests {
             format: None,
             description: None,
             role: crate::database::DatabaseRole::Normal,
+            mcp: None,
         };
         assert_eq!(
             render(&command, &answer, &dir()),

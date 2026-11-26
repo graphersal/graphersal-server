@@ -134,10 +134,10 @@ A `failed` database whose `database.toml` cannot be read has only `name`, `state
 | Method | Path | Body | Answer |
 |---|---|---|---|
 | GET | `/api/admin/databases` | | `200 {"databases": [entry...], "aliases": {alias: database}, "aliasesRevision", "problems": [string...]}` (rows sorted by name, alias rows included) |
-| POST | `/api/admin/databases` | `{"name", "kind"?, "role"?, "base"?, "schema"?, "description"?, "autoLoad"?, "readOnly"?}` | `201` entry (state `unloaded`) |
+| POST | `/api/admin/databases` | `{"name", "kind"?, "role"?, "base"?, "schema"?, "description"?, "autoLoad"?, "readOnly"?, "mcp"?}` | `201` entry (state `unloaded`) + `"mcpExposed"` |
 | GET | `/api/admin/databases/<name>` | | `200` entry (`<name>` may be an alias: an alias row); `ETag`: its `revision` |
 | DELETE | `/api/admin/databases/<name>` | | `200 {"name", "trash": "trash/<name>-<UTC time>", "grantsRemoved"}` (every grant on the database goes with it; a restore does not bring them back) |
-| POST | `/api/admin/databases/<name>/clone` | `{"name"}` | `201` entry of the new database |
+| POST | `/api/admin/databases/<name>/clone` | `{"name", "mcp"?}` | `201` entry of the new database + `"mcpExposed"` |
 | POST | `/api/admin/databases/<name>/load` | | `202` entry + `"load": "started"` or `"already-loading"`; `200` entry + `"load": "already-loaded"` |
 | POST | `/api/admin/databases/<name>/unload` | | `200` entry + `"unloaded": true` (was loaded) or `false` (was not) |
 | POST | `/api/admin/databases/<name>/promote` | | `200` entry (`role: base`, `readOnly: true`; one way) |
@@ -147,17 +147,17 @@ A `failed` database whose `database.toml` cannot be read has only `name`, `state
 | PUT | `/api/admin/databases/<name>/settings` | `{"description"?, "readOnly"?, "autoLoad"?, "limits"?: {key: n \| null}, "revision"?}` | `200` the settings + `"changed": [field...]` |
 | POST | `/api/admin/databases/<name>/backup` | | `201` backup |
 | GET | `/api/admin/databases/<name>/backups` | | `200 {"database", "backups": [backup...]}` (oldest first; also for the name of a deleted database) |
-| POST | `/api/admin/databases/<name>/restore` | `{"backup", "name"?}` | `201` entry + `"restoredFrom": {"database", "backup"}`, `"replaced": bool`, `"trash"` (when replaced) |
+| POST | `/api/admin/databases/<name>/restore` | `{"backup", "name"?, "mcp"?}` | `201` entry + `"restoredFrom": {"database", "backup"}`, `"replaced": bool`, `"trash"` (when replaced), `"mcpExposed"` |
 | GET | `/api/admin/databases/<name>/export?models=true\|false&materialize=true\|false` | | `200` the `.gsnap` file as a download |
-| POST | `/api/admin/import?name=<n>&base=<b>&format=<f>&description=<d>&role=<normal\|base>` | the file itself (`Content-Type: application/octet-stream`, or anything but JSON) | `201` entry + `"import"` |
-| POST | `/api/admin/import` | JSON `{"path" \| "inbox", "name", "base"?, "format"?, "description"?, "role"?}` | `201` entry + `"import"` |
+| POST | `/api/admin/import?name=<n>&base=<b>&format=<f>&description=<d>&role=<normal\|base>&mcp=<true\|false>` | the file itself (`Content-Type: application/octet-stream`, or anything but JSON) | `201` entry + `"import"`, `"mcpExposed"` |
+| POST | `/api/admin/import` | JSON `{"path" \| "inbox", "name", "base"?, "format"?, "description"?, "role"?, "mcp"?}` | `201` entry + `"import"`, `"mcpExposed"` |
 | GET | `/api/admin/imports` | | `200 {"dir", "imports": [{"name", "kind", "directory", "bytes", "modified"}...]}`: the import inbox |
 | GET | `/api/admin/models` | | `200 {"models": [model...], "missing": [{"database", "model"}...]}` |
 | POST | `/api/admin/models` | `{"path"?, "repo"?, "license"?}` | `201` (from a path) or `200` (a repository) `{"added": [model...], "resolved": [database...], "stillMissing": [{"database", "model"}...], "notes": [string...]}` |
 | POST | `/api/admin/models?repo=<r>&license=<l>&format=<gsnap\|tar>` | the file itself (anything but JSON): a `.gsnap` carrying model blobs or a `.tar` (or gzip-compressed `.tar.gz`/`.tgz`) of a Model2Vec model directory | `201`, the same answer |
 | DELETE | `/api/admin/models/<repo or blob hash>` | | `200 {"model", "removed": [blob...], "bytes"}` |
 | GET | `/api/admin/aliases` | | `200 {"aliases": {alias: database}, "revision"}` (`ETag`: the revision) |
-| PUT | `/api/admin/aliases/<alias>` | `{"target", "revision"?}` | `200 {"alias", "target", "leftoverGrantsRemoved"?}` (new alias or flip) |
+| PUT | `/api/admin/aliases/<alias>` | `{"target", "mcp"?, "revision"?}` | `200 {"alias", "target", "mcpExposed", "leftoverGrantsRemoved"?}` (new alias or flip; `mcp` applies to a new alias only) |
 | DELETE | `/api/admin/aliases/<alias>` | | `200 {"alias", "removed": true, "grantsRemoved"}` (the grants on the alias go with it) |
 | POST | `/api/admin/aliases/<alias>/rename` | `{"name", "revision"?}` | `200 {"alias", "renamedFrom", "target", "mcpSessionsMoved", "grantsMoved", "leftoverGrantsRemoved"?}` (see Aliases) |
 | GET | `/api/admin/runs` | | `200 {"runs": [run...], "textHeadChars": 200}` (every loaded database) |
@@ -175,7 +175,7 @@ A `failed` database whose `database.toml` cannot be read has only `name`, `state
 | POST | `/api/admin/grants` | `{"subject", "database", "level", "revision"?}` | `200` grant (new, or its level replaced) |
 | DELETE | `/api/admin/grants/<subject>/<database>` | | `200 {"subject", "database", "revoked": bool}` |
 | GET | `/api/admin/mcp` | | `200` the MCP state (see MCP; `ETag`: its revision) |
-| PUT | `/api/admin/mcp` | `{"enabled": bool, "revision"?}` | `200` the MCP state |
+| PUT | `/api/admin/mcp` | `{"enabled"?: bool, "exposeNew"?: bool, "revision"?}` (at least one) | `200` the MCP state |
 | PUT | `/api/admin/mcp/databases/<name>` | `{"exposed"?: bool, "readOnly"?: bool, "revision"?}` | `200` the MCP state + `"changed": {"name", "exposed", "readOnly"}` |
 | POST | `/api/admin/databases/<name>/verify` | | `200` a verify result (see Verify, repair and swap) |
 | POST | `/api/admin/verify` | | `200 {"results": [verify result \| {"database", "ok": false, "error"}...], "ok"}` (every database) |
@@ -703,7 +703,8 @@ routes. A change takes effect at once (no restart) and may be based on the state
 
 | Field | Meaning |
 |---|---|
-| `enabled` | the runtime switch (`mcp.toml` `enabled`); `false`: `/mcp` and `/db/<name>/mcp` answer `503`, open sessions are kept |
+| `enabled` | the runtime switch (`mcp.toml` `enabled`; `init` writes `false`); `false`: `/mcp` and `/db/<name>/mcp` answer `503`, open sessions are kept |
+| `exposeNew` | whether a new database or alias is offered to MCP when its creator does not say (`mcp.toml` `expose_new`, default `false`) |
 | `endpointBuilt` | `server.toml [mcp] enabled`: `false` = the server built no MCP endpoint (restart with it on); offline what `server.toml` says |
 | `serving` | `enabled` and `endpointBuilt` |
 | `online` | a running server answered (offline the console read `mcp.toml`; `usage` is `null`) |
@@ -711,6 +712,13 @@ routes. A change takes effect at once (no restart) and may be based on the state
 | `revision` | of the settings |
 | `databases` | every database and alias, and every name with settings that names nothing now: `name`, `kind` (`database` \| `alias` \| `missing`), `target` (an alias's database), `exposed` and `readOnly` (the name's own settings), `effectiveExposed` (the name and its database exposed), `effectiveReadOnly` (read-only for MCP by the name, its database, or the database's own mode: its read-only flag, a base), `sessions` (open MCP sessions working on it), `calls`, `errors` (tool calls since the start) |
 | `usage` | since the server started, in memory: `startedAtMs`, `sessions {open, byUser: [{user, sessions}], byDatabase: [{database, sessions}], withoutDatabase}`, `calls {total, errors, refused}` (`refused`: requests refused while MCP was off or the database hidden), `tools: [{tool, calls, errors}]`, `users: [{user, calls, errors}]`, `databases: [{database, calls, errors}]` (most calls first), `recentErrors: [{atMs, tool, user, database, message}]` (the last `recentErrorsMax` = 50, newest first); `null` offline |
+
+**New names** (create, clone, import, a restore into a new name, repair, a new alias): hidden
+from MCP unless the request says `"mcp": true` (an upload import `mcp=true`) or `exposeNew` is
+on; `"mcp": false` hides it whatever `exposeNew` says. The answer's `mcpExposed` is the new
+name's own setting. A restore over an existing database and an alias flip keep the name's
+setting. `PUT /api/admin/mcp {"exposeNew": bool}` is audited as `MCP exposure of new databases
+and aliases on|off`; with `enabled` in the same body both change, `exposeNew` first.
 
 `PUT /api/admin/mcp/databases/<name>` takes a database's or alias's name (a name with settings
 that names nothing now too, to reset it); a missing value is kept; neither given is `400`, an

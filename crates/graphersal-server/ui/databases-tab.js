@@ -32,6 +32,7 @@ import {
   createBody, nameProblem, existingNameProblem, renameProblem, NAME_HINT, rowActions, confirmText, outcomeText, outcomeTone, loadAndWatch, baseNames, realRows,
   bytesText, transferActions, needsModelHint, poolText, promoteAction, isConflict, kindHelp, BASE_HELP, PROMOTE_HELP, KIND_HELP,
   isOpenState, damageActions, verifyText, verifyDamaged, verifyAllText, problemLines, repairSummary, repairedName, uncleanRows, REPAIR_HELP, RESTORE_HINT,
+  MCP_NEW_HELP,
 } from './admin-api.js';
 import {
   admin, list, reload, patchRow, errorNotice, notify, pageHref, openapiHref, useFreshData, useSort, SortTh, ActionMenu, FormError,
@@ -59,8 +60,8 @@ const BUSY_TEXT = Object.freeze({
 /** The sortable columns of the alias table. */
 const ALIAS_COLUMNS = Object.freeze({ alias: { type: 'text' }, target: { type: 'text' } });
 
-const emptyCreate = () => ({ name: '', kind: 'plain', role: 'normal', base: '', description: '', schema: '', readOnly: false, autoLoad: false });
-const freshDialog = () => ({ mode: null, source: '', form: emptyCreate(), alias: '', target: '', newName: '', existing: false, problems: [], error: null, busy: false, repaired: null });
+const emptyCreate = () => ({ name: '', kind: 'plain', role: 'normal', base: '', description: '', schema: '', readOnly: false, autoLoad: false, mcp: false });
+const freshDialog = () => ({ mode: null, source: '', form: emptyCreate(), alias: '', target: '', newName: '', existing: false, mcp: false, problems: [], error: null, busy: false, repaired: null });
 
 export default {
   components: { SortTh, ActionMenu, FormError },
@@ -229,7 +230,8 @@ export default {
         if (problem) return { problems: [problem] };
         const subject = dialog.form.name.trim().toLowerCase();
         const source = dialog.source;
-        return { subject, action: 'clone', send: () => admin.clone(source, subject) };
+        const mcp = dialog.form.mcp === true;
+        return { subject, action: 'clone', send: () => admin.clone(source, subject, mcp) };
       }
       if (dialog.mode === 'alias') {
         // A flip keeps an existing alias's name (one made before 0.3.0 may break the new rule).
@@ -241,7 +243,8 @@ export default {
         const was = list.aliases.find((a) => a.alias === subject);
         if (was && was.target !== target && !window.confirm(confirmText('flipAlias', subject, target))) return { cancelled: true };
         const revision = list.aliasesRevision;
-        return { subject, action: 'setAlias', send: () => admin.setAlias(subject, target, revision) };
+        const mcp = !dialog.existing && dialog.mcp === true;
+        return { subject, action: 'setAlias', send: () => admin.setAlias(subject, target, revision, mcp) };
       }
       if (dialog.mode === 'repair') {
         const problem = nameProblem(dialog.newName, 'name for the repaired copy');
@@ -341,7 +344,7 @@ export default {
     useFreshData(() => Promise.all([reload(), readMemory(), readRecovery()]));
 
     return {
-      list, rows, aliases, memory, diskTitle, memoryText, memoryTitle, dbSort, aliasSort, kindHelp, baseHelp: BASE_HELP, promoteHelp: PROMOTE_HELP, kindHelpOf: KIND_HELP, busy, dlg, dialog, acts, bases, databaseNames, showSize, showMemory,
+      list, rows, aliases, memory, diskTitle, memoryText, memoryTitle, dbSort, aliasSort, kindHelp, baseHelp: BASE_HELP, mcpHelp: MCP_NEW_HELP, promoteHelp: PROMOTE_HELP, kindHelpOf: KIND_HELP, busy, dlg, dialog, acts, bases, databaseNames, showSize, showMemory,
       bytesText, needsModelHint, poolText, badgeText, rowItems, href: pageHref, reload, nameHint: NAME_HINT,
       unclean, hideUnclean, isOpenState, verifyDb, verifyAll, verifyingAll, openRepair, swapRepaired, keepBoth, repairHelp: REPAIR_HELP, restoreHint: RESTORE_HINT,
       loadDb, unloadDb, deleteDb, promoteDb, setFlag, openCreate, openClone, openAlias, openRename, closeDialog, submitDialog, removeAlias,
@@ -485,15 +488,18 @@ export default {
               <textarea v-model="dialog.form.schema" name="schema" class="mono" rows="5" spellcheck="false" placeholder='{"mode": "open", ...}'></textarea></label>
             <label class="inline" v-if="dialog.form.role !== 'base' || dialog.form.kind === 'layer'"><input type="checkbox" name="readOnly" v-model="dialog.form.readOnly"> Read-only</label>
             <label class="inline"><input type="checkbox" name="autoLoad" v-model="dialog.form.autoLoad"> Load when the server starts</label>
+            <label class="inline" :title="mcpHelp"><input type="checkbox" name="mcp" v-model="dialog.form.mcp" data-create-mcp> Expose through MCP</label>
           </template>
           <template v-else-if="dialog.mode === 'clone'">
             <p>A copy of the latest state of "{{ dialog.source }}" with the same kind, base, description and read-only flag; auto-load off. It is independent afterwards.</p>
             <label>Name of the clone <input v-model="dialog.form.name" name="name" class="mono" autocomplete="off" spellcheck="false"><small class="srv-field-hint">{{ nameHint }}</small></label>
+            <label class="inline" :title="mcpHelp"><input type="checkbox" name="mcp" v-model="dialog.form.mcp" data-clone-mcp> Expose through MCP</label>
           </template>
           <template v-else-if="dialog.mode === 'alias'">
             <label>Alias <input v-model="dialog.alias" name="alias" class="mono" autocomplete="off" spellcheck="false" :readonly="dialog.existing"><small v-if="!dialog.existing" class="srv-field-hint">{{ nameHint }}</small></label>
             <label>Database
               <select v-model="dialog.target" name="target"><option v-for="n in databaseNames" :key="n" :value="n">{{ n }}</option></select></label>
+            <label v-if="!dialog.existing" class="inline" :title="mcpHelp"><input type="checkbox" name="mcp" v-model="dialog.mcp" data-alias-mcp> Expose through MCP</label>
           </template>
           <template v-else-if="dialog.mode === 'repair' && !dialog.repaired">
             <p>{{ repairHelp }}</p>

@@ -251,10 +251,11 @@ fn init_creates_a_server_directory_and_refuses_a_foreign_one() {
     assert_eq!(
         text(&out.stdout),
         format!(
-            "Created the server directory {root_text}\n  config: {} (listen 127.0.0.1:8484, MCP \
-             on: edit it before serving)\n  # start it\n  graphersal-server serve --dir \
-             {root_text}\n  # or create a database first\n  graphersal-server db create NAME \
-             --dir {root_text}\n",
+            "Created the server directory {root_text}\n  config: {} (listen 127.0.0.1:8484: \
+             edit it before serving)\n  MCP:    off, and new databases are not offered to it \
+             (switch it on: graphersal-server mcp on --dir {root_text})\n  # start it\n  \
+             graphersal-server serve --dir {root_text}\n  # or create a database first\n  \
+             graphersal-server db create NAME --dir {root_text}\n",
             config_path.display()
         )
     );
@@ -1037,6 +1038,12 @@ fn execute(address: SocketAddr, db: &str, script: &str) -> serde_json::Value {
 }
 
 /// A plain database `name` (a closed Store holding the modern sample).
+/// Switches MCP on in `dir`'s `mcp.toml` (a new server starts with it off: round 4
+/// B-MCPDEF); names without an entry stay offered.
+fn mcp_on(dir: &ServerDir) {
+    std::fs::write(dir.mcp_settings_path(), "enabled = true\n").unwrap();
+}
+
 fn modern_db(dir: &ServerDir, name: &str) {
     use graphersal::persist::{Store, StoreOptions};
     use graphersal::prelude::TraversalGraph;
@@ -1268,10 +1275,15 @@ fn db_commands_act_on_the_directory_when_no_server_runs() {
         ],
     );
     assert_eq!(code, 0, "{err}");
+    // A new database is not offered to MCP (round 4 B-MCPDEF).
     assert_eq!(
         out,
-        "Created database 'acme'\n  kind:        plain\n  description: Acme graph\n  \
-         state:       unloaded\n"
+        format!(
+            "Created database 'acme'\n  kind:        plain\n  description: Acme graph\n  \
+             state:       unloaded\n  MCP:         not offered\n  # offer it to MCP\n  \
+             graphersal-server mcp db acme on --dir {}\n",
+            root.display()
+        )
     );
     assert!(!err.contains("note:"), "offline: {err}");
     let (code, out, err) = db(root, &["create", "base", "--role", "base"]);
@@ -1610,7 +1622,9 @@ fn import_offline_and_through_a_server() {
         out,
         format!(
             "Imported database 'gs'\n  source:      {graphson_arg}\n  format:      graphson\n  \
-             kind:        plain\n  description: From GraphSON\n  state:       unloaded\n"
+             kind:        plain\n  description: From GraphSON\n  state:       unloaded\n  \
+             MCP:         not offered\n  # offer it to MCP\n  graphersal-server mcp db gs on \
+             --dir {root}\n"
         )
     );
     assert!(!err.contains("sent to its admin API"), "{err}");
@@ -2027,6 +2041,7 @@ fn mcp_persons(address: SocketAddr, path: &str, session: &str, graph: Option<&st
 fn mcp_serves_every_database_through_one_endpoint() {
     let temp = TempDir::new("mcp");
     let dir = ServerDir::init(temp.path()).unwrap().dir;
+    mcp_on(&dir);
     for name in ["a", "b", "c"] {
         modern_db(&dir, name);
     }
@@ -2269,11 +2284,12 @@ fn mcp_sessions_follow_their_alias_name() {
     let temp = TempDir::new("mcp-alias");
     let root = temp.path();
     let dir = ServerDir::init(root).unwrap().dir;
+    mcp_on(&dir);
     for name in ["a", "b"] {
         modern_db(&dir, name);
     }
-    // The console renames offline too.
-    let (code, _, err) = db(root, &["alias", "set", "old", "a"]);
+    // The console renames offline too (the alias offered to MCP at birth: `--mcp`).
+    let (code, _, err) = db(root, &["alias", "set", "old", "a", "--mcp"]);
     assert_eq!(code, 0, "{err}");
     let (code, out, err) = db(root, &["alias", "rename", "old", "cur"]);
     assert_eq!(code, 0, "{err}");
@@ -2350,12 +2366,13 @@ fn mcp_sessions_follow_their_alias_name() {
         "{text}"
     );
 
-    // 3. Created again under the name: the session works on, no note.
+    // 3. Created again under the name (offered to MCP at birth: a new alias is hidden by
+    //    default, round 4 B-MCPDEF): the session works on, no note.
     let (status, answer) = admin_json(
         address,
         "PUT",
         "aliases/cur",
-        serde_json::json!({"target": "a"}),
+        serde_json::json!({"target": "a", "mcp": true}),
     );
     assert_eq!(status, 200, "{answer}");
     assert!(!counted(4).starts_with("note:"));
@@ -2412,6 +2429,7 @@ fn mcp_sessions_follow_their_alias_name() {
 fn mcp_token_and_off_switch_come_from_server_toml() {
     let temp = TempDir::new("mcp-config");
     let dir = ServerDir::init(temp.path()).unwrap().dir;
+    mcp_on(&dir);
     let config = dir.root().join("server.toml");
     // `[mcp] token` is gone (B3: users and grants in access.toml replace it): refused.
     std::fs::write(&config, "[mcp]\ntoken = \"s3cret\"\nmax_sessions = 2\n").unwrap();
@@ -2925,6 +2943,7 @@ fn browser_and_mcp_sessions_survive_a_restart_until_their_token_changes() {
     let temp = TempDir::new("sessions-restart");
     let root = temp.path().join("srv");
     let dir = ServerDir::init(&root).unwrap().dir;
+    mcp_on(&dir);
     modern_db(&dir, "acme");
     let running = start_with_acme(&root);
     let address = running.address();
@@ -5189,4 +5208,298 @@ fn the_openapi_command_writes_what_the_server_answers() {
     let output = run(&["openapi"]);
     assert_eq!(output.status.code(), Some(2));
     drop(running);
+}
+
+/// The names `list_graphs` of `/mcp` offers (an admin session: every database it may reach).
+fn mcp_listed(address: SocketAddr, session: &str) -> Vec<String> {
+    let (text, error) = mcp_tool(
+        address,
+        "/mcp",
+        session,
+        "list_graphs",
+        serde_json::json!({}),
+    );
+    assert!(!error, "{text}");
+    let listed = json(&text);
+    let mut names: Vec<String> = listed["graphs"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no graphs: {text}"))
+        .iter()
+        .map(|g| g["name"].as_str().unwrap().to_string())
+        .collect();
+    names.sort();
+    names
+}
+
+/// Round 4 B-MCPDEF: `init` makes a server with MCP off; every new database (create, import,
+/// clone, a restore into a new name, repair) and every new alias is hidden from MCP unless
+/// created with `--mcp` (or `"mcp": true` through the API) or `mcp expose-new` is on;
+/// `--no-mcp` hides one whatever the default; a renamed alias keeps its exposure.
+#[test]
+fn a_new_server_has_mcp_off_and_new_names_are_hidden_from_mcp() {
+    use graphersal::prelude::{Graph, GraphExport, TraversalGraph};
+    let temp = TempDir::new("mcp-defaults");
+    let root = temp.path().join("srv");
+    let out = run(&["init", root.to_str().unwrap()]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let dir = ServerDir::new(&root);
+    let settings = std::fs::read_to_string(dir.mcp_settings_path()).unwrap();
+    assert!(
+        settings.contains("enabled = false") && settings.contains("expose_new = false"),
+        "{settings}"
+    );
+    let (code, out, err) = mcp_command(&root, &["status"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        out.contains("off (switch it on: graphersal-server mcp on --dir"),
+        "{out}"
+    );
+    assert!(
+        out.contains("not offered to MCP unless created with --mcp"),
+        "{out}"
+    );
+    // Offline: every way a name is born.
+    let graph = Graph::new(TraversalGraph::tinkerpop_modern());
+    let graphson = temp.path().join("modern.json");
+    graph
+        .export_graphson_writer(std::fs::File::create(&graphson).unwrap())
+        .unwrap();
+    let graphson = graphson.to_str().unwrap();
+    let root_text = root.to_str().unwrap();
+    for args in [
+        &["create", "plain"][..],
+        &["create", "shown", "--mcp"],
+        &["clone", "shown", "cl"],
+        &["clone", "shown", "cl-shown", "--mcp"],
+        &["alias", "set", "al", "shown"],
+        &["alias", "set", "al-shown", "shown", "--mcp"],
+        &["backup", "shown"],
+    ] {
+        let (code, _, err) = db(&root, args);
+        assert_eq!(code, 0, "{args:?}: {err}");
+    }
+    let (code, out, err) = db(&root, &["create", "plain2"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("  MCP:"), "{out}");
+    assert!(out.contains("not offered"), "{out}");
+    assert!(
+        out.contains("graphersal-server mcp db plain2 on --dir"),
+        "{out}"
+    );
+    let (code, out, err) = db(&root, &["create", "x", "--mcp", "--no-mcp"]);
+    assert_eq!(code, 2, "{out}{err}");
+    let (code, _, err) = db(&root, &["delete", "plain2", "--mcp"]);
+    assert_eq!(
+        code, 2,
+        "--mcp belongs to the commands that make a name: {err}"
+    );
+    for args in [
+        &[root_text, graphson, "--name", "gs"][..],
+        &[root_text, graphson, "--name", "gs-shown", "--mcp"],
+    ] {
+        let (code, _, err) = import(args);
+        assert_eq!(code, 0, "{args:?}: {err}");
+    }
+    let (code, out, _) = db(&root, &["backups", "shown", "--json"]);
+    assert_eq!(code, 0);
+    let backup = json(&out)["backups"][0]["backup"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (code, _, err) = db(&root, &["restore", "shown", &backup, "--name", "rs"]);
+    assert_eq!(code, 0, "{err}");
+    let (code, _, err) = db(&root, &["repair", "plain"]);
+    assert_eq!(code, 0, "{err}");
+    // A database made by hand (no entry in mcp.toml) stays offered: the rule of older
+    // directories.
+    modern_db(&dir, "byhand");
+    let (code, _, err) = mcp_command(&root, &["on"]);
+    assert_eq!(code, 0, "{err}");
+
+    let running = serve::start(
+        &root,
+        ServeOptions::new().with_listen("127.0.0.1:0".parse().unwrap()),
+    )
+    .unwrap();
+    let address = running.address();
+    let loader = running.loader();
+    let all = [
+        "plain",
+        "shown",
+        "cl",
+        "cl-shown",
+        "gs",
+        "gs-shown",
+        "rs",
+        "plain-repaired",
+        "byhand",
+    ];
+    for name in all {
+        loader.load(name).unwrap();
+        assert_eq!(
+            loader.wait(name, Duration::from_secs(120)).unwrap(),
+            DbState::Loaded,
+            "{name}"
+        );
+    }
+    let session = mcp_initialize(address, "/mcp");
+    assert_eq!(
+        mcp_listed(address, &session),
+        ["al-shown", "byhand", "cl-shown", "gs-shown", "shown"]
+    );
+    let (text, error) = mcp_tool(
+        address,
+        "/mcp",
+        &session,
+        "use_graph",
+        serde_json::json!({"name": "cl"}),
+    );
+    assert!(error, "a hidden name is unknown to MCP: {text}");
+    let init = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+        "protocolVersion": "2025-06-18", "clientInfo": {"name": "it", "version": "1"}}});
+    for hidden in ["plain", "cl", "gs", "rs", "plain-repaired"] {
+        let (status, _, body) = mcp_post(
+            address,
+            &format!("/db/{hidden}/mcp"),
+            None,
+            &[],
+            init.clone(),
+        );
+        assert_eq!(status, 404, "{hidden}: {body}");
+    }
+    mcp_initialize(address, "/db/shown/mcp");
+    mcp_initialize(address, "/db/gs-shown/mcp");
+
+    // Through the running server: the API's `mcp`, the server-wide default, `--no-mcp`.
+    let (status, answer) = admin_json(
+        address,
+        "POST",
+        "databases",
+        serde_json::json!({"name": "api-shown", "mcp": true}),
+    );
+    assert_eq!(status, 201, "{answer}");
+    assert_eq!(answer["mcpExposed"], true, "{answer}");
+    let (status, answer) = admin_json(
+        address,
+        "POST",
+        "databases",
+        serde_json::json!({"name": "api-hidden"}),
+    );
+    assert_eq!(status, 201, "{answer}");
+    assert_eq!(answer["mcpExposed"], false, "{answer}");
+    let (status, answer) = admin_json(
+        address,
+        "PUT",
+        "aliases/api-al",
+        serde_json::json!({"target": "shown"}),
+    );
+    assert_eq!(status, 200, "{answer}");
+    assert_eq!(answer["mcpExposed"], false, "{answer}");
+    let (code, out, err) = mcp_command(&root, &["expose-new", "on"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        out.starts_with("New databases and aliases are offered to MCP\n"),
+        "{out}"
+    );
+    let (status, state) = admin_json(address, "GET", "mcp", serde_json::json!(null));
+    assert_eq!(status, 200, "{state}");
+    assert_eq!(state["exposeNew"], true, "{state}");
+    let (code, _, err) = db(&root, &["create", "later"]);
+    assert_eq!(code, 0, "{err}");
+    let (code, _, err) = db(&root, &["create", "later-hidden", "--no-mcp"]);
+    assert_eq!(code, 0, "{err}");
+    let (code, _, err) = db(&root, &["alias", "set", "later-al", "shown"]);
+    assert_eq!(code, 0, "{err}");
+    // A renamed alias keeps its exposure (hidden and offered alike).
+    for (old, new) in [("al", "al2"), ("al-shown", "al-shown2")] {
+        let (code, _, err) = db(&root, &["alias", "rename", old, new]);
+        assert_eq!(code, 0, "{err}");
+    }
+    let session = mcp_initialize(address, "/mcp");
+    let listed = mcp_listed(address, &session);
+    for name in ["api-shown", "later", "later-al", "al-shown2"] {
+        assert!(listed.iter().any(|n| n == name), "{name}: {listed:?}");
+    }
+    for name in [
+        "api-hidden",
+        "api-al",
+        "later-hidden",
+        "al2",
+        "al",
+        "al-shown",
+    ] {
+        assert!(!listed.iter().any(|n| n == name), "{name}: {listed:?}");
+    }
+    // Both switches in one request; a body without either is refused.
+    let (status, state) = admin_json(
+        address,
+        "PUT",
+        "mcp",
+        serde_json::json!({"exposeNew": false, "enabled": false}),
+    );
+    assert_eq!(status, 200, "{state}");
+    assert_eq!(
+        (&state["exposeNew"], &state["enabled"]),
+        (&serde_json::json!(false), &serde_json::json!(false))
+    );
+    let (status, _) = admin_json(address, "PUT", "mcp", serde_json::json!({}));
+    assert_eq!(status, 400);
+    running.stop().unwrap();
+}
+
+/// Round 4 B-MCPDEF: a server directory made before (no `mcp.toml`, or one without
+/// `expose_new`) keeps what it offered: MCP stays on and its databases and aliases (no
+/// entries) stay offered; only names created from now on are hidden.
+#[test]
+fn an_older_server_directory_keeps_its_mcp_exposure() {
+    let temp = TempDir::new("mcp-upgrade");
+    let root = temp.path().join("srv");
+    let dir = ServerDir::init(&root).unwrap().dir;
+    // As an older version left it: no mcp.toml, a database and an alias without entries.
+    std::fs::remove_file(dir.mcp_settings_path()).unwrap();
+    modern_db(&dir, "old");
+    std::fs::write(dir.aliases_path(), "old-al = \"old\"\n").unwrap();
+    let (code, out, err) = mcp_command(&root, &["status", "--json"]);
+    assert_eq!(code, 0, "{err}");
+    let state = json(&out);
+    assert_eq!(state["enabled"], true, "{state}");
+    assert_eq!(state["exposeNew"], false, "{state}");
+    let (code, _, err) = db(&root, &["clone", "old", "new"]);
+    assert_eq!(code, 0, "{err}");
+    // An mcp.toml of round 3 (no expose_new) parses the same way.
+    let text = std::fs::read_to_string(dir.mcp_settings_path()).unwrap();
+    assert!(text.contains("[databases.new]"), "{text}");
+    let running = serve::start(
+        &root,
+        ServeOptions::new().with_listen("127.0.0.1:0".parse().unwrap()),
+    )
+    .unwrap();
+    let address = running.address();
+    for name in ["old", "new"] {
+        running.loader().load(name).unwrap();
+        assert_eq!(
+            running
+                .loader()
+                .wait(name, Duration::from_secs(120))
+                .unwrap(),
+            DbState::Loaded
+        );
+    }
+    let session = mcp_initialize(address, "/mcp");
+    assert_eq!(mcp_listed(address, &session), ["old", "old-al"]);
+    mcp_initialize(address, "/db/old/mcp");
+    running.stop().unwrap();
+    std::fs::write(
+        dir.mcp_settings_path(),
+        "enabled = true\n\n[databases.old]\nread_only = true\n",
+    )
+    .unwrap();
+    let (code, out, err) = mcp_command(&root, &["status", "--json"]);
+    assert_eq!(code, 0, "{err}");
+    let state = json(&out);
+    assert_eq!(
+        (&state["enabled"], &state["exposeNew"]),
+        (&serde_json::json!(true), &serde_json::json!(false)),
+        "{state}"
+    );
 }

@@ -130,6 +130,9 @@ without a token.
   they continue with the same session and selected database, without connecting again. The
   HTTP API and the web pages are not affected.
 - Per database or alias: offered to MCP or hidden, and read-only for MCP.
+- "Expose new databases and aliases": whether a database or alias created from now on is offered
+  to MCP (off by default: a new name is hidden until exposed here). The create, clone, new alias
+  and import forms have their own "Expose through MCP" checkbox.
 - Usage since the start: open sessions and tool calls per database, tool calls per tool and per
   user, the recent errors.
 - The endpoint URL and the `claude mcp add` command.

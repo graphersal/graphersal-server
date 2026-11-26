@@ -11,13 +11,15 @@ const based = (request, revision) => (typeof revision === 'string' && revision ?
 
 /**
  * The requests: `state()` (the switches, every database's MCP settings and the usage
- * statistics), `setEnabled(on, revision?)` (MCP for the whole server), `setName(name,
+ * statistics), `setEnabled(on, revision?)` (MCP for the whole server), `setExposeNew(on,
+ * revision?)` (whether new databases and aliases are offered to MCP), `setName(name,
  * {exposed?, readOnly?}, revision?)` (one database or alias). A change takes the state's
  * `revision`: a change someone else made meanwhile refuses it (409).
  */
 export const mcpRequest = Object.freeze({
   state: () => ({ method: 'GET', path: 'api/admin/mcp' }),
   setEnabled: (on, revision) => based({ method: 'PUT', path: 'api/admin/mcp', body: { enabled: !!on } }, revision),
+  setExposeNew: (on, revision) => based({ method: 'PUT', path: 'api/admin/mcp', body: { exposeNew: !!on } }, revision),
   setName: (name, change, revision) => {
     const body = {};
     if (typeof change.exposed === 'boolean') body.exposed = change.exposed;
@@ -31,6 +33,7 @@ export function createMcp(options) {
   return {
     state: () => sendAdmin(options, mcpRequest.state()),
     setEnabled: (on, revision) => sendAdmin(options, mcpRequest.setEnabled(on, revision)),
+    setExposeNew: (on, revision) => sendAdmin(options, mcpRequest.setExposeNew(on, revision)),
     setName: (name, change, revision) => sendAdmin(options, mcpRequest.setName(name, change, revision)),
   };
 }
@@ -68,6 +71,14 @@ export function statusOf(answer = {}) {
   }
   return { tone: 'ok', text: 'MCP is on', help: '' };
 }
+
+/** Whether new databases and aliases are offered to MCP (`exposeNew`; default and missing: no). */
+export const exposeNewOf = (answer = {}) => answer.exposeNew === true;
+
+/** The tooltip of the "Expose new databases and aliases" checkbox. */
+export const EXPOSE_NEW_HELP = 'Whether a database or alias created from now on (create, import, clone, a restore into a new name, repair, a new alias) is offered to MCP. '
+  + 'Off (the default): it is hidden until it is exposed here, or created with "Expose through MCP". '
+  + 'The databases and aliases there now keep their settings.';
 
 /** The kinds of a database row: a database, an alias, or a name with settings that names nothing now. */
 export const MCP_ROW_KINDS = Object.freeze(['database', 'alias', 'missing']);
