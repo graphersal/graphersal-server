@@ -20,6 +20,7 @@
 - [MCP](guide/mcp.md)
 - [HTTP Clients and OpenAPI](guide/http_clients.md)
 - [Running as a Service](guide/service.md)
+- [Running in Docker](guide/docker.md)
 - [Troubleshooting](troubleshooting.md)
 
 # Reference

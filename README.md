@@ -59,6 +59,16 @@ cargo binstall graphersal-server             # the release binary, through cargo
 Manual download, checksum and attestation checks, and building from a clone:
 [Installation](book/src/getting_started/installation.md).
 
+In Docker: the repository's `Dockerfile` builds an image (no image is published yet); `/data` is
+the server directory, and the first start prints the first admin token once into the container
+log ([Running in Docker](book/src/guide/docker.md)):
+
+```bash
+docker build -t graphersal-server .
+docker run -d --name gsrv -p 127.0.0.1:8484:8484 -v gsrv-data:/data graphersal-server
+docker logs gsrv
+```
+
 ## Quick start
 
 ```bash
@@ -84,7 +94,7 @@ Model](book/src/guide/security.md)).
 
 The book in [`book/src/`](book/src/SUMMARY.md) is the documentation: installation, the command
 cheat sheet, concepts, databases, backups, models, users and grants, the security model, the web
-UI, MCP, HTTP clients, configuration, running as a service, troubleshooting, the admin API and
+UI, MCP, HTTP clients, configuration, running as a service or in Docker, troubleshooting, the admin API and
 the [release notes](book/src/release_notes/index.md). It is not published on a website: read it
 on GitHub, or build and open it with [mdBook](https://rust-lang.github.io/mdBook/):
 
