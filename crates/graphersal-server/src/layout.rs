@@ -547,10 +547,36 @@ fn write_atomic_file(path: &Path, bytes: &[u8], private: bool) -> Result<(), Ser
         let _ = fs::remove_file(&tmp);
         return Err(ServerError::io("write", &tmp, err));
     }
-    fs::rename(&tmp, path).map_err(|err| {
+    rename_replacing(&tmp, path).map_err(|err| {
         let _ = fs::remove_file(&tmp);
         ServerError::io("write", path, err)
     })
+}
+
+/// `fs::rename(from, to)` over an existing `to`. On Windows, replacing a file fails with
+/// "Access is denied" while another handle has `to` open without delete sharing (a reader in
+/// `fs::read_to_string`, another writer's rename in flight); such a handle is short-lived, so
+/// the rename is retried for up to about two seconds before the error is returned.
+fn rename_replacing(from: &Path, to: &Path) -> io::Result<()> {
+    #[cfg(windows)]
+    {
+        let mut delay = std::time::Duration::from_millis(1);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            match fs::rename(from, to) {
+                Err(err)
+                    if err.kind() == io::ErrorKind::PermissionDenied
+                        && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(delay);
+                    delay = (delay * 2).min(std::time::Duration::from_millis(50));
+                }
+                result => return result,
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    fs::rename(from, to)
 }
 
 /// The file names this server writes atomically (the legacy temporary names of earlier
