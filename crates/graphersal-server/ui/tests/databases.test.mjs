@@ -177,3 +177,16 @@ test('memoryRows: the server memory summary, free under the limit or on the mach
   assert.equal(memoryRows({ memory: { configuredLimit: 8589934592, limitBytes: 8589934592, limitSource: 'configured' } })
     .find((r) => r.key === 'limit').text, '8.0 GB (set in server.toml)');
 });
+
+test('memoryRows: free is capped by what the machine has available', async () => {
+  const { memoryRows } = await import('../databases.js');
+  const free = memoryRows({
+    memory: {
+      processBytes: 1024, databasesBytes: 0, machineTotalBytes: 8192, machineAvailableBytes: 2048,
+      limitBytes: 6144, limitSource: 'configured', configuredLimit: 6144, headroomBytes: null,
+      freeBytes: 2048, freeBasis: 'machine-below-limit',
+    },
+  }).find((r) => r.key === 'free');
+  assert.equal(free.text, '2.0 KB on the machine (less than the limit leaves)');
+  assert.match(free.title, /^2,048 bytes: the machine's available memory: less than the limit/);
+});

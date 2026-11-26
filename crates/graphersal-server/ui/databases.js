@@ -175,13 +175,16 @@ export function memoryRows(server) {
     title: `${limit === null ? 'No ceiling: the process may grow until the system stops it.' : `${exact(limit)}: the engine's process memory ceiling; a query, import or write that would go over it is refused.`} server.toml [limits] ${setting}${headroom !== null ? `, memory_headroom = ${headroom}` : ''}.`,
   });
   const free = n('freeBytes');
-  const basis = m.freeBasis === 'limit' ? 'limit' : 'machine';
+  const basis = ['limit', 'machine-below-limit'].includes(m.freeBasis) ? m.freeBasis : 'machine';
+  const freeWords = {
+    limit: ['under the limit', "the limit minus the process's memory"],
+    'machine-below-limit': ['on the machine (less than the limit leaves)', "the machine's available memory: less than the limit minus the process's memory"],
+    machine: ['on the machine', "no limit is set, so the machine's available memory"],
+  }[basis];
   rows.push({
     key: 'free', label: 'Free',
-    text: free === null ? 'unknown' : `${bytesText(free)} ${basis === 'limit' ? 'under the limit' : 'on the machine'}`,
-    title: free === null ? '' : basis === 'limit'
-      ? `${exact(free)}: the limit minus the process's memory`
-      : `${exact(free)}: no limit is set, so the machine's available memory`,
+    text: free === null ? 'unknown' : `${bytesText(free)} ${freeWords[0]}`,
+    title: free === null ? '' : `${exact(free)}: ${freeWords[1]}`,
   });
   return rows;
 }

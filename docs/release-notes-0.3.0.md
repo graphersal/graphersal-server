@@ -237,7 +237,8 @@ A server in the background without hunting for its pid:
   layers counts one time), the machine's total and available memory, the memory limit in
   effect with where it comes from (`configured`, a container's `cgroup` limit, 80 % of the
   `physical` memory, `none`) and the `[limits] memory_limit`/`memory_headroom` settings, and
-  what is free: the limit minus the process's memory, or the machine's available memory
-  without a limit. Before, `status` showed only the limit (`liveBytes`, `limitBytes` and
+  what is free: the limit minus the process's memory, but never more than the machine's
+  available memory (then `freeBasis: "machine-below-limit"`), or the machine's available
+  memory without a limit. Before, `status` showed only the limit (`liveBytes`, `limitBytes` and
   `availableBytes` stay in the answer). No new dependency on Linux and macOS (`libc`);
   `windows-sys`, already in the tree, gives the Windows figures.

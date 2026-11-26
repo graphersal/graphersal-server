@@ -622,7 +622,7 @@ Databases tab shows it above the table; `status` prints it). A figure the server
 | `configuredLimit` | `server.toml [limits] memory_limit` as written: a number of bytes, `"auto"`, `"none"`, or `null` when not set (the engine default, `auto`) |
 | `headroomBytes` | `[limits] memory_headroom` (what `auto` keeps free below a cgroup limit), `null` when not set (a tenth of the cgroup limit, at least 64 MiB) |
 | `availableBytes` | the engine's room below the ceiling (the whole ceiling without a tracking allocator), `null` without one |
-| `freeBytes`, `freeBasis` | "free under the limit": `limitBytes` minus the process's memory (`processBytes`, else `databasesBytes`) with `freeBasis: "limit"` when a ceiling is in effect; else the machine's available memory, `freeBasis: "machine"` |
+| `freeBytes`, `freeBasis` | "free under the limit": `limitBytes` minus the process's memory (`processBytes`, else `databasesBytes`) with `freeBasis: "limit"` when a ceiling is in effect, but never more than the machine's available memory (`machineAvailableBytes`): when that is smaller, it is the answer with `freeBasis: "machine-below-limit"`; without a ceiling the machine's available memory, `freeBasis: "machine"` |
 
 `POST /api/admin/shutdown` stops the server (`graphersal-server stop`): it answers `202
 {"stopping": true, "pid"}` and the server then stops exactly as on Ctrl+C or SIGTERM (running

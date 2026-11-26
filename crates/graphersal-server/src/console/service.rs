@@ -267,6 +267,10 @@ pub(crate) fn memory_rows(memory: &Value) -> Vec<(&'static str, String)> {
     let basis = memory.get("freeBasis").and_then(Value::as_str);
     let free = match (free, basis) {
         (Some(free), Some("limit")) => format!("{} under the limit", text::bytes(free)),
+        (Some(free), Some("machine-below-limit")) => format!(
+            "{} available on the machine (less than the limit leaves)",
+            text::bytes(free)
+        ),
         (Some(free), _) => format!("{} available on the machine (no limit)", text::bytes(free)),
         (None, _) => "unknown".to_string(),
     };
