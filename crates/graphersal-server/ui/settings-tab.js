@@ -1,6 +1,8 @@
 // The Database settings tab of the `server` profile (admins only, round 3 B7): everything
 // about one database from `GET api/admin/databases/<name>/settings`, grouped (identity, state
-// and sizes, query limits, MCP, grants, backups, the Store's creation parameters), and the
+// and sizes, query limits, MCP, grants, backups, damage and recovery (round 3 B-CRASH: the
+// maintenance state with its damage report, the last unclean shutdown's check of it), the
+// Store's creation parameters), and the
 // edit of what can change at runtime: the description, read-only, auto-load and the query limit
 // overrides (set or clear each; a limit applies at the database's next load, which the tab
 // says and offers to do). The database comes from the tab's address parameter `db` (the
@@ -14,7 +16,7 @@ import { reactive, ref, computed, watch } from 'vue';
 import {
   createSettings, limitRows, limitsNote, limitValueProblem, limitSetBody, limitClearBody, limitText,
   descriptionProblem, identityRows, stateRows, storeRows, settingsGrantRows, settingsMcpRows, mcpText,
-  backupsText, changedText, readOnlyLocked, MAX_DESCRIPTION_CHARS,
+  backupsText, changedText, readOnlyLocked, recoveryView, MAX_DESCRIPTION_CHARS,
 } from './settings-api.js';
 import { realRows, BASE_IS_FROZEN } from './admin-api.js';
 import {
@@ -186,7 +188,7 @@ export default {
 
     return {
       s, db, notice, names, limits, grants, mcpNames, loaded, limitSort, grantSort, mcpSort,
-      identityRows, stateRows, storeRows, limitsNote, limitText, mcpText, backupsText, readOnlyLocked, noticeClass,
+      identityRows, stateRows, storeRows, recoveryView, limitsNote, limitText, mcpText, backupsText, readOnlyLocked, noticeClass,
       maxDescription: MAX_DESCRIPTION_CHARS, baseFrozen: BASE_IS_FROZEN,
       refresh, pick, saveDescription, setFlag, setLimit, clearLimit, reloadNow,
       openMcp: () => props.api.navigate('mcp'),
@@ -299,6 +301,21 @@ export default {
 
     <div class="srv-head"><h2>Backups</h2><span class="spacer"></span><button type="button" class="btn small" @click="openBackups">Backups tab…</button></div>
     <p class="muted" data-settings-backups>{{ backupsText(s.answer) }}</p>
+
+    <div class="srv-head"><h2>Damage and recovery</h2></div>
+    <div data-settings-recovery>
+      <div v-if="recoveryView(s.answer).maintenance" class="notice srv-notice srv-error" role="alert">
+        <div class="srv-notice-text"><span>Maintenance: its Store is damaged, so it is served read-only (queries read the intact data, writes are refused). Repair it into a new database (Databases tab: Repair…), or restore a backup.</span>
+          <details class="srv-damage"><summary>Damage report</summary><pre class="mono">{{ recoveryView(s.answer).damage }}</pre></details></div>
+      </div>
+      <p v-else class="muted">No damage known (Verify on the Databases tab checks the whole Store).</p>
+      <template v-if="recoveryView(s.answer).unclean">
+        <p>Checked after the last unclean shutdown{{ recoveryView(s.answer).unclean.when ? ' (' + recoveryView(s.answer).unclean.when + ')' : '' }}{{ recoveryView(s.answer).unclean.pid ? ', the server with pid ' + recoveryView(s.answer).unclean.pid + ' was killed or crashed' : '' }}:</p>
+        <dl class="srv-facts">
+          <template v-for="r in recoveryView(s.answer).unclean.rows" :key="r[0]"><dt>{{ r[0] }}</dt><dd>{{ r[1] }}</dd></template>
+        </dl>
+      </template>
+    </div>
 
     <div class="srv-head"><h2>Store</h2></div>
     <p class="muted">Creation parameters: fixed when the Store was created, shown read-only.</p>

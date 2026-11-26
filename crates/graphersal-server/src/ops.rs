@@ -288,6 +288,11 @@ impl Admin {
         &self.audit
     }
 
+    /// The last unclean shutdown's state of the running server (`None` offline).
+    pub(crate) fn recovery(&self) -> Option<&Arc<crate::recovery::Recovery>> {
+        self.loader.as_ref().and_then(|l| l.recovery())
+    }
+
     /// The registry.
     pub fn registry(&self) -> &Arc<Registry> {
         &self.registry
@@ -837,6 +842,11 @@ mod mcp;
 #[path = "ops_settings.rs"]
 mod settings;
 
+#[path = "ops_damage.rs"]
+mod damage;
+pub(crate) use damage::repair_json;
+pub use damage::{Repaired, Swapped, Verified};
+
 #[path = "ops_users.rs"]
 mod users;
 pub use users::SessionsEnded;
@@ -861,3 +871,7 @@ mod import_tests;
 #[cfg(test)]
 #[path = "ops_promote_tests.rs"]
 mod promote_tests;
+
+#[cfg(test)]
+#[path = "ops_damage_tests.rs"]
+mod damage_tests;

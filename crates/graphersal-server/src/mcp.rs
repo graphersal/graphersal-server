@@ -243,7 +243,7 @@ fn graph_entry(name: &str, entry: &DatabaseEntry, level: Level, mcp_read_only: b
     let state = match &entry.state {
         DbState::Unloaded => GraphState::Unloaded,
         DbState::Loading => GraphState::Loading,
-        DbState::Loaded => GraphState::Loaded,
+        DbState::Loaded | DbState::Maintenance { .. } => GraphState::Loaded,
         DbState::NeedsModel { .. } => GraphState::NeedsModel,
         DbState::Failed { reason } => GraphState::Failed(reason.clone()),
     };
@@ -276,7 +276,7 @@ fn not_loaded_text(entry: &DatabaseEntry) -> String {
              operator to add the model and load it"
         ),
         // `loaded`: it was unloaded a moment ago.
-        DbState::Unloaded | DbState::Loaded => {
+        DbState::Unloaded | DbState::Loaded | DbState::Maintenance { .. } => {
             format!("database '{name}' is not loaded; ask an operator to load it")
         }
     }

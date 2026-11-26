@@ -301,3 +301,42 @@ hand in `database.toml`. Now:
 - `database.toml`'s `[limits.query]` now has a runtime writer (the settings change, under the
   registry's write lock; `docs/server-dir.md` "Concurrent changes"); every other rewrite still
   keeps the file's limits, so a hand edit survives.
+
+## After a crash: the unclean-shutdown check, verify, repair and swap
+
+A server killed by force (`kill -9`, an OOM kill, a power loss) left its databases' Stores
+open and no word about it. The engine already replayed each Store's journal at its next open;
+now the server finds out, checks and offers the way back
+([`docs/server-dir.md`, "After a crash"](server-dir.md#after-a-crash)):
+
+- **`server.open`**: the running server keeps the list of the databases it has open (loaded or
+  loading), rewritten atomically on every load and unload and removed at a clean stop. `stop`
+  on a stopped directory removes a stale `server.run` but never `server.open`.
+- **The unclean-shutdown check.** A `serve` or `start` that finds a `server.open` or a stale
+  `server.run` says so (`UNCLEAN SHUTDOWN` in the start block, an "Unclean shutdown" section, a
+  log warning, the audit record `unclean shutdown of the last server (pid N) found`) and, in the
+  background, loads every database the last server had open again (also without `auto_load`),
+  keeps what the open of its Store did (clean close, journal commits replayed, the position, a
+  torn tail cut) and verifies the open Store. Each result is logged and audited (`database 'x'
+  checked: ok (...)`) and kept in the new `recovery.json`: `status` (also on a stopped
+  server: what the next start will check), `GET /api/admin/server` and `GET
+  /api/admin/recovery` (`uncleanShutdown`), the Databases tab (a box above the table), `db info`
+  and the Database settings ("Damage and recovery") show the last unclean shutdown.
+- **The state `maintenance`.** A database whose Store the engine opens in maintenance mode
+  (damage found at the open), or whose verify finds damage under the damage policy
+  `maintenance`, is served read-only with its damage report: `db list` (a Problems entry naming
+  the repair), `status`, the listing's `state: "maintenance"` with `damage`, the Databases tab, the
+  Database settings. This holds for every load, not only after a crash.
+- **`db verify NAME | --all`** (`POST /api/admin/databases/<name>/verify`, `POST
+  /api/admin/verify`, "Verify" and "Verify all" in the Databases tab): the engine's scrub of a
+  Store (exit code 1 on damage).
+- **`db repair NAME [--name NEW]`** (`POST /api/admin/databases/<name>/repair`, "Repair…"): the
+  engine's repair into a NEW database (default `NAME-repaired`), never in place; the answer lists
+  what was rebuilt, lost, diverged and never carried, and the copy is verified. Plain databases
+  only (a layer or base: restore a backup).
+- **`db swap NAME WITH --yes`** (`POST /api/admin/databases/<name>/swap {"with", "confirm":
+  true}`, "Let it take the name…" after a repair): the repaired copy takes the damaged
+  database's name, the damaged one moves to `trash/`; the name's grants, aliases, MCP settings
+  and `database.toml` stay. Or keep both; or restore a backup (`db backups`, `db restore`).
+- Audit records: `unclean shutdown ... found`, `database 'x' checked`, `database 'x' repaired
+  into 'y'`, `database 'y' took the name 'x'`.

@@ -5,7 +5,8 @@
 //!
 //! Mapped routes: `GET databases`, `DELETE databases/<n>`, `POST databases` (a layer:
 //! `{"name", "base"}`), `POST databases/<n>/load|unload`, `GET databases/<n>/backups`,
-//! `GET databases/<n>/export?...`, `GET|PUT databases/<n>/settings`, `PUT|DELETE aliases/<a>`, `GET models`, `POST models`
+//! `POST databases/<n>/restore` (`{"backup", "name"?}`), `POST verify`, `POST
+//! databases/<n>/verify|repair|swap` (`{"name"}`, `{"with"}`), `GET databases/<n>/export?...`, `GET|PUT databases/<n>/settings`, `PUT|DELETE aliases/<a>`, `GET models`, `POST models`
 //! (`{"path"}` or `{"repo"}`), `POST import?name=&role=`, `GET imports`, `GET users`, `POST users`
 //! (`{"name", "admin"}`), `POST|DELETE users/<n>/token`, `PUT users/<n>/admin` (`{"admin"}`).
 
@@ -99,6 +100,23 @@ fn command(method: &str, path: &str, body: Option<&Value>, dir_arg: &str) -> Opt
             db(format!("{action} {}", word(name)))
         }
         ("GET", ["databases", name, "backups"]) => db(format!("backups {}", word(name))),
+        ("POST", ["databases", name, "restore"]) => {
+            let backup = field("backup").unwrap_or_else(|| "BACKUP".to_string());
+            match field("name") {
+                Some(new) => db(format!("restore {} {backup} --name {new}", word(name))),
+                None => db(format!("restore {} {backup}", word(name))),
+            }
+        }
+        ("POST", ["verify"]) => db("verify --all".to_string()),
+        ("POST", ["databases", name, "verify"]) => db(format!("verify {}", word(name))),
+        ("POST", ["databases", name, "repair"]) => match field("name") {
+            Some(new) => db(format!("repair {} --name {new}", word(name))),
+            None => db(format!("repair {}", word(name))),
+        },
+        ("POST", ["databases", name, "swap"]) => {
+            let with = field("with").unwrap_or_else(|| "REPAIRED".to_string());
+            db(format!("swap {} {with} --yes", word(name)))
+        }
         ("GET", ["databases", name, "settings"]) => db(format!("info {}", word(name))),
         ("PUT", ["databases", name, "settings"]) => db(format!("set {} ...", word(name))),
         ("GET", ["databases", name, "export"]) => {

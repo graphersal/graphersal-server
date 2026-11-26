@@ -9,7 +9,7 @@
 
 import { reactive, ref, computed, watch, onDeactivated, onUnmounted } from 'vue';
 import {
-  runRows, durationText, runTextHead, cancelRunAction, confirmText, outcomeText, realRows, RUNS_POLL_MS,
+  runRows, durationText, runTextHead, cancelRunAction, confirmText, outcomeText, realRows, RUNS_POLL_MS, isOpenState,
 } from './admin-api.js';
 import {
   admin, list, reload, errorNotice, noticeClass, useFreshData, useSort, SortTh,
@@ -36,7 +36,7 @@ export default {
     let timer = null;
     let alive = true;
 
-    const loadedNames = computed(() => realRows(list.rows).filter((r) => r.state === 'loaded').map((r) => r.name));
+    const loadedNames = computed(() => realRows(list.rows).filter((r) => isOpenState(r.state)).map((r) => r.name));
 
     async function refresh() {
       clearTimeout(timer);

@@ -41,6 +41,13 @@ pub fn start_block(running: &Running) -> String {
         &running.address().to_string(),
         config,
     ));
+    if let Some(unclean) = running.unclean_shutdown() {
+        out.push(warning_row(format!(
+            "UNCLEAN SHUTDOWN: {}; the databases it had open are loaded again and checked \
+             (WAL replay, verify) in the background: see the section below and `status`",
+            unclean.headline()
+        )));
+    }
     out.push(String::new());
     out.push(text::render(&sections(running, Some(config))));
     out.join("\n")
@@ -285,7 +292,32 @@ fn sections(running: &Running, config: Option<&ServerConfig>) -> Vec<Section> {
         Some(_) => mcp.row("endpoint", "off ([mcp] enabled = false in server.toml)"),
         None => mcp.row("endpoint", "unknown (server.toml could not be read again)"),
     }
-    vec![server, databases, problems, models, mcp]
+    let mut unclean = Section::new("Unclean shutdown");
+    if let Some(report) = running.unclean_shutdown() {
+        unclean.row("found", report.headline());
+        let names: Vec<&str> = report.databases.iter().map(|d| d.name.as_str()).collect();
+        unclean.row(
+            "checking",
+            if names.is_empty() {
+                "nothing: no database was open".to_string()
+            } else {
+                format!(
+                    "{} (loaded again, its Store's recovery report kept, then verified; a \
+                     damaged one is served read-only: state maintenance)",
+                    names.join(", ")
+                )
+            },
+        );
+        unclean.unwrapped(
+            "results",
+            format!("graphersal-server status --dir {dir_arg} (and the log, recovery.json)"),
+        );
+        unclean.unwrapped(
+            "by hand",
+            format!("graphersal-server db verify --all --dir {dir_arg}"),
+        );
+    }
+    vec![server, unclean, databases, problems, models, mcp]
 }
 
 /// The start-block rows of the access and HTTP modes of `config`: access control, the public

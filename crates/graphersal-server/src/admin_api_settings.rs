@@ -25,7 +25,11 @@
 //! `null`), `store` (the Store's creation parameters and position from the engine's
 //! `Store::inspect`: `storeId`, `graphId`, `damagePolicy`, `chunkBytes`, `createdAt`,
 //! `formatVersion`, `backend`, `commitSeq`, `lastCommitAt`, `layerBase`, `snapshots`,
-//! `walBytes`, `clean`; read-only) or `storeError`.
+//! `walBytes`, `clean`; read-only) or `storeError`, and `recovery` (round 3 B-CRASH:
+//! `maintenance` (bool), `damage` (the damage report of a database in maintenance, else
+//! `null`), `help` (in maintenance: repair or restore), `uncleanShutdown` (`null`, or
+//! `{"detectedAtMs", "previousPid", "check"}` when the last unclean shutdown's check covered
+//! this database: `check` = its `DatabaseCheck`, `crate::recovery`)).
 //!
 //! A change takes the real name (an alias is `404` with a help naming the database). Each
 //! field is optional, at least one is given; `limits` sets a key to a whole number
@@ -224,7 +228,37 @@ pub(crate) fn view(admin: &Admin, name: &str) -> Option<Value> {
         }
         Err(reason) => out["storeError"] = json!(reason),
     }
+    out["recovery"] = recovery_json(admin, &entry);
     Some(out)
+}
+
+/// The `recovery` of the settings (module docs): the damage state and this database's part of
+/// the last unclean shutdown's check.
+fn recovery_json(admin: &Admin, entry: &DatabaseEntry) -> Value {
+    let damage = match &entry.state {
+        crate::registry::DbState::Maintenance { damage } => Some(damage.clone()),
+        _ => None,
+    };
+    let unclean = super::unclean_json(admin);
+    let check = unclean["databases"].as_array().and_then(|checks| {
+        checks
+            .iter()
+            .find(|c| c["name"].as_str() == Some(entry.name.as_str()))
+            .cloned()
+    });
+    let mut out = json!({
+        "maintenance": damage.is_some(),
+        "damage": damage,
+        "uncleanShutdown": check.map(|check| json!({
+            "detectedAtMs": unclean["detectedAtMs"],
+            "previousPid": unclean["previousPid"],
+            "check": check,
+        })),
+    });
+    if damage.is_some() {
+        out["help"] = json!(super::damage_help(&entry.name));
+    }
+    out
 }
 
 /// The `limits` of the settings (module docs).

@@ -297,6 +297,8 @@ pub struct Running {
     config: ServerConfig,
     access: Option<Arc<Access>>,
     first_admin: Option<FirstAdmin>,
+    /// The unclean shutdown found at this start, with its check as begun.
+    unclean: Option<crate::recovery::UncleanShutdown>,
 }
 
 /// A `ServerError::Config`-style refusal of a `serve` option that is 0.
@@ -403,6 +405,8 @@ pub fn start(
     });
     // The MCP switches (`mcp.toml`): a file that does not parse stops the start.
     let mcp_control = Arc::new(crate::mcp_control::McpControl::open(&dir)?);
+    // Before this server writes its own run files: did the last one stop cleanly?
+    let previous = crate::recovery::detect(&dir);
     // A new operator token per run: the console on this machine reads it from `server.run`.
     let operator = Secret::generate().map_err(|message| ServerError::Random { message })?;
     let operator_hash = operator.hash();
@@ -439,6 +443,7 @@ pub fn start(
         config: config.clone(),
         access: None,
         first_admin: None,
+        unclean: None,
     };
     // The scan with the lock held and the listener up: the probes answer meanwhile.
     match Registry::scan(&running.dir) {
@@ -447,6 +452,9 @@ pub fn start(
                 Loader::with_backup_root(registry.clone(), host_check, mcp, Some(backup_root));
             running.loader.set_mcp_control(mcp_control);
             running.registry = registry;
+            running
+                .loader
+                .set_recovery(Arc::new(crate::recovery::Recovery::open(&running.dir)));
         }
         Err(err) => {
             let _ = running.shutdown();
@@ -494,8 +502,29 @@ pub fn start(
         let _ = running.shutdown();
         return Err(err);
     }
+    // From now on `server.open` names what this server has open (written after `ready`, so
+    // the probes are not delayed by its fsync; it holds the whole open set whenever written).
+    running
+        .loader
+        .set_open_record(Arc::new(crate::recovery::OpenRecord::new(
+            running.dir.clone(),
+            facts.started_at_ms(),
+        )));
     // The databases with `auto_load = true`, each on a background thread of its own.
     running.loader.auto_load();
+    // After an unclean shutdown: every database the last server had open is loaded again and
+    // checked in the background (crate::recovery).
+    if let (Some(previous), Some(recovery)) = (&previous, running.loader.recovery().cloned()) {
+        let names = crate::recovery::names_to_check(previous, &running.loader);
+        let admin = crate::ops::Admin::online(running.loader.clone());
+        running.unclean = Some(crate::recovery::start_check(
+            &running.loader,
+            &recovery,
+            previous,
+            names,
+            admin,
+        ));
+    }
     // In the background: every idle database's model blobs shared through `models/`, and
     // `models/models.toml` rebuilt (problems are logged, never fatal; a database that loads
     // meanwhile is skipped).
@@ -573,6 +602,14 @@ impl Running {
         self.first_admin.take()
     }
 
+    /// The unclean shutdown of the last server found at this start (round 3 B-CRASH,
+    /// [`crate::recovery`]): the databases being checked; `None` when it stopped cleanly. The
+    /// checks run in the background: `GET /api/admin/server` (`uncleanShutdown`) and
+    /// `recovery.json` have their results.
+    pub fn unclean_shutdown(&self) -> Option<&crate::recovery::UncleanShutdown> {
+        self.unclean.as_ref()
+    }
+
     /// The connection limits the server runs with.
     pub fn connection_limits(&self) -> ConnectionLimits {
         self.shared.limits
@@ -605,8 +642,15 @@ impl Running {
             tracing::warn!(target: "graphersal_server", "stopping with {left} requests still running");
         }
         // Every database unloaded, its Store closed cleanly, before the lock is released.
-        if let Err(err) = self.loader.shutdown() {
-            tracing::warn!(target: "graphersal_server", "stopping: {err}");
+        match self.loader.shutdown() {
+            // A clean stop: no database is left to check at the next start.
+            Ok(()) if self.loader.records_open() => {
+                if let Err(err) = crate::recovery::OpenFile::remove(&self.dir) {
+                    tracing::warn!(target: "graphersal_server", "stopping: {err}");
+                }
+            }
+            Ok(()) => {}
+            Err(err) => tracing::warn!(target: "graphersal_server", "stopping: {err}"),
         }
         // The connections left (idle ones, lingering closes) end with the runtime.
         listener.runtime.shutdown_timeout(Duration::from_secs(1));

@@ -213,6 +213,45 @@ export function storeRows(answer = {}) {
   return rows;
 }
 
+/**
+ * The "Damage and recovery" part of the view (round 3 B-CRASH: `recovery`): `{maintenance,
+ * damage, help, unclean}` with `unclean` = `{when, pid, outcome, rows: [[label, value]]}` when the
+ * last unclean shutdown's check covered this database, else null.
+ */
+export function recoveryView(answer = {}) {
+  const r = answer.recovery && typeof answer.recovery === 'object' ? answer.recovery : {};
+  const u = r.uncleanShutdown && typeof r.uncleanShutdown === 'object' ? r.uncleanShutdown : null;
+  let unclean = null;
+  if (u && u.check && typeof u.check === 'object') {
+    const c = u.check;
+    const rows = [['Outcome', typeof c.outcome === 'string' ? c.outcome : '—']];
+    if (typeof c.state === 'string') rows.push(['State afterwards', c.state]);
+    const rec = c.recovery && typeof c.recovery === 'object' ? c.recovery : null;
+    if (rec) {
+      rows.push(['Closed cleanly', rec.cleanClose ? 'yes' : 'no (the server was killed)']);
+      rows.push(['Journal replayed', `${rec.commitsReplayed || 0} commit(s) onto snapshot ${rec.snapshotCommitSeq}, now at commit ${rec.commitSeq}`]);
+      if (rec.tornTail) rows.push(['Torn tail cut', rec.tornTail]);
+      if (rec.intentCompleted) rows.push(['Completed', rec.intentCompleted]);
+      if (rec.maintenance) rows.push(['Opened', 'in maintenance mode (damage found)']);
+    }
+    const v = c.verify && typeof c.verify === 'object' ? c.verify : null;
+    if (v) rows.push(['Verify', v.ok ? 'no problem found' : `${Array.isArray(v.problems) ? v.problems.length : 0} problem(s)`]);
+    if (typeof c.message === 'string' && c.message) rows.push(['Note', c.message]);
+    unclean = {
+      when: typeof u.detectedAtMs === 'number' ? new Date(u.detectedAtMs).toISOString().replace(/\.\d{3}Z$/, 'Z') : '',
+      pid: typeof u.previousPid === 'number' ? u.previousPid : null,
+      outcome: typeof c.outcome === 'string' ? c.outcome : '',
+      rows,
+    };
+  }
+  return {
+    maintenance: r.maintenance === true,
+    damage: typeof r.damage === 'string' ? r.damage : '',
+    help: typeof r.help === 'string' ? r.help : '',
+    unclean,
+  };
+}
+
 /** The grant rows: `{key, subject, on, level, via, viaText}`. */
 export function settingsGrantRows(answer = {}) {
   return arr(answer.grants)

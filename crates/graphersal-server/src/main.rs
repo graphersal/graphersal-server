@@ -7,7 +7,7 @@
 //! graphersal-server start --dir DIR [serve options] [--timeout SECS]
 //! graphersal-server stop --dir DIR [--timeout SECS]
 //! graphersal-server status --dir DIR [--json]
-//! graphersal-server db list|create|delete|clone|load|unload|promote|read-only|auto-load|alias|backup|backups|restore|export ... --dir DIR [--json]
+//! graphersal-server db list|create|delete|clone|load|unload|promote|read-only|auto-load|alias|backup|backups|restore|verify|repair|swap|export ... --dir DIR [--json]
 //! graphersal-server import DIR SOURCE --name NAME [--base BASE] [--format F] [--description TEXT] [--role normal|base] [--json]
 //! graphersal-server import DIR --inbox FILE --name NAME [...] | import DIR --list [--json]
 //! graphersal-server models list|add|remove ... --dir DIR [--json]
@@ -146,6 +146,19 @@ Usage:
             Restores the backup BACKUP (a name from db backups) of NAME into NAME (it must
             be unloaded; the replaced database moves to DIR/trash/) or into the new
             database NEW. A layer's backup needs its base (checked by identity).
+        db verify NAME | db verify --all
+            The engine's scrub of NAME's Store (every checksum, snapshot and WAL record),
+            or of every database's. A loaded database's open Store is verified (damage
+            found turns it read-only: state maintenance); otherwise its files.
+        db repair NAME [--name NEW]
+            Repairs the damaged plain database NAME into the NEW database (default
+            NAME-repaired; never in place, NAME is not changed): damaged parts rebuilt from
+            older snapshots and the WAL, what is lost reported; the copy is verified. Then
+            `db swap NAME NEW --yes`, or keep both. A layer or base: restore a backup.
+        db swap NAME WITH --yes
+            The database WITH (a repaired copy) takes the name NAME: NAME moves to
+            DIR/trash/, WITH's name goes away; NAME's grants, aliases and settings stay.
+            Both are unloaded first; NAME is loaded again when it was loaded.
         db export NAME --out FILE [--no-models] [--materialize]
             A packed snapshot (.gsnap) of NAME's latest state: with its embedding models
             unless --no-models; a layer as a layer snapshot (loads only over its base, no
@@ -594,7 +607,7 @@ fn status_command(args: &[String]) -> ExitCode {
         Ok(status) => {
             if parsed.json {
                 out(
-                    &serde_json::to_string_pretty(&console::status_json(&status))
+                    &serde_json::to_string_pretty(&console::status_json_of(&status, &dir))
                         .unwrap_or_default(),
                 );
             } else {
@@ -638,7 +651,7 @@ fn db_command(args: &[String]) -> ExitCode {
                 values.push((flag, value));
             }
             "--json" | "--auto-load" | "--read-only" | "--no-wait" | "--no-models"
-            | "--materialize" | "--clear"
+            | "--materialize" | "--clear" | "--all" | "--yes"
                 if inline.is_none() =>
             {
                 switches.push(flag);
@@ -1204,6 +1217,26 @@ fn parse_db(
                  --clear",
             ));
         }
+        ["verify", name] => DbCommand::Verify {
+            name: Some(name.to_string()),
+        },
+        ["verify"] if switch("--all") => DbCommand::Verify { name: None },
+        ["verify", ..] => return Err(usage("db verify takes NAME or --all")),
+        ["repair", name] => DbCommand::Repair {
+            name: name.to_string(),
+            target: value("--name"),
+        },
+        ["swap", name, with] => {
+            if !switch("--yes") {
+                return Err(usage(&format!(
+                    "db swap moves the database '{name}' to trash/ and gives its name to                      '{with}': confirm it with --yes"
+                )));
+            }
+            DbCommand::Swap {
+                name: name.to_string(),
+                with: with.to_string(),
+            }
+        }
         ["alias", "set", alias, target] => DbCommand::AliasSet {
             alias: alias.to_string(),
             target: target.to_string(),
@@ -1257,8 +1290,19 @@ fn parse_db(
     if switch("--clear") && !matches!(command, DbCommand::Set { .. }) {
         return Err(usage("--clear belongs to db set NAME limit KEY"));
     }
-    if value("--name").is_some() && !matches!(command, DbCommand::Restore { .. }) {
-        return Err(usage("--name belongs to db restore"));
+    if value("--name").is_some()
+        && !matches!(
+            command,
+            DbCommand::Restore { .. } | DbCommand::Repair { .. }
+        )
+    {
+        return Err(usage("--name belongs to db restore and db repair"));
+    }
+    if switch("--all") && !matches!(command, DbCommand::Verify { name: None }) {
+        return Err(usage("--all belongs to db verify"));
+    }
+    if switch("--yes") && !matches!(command, DbCommand::Swap { .. }) {
+        return Err(usage("--yes belongs to db swap"));
     }
     let export = matches!(command, DbCommand::Export { .. });
     if !export && value("--out").is_some() {

@@ -9,7 +9,7 @@
 // "My databases" tab, anonymous the "Sign in" tab. After a login or a logout the page loads the
 // root again, so the server's answer picks the tabs; the page never decides them itself.
 
-import { sendAdmin } from './admin-api.js';
+import { sendAdmin, isOpenState } from './admin-api.js';
 import { databaseHref, DATABASE_STATES, STATE_TONES } from './databases.js';
 
 /** The routes of this model, relative to the server root. */
@@ -155,7 +155,7 @@ export function mineRows(answer) {
       readOnly: level === 'read',
       description: typeof d.description === 'string' ? d.description : '',
       aliasOf: typeof d.aliasOf === 'string' && d.aliasOf ? d.aliasOf : null,
-      open: d.state === 'loaded',
+      open: isOpenState(d.state),
     });
     const row = rows[rows.length - 1];
     row.kind = row.aliasOf ? 'alias' : 'database';

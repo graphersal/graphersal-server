@@ -95,8 +95,39 @@ server it prints `not running` and exits 0 (removing a stale `server.run`). `sta
 pid, address, version, uptime, the databases (the loaded ones by name) and memory (the process's
 resident memory, the loaded databases', the machine's total and available memory, the memory
 limit with where it comes from and the `[limits]` settings, and what is free under it); a stale
-`server.run` left by a crash is reported. Under a service manager (systemd, launchd) run
+`server.run` left by a crash is reported, and so is the last unclean shutdown ([After a
+crash](#after-a-crash)). Under a service manager (systemd, launchd) run
 `serve` in the foreground instead: [Running as a service](docs/server-dir.md#running-as-a-service).
+
+### After a crash
+
+A server killed by force (`kill -9`, an OOM kill, a power loss) needs no manual cleanup: the
+OS releases `server.lock`, every acknowledged commit is in its database's journal (WAL), and
+the next open of a Store replays it. The next `serve` or `start` notices that the last server
+did not stop cleanly (it left `server.open`, the list of the databases it had open, or a stale
+`server.run`) and says so in its start block and log (`UNCLEAN SHUTDOWN`, audited). Every
+database that was open at that moment is loaded again (also without `auto_load`), its
+journal replayed (what was replayed or cut off is kept) and its Store verified, in the
+background; `status`, the Databases tab, `db info` and the Database settings show the result as
+"Last unclean shutdown". A database whose Store turns out damaged is served **read-only** in
+the state `maintenance` with its damage report (queries read the intact data, writes are
+refused). Then, per database:
+
+```bash
+graphersal-server status --dir ./srv                 # the last unclean shutdown, per database
+graphersal-server db verify --all --dir ./srv        # scrub every Store by hand (exit 1 on damage)
+graphersal-server db repair acme --dir ./srv         # a repaired copy as the NEW database acme-repaired
+graphersal-server db verify acme-repaired --dir ./srv
+graphersal-server db swap acme acme-repaired --yes --dir ./srv   # the copy takes the name; the old one to trash/
+# or keep both; or restore a backup instead:
+graphersal-server db backups acme --dir ./srv
+graphersal-server db restore acme BACKUP --dir ./srv  # (unload it first)
+```
+
+A repair never writes the damaged database: it rebuilds damaged parts from older snapshots and
+the journal into a new database, reports what is lost or diverged, and the engine verifies the
+copy. Layers and bases are not repaired (restore a backup). Details: [`docs/server-dir.md`,
+"After a crash"](docs/server-dir.md#after-a-crash).
 
 A first session from the console (in a second terminal while the server runs). The console
 of the OS user owning `./srv` needs no token (it uses the run's operator token from
@@ -148,7 +179,7 @@ databases and missing models. Paths and commands are never wrapped.
 |---|---|
 | `start [serve options] [--timeout SECS]` | `serve` in the background (log `DIR/logs/server.log`); waits until ready, prints the start block and the address |
 | `stop [--timeout SECS]` | stops the running server cleanly and waits; `not running` (exit 0) when none runs |
-| `status [--json]` | running or stopped: pid, address, version, uptime, databases, memory (process, loaded databases, machine, limit, free), the log; exit code 0 running, 3 stopped |
+| `status [--json]` | running or stopped: pid, address, version, uptime, databases, memory (process, loaded databases, machine, limit, free), the log, the last unclean shutdown (and, stopped, one the next start will check); exit code 0 running, 3 stopped |
 | `db list` | the databases and aliases with their states |
 | `db create NAME [--base BASE] [--kind plain\|layer] [--role normal\|base] [--schema FILE.json] [--description TEXT] [--auto-load] [--read-only]` | a new empty database; `--base` makes a layer over a `role = base` database |
 | `db delete NAME` | an unloaded database, moved to `DIR/trash/`; every grant on it is removed (a restore does not bring them back) |
@@ -161,6 +192,9 @@ databases and missing models. Paths and commands are never wrapped.
 | `db alias set ALIAS DATABASE`, `db alias remove ALIAS`, `db alias rename OLD NEW` | aliases (a flip takes effect at once, also for the grants on the alias; a rename moves open MCP sessions and the alias's grants with it; a removal removes its grants) |
 | `db backup NAME`, `db backups NAME` | verified ZIP backups in `DIR/backups/NAME/` |
 | `db restore NAME BACKUP [--name NEW]` | over NAME (unloaded) or into the new database NEW |
+| `db verify NAME`, `db verify --all` | the engine's scrub of NAME's Store (a loaded one: its open Store; damage found makes it read-only, state `maintenance`) or of every database's; exit 1 when damage is found |
+| `db repair NAME [--name NEW]` | a repaired copy of the plain database NAME as the new database NEW (default `NAME-repaired`; never in place, NAME is not changed): what was rebuilt, lost or diverged; the copy is verified |
+| `db swap NAME WITH --yes` | WITH (a repaired copy) takes the name NAME: NAME moves to `DIR/trash/`, WITH's name goes away; NAME's grants, aliases and settings stay; both unloaded first, NAME loaded again when it was |
 | `db export NAME --out FILE [--no-models] [--materialize]` | a packed snapshot (`.gsnap`) |
 | `import DIR SOURCE --name NAME [--base BASE] [--format F] [--description TEXT] [--role normal\|base]` | a new database from a `.gsnap`, a Store (directory or `.gstore`), GraphSON or GraphML; an embedding model it names without carrying comes from `models/` (else the database is `needs-model` until `models add`); a model blob a Store lacks is filled from `models/` (else the database is `needs-model` until `models add`, like a snapshot); `--role base` makes a base of a plain source |
 | `import DIR --inbox FILE --name NAME [...]`, `import DIR --list` | the same from the import inbox `DIR/imports/` (FILE: one entry name there; a link leading outside is refused), and its listing |
@@ -217,7 +251,8 @@ override, the server's default, the next load's value and, while loaded, the val
 with "Unload and load now…" when they differ), MCP, grants and backups (with links to those
 tabs) and the Store's creation parameters read-only; the description, read-only, auto-load and
 each limit override are edited in place, every change based on the view's revision; model
-`settings-api.js`), the views of non-admins `login-tab.js` (paste a token; then the page's `?next=`
+`settings-api.js`; its "Damage and recovery" part shows a database in maintenance with its
+damage report and its check after the last unclean shutdown), the views of non-admins `login-tab.js` (paste a token; then the page's `?next=`
 path, only a path from the server root, or the root) and `mine-tab.js` ("My databases"), the
 top bar's `header.js` (who is signed in, "Log out"), the pure models
 `admin-api.js`, `databases.js`, `access-api.js`, `fresh.js` (fresh data per visit) and `sort.js` (sortable columns), the tabs' shared state `shared.js` and the style sheet
@@ -257,6 +292,13 @@ machine's available and total memory, the memory limit (`server.toml [limits] me
 by default 80 % of the machine or a container's limit minus `memory_headroom`) and what is free
 under it (without a limit: on the machine). `db list` has the same two columns.
 
+The Databases tab shows a database in the state `maintenance` (loaded read-only, its Store
+damaged) with its damage report, "Verify" per row and "Verify all", and "Repair…" (a plain
+database): a repaired copy as a new database, then "Let it take the name…" (confirmed: the
+damaged one moves to `trash/`) or "Keep both", with the hint to restore a backup instead; above
+the table the last unclean shutdown, each database it checked with its journal replay and
+verify result.
+
 The Databases tab explains bases and layers: the Kind column's tooltips, a "Bases and layers"
 box under the table, and the confirmation of "Promote to base…" say what a base is (a frozen,
 read-only database that layers are built over; each layer stores only its own changes), that
@@ -293,6 +335,8 @@ a build first, else these two tests are skipped).
   access.toml     users (token hashes and last 4 characters), roles, grants
   server.lock     one running server per directory
   server.run      the running server's address and operator token (mode 0600, only while it runs)
+  server.open     the databases the running server has open (removed at a clean stop)
+  recovery.json   the last unclean shutdown and its check of each database
   aliases.toml    current = "acme-2026.3"
   mcp.toml        the MCP switches (on/off, per database offered and read-only), written by the server
   databases/<name>/database.toml + store/
@@ -384,7 +428,8 @@ directories and file names below `databases/<name>/`, and a path over 260 charac
 - **Prebuilt binary for Windows x86_64 only**; other platforms build from source (see
   [Download / build](#download--build)). On Windows the clean stop is Ctrl+C or Ctrl+Break in
   the server's console (there is no SIGTERM); a killed server leaves `server.run` behind, and the
-  next `serve` replaces it (the lock is released by the OS).
+  next `serve` replaces it (the lock is released by the OS) and checks the databases it had
+  open ([After a crash](#after-a-crash)).
 
 ## Licence
 

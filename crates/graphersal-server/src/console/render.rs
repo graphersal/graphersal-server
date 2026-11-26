@@ -48,10 +48,19 @@ fn database_url(server: &str, name: &str, fallback: &str) -> String {
 }
 
 /// Whether the answer of `command` reports a failure although the request succeeded (a load
-/// that ended `failed` or `needs-model`).
+/// that ended `failed` or `needs-model`; a verify that found damage, or a database in
+/// maintenance).
 pub fn failed(command: &DbCommand, answer: &Value) -> bool {
-    matches!(command, DbCommand::Load { .. })
-        && matches!(answer["state"].as_str(), Some("failed" | "needs-model"))
+    match command {
+        DbCommand::Load { .. } => {
+            matches!(answer["state"].as_str(), Some("failed" | "needs-model"))
+        }
+        DbCommand::Verify { name: Some(_) } => {
+            answer["ok"] != Value::Bool(true) || answer["state"] == "maintenance"
+        }
+        DbCommand::Verify { name: None } => answer["ok"] != Value::Bool(true),
+        _ => false,
+    }
 }
 
 /// The human text of `outcome` of `command` on the server directory `dir`: [`render`], and a
@@ -160,6 +169,32 @@ fn render_with(command: &DbCommand, answer: &Value, dir: &Path, server: Option<&
         ))
         .text(),
         DbCommand::Info { .. } => render_info(answer, &dir_arg),
+        DbCommand::Verify { name: Some(_) } => verify_note(answer, &dir_arg).text(),
+        DbCommand::Verify { name: None } => render_verify_all(answer, &dir_arg),
+        DbCommand::Repair { .. } => render_repair(answer, &dir_arg),
+        DbCommand::Swap { .. } => {
+            let name = s("name");
+            let mut note = Note::new(format!(
+                "Database '{}' took the name '{name}'",
+                s("swappedWith")
+            ))
+            .detail(
+                "replaced",
+                format!("the old '{name}' moved to {}", below(dir, &s("trash"))),
+            )
+            .detail(
+                "kept",
+                format!("the grants, aliases and settings of '{name}'"),
+            );
+            if answer["reloaded"] == Value::Bool(true) {
+                note = note.detail("loaded", "again (it was loaded)");
+            }
+            note.command(
+                "verify it",
+                format!("{BIN} db verify {name} --dir {dir_arg}"),
+            )
+            .text()
+        }
         DbCommand::Set { name, setting } => render_set(name, setting, answer, &dir_arg),
         DbCommand::AliasSet { .. } => leftover_note(
             Note::new(format!(
@@ -412,6 +447,199 @@ fn render_with(command: &DbCommand, answer: &Value, dir: &Path, server: Option<&
                 .text()
         }
     }
+}
+
+/// One verify result (`db verify NAME`, and each of `db verify --all`).
+fn verify_note(answer: &Value, dir_arg: &str) -> Note {
+    let name = answer["database"].as_str().unwrap_or_default();
+    let n = |key: &str| answer[key].as_u64().unwrap_or_default();
+    let ok = answer["ok"] == Value::Bool(true);
+    let maintenance = answer["state"] == "maintenance";
+    if let Some(error) = answer["error"].as_str() {
+        return Note::new(format!("Database '{name}': the verify failed"))
+            .detail("error", error)
+            .command(
+                "restore a backup",
+                format!("{BIN} db backups {name} --dir {dir_arg}"),
+            );
+    }
+    let headline = match (ok, maintenance) {
+        (true, false) => format!("Database '{name}' verifies: no problem found"),
+        (true, true) => format!("Database '{name}' is in maintenance (read-only)"),
+        (false, _) => format!(
+            "Database '{name}' is DAMAGED: {} problem(s)",
+            answer["problems"].as_array().map(Vec::len).unwrap_or(0)
+        ),
+    };
+    let mut note = Note::new(headline)
+        .detail("verified", answer["how"].as_str().unwrap_or_default())
+        .detail(
+            "checked",
+            format!(
+                "{} snapshot(s), {} WAL segment(s), {} record(s) (commits {}..{}), {} model(s),                  {} blob(s)",
+                n("snapshotsChecked"),
+                n("segmentsChecked"),
+                n("recordsChecked"),
+                n("firstCommit"),
+                n("lastCommit"),
+                n("modelsChecked"),
+                n("blobsChecked")
+            ),
+        )
+        .detail("state", answer["state"].as_str().unwrap_or_default());
+    for problem in answer["problems"].as_array().into_iter().flatten() {
+        let at = problem["offset"]
+            .as_u64()
+            .map(|o| format!(" at byte {o}"))
+            .unwrap_or_default();
+        note = note.detail(
+            "problem",
+            format!(
+                "{}{at}: {}",
+                problem["path"].as_str().unwrap_or_default(),
+                problem["reason"].as_str().unwrap_or_default()
+            ),
+        );
+    }
+    if let Some(damage) = answer["damage"].as_str() {
+        note = note.detail("damage", damage);
+    }
+    if !ok || maintenance {
+        note = note
+            .command(
+                "repair it into a new database (it is not changed)",
+                format!("{BIN} db repair {name} --dir {dir_arg}"),
+            )
+            .command(
+                "or restore a backup",
+                format!("{BIN} db backups {name} --dir {dir_arg}"),
+            );
+    }
+    note
+}
+
+/// `db verify --all`.
+fn render_verify_all(answer: &Value, dir_arg: &str) -> String {
+    let results = answer["results"].as_array().cloned().unwrap_or_default();
+    if results.is_empty() {
+        return Note::new("No databases to verify").text();
+    }
+    let cells: Vec<Vec<String>> = results
+        .iter()
+        .map(|r| {
+            let verdict = if r.get("error").is_some() {
+                "verify failed".to_string()
+            } else if r["ok"] == Value::Bool(true) && r["state"] != "maintenance" {
+                "ok".to_string()
+            } else {
+                format!(
+                    "DAMAGED ({} problem(s))",
+                    r["problems"].as_array().map(Vec::len).unwrap_or(0)
+                )
+            };
+            vec![
+                r["database"].as_str().unwrap_or_default().to_string(),
+                verdict,
+                r["state"].as_str().unwrap_or_default().to_string(),
+                r["how"].as_str().unwrap_or_default().to_string(),
+            ]
+        })
+        .collect();
+    let mut out = String::new();
+    let mut section = Section::new(format!("Verify ({})", results.len()));
+    section.lines(table(&["DATABASE", "RESULT", "STATE", "VERIFIED"], &cells));
+    out.push_str(&text::render(&[section]));
+    for r in &results {
+        let ok = r["ok"] == Value::Bool(true) && r["state"] != "maintenance";
+        if !ok {
+            out.push('\n');
+            out.push_str(&verify_note(r, dir_arg).text());
+        }
+    }
+    out
+}
+
+/// `db repair NAME`.
+fn render_repair(answer: &Value, dir_arg: &str) -> String {
+    let name = answer["name"].as_str().unwrap_or_default();
+    let source = answer["repairedFrom"].as_str().unwrap_or_default();
+    let repair = &answer["repair"];
+    let lossless = repair["lossless"] == Value::Bool(true);
+    let mut note = Note::new(format!("Repaired database '{source}' into '{name}'"))
+        .detail(
+            "result",
+            if lossless {
+                "lossless: no data of the readable state lost, nothing diverged".to_string()
+            } else {
+                "DATA LOST or diverged: read the lines below".to_string()
+            },
+        )
+        .detail(
+            "position",
+            format!(
+                "commit {}",
+                repair["commitSeq"].as_u64().unwrap_or_default()
+            ),
+        )
+        .detail("verified", "yes (the engine verifies the copy)")
+        .detail(
+            "unchanged",
+            format!("'{source}' (in maintenance while it is damaged)"),
+        );
+    let list = |key: &str| -> Vec<String> {
+        repair[key]
+            .as_array()
+            .map(|items| {
+                items
+                    .iter()
+                    .map(|v| match v.as_str() {
+                        Some(text) => text.to_string(),
+                        None => v.to_string(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    for line in list("repaired") {
+        note = note.detail("rebuilt", line);
+    }
+    for range in repair["lostCommits"].as_array().into_iter().flatten() {
+        let first = range["first"].as_u64().unwrap_or_default();
+        let text = match range["last"].as_u64() {
+            Some(last) => format!("commits {first}..={last}"),
+            None => format!("commits from {first} on"),
+        };
+        note = note.detail("lost", text);
+    }
+    for line in list("lostRanges") {
+        note = note.detail("lost", line);
+    }
+    for line in list("lostElements") {
+        note = note.detail("lost", line);
+    }
+    let diverged = repair["divergedCount"].as_u64().unwrap_or_default();
+    if diverged > 0 {
+        note = note.detail(
+            "diverged",
+            format!("{diverged} element(s): check them by hand (--json lists them)"),
+        );
+    }
+    for line in list("modelsNotCarried") {
+        note = note.detail("model not carried", line);
+    }
+    note = note.detail(
+        "never carried",
+        repair["notCarried"].as_str().unwrap_or_default(),
+    );
+    note.command(
+        "let the repaired copy take the name (the old one moves to trash/)",
+        format!("{BIN} db swap {source} {name} --yes --dir {dir_arg}"),
+    )
+    .command(
+        "or keep both: nothing to do; or restore a backup instead",
+        format!("{BIN} db backups {source} --dir {dir_arg}"),
+    )
+    .text()
 }
 
 /// `note` with the answer's new `token`, shown once.
@@ -870,6 +1098,69 @@ fn render_info(answer: &Value, dir_arg: &str) -> String {
             store.row("layer base", base);
         }
     }
+    // Round 3 B-CRASH: the damage state and this database's unclean-shutdown check (left out
+    // when there is neither).
+    let recovery = &answer["recovery"];
+    let mut damage = Section::new("Damage and recovery");
+    if recovery["maintenance"] == Value::Bool(true) {
+        damage.row(
+            "maintenance",
+            "its Store is damaged: served read-only (queries read the intact data)",
+        );
+        if let Some(report) = recovery["damage"].as_str() {
+            damage.lines(report.lines().map(|l| format!("  {l}")));
+        }
+        damage.unwrapped(
+            "repair",
+            format!("{BIN} db repair {name} --dir {dir_arg} (or db backups {name})"),
+        );
+    }
+    let unclean = &recovery["uncleanShutdown"];
+    if let Some(check) = unclean.get("check").filter(|c| c.is_object()) {
+        let when = unclean["detectedAtMs"]
+            .as_u64()
+            .map(|ms| crate::database::utc_text(ms / 1000))
+            .unwrap_or_default();
+        damage.row(
+            "unclean shutdown",
+            format!(
+                "checked at the start of {when}: {}",
+                check["outcome"].as_str().unwrap_or_default()
+            ),
+        );
+        let rec = &check["recovery"];
+        if rec.is_object() {
+            damage.row(
+                "journal",
+                format!(
+                    "{} commit(s) replayed onto snapshot {}, at commit {}{}",
+                    rec["commitsReplayed"].as_u64().unwrap_or_default(),
+                    rec["snapshotCommitSeq"].as_u64().unwrap_or_default(),
+                    rec["commitSeq"].as_u64().unwrap_or_default(),
+                    rec["tornTail"]
+                        .as_str()
+                        .map(|t| format!("; torn tail cut: {t}"))
+                        .unwrap_or_default()
+                ),
+            );
+        }
+        if let Some(ok) = check["verify"]["ok"].as_bool() {
+            damage.row(
+                "verify",
+                if ok {
+                    "no problem found".to_string()
+                } else {
+                    format!(
+                        "{} problem(s)",
+                        check["verify"]["problems"]
+                            .as_array()
+                            .map(Vec::len)
+                            .unwrap_or(0)
+                    )
+                },
+            );
+        }
+    }
     text::render(&[
         identity,
         state,
@@ -877,6 +1168,7 @@ fn render_info(answer: &Value, dir_arg: &str) -> String {
         mcp_section,
         grants,
         backup_section,
+        damage,
         store,
     ])
 }
@@ -1065,6 +1357,26 @@ pub(crate) fn problems_section(rows: &[&Value], problems: &[String], dir_arg: &s
                     .text(),
                 true,
             )),
+            (Some("maintenance"), _) => {
+                let first = row["damage"]
+                    .as_str()
+                    .and_then(|d| d.lines().next())
+                    .unwrap_or("its Store is damaged");
+                entries.push((
+                    name.clone(),
+                    Note::new(format!("maintenance (read-only): {first}"))
+                        .command(
+                            "repair it into a new database",
+                            format!("{BIN} db repair {name} --dir {dir_arg}"),
+                        )
+                        .command(
+                            "or restore a backup",
+                            format!("{BIN} db backups {name} --dir {dir_arg}"),
+                        )
+                        .text(),
+                    true,
+                ));
+            }
             // Never wrapped: the reason names paths and commands.
             (Some(state), Some(reason)) => entries.push((
                 name.clone(),

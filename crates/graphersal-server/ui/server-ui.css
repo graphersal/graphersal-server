@@ -79,3 +79,11 @@ p.srv-problems { padding-left: 0; }
 .srv-help-box { margin-top: 12px; max-width: 80ch; }
 .srv-help-box summary { cursor: pointer; }
 .srv-help-box p { margin: 6px 0; }
+
+/* Round 3 B-CRASH: damage reports, verify problems, the last unclean shutdown. */
+.srv-pre { white-space: pre-wrap; }
+.srv-damage summary { cursor: pointer; color: var(--danger); }
+.srv-damage pre { white-space: pre-wrap; font-size: 0.85em; max-width: 48em; margin: 0.25em 0 0; }
+.srv-unclean-list { margin: 0.4em 0 0; padding-left: 1.2em; }
+.srv-unclean-list li { margin: 0.15em 0; }
+.srv-repair-lines { margin: 0.4em 0; padding-left: 1.2em; font-size: 0.9em; }

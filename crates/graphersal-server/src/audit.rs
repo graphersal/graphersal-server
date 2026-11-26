@@ -259,6 +259,48 @@ pub enum AuditEvent {
     /// `POST /api/admin/shutdown`).
     #[non_exhaustive]
     ShutdownRequested {},
+    /// The server found at its start that the last server did not stop cleanly (round 3
+    /// B-CRASH, [`crate::recovery`]): the databases it checks.
+    #[non_exhaustive]
+    UncleanShutdown {
+        /// The process id of the server that did not stop cleanly, when known.
+        pid: Option<u32>,
+        /// The databases checked.
+        databases: Vec<String>,
+    },
+    /// A database's Store was checked: after an unclean shutdown, or by `db verify`
+    /// (round 3 B-CRASH).
+    #[non_exhaustive]
+    DatabaseChecked {
+        /// The database.
+        name: String,
+        /// The outcome (`ok`, `damaged`, `failed`, ...).
+        outcome: String,
+        /// What the open and the verify found, in words.
+        detail: String,
+    },
+    /// A database was repaired into a new database (round 3 B-CRASH, the engine's
+    /// `Store::repair_to`; the damaged one is unchanged).
+    #[non_exhaustive]
+    DatabaseRepaired {
+        /// The damaged database.
+        source: String,
+        /// The new, repaired database.
+        name: String,
+        /// Whether the repair lost no data of the readable state.
+        lossless: bool,
+    },
+    /// A database took the place of another (round 3 B-CRASH `db swap`: a repaired copy
+    /// replaces the damaged database, which went to `trash/`).
+    #[non_exhaustive]
+    DatabaseSwapped {
+        /// The name kept.
+        name: String,
+        /// The database that took that name (its own name is gone).
+        with: String,
+        /// Where the replaced database went.
+        trash: PathBuf,
+    },
 }
 
 impl AuditEvent {
@@ -401,6 +443,35 @@ impl fmt::Display for AuditEvent {
             AuditEvent::LoginFailed { reason } => write!(f, "login refused: {reason}"),
             AuditEvent::LoggedOut { principal } => write!(f, "logout of '{principal}'"),
             AuditEvent::ShutdownRequested {} => write!(f, "server shutdown requested"),
+            AuditEvent::UncleanShutdown { pid, databases } => write!(
+                f,
+                "unclean shutdown of the last server{} found; checking [{}]",
+                pid.map(|pid| format!(" (pid {pid})")).unwrap_or_default(),
+                databases.join(", ")
+            ),
+            AuditEvent::DatabaseChecked {
+                name,
+                outcome,
+                detail,
+            } => write!(f, "database '{name}' checked: {outcome} ({detail})"),
+            AuditEvent::DatabaseRepaired {
+                source,
+                name,
+                lossless,
+            } => write!(
+                f,
+                "database '{source}' repaired into '{name}' ({})",
+                if *lossless {
+                    "lossless"
+                } else {
+                    "DATA LOST, see the repair report"
+                }
+            ),
+            AuditEvent::DatabaseSwapped { name, with, trash } => write!(
+                f,
+                "database '{with}' took the name '{name}'; the old '{name}' moved to {}",
+                trash.display()
+            ),
         }
     }
 }

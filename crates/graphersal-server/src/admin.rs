@@ -589,7 +589,7 @@ impl Registry {
         let mut inner = self.write();
         let key = build.name.clone();
         let entry = inner.entries.get(&key).ok_or_else(|| not_found(&key))?;
-        if matches!(entry.state, DbState::Loaded | DbState::Loading) {
+        if entry.state.is_busy() {
             return Err(ServerError::Refused {
                 name: key,
                 message: format!("it is {}; unload it first", entry.state.as_str()),
@@ -661,6 +661,122 @@ impl Registry {
         Ok(target)
     }
 
+    /// Lets the database `with` take the place of the database `name` (round 3 B-CRASH `db
+    /// swap`, [`crate::ops::Admin::swap`]): `databases/<name>/` moves into
+    /// `trash/<name>-<UTC time>/`, `databases/<with>/` is renamed to `databases/<name>/` (if
+    /// that fails the old directory is moved back) and gets the old `database.toml` back
+    /// (byte for byte: description, flags, limits); the name `with` leaves the registry, and
+    /// `after` runs with it under the write lock (the server removes its grants there). Answers
+    /// the new entry of `name`, the trash directory and `after`'s result. Refused while either
+    /// is loaded or being loaded (the caller holding the loader makes sure they stay so), being
+    /// built or replaced, for anything but plain normal databases, and while an alias names
+    /// `with`.
+    pub fn swap_in<T>(
+        &self,
+        name: &str,
+        with: &str,
+        after: impl FnOnce(&str) -> T,
+    ) -> Result<(DatabaseEntry, PathBuf, T), ServerError> {
+        let (key, other) = (fold(name), fold(with));
+        let mut inner = self.write();
+        let old = inner
+            .entries
+            .get(&key)
+            .ok_or_else(|| not_found(name))?
+            .clone();
+        let new = inner
+            .entries
+            .get(&other)
+            .ok_or_else(|| not_found(with))?
+            .clone();
+        let refuse = |name: &str, message: String| ServerError::Refused {
+            name: name.to_string(),
+            message,
+        };
+        for entry in [&old, &new] {
+            if entry.state.is_busy() {
+                return Err(refuse(
+                    &entry.name,
+                    format!("it is {}; unload it first", entry.state.as_str()),
+                ));
+            }
+            if inner.pending.contains(&entry.name) {
+                return Err(refuse(
+                    &entry.name,
+                    "it is being built or replaced; try again when that ends".to_string(),
+                ));
+            }
+            let plain = entry
+                .config
+                .as_ref()
+                .is_some_and(|c| c.kind == DatabaseKind::Plain && c.role == DatabaseRole::Normal);
+            if !plain {
+                return Err(refuse(
+                    &entry.name,
+                    "only a plain normal database takes part in a swap (a layer, a base or a                      failed database does not)"
+                        .to_string(),
+                ));
+            }
+        }
+        let aliases: Vec<&str> = inner
+            .aliases
+            .iter()
+            .filter(|(_, target)| **target == other)
+            .map(|(alias, _)| alias.as_str())
+            .collect();
+        if !aliases.is_empty() {
+            return Err(refuse(
+                &other,
+                format!(
+                    "the aliases {} name it, and its name goes away in the swap; remove them or                      point them at another database first",
+                    aliases.join(", ")
+                ),
+            ));
+        }
+        let config_path = old.dir.join(crate::database::DATABASE_FILE);
+        let config_bytes =
+            fs::read(&config_path).map_err(|err| ServerError::io("read", &config_path, err))?;
+        let trash = self.trash_target(&key)?;
+        fs::rename(&old.dir, &trash).map_err(|err| ServerError::io("rename", &old.dir, err))?;
+        if let Err(err) = fs::rename(&new.dir, &old.dir) {
+            if let Err(back) = fs::rename(&trash, &old.dir) {
+                tracing::error!(
+                    target: "graphersal_server",
+                    "database '{key}': cannot move {} back after a failed swap: {back}; it is \
+                     kept there",
+                    trash.display()
+                );
+            }
+            return Err(ServerError::io("rename", &new.dir, err));
+        }
+        if let Err(err) = crate::layout::write_atomic(
+            &old.dir.join(crate::database::DATABASE_FILE),
+            &config_bytes,
+        ) {
+            // The swapped-in database keeps its own (valid) configuration.
+            tracing::warn!(
+                target: "graphersal_server",
+                "database '{key}': the old database.toml could not be put back: {err}"
+            );
+        }
+        let config = DatabaseConfig::read(&old.dir).ok().or(old.config.clone());
+        inner.entries.remove(&other);
+        let entry = DatabaseEntry {
+            name: key.clone(),
+            dir: old.dir.clone(),
+            state: DbState::at_rest(config.as_ref()),
+            config,
+        };
+        inner.entries.insert(key.clone(), entry.clone());
+        tracing::info!(
+            target: "graphersal_server",
+            "database '{other}' took the name '{key}' (the old one moved to {})",
+            trash.display()
+        );
+        let out = after(&other);
+        Ok((entry, trash, out))
+    }
+
     /// Moves the database `name` out of the registry into `trash/<name>-<UTC time>/` (a
     /// counter is added when that exists) and answers its name and trash directory. Refused
     /// while it is loaded or being loaded (the caller holding the loader makes sure it stays
@@ -688,7 +804,7 @@ impl Registry {
             name: key.clone(),
             message,
         };
-        if matches!(entry.state, DbState::Loaded | DbState::Loading) {
+        if entry.state.is_busy() {
             return Err(refuse(format!(
                 "it is {}; unload it first",
                 entry.state.as_str()
@@ -843,7 +959,9 @@ pub(crate) fn promote_refusal(config: &DatabaseConfig, state: &DbState) -> Optio
     }
     match state {
         DbState::Unloaded => None,
-        DbState::Loading | DbState::Loaded => Some("it is loaded; unload it first".to_string()),
+        DbState::Loading | DbState::Loaded | DbState::Maintenance { .. } => {
+            Some("it is loaded; unload it first".to_string())
+        }
         DbState::NeedsModel { repo } => Some(format!(
             "it needs the embedding model '{repo}'; add it first (a base is frozen, so no model \
              can be added to it later)"
