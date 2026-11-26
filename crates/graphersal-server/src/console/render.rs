@@ -257,6 +257,54 @@ fn render_with(command: &DbCommand, answer: &Value, dir: &Path, server: Option<&
         .detail("size", size(answer))
         .text(),
         DbCommand::UserList => render_users(answer, &dir_arg),
+        DbCommand::McpStatus => render_mcp(answer, &dir_arg),
+        DbCommand::McpSwitch { .. } => {
+            let on = answer["enabled"] == Value::Bool(true);
+            let note = Note::new(format!("MCP is switched {}", on_off(on)));
+            let note = if on {
+                note.detail("endpoints", "/mcp and /db/<name>/mcp answer again")
+            } else {
+                note.detail(
+                    "endpoints",
+                    "/mcp and /db/<name>/mcp answer 503 until it is switched on; open MCP \
+                     sessions are kept and go on then",
+                )
+            };
+            let note = if answer["endpointBuilt"] == Value::Bool(false) {
+                note.detail(
+                    "but",
+                    "server.toml [mcp] enabled = false: no MCP endpoint until it is true and \
+                     the server restarted",
+                )
+            } else {
+                note
+            };
+            note.text()
+        }
+        DbCommand::McpDatabase { .. } => {
+            let changed = &answer["changed"];
+            let name = changed["name"].as_str().unwrap_or_default();
+            let exposed = changed["exposed"] == Value::Bool(true);
+            let read_only = changed["readOnly"] == Value::Bool(true);
+            Note::new(format!("MCP settings of '{name}'"))
+                .detail(
+                    "offered",
+                    if exposed {
+                        "yes".to_string()
+                    } else {
+                        format!("no: hidden from list_graphs and use_graph, /db/{name}/mcp 404")
+                    },
+                )
+                .detail(
+                    "read-only",
+                    if read_only {
+                        "yes: MCP sessions only read, whatever their grant"
+                    } else {
+                        "no: the caller's grant and the database's mode decide"
+                    },
+                )
+                .text()
+        }
         DbCommand::UserAdd { .. } => {
             let name = s("name");
             let what = if answer["admin"] == Value::Bool(true) {
@@ -503,6 +551,94 @@ fn render_users(answer: &Value, dir_arg: &str) -> String {
         grants.lines(table(&["SUBJECT", "DATABASE", "LEVEL"], &others));
     }
     text::render(&[users, grants])
+}
+
+/// `mcp status`: the switches, the databases' MCP settings and the usage statistics.
+fn render_mcp(answer: &Value, dir_arg: &str) -> String {
+    let yes_no = |v: &Value| if *v == Value::Bool(true) { "yes" } else { "no" };
+    let mut status = Section::new("MCP");
+    let serving = answer["serving"] == Value::Bool(true);
+    status.row(
+        "state",
+        if serving {
+            "on".to_string()
+        } else if answer["endpointBuilt"] == Value::Bool(false) {
+            "off: server.toml [mcp] enabled = false (restart after changing it)".to_string()
+        } else {
+            format!("off (switch it on: {BIN} mcp on --dir {dir_arg})")
+        },
+    );
+    status.row("endpoint", answer["endpoint"].as_str().unwrap_or("/mcp"));
+    let usage = &answer["usage"];
+    if usage.is_object() {
+        status.row(
+            "sessions",
+            format!("{} open", usage["sessions"]["open"].as_u64().unwrap_or(0)),
+        );
+        status.row(
+            "tool calls",
+            format!(
+                "{} ({} errors, {} refused while off) since the start",
+                usage["calls"]["total"].as_u64().unwrap_or(0),
+                usage["calls"]["errors"].as_u64().unwrap_or(0),
+                usage["calls"]["refused"].as_u64().unwrap_or(0)
+            ),
+        );
+    } else {
+        status.row("statistics", "only while the server runs");
+    }
+    let mut databases = Section::new("Databases");
+    let rows: Vec<Vec<String>> = answer["databases"]
+        .as_array()
+        .map(|rows| {
+            rows.iter()
+                .map(|row| {
+                    let name = row["name"].as_str().unwrap_or_default();
+                    let name = match (row["kind"].as_str(), row["target"].as_str()) {
+                        (Some("alias"), Some(target)) => format!("{name} → {target} (alias)"),
+                        (Some("missing"), _) => format!("{name} (missing)"),
+                        _ => name.to_string(),
+                    };
+                    vec![
+                        name,
+                        yes_no(&row["effectiveExposed"]).to_string(),
+                        yes_no(&row["effectiveReadOnly"]).to_string(),
+                        row["sessions"].as_u64().unwrap_or(0).to_string(),
+                        row["calls"].as_u64().unwrap_or(0).to_string(),
+                    ]
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if rows.is_empty() {
+        databases.row("none", "no databases or aliases");
+    } else {
+        databases.lines(table(
+            &["NAME", "OFFERED", "READ-ONLY", "SESSIONS", "CALLS"],
+            &rows,
+        ));
+    }
+    let mut sections = vec![status, databases];
+    let tools: Vec<Vec<String>> = usage["tools"]
+        .as_array()
+        .map(|rows| {
+            rows.iter()
+                .map(|row| {
+                    vec![
+                        row["tool"].as_str().unwrap_or_default().to_string(),
+                        row["calls"].as_u64().unwrap_or(0).to_string(),
+                        row["errors"].as_u64().unwrap_or(0).to_string(),
+                    ]
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if !tools.is_empty() {
+        let mut section = Section::new("Tool calls");
+        section.lines(table(&["TOOL", "CALLS", "ERRORS"], &tools));
+        sections.push(section);
+    }
+    text::render(&sections)
 }
 
 /// `1.2 KiB (1234 bytes)` of the answer's `bytes`.

@@ -32,6 +32,7 @@
 //! | DELETE | `aliases/<alias>` | | `200 {"alias", "removed": true, "grantsRemoved"}` (its grants go with it) |
 //! | POST | `aliases/<alias>/rename` | `{"name", "revision"?}` | `200 {"alias", "renamedFrom", "target", "mcpSessionsMoved", "grantsMoved"}` |
 //! | GET, POST, PUT, DELETE | `users...`, `grants...` | | the users and grants of `access.toml` (the `admin_api_users.rs` table) |
+//! | GET, PUT | `mcp`, `mcp/databases/<name>` | | the MCP switches of `mcp.toml` and the usage statistics (the `admin_api_mcp.rs` table) |
 //!
 //! A new database or alias never inherits grants left on its name (from a database or alias
 //! deleted while an older version ran, or whose grants could not be removed then): create,
@@ -173,6 +174,11 @@ pub(crate) fn route(
         |body: Option<String>| admin.clone().expecting(body.or_else(|| if_match.clone()));
     if matches!(segments.first(), Some(&("users" | "grants")))
         && let Some(answer) = users::route(admin, method, &segments, request, &expecting)
+    {
+        return answer;
+    }
+    if segments.first() == Some(&"mcp")
+        && let Some(answer) = mcp::route(admin, method, &segments, request, &expecting)
     {
         return answer;
     }
@@ -1660,6 +1666,9 @@ pub(crate) fn entry_json(entry: &DatabaseEntry, alias: Option<&str>) -> Value {
 
 #[path = "admin_api_users.rs"]
 mod users;
+
+#[path = "admin_api_mcp.rs"]
+mod mcp;
 
 #[cfg(test)]
 mod tests {

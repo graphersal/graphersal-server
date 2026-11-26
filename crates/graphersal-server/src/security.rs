@@ -12,7 +12,7 @@
 //!   modes ([`crate::layout`]'s private writes). `init` on an existing server directory owned
 //!   by the current user tightens the modes it finds too open (the upgrade path).
 //! - [`check`] runs before `serve` and every console command (offline and through a running
-//!   server with the operator token): the directory, `server.toml` and `aliases.toml` must be
+//!   server with the operator token): the directory, `server.toml`, `aliases.toml` and `mcp.toml` must be
 //!   owned by the process's effective user and not writable by group or others; the secrets
 //!   (`access.toml`, `server.run`, `sessions/` and its files) must be owned by it and neither
 //!   readable nor writable by group or others. A missing file is fine. A refusal is
@@ -91,7 +91,7 @@ pub(crate) fn check_owner(dir: &ServerDir) -> Result<(), ServerError> {
 #[cfg(unix)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Kind {
-    /// The server directory, `server.toml`, `aliases.toml`: owner only may write.
+    /// The server directory, `server.toml`, `aliases.toml`, `mcp.toml`: owner only may write.
     Shared,
     /// A secret file (`access.toml`, `server.run`, session files): owner only, `0600`.
     SecretFile,
@@ -128,6 +128,7 @@ fn checked_paths(dir: &ServerDir) -> Result<Vec<(PathBuf, Kind)>, ServerError> {
         (dir.root().to_path_buf(), Kind::Shared),
         (dir.config_path(), Kind::Shared),
         (dir.aliases_path(), Kind::Shared),
+        (dir.mcp_settings_path(), Kind::Shared),
         (dir.access_path(), Kind::SecretFile),
         (dir.run_path(), Kind::SecretFile),
         (dir.sessions(), Kind::SecretDir),
@@ -253,7 +254,7 @@ fn foreign_owner(root: &Path, owner: u32, euid: u32) -> ServerError {
 }
 
 /// Sets the owner-only modes on what `dir` holds (module docs): the directory and `sessions/`
-/// `0700`, the secret files `0600`, `server.toml`/`aliases.toml` without group/other write.
+/// `0700`, the secret files `0600`, `server.toml`/`aliases.toml`/`mcp.toml` without group/other write.
 /// Only paths owned by `euid` whose mode is too open are changed; answers them. Windows:
 /// nothing.
 pub(crate) fn tighten(dir: &ServerDir) -> Result<Vec<PathBuf>, ServerError> {

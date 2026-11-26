@@ -173,6 +173,9 @@ pub struct Loader {
     unload_wait: Duration,
     /// The server's MCP endpoint, shared by every context it builds (`None`: MCP is off).
     mcp: Option<Arc<Mcp>>,
+    /// The MCP switches (`mcp.toml`) and usage statistics (`serve` sets them once; unset in the
+    /// unit tests: everything on, no statistics).
+    mcp_control: std::sync::OnceLock<Arc<crate::mcp_control::McpControl>>,
     /// The backup root (`server.toml [jobs] backup_root`, resolved): every context's file root
     /// (`ContextBuilder::file_root`), and the root the stored jobs of a loaded database are
     /// checked against (`None`: no confinement, the unit tests).
@@ -257,9 +260,20 @@ impl Loader {
             stopping: AtomicBool::new(false),
             unload_wait: UNLOAD_WAIT,
             mcp,
+            mcp_control: std::sync::OnceLock::new(),
             backup_root,
             memory_seen: Mutex::new(BTreeMap::new()),
         })
+    }
+
+    /// Sets the MCP switches and statistics (once; a second call is ignored).
+    pub(crate) fn set_mcp_control(&self, control: Arc<crate::mcp_control::McpControl>) {
+        let _ = self.mcp_control.set(control);
+    }
+
+    /// The MCP switches and statistics (`None`: not set, the unit tests: everything on).
+    pub(crate) fn mcp_control(&self) -> Option<&Arc<crate::mcp_control::McpControl>> {
+        self.mcp_control.get()
     }
 
     /// The server's MCP endpoint, `None` when MCP is off (`server.toml` `[mcp] enabled`).

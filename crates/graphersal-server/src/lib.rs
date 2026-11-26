@@ -49,6 +49,7 @@ pub mod limits;
 pub mod loader;
 pub mod lock;
 mod mcp;
+mod mcp_control;
 mod model_archive;
 pub mod models;
 mod mounts;

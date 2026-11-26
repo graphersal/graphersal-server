@@ -109,6 +109,7 @@ test('every table of the admin UI sorts: its headers are sort-th, its rows come 
     'models-tab.js': ['modelSort', 'missingSort'],
     'runs-tab.js': ['runSort'],
     'mine-tab.js': ['mineSort'],
+    'mcp-tab.js': ['dbSort', 'toolSort', 'userSort', 'sessionSort', 'errorSort'],
   };
   for (const [file, sorters] of Object.entries(tables)) {
     const src = readFileSync(new URL(`../${file}`, import.meta.url), 'utf8');

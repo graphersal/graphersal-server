@@ -242,3 +242,29 @@ A server in the background without hunting for its pid:
   memory without a limit. Before, `status` showed only the limit (`liveBytes`, `limitBytes` and
   `availableBytes` stay in the answer). No new dependency on Linux and macOS (`libc`);
   `windows-sys`, already in the tree, gives the Windows figures.
+
+## The MCP tab: switch MCP, hide or protect databases, see its use
+
+MCP started with the server and nothing switched it at runtime. Now (web UI tab **MCP**, the
+admin API `GET`/`PUT /api/admin/mcp` and `PUT /api/admin/mcp/databases/<name>`, the console
+`graphersal-server mcp status|on|off`, `mcp db NAME on|off`, `mcp db NAME read-only on|off`),
+with no restart:
+
+- **MCP on or off for the whole server.** Off: `/mcp` and every `/db/<name>/mcp` answer `503`
+  with help at once; open MCP sessions are kept and go on when MCP is switched on again.
+  `server.toml [mcp] enabled = false` stays the hard switch (no endpoint until a restart).
+- **Per database or alias: offered to MCP or hidden.** A hidden name is not listed by
+  `list_graphs`, answers `use_graph` and `"graph"` like an unknown name, and its
+  `/db/<name>/mcp` answers `404`; the HTTP API is not affected.
+- **Per database or alias: read-only for MCP.** MCP sessions only read it, whatever their grant
+  (the HTTP API still follows the grant): the effective MCP level is the least of the grant, the
+  database's mode and this switch. An alias narrows its database, never widens it.
+- **Usage statistics** since the start (in memory, reset by a restart): open MCP sessions per
+  user and per database, tool calls in total, per tool, per user and per database with their
+  errors, the last 50 tool errors, and the requests refused while MCP was off; the tab shows
+  them in sortable tables, fresh on every visit, beside the endpoint URL and the `claude mcp
+  add` command with a placeholder token.
+- The switches live in the new file `mcp.toml` of the server directory (written atomically by
+  the server, with a `revision`: a change based on a stale page is refused with `409` and the tab
+  reads the state again; checked by `serve`'s permission check like `aliases.toml`). A renamed
+  alias keeps its settings; a deleted database or removed alias loses them. Changes are audited.

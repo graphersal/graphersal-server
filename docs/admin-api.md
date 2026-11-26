@@ -162,6 +162,9 @@ A `failed` database whose `database.toml` cannot be read has only `name`, `state
 | GET | `/api/admin/grants` | | `200 {"grants": [grant...], "revision"}` (`ETag`: the revision) |
 | POST | `/api/admin/grants` | `{"subject", "database", "level", "revision"?}` | `200` grant (new, or its level replaced) |
 | DELETE | `/api/admin/grants/<subject>/<database>` | | `200 {"subject", "database", "revoked": bool}` |
+| GET | `/api/admin/mcp` | | `200` the MCP state (see MCP; `ETag`: its revision) |
+| PUT | `/api/admin/mcp` | `{"enabled": bool, "revision"?}` | `200` the MCP state |
+| PUT | `/api/admin/mcp/databases/<name>` | `{"exposed"?: bool, "readOnly"?: bool, "revision"?}` | `200` the MCP state + `"changed": {"name", "exposed", "readOnly"}` |
 | GET | `/api/admin/server` | | `200 {"server", "version", "pid", "address", "url", "directory", "startedAtMs", "uptimeSecs", "databases": {"total", "loaded": [name...], "loading": [name...]}, "aliases", "memory": {"processBytes", "liveBytes", "databasesBytes", "machineTotalBytes", "machineAvailableBytes", "limitBytes", "limitSource", "configuredLimit", "headroomBytes", "availableBytes", "freeBytes", "freeBasis"}}` (see Server) |
 | POST | `/api/admin/shutdown` | | `202 {"stopping": true, "pid"}`, then the server stops (see Server) |
 
@@ -602,6 +605,30 @@ without a grant of its own (`docs/access.md` "Grants on aliases").
 The console's `user` commands are these routes (offline the console edits `access.toml` itself,
 as the operator); the web UI's Users tab uses them too.
 
+### MCP
+
+The runtime switches of the MCP endpoints (`mcp.toml`, [`mcp.md`](mcp.md#switches-at-runtime-the-mcp-tab-mcptoml))
+and their usage statistics; the web UI's MCP tab and `graphersal-server mcp ...` use these
+routes. A change takes effect at once (no restart) and may be based on the state's `revision`
+(stale: `409` with the current one). The MCP state:
+
+| Field | Meaning |
+|---|---|
+| `enabled` | the runtime switch (`mcp.toml` `enabled`); `false`: `/mcp` and `/db/<name>/mcp` answer `503`, open sessions are kept |
+| `endpointBuilt` | `server.toml [mcp] enabled`: `false` = the server built no MCP endpoint (restart with it on); offline what `server.toml` says |
+| `serving` | `enabled` and `endpointBuilt` |
+| `online` | a running server answered (offline the console read `mcp.toml`; `usage` is `null`) |
+| `endpoint`, `maxSessions` | `/mcp`; `server.toml [mcp] max_sessions` |
+| `revision` | of the settings |
+| `databases` | every database and alias, and every name with settings that names nothing now: `name`, `kind` (`database` \| `alias` \| `missing`), `target` (an alias's database), `exposed` and `readOnly` (the name's own settings), `effectiveExposed` (the name and its database exposed), `effectiveReadOnly` (read-only for MCP by the name, its database, or the database's own mode: its read-only flag, a base), `sessions` (open MCP sessions working on it), `calls`, `errors` (tool calls since the start) |
+| `usage` | since the server started, in memory: `startedAtMs`, `sessions {open, byUser: [{user, sessions}], byDatabase: [{database, sessions}], withoutDatabase}`, `calls {total, errors, refused}` (`refused`: requests refused while MCP was off or the database hidden), `tools: [{tool, calls, errors}]`, `users: [{user, calls, errors}]`, `databases: [{database, calls, errors}]` (most calls first), `recentErrors: [{atMs, tool, user, database, message}]` (the last `recentErrorsMax` = 50, newest first); `null` offline |
+
+`PUT /api/admin/mcp/databases/<name>` takes a database's or alias's name (a name with settings
+that names nothing now too, to reset it); a missing value is kept; neither given is `400`, an
+unknown name `404`. The changes are audited (`MCP on|off`, `MCP for '<name>': exposed ...,
+read-only ...`). Users are named without the `user:` prefix; `anonymous` for requests without
+a token, `operator` for the console's token.
+
 ### Server
 
 `GET /api/admin/server` describes the running server itself (`graphersal-server status`):
@@ -655,6 +682,7 @@ graphersal-server import DIR --list [--json]
 graphersal-server models list | add SOURCE [--repo R] [--license L] | remove REPO --dir DIR [--json]
 graphersal-server user list | add NAME [--admin] | token NAME [--revoke] | remove NAME --dir DIR [--json]
 graphersal-server user admin NAME on|off | grant SUBJECT DATABASE read|write | revoke SUBJECT DATABASE --dir DIR [--json]
+graphersal-server mcp status | on | off | db NAME on|off | db NAME read-only on|off --dir DIR [--json]
 ```
 
 With a server running on `DIR` (its `server.lock` is held) the console sends these requests to

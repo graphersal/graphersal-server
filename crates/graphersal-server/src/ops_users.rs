@@ -97,6 +97,8 @@ impl Admin {
 
     /// Moves the grants on the alias `old` to `new` (renamed): how many moved.
     pub(crate) fn move_alias_grants(&self, old: &str, new: &str) -> Result<usize, ServerError> {
+        // The alias's MCP settings (`mcp.toml`) go with it too.
+        self.move_mcp_settings(old, new);
         match self.grants_state()? {
             Some(access) => access.rename_grants(&self.principal, old, new),
             None => Ok(0),
@@ -106,6 +108,8 @@ impl Admin {
     /// Removes the grants on the name `name` itself (an alias removed, a database deleted):
     /// how many, each audited as a revoked grant.
     pub(crate) fn drop_grants_on(&self, name: &str) -> Result<usize, ServerError> {
+        // Its MCP settings (`mcp.toml`) go with it too.
+        self.forget_mcp_settings(name);
         match self.grants_state()? {
             Some(access) => access.drop_grants(&self.principal, name),
             None => Ok(0),

@@ -116,6 +116,22 @@ pub enum AuditEvent {
         /// The alias.
         alias: String,
     },
+    /// MCP was switched on or off for the whole server (`mcp.toml` `enabled`).
+    #[non_exhaustive]
+    McpSwitched {
+        /// The new value.
+        on: bool,
+    },
+    /// A database's (or alias's) MCP settings were changed (`mcp.toml`).
+    #[non_exhaustive]
+    McpDatabaseSet {
+        /// The database or alias.
+        name: String,
+        /// Whether MCP offers it.
+        exposed: bool,
+        /// Whether MCP serves it read-only.
+        read_only: bool,
+    },
     /// An alias was renamed.
     #[non_exhaustive]
     AliasRenamed {
@@ -286,6 +302,17 @@ impl fmt::Display for AuditEvent {
                 write!(f, "alias '{alias}' set to database '{target}'")
             }
             AuditEvent::AliasRemoved { alias } => write!(f, "alias '{alias}' removed"),
+            AuditEvent::McpSwitched { on } => write!(f, "MCP {}", on_off(*on)),
+            AuditEvent::McpDatabaseSet {
+                name,
+                exposed,
+                read_only,
+            } => write!(
+                f,
+                "MCP for '{name}': exposed {}, read-only {}",
+                on_off(*exposed),
+                on_off(*read_only)
+            ),
             AuditEvent::AliasRenamed {
                 old,
                 new,

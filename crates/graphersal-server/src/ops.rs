@@ -830,6 +830,9 @@ pub use models::{ModelAddSpec, ModelAdded, ModelRemoved};
 mod runs;
 pub use runs::DatabaseRun;
 
+#[path = "ops_mcp.rs"]
+mod mcp;
+
 #[path = "ops_users.rs"]
 mod users;
 pub use users::SessionsEnded;

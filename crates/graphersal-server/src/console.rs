@@ -1,5 +1,5 @@
 //! The console's admin commands (`graphersal-server db ...`, `import`, `models ...`,
-//! `user ...`).
+//! `user ...`, `mcp ...`).
 //!
 //! Every command is one request of the admin HTTP API ([`DbCommand::request`]). [`run`] sends it
 //! where the directory is:
@@ -272,6 +272,23 @@ pub enum DbCommand {
         /// A database's name or `*`.
         database: String,
     },
+    /// `mcp status`: the MCP switches, the databases' MCP settings and (through a running
+    /// server) the usage statistics.
+    McpStatus,
+    /// `mcp on|off`: MCP for the whole server.
+    McpSwitch {
+        /// On or off.
+        on: bool,
+    },
+    /// `mcp db NAME on|off` (exposure) or `mcp db NAME read-only on|off`.
+    McpDatabase {
+        /// A database or an alias.
+        name: String,
+        /// Offer it to MCP (`None`: unchanged).
+        exposed: Option<bool>,
+        /// Serve it read-only to MCP (`None`: unchanged).
+        read_only: Option<bool>,
+    },
 }
 
 impl DbCommand {
@@ -423,6 +440,28 @@ impl DbCommand {
                 format!("grants/{}/{}", segment(subject), segment(database)),
                 None,
             ),
+            DbCommand::McpStatus => (Method::Get, "mcp".into(), None),
+            DbCommand::McpSwitch { on } => {
+                (Method::Put, "mcp".into(), Some(json!({ "enabled": on })))
+            }
+            DbCommand::McpDatabase {
+                name,
+                exposed,
+                read_only,
+            } => {
+                let mut body = Map::new();
+                if let Some(exposed) = exposed {
+                    body.insert("exposed".into(), json!(exposed));
+                }
+                if let Some(read_only) = read_only {
+                    body.insert("readOnly".into(), json!(read_only));
+                }
+                (
+                    Method::Put,
+                    format!("mcp/databases/{}", segment(name)),
+                    Some(Value::Object(body)),
+                )
+            }
             DbCommand::Export { name, spec, .. } => (
                 Method::Get,
                 format!(

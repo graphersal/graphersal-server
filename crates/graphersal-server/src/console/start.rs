@@ -267,6 +267,20 @@ fn sections(running: &Running, config: Option<&ServerConfig>) -> Vec<Section> {
                  databases, a request without one the anonymous grants (access.toml)",
             );
             mcp.unwrapped("connect", connect);
+            // The runtime switch of `mcp.toml` (the web UI's MCP tab, `graphersal-server mcp`).
+            if running
+                .loader()
+                .mcp_control()
+                .is_some_and(|control| !control.enabled())
+            {
+                mcp.row(
+                    "state",
+                    format!(
+                        "switched off (mcp.toml): the endpoints answer 503; switch it on: \
+                         graphersal-server mcp on --dir {dir_arg}"
+                    ),
+                );
+            }
         }
         Some(_) => mcp.row("endpoint", "off ([mcp] enabled = false in server.toml)"),
         None => mcp.row("endpoint", "unknown (server.toml could not be read again)"),

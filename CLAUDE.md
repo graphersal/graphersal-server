@@ -411,6 +411,33 @@ from published files). When this file disagrees with the code, the code wins: sa
   `Mcp::handle_directory` (POST/DELETE; GET 405). `/db/<name>/mcp` is graphersal-serve's own
   route behind the mount, on the same `Mcp`. The endpoint never loads/unloads. Contract:
   `docs/mcp.md`. E2E in `tests/server_tests.rs` (`mcp_*`).
+- `mcp_control` (round 3 B6, private): the runtime MCP switches in `mcp.toml`
+  (`McpSettings {enabled, databases: {name: NameSettings {exposed, read_only}}}`, names folded,
+  defaults not written, canonical text + `revision`; `McpControl` = `RwLock` held across
+  check/write/memory (a LEAF lock), `open(dir)` (missing = defaults, a bad file = `Config`,
+  stops `serve`), `change(expected, f)`, `forget_name`/`rename` (called from
+  `Admin::drop_grants_on`/`move_alias_grants`: delete, alias remove, a new name drop; rename
+  moves)); set once on the loader by `serve` (`Loader::set_mcp_control`/`mcp_control()`,
+  `None` in unit tests = all on). Semantics: `requested` resolving to `real` is exposed when
+  both are, read-only when either is (an alias narrows, never widens); `server.toml [mcp]
+  enabled = false` stays the hard switch (no `Mcp` built). Enforcement: router `/mcp` and
+  `/db/<n>/mcp` -> `mcp::switched_off()` 503 (sessions kept); `/db/<n>/mcp` hidden ->
+  `mcp::not_exposed` 404, read-only -> `mark_read_only`; `mcp::Directory` filters `list`,
+  refuses hidden names with the unknown-name text, `host` read-only profile, `resolve` routes by
+  the alias name when the alias has own settings. `McpUsage` (in memory since start): open
+  sessions from the endpoint's saved table (`ObservedSessions` wraps `McpSessionFile` as the
+  `SessionStore`) + per-database endpoint sessions (`mount_session`, sha256 of the
+  `Mcp-Session-Id` of an `initialize` answer), tool calls observed by the router
+  (`mcp::buffer_body` reads the POST body, at most 16 MiB + 1, `observe` parses the JSON-RPC
+  request/answer): per tool/user/database (bounded `MAX_NAMES`, `(other)`), errors, last
+  `RECENT_ERRORS` = 50, `refused`. Admin: `ops_mcp.rs` (`Admin::mcp_control`, online the
+  loader's, offline the file; `mcp_set_enabled`, `mcp_set_name` under `Registry::while_named`,
+  audited `McpSwitched`/`McpDatabaseSet`), routes `admin_api_mcp.rs` (`GET`/`PUT mcp`, `PUT
+  mcp/databases/<n>`, state JSON with `databases` rows and `usage`), console `mcp
+  status|on|off|db NAME [read-only] on|off` (`DbCommand::Mcp*`, `render_mcp`), UI `mcp-tab.js`
+  + model `mcp-api.js`. Tests: `mcp_control::tests`, `router_access_tests.rs` `mcp_switches_*`,
+  `mcp_usage_*`, `server_tests.rs` `mcp_commands_offline_and_through_a_server`,
+  `ui/tests/mcp.test.mjs`.
 - `loader` (`Loader`, beside the registry, `Running::loader()`): `load` (background thread,
   state `loading` -> `loaded` / `failed (reason)` / `needs-model (repo)` when a model blob is
   missing; a load of a loaded/loading DB answers `LoadStart::Already*`, no error), `wait`,
@@ -453,7 +480,7 @@ from published files). When this file disagrees with the code, the code wins: sa
 - `crates/graphersal-server/ui/`: the server's web UI, the playground UI profile `server`
   (the graphersal-memory `memory` profile's pattern; the engine's playground mechanism: its
   `playground/CLAUDE.md` "UI profiles"): `profile.json` (the admin's: module tabs Databases, Backups, Import,
-  Export, Models, Runs, Users, `header` = `header.js`; no workspace: the root has no graph; `files` = `server-ui/` relative to `/`),
+  Export, Models, Runs, Users, MCP (`mcp-tab.js` over `mcp-api.js`, B6), `header` = `header.js`; no workspace: the root has no graph; `files` = `server-ui/` relative to `/`),
   `profile-views.json` (the keys a user's view (`mine-tab.js`, "My databases" over `GET
   api/databases`) and anonymous's (`login-tab.js`, "Sign in": paste a token, `POST api/login`,
   then the address's `?next=` if `access-api.js` `safeNext` takes it, else the root) replace;
@@ -531,7 +558,7 @@ WD_TIMEOUT=600 ../graphersal/ai/bench/watchdog.sh scripts/smoke.sh   # end to en
 - Concurrent changes (B-CONCUR): a writer of a server file takes that file's lock and holds it
   across read, change and write; memory changes only after the write succeeded; never take a
   lock earlier in the documented order while holding a later one (loader state, loader flips,
-  registry, access, session tables; models/naming locks are leaves). A new runtime writer goes
+  registry, access, session tables; models/naming/MCP settings locks are leaves). A new runtime writer goes
   into the inventory of `docs/server-dir.md`; a new editable shared object gets a revision.
 - Tokens and session ids: only hashes at rest, never logged (`Secret`'s `Debug` is redacted;
   audit events show `token_last4` only).

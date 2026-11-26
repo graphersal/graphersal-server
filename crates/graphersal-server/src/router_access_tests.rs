@@ -75,8 +75,13 @@ fn fixture_with(name: &str, allowed: Vec<String>, modes: Modes) -> Fixture {
     let registry = Registry::scan(&dir).unwrap();
     registry.alias_set("cur", "r").unwrap();
     registry.alias_set("hid", "h").unwrap();
-    let mcp = crate::mcp::endpoint(&crate::config::McpConfig::default());
+    let control = Arc::new(crate::mcp_control::McpControl::open(&dir).unwrap());
+    let mcp = crate::mcp::endpoint(
+        &crate::config::McpConfig::default(),
+        control.usage().clone(),
+    );
     let loader = Loader::with_mcp(registry, host_check.clone(), mcp);
+    loader.set_mcp_control(control);
     let audit = Arc::new(MemoryAudit::default());
     let (access, _) = Access::open(
         &dir,
@@ -2342,4 +2347,415 @@ fn every_answer_says_no_store_exactly_once() {
     // The answers above are what the UI reads: a user added meanwhile shows on the next read.
     let users = json_of(&get(&fx, Who::Bearer(&alice), "/api/admin/users"));
     assert!(users.to_string().contains("\"dave\""), "{users}");
+}
+
+/// Round 3 B6: the MCP switches of `mcp.toml` through the admin API, enforced on `/mcp` and
+/// `/db/<name>/mcp`: off globally (503, sessions kept, back on), a name hidden (unknown on
+/// `/mcp`, 404 on its endpoint, HTTP untouched), MCP read-only (writes refused through MCP,
+/// the HTTP API with a write grant still writes), revisions (409), admins only.
+#[test]
+fn mcp_switches_turn_off_hide_and_force_read_only() {
+    let fx = fixture("access-mcp-switches");
+    let (alice, bob) = (Who::Bearer(fx.alice.as_str()), Who::Bearer(fx.bob.as_str()));
+    let state = expect(get(&fx, alice, "/api/admin/mcp"), 200);
+    assert_eq!(state["enabled"], true);
+    assert_eq!(state["serving"], true);
+    assert_eq!(state["endpointBuilt"], true);
+    assert_eq!(state["online"], true);
+    let names: Vec<&str> = state["databases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["h", "r", "w", "cur", "hid"]);
+    let r0 = state["revision"].as_str().unwrap().to_string();
+    // Only admins see the routes.
+    assert_eq!(get(&fx, bob, "/api/admin/mcp").status(), 404);
+    let session = mcp_initialize(&fx, bob, "/mcp");
+    let mounted = mcp_initialize(&fx, alice, "/db/w/mcp");
+    let list = json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"});
+
+    // Off: both endpoints 503 with help, a stale revision is refused, back on: the sessions go on.
+    let off = expect(
+        put(
+            &fx,
+            alice,
+            "/api/admin/mcp",
+            json!({"enabled": false, "revision": r0}),
+        ),
+        200,
+    );
+    assert_eq!(off["enabled"], false);
+    assert_eq!(off["serving"], false);
+    let stale = expect(
+        put(
+            &fx,
+            alice,
+            "/api/admin/mcp",
+            json!({"enabled": true, "revision": r0}),
+        ),
+        409,
+    );
+    assert_eq!(stale["revision"], off["revision"]);
+    for (path, id, who) in [("/mcp", &session, bob), ("/db/w/mcp", &mounted, alice)] {
+        let refused = mcp(&fx, who, path, Some(id), list.clone());
+        assert_eq!(refused.status(), 503, "{path}");
+        let body = json_of(&refused);
+        assert_eq!(body["error"], "MCP is switched off on this server");
+        assert!(body["help"].as_str().unwrap().contains("mcp on"), "{body}");
+    }
+    let text = std::fs::read_to_string(fx.loader.registry().dir().mcp_settings_path()).unwrap();
+    assert!(text.contains("enabled = false"), "{text}");
+    expect(
+        put(&fx, alice, "/api/admin/mcp", json!({"enabled": true})),
+        200,
+    );
+    assert_eq!(
+        mcp(&fx, bob, "/mcp", Some(&session), list.clone()).status(),
+        200
+    );
+    assert_eq!(
+        mcp(&fx, alice, "/db/w/mcp", Some(&mounted), list.clone()).status(),
+        200
+    );
+
+    // A hidden name: not listed, unknown on use_graph and `graph`, its endpoint 404; HTTP as before.
+    let hidden = expect(
+        put(
+            &fx,
+            alice,
+            "/api/admin/mcp/databases/W",
+            json!({"exposed": false}),
+        ),
+        200,
+    );
+    assert_eq!(
+        hidden["changed"],
+        json!({"name": "w", "exposed": false, "readOnly": false})
+    );
+    let (listing, _) = mcp_tool(&fx, bob, "/mcp", &session, "list_graphs", json!({}));
+    assert!(!listing.contains("\"w\""), "{listing}");
+    assert!(listing.contains("\"r\""), "{listing}");
+    let (used, error) = mcp_tool(
+        &fx,
+        bob,
+        "/mcp",
+        &session,
+        "use_graph",
+        json!({"name": "w"}),
+    );
+    assert!(error, "{used}");
+    let (unknown, _) = mcp_tool(
+        &fx,
+        bob,
+        "/mcp",
+        &session,
+        "use_graph",
+        json!({"name": "zz"}),
+    );
+    assert_eq!(used.replace("'w'", "'zz'"), unknown);
+    let query = json!({"query": "MATCH (p:person) RETURN count(p) AS n", "graph": "w"});
+    let (text, error) = mcp_tool(&fx, bob, "/mcp", &session, "gql", query);
+    assert!(error, "{text}");
+    let refused = mcp(&fx, alice, "/db/w/mcp", Some(&mounted), list.clone());
+    assert_eq!(refused.status(), 404);
+    assert_eq!(json_of(&refused)["error"], "MCP is switched off for 'w'");
+    let before = person_count(&fx, "w");
+    execute(&fx, bob, "w", WRITE);
+    assert_eq!(person_count(&fx, "w"), before + 1, "HTTP is not touched");
+    // An alias hidden on its own: its database stays listed.
+    expect(
+        put(
+            &fx,
+            alice,
+            "/api/admin/mcp/databases/cur",
+            json!({"exposed": false}),
+        ),
+        200,
+    );
+    let (listing, _) = mcp_tool(&fx, bob, "/mcp", &session, "list_graphs", json!({}));
+    assert!(!listing.contains("\"cur\""), "{listing}");
+    assert!(listing.contains("\"r\""), "{listing}");
+
+    // MCP read-only: bob's write grant on w no longer writes through MCP, still over HTTP.
+    let state = expect(
+        put(
+            &fx,
+            alice,
+            "/api/admin/mcp/databases/w",
+            json!({"exposed": true, "readOnly": true}),
+        ),
+        200,
+    );
+    let row = state["databases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["name"] == "w")
+        .unwrap()
+        .clone();
+    assert_eq!(row["effectiveExposed"], true);
+    assert_eq!(row["effectiveReadOnly"], true);
+    let (listing, _) = mcp_tool(&fx, bob, "/mcp", &session, "list_graphs", json!({}));
+    let graphs: Value = serde_json::from_str(&listing).unwrap();
+    let w = graphs["graphs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|g| g["name"] == "w")
+        .unwrap()
+        .clone();
+    assert_eq!(w["readOnly"], true, "{listing}");
+    let before = person_count(&fx, "w");
+    let (text, error) = mcp_tool(
+        &fx,
+        bob,
+        "/mcp",
+        &session,
+        "query",
+        json!({"script": WRITE, "graph": "w"}),
+    );
+    assert!(error || text.to_lowercase().contains("denied"), "{text}");
+    let bob_mounted = mcp_initialize(&fx, bob, "/db/w/mcp");
+    let (text, error) = mcp_tool(
+        &fx,
+        bob,
+        "/db/w/mcp",
+        &bob_mounted,
+        "query",
+        json!({"script": WRITE}),
+    );
+    assert!(error || text.to_lowercase().contains("denied"), "{text}");
+    assert_eq!(person_count(&fx, "w"), before, "MCP did not write");
+    execute(&fx, bob, "w", WRITE);
+    assert_eq!(
+        person_count(&fx, "w"),
+        before + 1,
+        "the HTTP API still writes"
+    );
+    // Read-only on an alias narrows only the alias, also for a caller granted its database.
+    expect(
+        put(
+            &fx,
+            alice,
+            "/api/admin/mcp/databases/w",
+            json!({"readOnly": false}),
+        ),
+        200,
+    );
+    expect(
+        put(&fx, alice, "/api/admin/aliases/ww", json!({"target": "w"})),
+        200,
+    );
+    expect(
+        put(
+            &fx,
+            alice,
+            "/api/admin/mcp/databases/ww",
+            json!({"readOnly": true}),
+        ),
+        200,
+    );
+    let admin_session = mcp_initialize(&fx, alice, "/mcp");
+    let (_, error) = mcp_tool(
+        &fx,
+        alice,
+        "/mcp",
+        &admin_session,
+        "use_graph",
+        json!({"name": "ww"}),
+    );
+    assert!(!error);
+    let before = person_count(&fx, "w");
+    let (text, error) = mcp_tool(
+        &fx,
+        alice,
+        "/mcp",
+        &admin_session,
+        "query",
+        json!({"script": WRITE}),
+    );
+    assert!(error || text.to_lowercase().contains("denied"), "{text}");
+    let (text, error) = mcp_tool(
+        &fx,
+        alice,
+        "/mcp",
+        &admin_session,
+        "query",
+        json!({"script": WRITE, "graph": "w"}),
+    );
+    assert!(!error, "{text}");
+    assert_eq!(person_count(&fx, "w"), before + 1);
+    // A rename carries the alias's settings, a removal drops them.
+    expect(
+        post(
+            &fx,
+            alice,
+            "/api/admin/aliases/ww/rename",
+            json!({"name": "wv"}),
+        ),
+        200,
+    );
+    let state = expect(get(&fx, alice, "/api/admin/mcp"), 200);
+    let find = |name: &str| {
+        state["databases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["name"] == name)
+            .cloned()
+    };
+    assert_eq!(find("wv").unwrap()["readOnly"], true);
+    assert!(find("ww").is_none());
+    expect(delete(&fx, alice, "/api/admin/aliases/wv"), 200);
+    let state = expect(get(&fx, alice, "/api/admin/mcp"), 200);
+    assert!(
+        !state["databases"].to_string().contains("\"wv\""),
+        "{state}"
+    );
+
+    // Refusals: an unknown name, nothing to change, a stale revision of a name's change.
+    let unknown = expect(
+        put(
+            &fx,
+            alice,
+            "/api/admin/mcp/databases/nope",
+            json!({"exposed": false}),
+        ),
+        404,
+    );
+    assert!(
+        unknown["help"]
+            .as_str()
+            .unwrap()
+            .contains("GET /api/admin/mcp"),
+        "{unknown}"
+    );
+    expect(
+        put(&fx, alice, "/api/admin/mcp/databases/w", json!({})),
+        400,
+    );
+    expect(
+        put(
+            &fx,
+            alice,
+            "/api/admin/mcp/databases/w",
+            json!({"exposed": false, "revision": r0}),
+        ),
+        409,
+    );
+    assert_eq!(get(&fx, alice, "/api/admin/mcp/other").status(), 404);
+    assert_eq!(post(&fx, alice, "/api/admin/mcp", json!({})).status(), 405);
+}
+
+/// Round 3 B6: the usage statistics count open sessions (by user, by database), tool calls per
+/// tool, user and database, errors with the recent ones, and requests refused while off.
+#[test]
+fn mcp_usage_statistics_count_sessions_calls_and_errors() {
+    let fx = fixture("access-mcp-usage");
+    let (alice, bob) = (Who::Bearer(fx.alice.as_str()), Who::Bearer(fx.bob.as_str()));
+    let session = mcp_initialize(&fx, bob, "/mcp");
+    let (_, error) = mcp_tool(
+        &fx,
+        bob,
+        "/mcp",
+        &session,
+        "use_graph",
+        json!({"name": "w"}),
+    );
+    assert!(!error);
+    let (_, error) = mcp_tool(
+        &fx,
+        bob,
+        "/mcp",
+        &session,
+        "use_graph",
+        json!({"name": "zz"}),
+    );
+    assert!(error);
+    let mounted = mcp_initialize(&fx, alice, "/db/w/mcp");
+    let query = json!({"query": "MATCH (p:person) RETURN count(p) AS n"});
+    let (text, error) = mcp_tool(&fx, alice, "/db/w/mcp", &mounted, "gql", query);
+    assert!(!error, "{text}");
+    expect(
+        put(&fx, alice, "/api/admin/mcp", json!({"enabled": false})),
+        200,
+    );
+    let list = json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"});
+    assert_eq!(mcp(&fx, bob, "/mcp", Some(&session), list).status(), 503);
+    expect(
+        put(&fx, alice, "/api/admin/mcp", json!({"enabled": true})),
+        200,
+    );
+
+    let state = expect(get(&fx, alice, "/api/admin/mcp"), 200);
+    let usage = &state["usage"];
+    assert_eq!(
+        usage["calls"],
+        json!({"total": 3, "errors": 1, "refused": 1})
+    );
+    assert_eq!(usage["sessions"]["open"], 2);
+    assert_eq!(
+        usage["sessions"]["byDatabase"],
+        json!([{"database": "w", "sessions": 2}])
+    );
+    assert_eq!(
+        usage["sessions"]["byUser"],
+        json!([{"user": "alice", "sessions": 1}, {"user": "bob", "sessions": 1}])
+    );
+    assert_eq!(
+        usage["tools"],
+        json!([
+            {"tool": "use_graph", "calls": 2, "errors": 1},
+            {"tool": "gql", "calls": 1, "errors": 0},
+        ])
+    );
+    assert_eq!(
+        usage["users"],
+        json!([
+            {"user": "bob", "calls": 2, "errors": 1},
+            {"user": "alice", "calls": 1, "errors": 0},
+        ])
+    );
+    assert_eq!(
+        usage["databases"],
+        json!([
+            {"database": "w", "calls": 2, "errors": 0},
+            {"database": "zz", "calls": 1, "errors": 1},
+        ])
+    );
+    let recent = usage["recentErrors"].as_array().unwrap();
+    assert_eq!(recent.len(), 1);
+    assert_eq!(recent[0]["tool"], "use_graph");
+    assert_eq!(recent[0]["user"], "bob");
+    assert_eq!(recent[0]["database"], "zz");
+    assert!(
+        recent[0]["message"].as_str().unwrap().contains("zz"),
+        "{recent:?}"
+    );
+    assert!(recent[0]["atMs"].as_u64().unwrap() > 0);
+    let w = state["databases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["name"] == "w")
+        .unwrap()
+        .clone();
+    assert_eq!(
+        (w["sessions"].clone(), w["calls"].clone()),
+        (json!(2), json!(2))
+    );
+    // An ended session leaves the count.
+    let ended = send(
+        &fx,
+        bob,
+        Method::Delete,
+        "/mcp",
+        None,
+        &[("Mcp-Session-Id", session.as_str())],
+    );
+    assert!(ended.status() < 300, "{}", ended.status());
+    let state = expect(get(&fx, alice, "/api/admin/mcp"), 200);
+    assert_eq!(state["usage"]["sessions"]["open"], 1);
 }

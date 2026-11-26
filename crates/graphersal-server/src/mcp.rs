@@ -15,6 +15,11 @@
 //!   the router refuses it like every other route of the database and marks it read-only for a
 //!   reader.
 //!
+//! The runtime switches of `mcp.toml` ([`crate::mcp_control`]) apply to both: off = `503`
+//! ([`switched_off`], checked by the router), a hidden name is unknown to the [`Directory`]
+//! (and `404` on its own endpoint, [`not_exposed`]), an MCP read-only name gets the reading
+//! profile; every tool call is counted ([`route`], the router for `/db/<name>/mcp`).
+//!
 //! MCP sessions survive a restart: `serve` builds the endpoint with [`persistent_endpoint`]
 //! (`sessions/mcp.json`, [`crate::sessions`]), so a client keeps its session id, its identity
 //! and its selected name across a restart.
@@ -37,17 +42,28 @@ use crate::config::McpConfig;
 use crate::database::{DatabaseKind, DatabaseRole};
 use crate::layout::ServerDir;
 use crate::loader::Loader;
+use crate::mcp_control::{McpUsage, ObservedRequest, ObservedSessions};
 use crate::registry::{DatabaseEntry, DbState};
 use crate::sessions::McpSessionFile;
 
 /// The path of the server-wide endpoint.
 pub(crate) const ENDPOINT: &str = "/mcp";
 
-/// The server's MCP endpoint for `config` with its sessions in memory only, `None` when MCP
-/// is off (the unit tests; `serve` uses [`persistent_endpoint`]).
+/// The server's MCP endpoint for `config` with its sessions in memory only (reported to
+/// `usage`), `None` when MCP is off (the unit tests; `serve` uses [`persistent_endpoint`]).
 #[cfg(test)]
-pub(crate) fn endpoint(config: &McpConfig) -> Option<Arc<Mcp>> {
-    config.enabled.then(|| Arc::new(bare_endpoint(config)))
+pub(crate) fn endpoint(config: &McpConfig, usage: Arc<McpUsage>) -> Option<Arc<Mcp>> {
+    config.enabled.then(|| Arc::new(in_memory(config, usage)))
+}
+
+/// The endpoint of `config` whose sessions live in memory only, reported to `usage`.
+fn in_memory(config: &McpConfig, usage: Arc<McpUsage>) -> Mcp {
+    let store = Arc::new(ObservedSessions::new(None, usage));
+    match bare_endpoint(config).with_session_store(store) {
+        Ok(mcp) => mcp,
+        // An empty store cannot fail to load.
+        Err(_) => bare_endpoint(config),
+    }
 }
 
 /// The endpoint of `config` without a session store.
@@ -60,8 +76,13 @@ fn bare_endpoint(config: &McpConfig) -> Mcp {
 /// The server's MCP endpoint for `config` whose sessions survive a restart: kept in `dir`'s
 /// `sessions/mcp.json` ([`McpSessionFile`], restored now, written through on every change).
 /// The stored sessions of a user that is gone or has no token are dropped at this load
-/// (revoked while the server was down); `None` when MCP is off.
-pub(crate) fn persistent_endpoint(config: &McpConfig, dir: &ServerDir) -> Option<Arc<Mcp>> {
+/// (revoked while the server was down); every saved table is reported to `usage` (the open
+/// sessions of the statistics); `None` when MCP is off.
+pub(crate) fn persistent_endpoint(
+    config: &McpConfig,
+    dir: &ServerDir,
+    usage: Arc<McpUsage>,
+) -> Option<Arc<Mcp>> {
     if !config.enabled {
         return None;
     }
@@ -78,14 +99,15 @@ pub(crate) fn persistent_endpoint(config: &McpConfig, dir: &ServerDir) -> Option
         // A broken access.toml stops the start anyway (`Access::open`): keep every session.
         Err(_) => McpSessionFile::new(dir),
     };
-    match bare_endpoint(config).with_session_store(Arc::new(file)) {
+    let store = Arc::new(ObservedSessions::new(Some(file), usage.clone()));
+    match bare_endpoint(config).with_session_store(store) {
         Ok(mcp) => Some(Arc::new(mcp)),
         Err(err) => {
             tracing::warn!(
                 target: "graphersal_server",
                 "MCP sessions: {err}; they are kept in memory only"
             );
-            Some(Arc::new(bare_endpoint(config)))
+            Some(Arc::new(in_memory(config, usage)))
         }
     }
 }
@@ -109,6 +131,29 @@ impl Directory<'_> {
     fn unknown(name: &str) -> McpError {
         McpError::Failed(format!("no database or alias '{name}'"))
     }
+
+    /// Whether MCP offers `requested` (resolving to the database `real`): `mcp.toml`'s
+    /// exposure ([`crate::mcp_control`]; everything without switches).
+    fn exposed(&self, requested: &str, real: &str) -> bool {
+        self.loader
+            .mcp_control()
+            .is_none_or(|control| control.exposed(requested, real))
+    }
+
+    /// Whether MCP serves `requested` (resolving to `real`) read-only by `mcp.toml`.
+    fn mcp_read_only(&self, requested: &str, real: &str) -> bool {
+        self.loader
+            .mcp_control()
+            .is_some_and(|control| control.read_only(requested, real))
+    }
+
+    /// Whether the alias name `requested` has MCP settings of its own (then a session that
+    /// selected it is routed by that name, so they apply on every call).
+    fn own_settings(&self, requested: &str) -> bool {
+        self.loader
+            .mcp_control()
+            .is_some_and(|control| control.has_own(requested))
+    }
 }
 
 impl GraphDirectory for Directory<'_> {
@@ -119,14 +164,21 @@ impl GraphDirectory for Directory<'_> {
             .into_iter()
             .filter_map(|e| {
                 let level = self.granted(&e.name);
-                (level != Level::None).then(|| graph_entry(&e.name, &e, level))
+                (level != Level::None && self.exposed(&e.name, &e.name)).then(|| {
+                    let read_only = self.mcp_read_only(&e.name, &e.name);
+                    graph_entry(&e.name, &e, level, read_only)
+                })
             })
             .collect();
         // An alias is listed when it reaches its target for the caller: a grant on the target
-        // or on the alias itself (`Access::reach`).
+        // or on the alias itself (`Access::reach`); both names exposed to MCP.
         for (alias, _) in registry.aliases() {
-            if let Some((entry, level)) = self.access.reach(registry, self.principal, &alias) {
-                graphs.push(graph_entry(&alias, &entry, level).with_alias_of(&entry.name));
+            if let Some((entry, level)) = self.access.reach(registry, self.principal, &alias)
+                && self.exposed(&alias, &entry.name)
+            {
+                let read_only = self.mcp_read_only(&alias, &entry.name);
+                graphs
+                    .push(graph_entry(&alias, &entry, level, read_only).with_alias_of(&entry.name));
             }
         }
         Ok(graphs)
@@ -139,7 +191,13 @@ impl GraphDirectory for Directory<'_> {
     fn resolve(&self, name: &str) -> Result<String, McpError> {
         let registry = self.loader.registry();
         match self.access.reach(registry, self.principal, name) {
-            Some((entry, _)) if self.granted(&entry.name) != Level::None => Ok(entry.name),
+            Some((entry, _)) if !self.exposed(name, &entry.name) => Err(Self::unknown(name)),
+            Some((entry, _))
+                if self.granted(&entry.name) != Level::None
+                    && (crate::names::fold(name) == entry.name || !self.own_settings(name)) =>
+            {
+                Ok(entry.name)
+            }
             Some(_) => Ok(crate::names::fold(name)),
             None => Err(Self::unknown(name)),
         }
@@ -152,9 +210,12 @@ impl GraphDirectory for Directory<'_> {
         else {
             return Err(Self::unknown(route));
         };
+        if !self.exposed(route, &entry.name) {
+            return Err(Self::unknown(route));
+        }
         if let Some(context) = self.loader.context(&entry.name) {
             let profile = context.mcp_profile().cloned().unwrap_or_default();
-            let profile = if level == Level::Read {
+            let profile = if level == Level::Read || self.mcp_read_only(route, &entry.name) {
                 profile.with_read_only(true)
             } else {
                 profile
@@ -167,8 +228,9 @@ impl GraphDirectory for Directory<'_> {
 }
 
 /// The `list_graphs` entry `name` (the database's own name, or an alias of it) for `entry`;
-/// read-only also when the caller's `level` is only [`Level::Read`].
-fn graph_entry(name: &str, entry: &DatabaseEntry, level: Level) -> GraphEntry {
+/// read-only also when the caller's `level` is only [`Level::Read`] or `mcp_read_only`
+/// (`mcp.toml`).
+fn graph_entry(name: &str, entry: &DatabaseEntry, level: Level, mcp_read_only: bool) -> GraphEntry {
     let config = entry.config.as_ref();
     let base = config.is_some_and(|c| c.role == DatabaseRole::Base);
     let kind = if base {
@@ -185,9 +247,9 @@ fn graph_entry(name: &str, entry: &DatabaseEntry, level: Level) -> GraphEntry {
         DbState::NeedsModel { .. } => GraphState::NeedsModel,
         DbState::Failed { reason } => GraphState::Failed(reason.clone()),
     };
-    let mut graph = GraphEntry::new(name, state)
-        .with_kind(kind)
-        .with_read_only(base || config.is_some_and(|c| c.read_only) || level == Level::Read);
+    let mut graph = GraphEntry::new(name, state).with_kind(kind).with_read_only(
+        base || config.is_some_and(|c| c.read_only) || level == Level::Read || mcp_read_only,
+    );
     if let Some(description) = config
         .map(|c| c.description.as_str())
         .filter(|d| !d.is_empty())
@@ -221,24 +283,117 @@ fn not_loaded_text(entry: &DatabaseEntry) -> String {
 }
 
 /// Answers a request to `/mcp` (after the `Host`/`Origin` checks and authentication; the
-/// request carries the principal's identity) on the endpoint `mcp` over `directory`.
+/// request carries the principal's identity) on the endpoint `mcp` over `directory`; its tool
+/// calls are counted in the loader's MCP statistics ([`crate::mcp_control::McpUsage`]).
 pub(crate) fn route(mcp: &Mcp, directory: &Directory<'_>, request: &mut Request<'_>) -> Response {
     let headers = request.headers().to_vec();
     let method = request.method().as_str().to_string();
     let identity = request.identity().map(str::to_string);
-    let mut mcp_request = McpRequest::new(&method, request.body());
+    let usage = directory.loader.mcp_control().map(|c| c.usage().clone());
+    let buffered = match &usage {
+        Some(_) => match buffer_body(request) {
+            Ok(body) => body,
+            Err(answer) => return answer,
+        },
+        None => None,
+    };
+    let mut mcp_request = match &buffered {
+        Some(body) => McpRequest::new(&method, body.as_slice()),
+        None => McpRequest::new(&method, request.body()),
+    };
     for (name, value) in &headers {
         mcp_request = mcp_request.header(name, value);
     }
     if let Some(identity) = &identity {
         mcp_request = mcp_request.with_identity(identity);
     }
-    let (status, headers, body) = mcp.handle_directory(directory, mcp_request).into_parts();
+    let (status, answer_headers, body) = mcp.handle_directory(directory, mcp_request).into_parts();
+    if let (Some(usage), Some(sent)) = (&usage, &buffered) {
+        let session = header_of(&headers, SESSION_HEADER);
+        usage.observe(
+            &ObservedRequest {
+                identity: identity.as_deref(),
+                mount: None,
+                session: session.as_deref(),
+                new_session: None,
+                body: sent,
+            },
+            status,
+            &body,
+        );
+    }
     let mut answer = Response::new(status, body);
-    for (name, value) in &headers {
+    for (name, value) in &answer_headers {
         answer = answer.with_header(name, value);
     }
     answer
+}
+
+/// The MCP session header.
+pub(crate) const SESSION_HEADER: &str = "Mcp-Session-Id";
+
+/// The largest body read to count its tool calls (the endpoint's own body limit, 16 MiB): a
+/// larger declared body is passed on unread (the endpoint refuses it).
+const MAX_OBSERVED_BODY: usize = 16 * 1024 * 1024;
+
+/// The first header `name` of `headers` (case-insensitive).
+pub(crate) fn header_of(headers: &[(String, String)], name: &str) -> Option<String> {
+    headers
+        .iter()
+        .find(|(field, _)| field.eq_ignore_ascii_case(name))
+        .map(|(_, value)| value.clone())
+}
+
+/// The body of a `POST` to an MCP endpoint, read into memory (at most one byte over the
+/// endpoint's limit, so the endpoint still sees an oversize body as one) to count its tool
+/// calls; `None` for another method or a declared body over the limit; `Err`: the answer when
+/// the body cannot be read.
+pub(crate) fn buffer_body(request: &mut Request<'_>) -> Result<Option<Vec<u8>>, Response> {
+    use std::io::Read;
+    if request.method().as_str() != "POST"
+        || request
+            .body_length()
+            .is_some_and(|len| len > MAX_OBSERVED_BODY)
+    {
+        return Ok(None);
+    }
+    let mut bytes = Vec::new();
+    match request
+        .body()
+        .take(MAX_OBSERVED_BODY as u64 + 1)
+        .read_to_end(&mut bytes)
+    {
+        Ok(_) => Ok(Some(bytes)),
+        Err(err) => Err(Response::json(
+            400,
+            &serde_json::json!({ "error": format!("cannot read the body: {err}") }),
+        )),
+    }
+}
+
+/// The answer of an MCP endpoint while MCP is switched off (`mcp.toml` `enabled = false`).
+pub(crate) fn switched_off() -> Response {
+    Response::json(
+        503,
+        &serde_json::json!({
+            "error": "MCP is switched off on this server",
+            "help": crate::mcp_control::SWITCHED_OFF_HELP,
+        }),
+    )
+}
+
+/// The answer of `/db/<name>/mcp` for a name MCP does not offer (`mcp.toml` `exposed =
+/// false` on the name or its database).
+pub(crate) fn not_exposed(name: &str) -> Response {
+    Response::json(
+        404,
+        &serde_json::json!({
+            "error": format!("MCP is switched off for '{name}'"),
+            "help": "an admin offers it again in the web UI's MCP tab, with PUT \
+                     /api/admin/mcp/databases/<name> {\"exposed\": true}, or with \
+                     graphersal-server mcp db NAME on --dir DIR",
+        }),
+    )
 }
 
 #[cfg(test)]
@@ -371,10 +526,11 @@ mod tests {
     #[test]
     fn the_endpoint_follows_the_config() {
         let mut config = McpConfig::default();
-        let mcp = endpoint(&config).unwrap();
+        let usage = Arc::new(McpUsage::new());
+        let mcp = endpoint(&config, usage.clone()).unwrap();
         assert_eq!(mcp.status()["endpoint"], ENDPOINT);
         assert!(!mcp.has_token());
         config.enabled = false;
-        assert!(endpoint(&config).is_none());
+        assert!(endpoint(&config, usage).is_none());
     }
 }

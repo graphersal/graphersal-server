@@ -401,6 +401,8 @@ pub fn start(
         overflow: Arc::new(Semaphore::new(OVERFLOW_CONNECTIONS)),
         saturated: AtomicBool::new(false),
     });
+    // The MCP switches (`mcp.toml`): a file that does not parse stops the start.
+    let mcp_control = Arc::new(crate::mcp_control::McpControl::open(&dir)?);
     // A new operator token per run: the console on this machine reads it from `server.run`.
     let operator = Secret::generate().map_err(|message| ServerError::Random { message })?;
     let operator_hash = operator.hash();
@@ -411,7 +413,7 @@ pub fn start(
     let (stop, stop_rx) = watch::channel(false);
     let accept = runtime.spawn(accept(socket, shared.clone(), stop_rx));
     // MCP sessions survive a restart: restored from `sessions/mcp.json` now.
-    let mcp = crate::mcp::persistent_endpoint(&config.mcp, &dir);
+    let mcp = crate::mcp::persistent_endpoint(&config.mcp, &dir, mcp_control.usage().clone());
     let registry = Registry::empty(&dir);
     let loader = Loader::with_backup_root(
         registry.clone(),
@@ -419,6 +421,7 @@ pub fn start(
         mcp.clone(),
         Some(backup_root.clone()),
     );
+    loader.set_mcp_control(mcp_control.clone());
     let mut running = Running {
         dir,
         shared,
@@ -442,6 +445,7 @@ pub fn start(
         Ok(registry) => {
             running.loader =
                 Loader::with_backup_root(registry.clone(), host_check, mcp, Some(backup_root));
+            running.loader.set_mcp_control(mcp_control);
             running.registry = registry;
         }
         Err(err) => {
