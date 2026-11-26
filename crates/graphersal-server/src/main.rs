@@ -13,7 +13,9 @@
 //! graphersal-server models list|add|remove ... --dir DIR [--json]
 //! graphersal-server user ... --dir DIR [--json]
 //! graphersal-server mcp status|on|off | mcp db NAME [read-only] on|off --dir DIR [--json]
-//!     (db, import, models, user, mcp, stop, status also: [--token TOKEN [--server ADDRESS]])
+//! graphersal-server backup --dir DIR [--out FILE] [--with-databases] [--json]
+//! graphersal-server restore FILE --dir NEWDIR [--force-version] [--json]
+//!     (db, import, models, user, mcp, backup, stop, status also: [--token TOKEN [--server ADDRESS]])
 //! ```
 //!
 //! stdout carries only results, stderr diagnostics and the log. Exit codes: `0` ok, `1` the
@@ -218,6 +220,24 @@ Usage:
         mcp db NAME on|off       offer a database or alias to MCP, or hide it
         mcp db NAME read-only on|off
             MCP sessions only read NAME, whatever their grant.
+  graphersal-server backup --dir DIR [--out FILE] [--with-databases] [--json]
+      One ZIP archive (mode 0600) of the server itself: server.toml, aliases.toml,
+      access.toml, mcp.toml, every database's database.toml (its settings, not its
+      data), the list of the shared models and manifest.json (versions, time, every
+      file's SHA-256, what was left out and why). Never in it: sessions/, logs/,
+      server.run/.lock/.open, recovery.json, tmp/, trash/, imports/, backups/.
+      --with-databases adds a fresh verified backup of every database (its Store with
+      its saved queries and backup jobs) and the shared model blobs: a full backup.
+      FILE defaults to ./<dir name>-server-backup-<UTC time>.zip. Through a running
+      server like db (it copies its files under its locks). The archive holds the
+      users' token hashes: keep it like a password.
+  graphersal-server restore FILE --dir NEWDIR [--force-version] [--json]
+      Build the NEW server directory NEWDIR (missing or empty; never over an existing
+      one) from the server backup FILE: every checksum and the format checked first,
+      modes 0700/0600, the databases from their embedded backups (an archive without
+      a database's data skips it, reported), then the configuration. Users keep their
+      tokens; sessions are not restored. --force-version tries an archive of a newer
+      graphersal-server. Then: graphersal-server serve --dir NEWDIR.
   graphersal-server --help | --version
 
 The OS user owning DIR is its operator: serve and the db, import, models, user and mcp commands
@@ -225,7 +245,7 @@ refuse a DIR (or access.toml, server.run, sessions/) owned by another user or op
 or others, naming the chmod/chown that fixes it (unix; on Windows DIR's ACL is the boundary).
 Other administrators send an admin token instead:
   ... --token TOKEN [--server ADDRESS]
-      db, import, models, user, mcp, stop and status go to the running server with this user's admin token
+      db, import, models, user, mcp, backup, stop and status go to the running server with this user's admin token
       (or the environment variable GRAPHERSAL_SERVER_TOKEN), at ADDRESS (IP:PORT) or the
       address in DIR/server.run; no file of DIR is written and its permissions are not
       checked. Refused when no server runs.
@@ -256,6 +276,8 @@ fn main() -> ExitCode {
         Some("models") => models_command(&args[1..]),
         Some("user") => user_command(&args[1..]),
         Some("mcp") => mcp_command(&args[1..]),
+        Some("backup") => backup_command(&args[1..]),
+        Some("restore") => restore_command(&args[1..]),
         Some(other) => usage_error(&format!("unknown command {other:?}")),
     }
 }
@@ -1388,4 +1410,151 @@ fn create_command(
         name: name.to_string(),
         spec,
     })
+}
+
+/// The flags and positional arguments of `backup` and `restore`: (positional, values,
+/// switches); `Err`: the usage error's exit code.
+#[allow(clippy::type_complexity)]
+fn parse_simple(
+    command: &str,
+    args: &[String],
+    value_flags: &[&str],
+    switch_flags: &[&str],
+) -> Result<(Vec<String>, Vec<(String, String)>, Vec<String>), ExitCode> {
+    let mut positional = Vec::new();
+    let mut values: Vec<(String, String)> = Vec::new();
+    let mut switches = Vec::new();
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        if !arg.starts_with("--") {
+            positional.push(arg.clone());
+            continue;
+        }
+        let (flag, inline) = match arg.split_once('=') {
+            Some((flag, value)) => (flag.to_string(), Some(value.to_string())),
+            None => (arg.clone(), None),
+        };
+        if value_flags.contains(&flag.as_str()) {
+            let Some(value) = inline.or_else(|| rest.next().cloned()) else {
+                return Err(usage_error(&format!("{command}: {flag} needs a value")));
+            };
+            if values.iter().any(|(f, _)| *f == flag) {
+                return Err(usage_error(&format!("{command}: {flag} given twice")));
+            }
+            values.push((flag, value));
+        } else if switch_flags.contains(&flag.as_str()) && inline.is_none() {
+            switches.push(flag);
+        } else {
+            return Err(usage_error(&format!("{command}: unknown argument {arg:?}")));
+        }
+    }
+    Ok((positional, values, switches))
+}
+
+/// `backup --dir DIR [--out FILE] [--with-databases] [--json] [--token T [--server A]]`.
+fn backup_command(args: &[String]) -> ExitCode {
+    let (positional, values, switches) = match parse_simple(
+        "backup",
+        args,
+        &["--dir", "--out", "--token", "--server"],
+        &["--with-databases", "--json"],
+    ) {
+        Ok(parsed) => parsed,
+        Err(code) => return code,
+    };
+    if let Some(extra) = positional.first() {
+        return usage_error(&format!("backup: unexpected argument {extra:?}"));
+    }
+    let value = |flag: &str| {
+        values
+            .iter()
+            .find(|(f, _)| f == flag)
+            .map(|(_, v)| v.clone())
+    };
+    let Some(dir) = value("--dir") else {
+        return usage_error("backup needs --dir DIR");
+    };
+    let with_databases = switches.iter().any(|s| s == "--with-databases");
+    let json = switches.iter().any(|s| s == "--json");
+    let remote = match Remote::of(value("--token"), value("--server")) {
+        Ok(remote) => remote,
+        Err(code) => return code,
+    };
+    init_console_logging();
+    let unchecked = ServerDir::new(&dir);
+    let file = value("--out")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| console::default_backup_file(&unchecked));
+    let result = match remote {
+        Some(remote) => console::server_backup_with_token(
+            &unchecked,
+            &file,
+            with_databases,
+            &remote.token,
+            remote.address,
+        ),
+        None => {
+            if let Err(error) = graphersal_server::security::check(&unchecked) {
+                return failure(&error);
+            }
+            match ServerDir::open(&dir) {
+                Ok(dir) => console::server_backup(&dir, &file, with_databases),
+                Err(error) => return failure(&error),
+            }
+        }
+    };
+    match result {
+        Ok(outcome) => {
+            if let Via::Server(address) = outcome.via {
+                err(&format!(
+                    "note: a server runs on {dir}; the backup came from its admin API at {address}"
+                ));
+            }
+            if json {
+                out(&serde_json::to_string_pretty(&outcome.body).unwrap_or_default());
+            } else {
+                out(&console::server_backup_text(&outcome.body));
+            }
+            exit(0)
+        }
+        Err(error) => failure(&error),
+    }
+}
+
+/// `restore FILE --dir NEWDIR [--force-version] [--json]`.
+fn restore_command(args: &[String]) -> ExitCode {
+    let (positional, values, switches) =
+        match parse_simple("restore", args, &["--dir"], &["--force-version", "--json"]) {
+            Ok(parsed) => parsed,
+            Err(code) => return code,
+        };
+    let file = match positional.as_slice() {
+        [file] => PathBuf::from(file),
+        [] => return usage_error("restore needs the backup FILE"),
+        _ => return usage_error("restore takes one backup FILE"),
+    };
+    let Some(dir) = values
+        .iter()
+        .find(|(f, _)| f == "--dir")
+        .map(|(_, v)| PathBuf::from(v))
+    else {
+        return usage_error("restore needs --dir NEWDIR (a new or empty directory)");
+    };
+    init_console_logging();
+    let options = graphersal_server::server_backup::RestoreOptions::new()
+        .with_force_version(switches.iter().any(|s| s == "--force-version"));
+    match graphersal_server::server_backup::restore(&file, &dir, options) {
+        Ok(report) => {
+            if switches.iter().any(|s| s == "--json") {
+                out(
+                    &serde_json::to_string_pretty(&console::restore_json(&report))
+                        .unwrap_or_default(),
+                );
+            } else {
+                out(&console::restore_text(&report));
+            }
+            exit(0)
+        }
+        Err(error) => failure(&error),
+    }
 }

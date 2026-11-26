@@ -164,10 +164,10 @@ pub struct Exported {
 
 /// A backup's sidecar `<backup>.toml`: what the archive does not say.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-struct Sidecar {
+pub(crate) struct Sidecar {
     database: String,
-    created: String,
-    kind: DatabaseKind,
+    pub(crate) created: String,
+    pub(crate) kind: DatabaseKind,
     role: DatabaseRole,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     base: Option<String>,
@@ -198,6 +198,11 @@ impl TmpFile {
     pub(crate) fn path(&self) -> &Path {
         &self.path
     }
+
+    /// The temporary file `path` (not created; removed on drop when it exists).
+    pub(crate) fn at(path: PathBuf) -> Self {
+        Self { path }
+    }
 }
 
 impl Drop for TmpFile {
@@ -223,9 +228,9 @@ pub(crate) struct ExportFile {
 }
 
 impl ExportFile {
-    /// The file in `tmp/`.
-    pub(crate) fn path(&self) -> &Path {
-        self.file.path()
+    /// What was written and the file's guard.
+    pub(crate) fn into_parts(self) -> (Exported, TmpFile) {
+        (self.exported, self.file)
     }
 }
 
@@ -258,7 +263,51 @@ impl Admin {
     /// nothing is kept); [`ServerError::Io`].
     pub fn backup(&self, name: &str) -> Result<BackupInfo, ServerError> {
         let entry = self.registry.get(name)?;
-        let config = config_of(&entry)?;
+        let (tmp, sidecar) = self.backup_to_tmp(&entry)?;
+        let created = sidecar.created.clone();
+        let dir = self.backups_dir(&entry.name);
+        fs::create_dir_all(&dir).map_err(|err| ServerError::io("create directory", &dir, err))?;
+        let stamp = created.replace(':', "-");
+        let _naming = NAMING
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut backup = stamp.clone();
+        let mut n = 1;
+        while dir.join(format!("{backup}.{BACKUP_EXT}")).exists() {
+            n += 1;
+            backup = format!("{stamp}-{n}");
+        }
+        let text = toml::to_string(&sidecar).map_err(|err| ServerError::Config {
+            path: dir.join(format!("{backup}.{SIDECAR_EXT}")),
+            message: err.to_string(),
+        })?;
+        crate::layout::write_atomic(
+            &dir.join(format!("{backup}.{SIDECAR_EXT}")),
+            text.as_bytes(),
+        )?;
+        let target = dir.join(format!("{backup}.{BACKUP_EXT}"));
+        fs::rename(tmp.path(), &target)
+            .map_err(|err| ServerError::io("rename", tmp.path(), err))?;
+        drop(_naming);
+        let info = backup_info(&entry.name, &backup, &target, Some(sidecar));
+        self.audit().record(AuditEvent::DatabaseBackedUp {
+            name: entry.name.clone(),
+            path: target.clone(),
+            bytes: info.bytes,
+        });
+        Ok(info)
+    }
+
+    /// A verified ZIP backup of the database `entry` written into a new file in `tmp/` (the
+    /// first half of [`Admin::backup`], shared with the server backup,
+    /// [`crate::server_backup`]): the file (removed when dropped) and its sidecar.
+    /// A loaded database is backed up from its open Store (the context held, so an unload
+    /// waits), an unloaded one from its files.
+    pub(crate) fn backup_to_tmp(
+        &self,
+        entry: &DatabaseEntry,
+    ) -> Result<(TmpFile, Sidecar), ServerError> {
+        let config = config_of(entry)?;
         let tmp = TmpFile::new(
             &self.registry.dir().tmp(),
             &format!("backup-{}", entry.name),
@@ -297,47 +346,16 @@ impl Admin {
                 .map(|base| base.to_string()),
             DatabaseKind::Plain => None,
         };
-        let created = utc_now();
         let sidecar = Sidecar {
             database: entry.name.clone(),
-            created: created.clone(),
+            created: utc_now(),
             kind: config.kind,
             role: config.role,
             base: config.base.clone(),
             description: config.description.clone(),
             layer_base,
         };
-        let dir = self.backups_dir(&entry.name);
-        fs::create_dir_all(&dir).map_err(|err| ServerError::io("create directory", &dir, err))?;
-        let stamp = created.replace(':', "-");
-        let _naming = NAMING
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let mut backup = stamp.clone();
-        let mut n = 1;
-        while dir.join(format!("{backup}.{BACKUP_EXT}")).exists() {
-            n += 1;
-            backup = format!("{stamp}-{n}");
-        }
-        let text = toml::to_string(&sidecar).map_err(|err| ServerError::Config {
-            path: dir.join(format!("{backup}.{SIDECAR_EXT}")),
-            message: err.to_string(),
-        })?;
-        crate::layout::write_atomic(
-            &dir.join(format!("{backup}.{SIDECAR_EXT}")),
-            text.as_bytes(),
-        )?;
-        let target = dir.join(format!("{backup}.{BACKUP_EXT}"));
-        fs::rename(tmp.path(), &target)
-            .map_err(|err| ServerError::io("rename", tmp.path(), err))?;
-        drop(_naming);
-        let info = backup_info(&entry.name, &backup, &target, Some(sidecar));
-        self.audit().record(AuditEvent::DatabaseBackedUp {
-            name: entry.name.clone(),
-            path: target.clone(),
-            bytes: info.bytes,
-        });
-        Ok(info)
+        Ok((tmp, sidecar))
     }
 
     /// The backups of the database name `name`, oldest first (module docs). The database need

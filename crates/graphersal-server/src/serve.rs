@@ -87,7 +87,7 @@ use crate::error::ServerError;
 use crate::layout::ServerDir;
 use crate::loader::Loader;
 use crate::lock::ServerLock;
-use crate::ops::ExportFile;
+use crate::ops::TmpFile;
 use crate::registry::Registry;
 use crate::router::{Answer, Modes, Router};
 use crate::run_file::RunInfo;
@@ -1236,14 +1236,9 @@ fn build(status: u16, headers: &[(String, String)], body: Outgoing) -> hyper::Re
     response
 }
 
-/// Streams an export file into the download's channel; the export is removed once the file
-/// is closed (the client got it, or went away).
-fn pump(
-    mut file: File,
-    guard: ExportFile,
-    tx: &mpsc::Sender<io::Result<Bytes>>,
-    in_flight: InFlight,
-) {
+/// Streams a download's file (an export, a server backup) into the download's channel; the
+/// file is removed once it is closed (the client got it, or went away).
+fn pump(mut file: File, guard: TmpFile, tx: &mpsc::Sender<io::Result<Bytes>>, in_flight: InFlight) {
     let mut buffer = vec![0u8; DOWNLOAD_CHUNK];
     loop {
         let chunk = match file.read(&mut buffer) {
@@ -1253,7 +1248,7 @@ fn pump(
             Err(err) => Err(err),
         };
         if let Err(err) = &chunk {
-            tracing::warn!(target: "graphersal_server", "an export download broke off: {err}");
+            tracing::warn!(target: "graphersal_server", "a download broke off: {err}");
         }
         let failed = chunk.is_err();
         if tx.blocking_send(chunk).is_err() {

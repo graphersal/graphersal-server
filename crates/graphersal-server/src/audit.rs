@@ -86,6 +86,19 @@ pub enum AuditEvent {
         /// Its size.
         bytes: u64,
     },
+    /// A backup of the whole server (its configuration, and with databases their data) was
+    /// written ([`crate::server_backup`]).
+    #[non_exhaustive]
+    ServerBackedUp {
+        /// Whether the databases' data is in it.
+        with_databases: bool,
+        /// How many databases' data it holds.
+        databases: usize,
+        /// The file (the console), `None` for a download of the admin API.
+        path: Option<PathBuf>,
+        /// Its size.
+        bytes: u64,
+    },
     /// A database's read-only flag was set.
     #[non_exhaustive]
     ReadOnlySet {
@@ -353,6 +366,26 @@ impl fmt::Display for AuditEvent {
                 "database '{name}' backed up into {} ({bytes} bytes)",
                 path.display()
             ),
+            AuditEvent::ServerBackedUp {
+                with_databases,
+                databases,
+                path,
+                bytes,
+            } => {
+                let what = if *with_databases {
+                    format!("with {databases} database(s)")
+                } else {
+                    "configuration only".to_string()
+                };
+                match path {
+                    Some(path) => write!(
+                        f,
+                        "server backed up ({what}) into {} ({bytes} bytes)",
+                        path.display()
+                    ),
+                    None => write!(f, "server backup ({what}, {bytes} bytes) downloaded"),
+                }
+            }
             AuditEvent::ReadOnlySet { name, on } => {
                 write!(f, "database '{name}' read-only {}", on_off(*on))
             }

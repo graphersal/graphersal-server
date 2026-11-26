@@ -821,7 +821,6 @@ pub(crate) use transfer::TmpFile;
 #[path = "ops_import.rs"]
 mod import;
 pub use import::{ImportFormat, ImportSource, Imported};
-pub(crate) use transfer::ExportFile;
 pub use transfer::{BackupInfo, ExportSpec, Exported, Restored};
 
 #[path = "ops_inbox.rs"]
@@ -846,6 +845,9 @@ mod settings;
 mod damage;
 pub(crate) use damage::repair_json;
 pub use damage::{Repaired, Swapped, Verified};
+
+#[path = "ops_server_backup.rs"]
+mod server_backup;
 
 #[path = "ops_users.rs"]
 mod users;
@@ -875,3 +877,7 @@ mod promote_tests;
 #[cfg(test)]
 #[path = "ops_damage_tests.rs"]
 mod damage_tests;
+
+#[cfg(test)]
+#[path = "ops_server_backup_tests.rs"]
+mod server_backup_tests;

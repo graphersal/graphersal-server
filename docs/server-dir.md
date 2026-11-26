@@ -618,7 +618,7 @@ What writes which file at runtime, and under which lock:
 | `models/blobs/`, `models/models.toml` | adopting blobs, the models listing (rebuilds the index), model add/remove | the models lock |
 | `backups/<name>/<time>.zip`, `<time>.toml` | backups (built in `tmp/`, then renamed) | the backup naming lock (two backups in one second get `-2`) |
 | `backups/jobs/` | backup jobs of the engine | the engine's job runner |
-| `tmp/` | builds, uploads, exports, unpacked models | none needed: every name is unique (a counter) |
+| `tmp/` | builds, uploads, exports, unpacked models, server backups being downloaded | none needed: every name is unique (a counter) |
 | `imports/` | nothing (created only; the admin fills it) | |
 | `logs/server.log` | `start` (one line, appended), then the server's stdout and stderr | append mode |
 
@@ -630,9 +630,98 @@ recovery report's lock take no other lock (the `server.open` writer reads the lo
 inside its own lock, never the other way round). The audit records go to the log, no file of
 their own.
 
+## Server backups
+
+`graphersal-server backup --dir DIR [--out FILE] [--with-databases]` (also through a running
+server, the admin API's `GET /api/admin/server-backup`, and the web UI's Backups tab, "Download
+server backup") writes ONE ZIP archive of the server itself, mode `0600`, through `FILE.part`
+renamed when complete (default `FILE`: `./<dir name>-server-backup-<UTC time>.zip`):
+
+| Entry | What |
+|---|---|
+| `server.toml`, `aliases.toml`, `access.toml`, `mcp.toml` | the configuration, as the files are (each when the directory has it) |
+| `databases/<name>/database.toml` | every database's settings (kind, role, base, flags, description, `[limits.query]`), not its data |
+| `models.json` | the shared models: repository, identity, licence, blob hash and size, the databases using them |
+| `databases/<name>/backup.zip`, `backup.toml` | with `--with-databases`: a fresh VERIFIED backup of the database (the same as `db backup`: its Store, with the catalog holding its saved queries and backup job definitions, and its model blobs) and its sidecar |
+| `models/blobs/<2 hex>/<sha256>` | with `--with-databases`: every shared model blob |
+| `manifest.json` (last) | `format` (`graphersal-server-backup`), `formatVersion` (1), `serverVersion`, `createdAt`, `sourceDir` (the directory's name, never its path), `withDatabases`, `files` (every other entry with `bytes` and `sha256`), `databases` (name, kind, role, base, state, `included`, `reason` when not), `excluded` (path and reason) |
+
+Never in it (listed under `excluded` with the reason): `sessions/` (restoring sessions would
+revive logins), `logs/`, `server.lock`, `server.run` (a run's operator token), `server.open` and
+`recovery.json` (the state of a run), `tmp/`, `trash/`, `imports/`, `backups/` (the per-database
+backups and the backup jobs' root: keep them on their own), `models/models.toml` (derived); and
+without `--with-databases` every `databases/<name>/store/` and `models/blobs/`. A database's
+backup jobs and saved queries live in its Store's catalog, so they come with its data.
+
+A running server copies the configuration files under their writers' locks (the registry's read
+lock for `aliases.toml` and every `database.toml`, then the access file's lock, then the MCP
+settings' lock, the order of [Concurrent changes](#concurrent-changes)): the archive is one
+consistent state. The databases' backups are taken afterwards, one at a time (a loaded one from
+its open Store); one that fails (a damaged or failed database) is left out, named in the
+manifest and in the command's output, and the backup still succeeds. The console on a stopped
+directory holds the server lock. Every server backup is audited. The archive holds the token
+hashes: keep it like a password ([`access.md`](access.md#server-backups-are-secrets)).
+
+`graphersal-server restore FILE --dir NEWDIR [--force-version]` builds a NEW server directory
+from an archive:
+
+1. **Refusals first, nothing written.** `NEWDIR` must be missing or an empty directory of this
+   OS user (an existing server directory, a running server's included, is never written).
+   Every entry's CRC-32 and SHA-256 must match the manifest; an entry the manifest does not
+   list, a listed entry that is missing, a name outside the layout above or a changed manifest
+   refuses the archive (`cannot restore the server backup ...: ... checksum mismatch`). An
+   archive of a newer format version or written by a newer graphersal-server is refused unless
+   `--force-version` (its files must still read: an unknown key is refused as at a start). Every
+   configuration file is parsed as the server would.
+2. **The layout**, owner only: `NEWDIR` and every directory of the layout `0700`, every file the
+   restore writes `0600`; `server.toml` as it was.
+3. **The databases** from their embedded backups (bases and plain databases before the layers
+   over them; each through the ordinary restore of a backup, so a database is registered whole
+   or not at all), then their `database.toml` as it was (flags, description, limits, creation
+   time). The shared model blobs go into `models/blobs/`; the server links them at its start.
+4. **The configuration that names databases and users**, last: `aliases.toml`, `mcp.toml`,
+   `access.toml`.
+
+A database whose data the archive does not hold (a configuration-only archive, or one whose
+backup failed) is SKIPPED and reported, never half-registered: its aliases stay in
+`aliases.toml` (dropped at start until the database exists), its grants and MCP settings stay
+in their files. Copy its directory (`databases/<name>/`, with `rsync -aH` while both servers are
+stopped) into the new directory to bring it back with them; a database created or imported
+under that name starts without them ([`access.md`](access.md#grants-never-outlive-their-name)).
+A failure removes everything the restore wrote. The users keep their tokens (the hashes came
+along); browser and MCP sessions start afresh. The output ends with the next command, `serve
+--dir NEWDIR`.
+
+### Move a server to a new machine
+
+```bash
+# 1. on the old machine: a full backup (through the running server, or with it stopped)
+graphersal-server backup --dir /srv/graphs --with-databases --out /secure/graphs-full.zip
+# 2. copy it over a private channel; it holds the token hashes
+scp /secure/graphs-full.zip new-host:/secure/
+# 3. on the new machine, as the OS user that will own the server directory
+graphersal-server restore /secure/graphs-full.zip --dir /srv/graphs
+# 4. check server.toml (listen address, [http] allowed_hosts, an absolute [jobs] backup_root)
+#    for the new machine, then serve it (or install the service unit: Running as a service)
+graphersal-server serve --dir /srv/graphs
+# 5. stop the old server; keep or remove the archive like a secret
+```
+
+Check after the start: `graphersal-server status --dir /srv/graphs`, `db list` (every database
+there, none `failed`), `user list`. Users log in with their old tokens. Per-database backups
+(`backups/`) and the import inbox do not move: copy `backups/` by hand when you want the
+history. A configuration-only archive (without `--with-databases`) moves the settings, users
+and grants only; then copy each database's directory `databases/NAME/` into the new
+directory's `databases/` (`rsync -aH`) while both servers are stopped, or restore their own backups (`db restore`).
+
+Not automatic: there is no scheduled server backup (the backup jobs belong to one database's
+engine); run `graphersal-server backup` from cron or a systemd timer (as the directory's owner)
+for one.
+
 ## External backups of the whole directory
 
-Stop the server (or accept the state of a running one), then copy the directory with
+The server backup above is the supported way. Otherwise stop the server (or accept the state
+of a running one), then copy the directory with
 `rsync -aH` (`-H` keeps the hard links between `models/blobs/` and the databases). `cp -r` or a
 zip duplicates every linked model blob: bigger, still correct. For a consistent copy of one
 database while it is served, use `graphersal-server db backup NAME`.

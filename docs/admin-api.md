@@ -175,6 +175,7 @@ A `failed` database whose `database.toml` cannot be read has only `name`, `state
 | GET | `/api/admin/recovery` | | `200 {"uncleanShutdown": report \| null}` (the last unclean shutdown, see Server) |
 | GET | `/api/admin/server` | | `200 {"server", "version", "pid", "address", "url", "directory", "startedAtMs", "uptimeSecs", "databases": {"total", "loaded": [name...], "loading": [name...], "maintenance": [name...]}, "aliases", "uncleanShutdown": report \| null, "memory": {"processBytes", "liveBytes", "databasesBytes", "machineTotalBytes", "machineAvailableBytes", "limitBytes", "limitSource", "configuredLimit", "headroomBytes", "availableBytes", "freeBytes", "freeBasis"}}` (see Server) |
 | POST | `/api/admin/shutdown` | | `202 {"stopping": true, "pid"}`, then the server stops (see Server) |
+| GET | `/api/admin/server-backup?withDatabases=1` | | `200` the server backup (a ZIP) as a download; the operator and admin users only (`everyone` `403`); see Server backup |
 
 ### Revisions (concurrent changes)
 
@@ -408,6 +409,35 @@ sidecar: any base database) must be a `role = "base"` database whose identity is
 layer was built over; otherwise `409` naming that identity (and the base databases that have
 it, if any). Unknown backup: `404` with help `GET .../<name>/backups`. The restored database is
 `unloaded`.
+
+### Server backup
+
+`GET /api/admin/server-backup` answers ONE ZIP archive of the whole server (the format and the
+restore: `server-dir.md`, "Server backups"): `server.toml`, `aliases.toml`, `access.toml`,
+`mcp.toml`, every database's `database.toml` (its settings, not its data), `models.json` (the
+shared models: repository, identity, licence, blob hash and size, the databases using them) and
+`manifest.json` (the format and its version, the server version, the time, the source
+directory's name, every entry's length and SHA-256, the databases and what was left out and
+why). `?withDatabases=1` adds a fresh verified backup of every database
+(`databases/<name>/backup.zip` + `backup.toml`, the same backup as `POST .../backup`, taken
+from the open Store of a loaded database) and every shared model blob (`models/blobs/...`): a
+full backup. A database whose backup fails (damaged, failed) is left out and named in the
+manifest; the download still succeeds.
+
+The server copies the configuration files under their writers' locks (the registry's, the
+access file's, the MCP settings'), so the archive is one consistent state, and builds the
+archive in `tmp/` before the answer starts (a full backup of large databases takes a while).
+Headers: `Content-Type: application/octet-stream`, `Content-Disposition: attachment;
+filename="<dir name>-server-backup-<UTC time>.zip"`, `X-Graphersal-Server-Backup: config |
+with-databases`, `X-Graphersal-Databases` (how many databases' data it holds),
+`X-Graphersal-Skipped` (the databases a full backup left out, comma-separated). Another query
+parameter or value: `400`.
+
+The archive holds the users' token HASHES (never a token) and every grant: it is a secret
+(`access.md`, "Server backups are secrets"). Only the operator token and admin users get it;
+`everyone` of a server without access control is refused (`403`), as for the shutdown. Every
+download is audited (`server backup (configuration only, <bytes> bytes) downloaded`, with the
+actor). The console's `graphersal-server backup` uses this route when a server runs.
 
 ### Export
 
@@ -805,6 +835,8 @@ graphersal-server models list | add SOURCE [--repo R] [--license L] | remove REP
 graphersal-server user list | add NAME [--admin] | token NAME [--revoke] | remove NAME --dir DIR [--json]
 graphersal-server user admin NAME on|off | grant SUBJECT DATABASE read|write | revoke SUBJECT DATABASE --dir DIR [--json]
 graphersal-server mcp status | on | off | db NAME on|off | db NAME read-only on|off --dir DIR [--json]
+graphersal-server backup --dir DIR [--out FILE] [--with-databases] [--json]
+graphersal-server restore FILE --dir NEWDIR [--force-version] [--json]
 ```
 
 With a server running on `DIR` (its `server.lock` is held) the console sends these requests to
@@ -828,6 +860,15 @@ diverged and never carried, and the next commands); `db swap NAME WITH --yes` is
 databases/NAME/swap {"with": WITH, "confirm": true}` (without `--yes` a usage error, exit code
 `2`). Offline all three work on the directory (verify reads the files, repair and swap write
 under the server lock).
+
+`backup` writes the server backup to `FILE` (default `./<dir name>-server-backup-<UTC
+time>.zip`; through `FILE.part`, mode `0600`, renamed when complete): offline the admin core
+writes it under the server lock, through a running server the console downloads `GET
+server-backup` (also with `--token`). Its `--json` answer is `{"file", "bytes",
+"withDatabases", "databases", "skipped": [{"name", "reason"}...]}`. `restore` never goes
+through a server: it builds a new directory (`server-dir.md`, "Server backups"); its `--json`
+answer is `{"dir", "sourceDir", "serverVersion", "createdAt", "withDatabases", "files",
+"databases", "skipped": [{"name", "reason"}...], "modelBlobs", "notes"}`.
 
 `db export` writes `FILE` (through `FILE.part`, renamed when complete): offline the admin core
 writes it, through a server the console streams the download. Its `--json` answer is

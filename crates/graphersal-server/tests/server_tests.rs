@@ -4928,3 +4928,190 @@ fn a_damaged_database_is_in_maintenance_and_is_repaired_and_swapped() {
     let log = std::fs::read_to_string(&log).unwrap();
     assert!(log.contains("maintenance"), "{log}");
 }
+
+/// Serves `root` on a free port (stderr piped, for [`stop_and_wait`]): the process and its
+/// address.
+fn serve_dir(root: &Path) -> (ServerProcess, SocketAddr) {
+    let server = ServerProcess::spawn(
+        Command::new(BIN)
+            .args(["serve", "--dir"])
+            .arg(root)
+            .args(["--listen", "127.0.0.1:0"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped()),
+    );
+    let info = wait_for_run_file(&ServerDir::new(root));
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while get(info.address, "/readyz").0 != 200 {
+        assert!(Instant::now() < deadline, "never ready");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    (server, info.address)
+}
+
+/// `backup` through a running server and offline, `restore` into a new directory, `serve` it:
+/// the same users (who log in with their old tokens), grants, aliases, MCP settings and
+/// database settings, the data of the full backup; a second restore into the same directory
+/// is refused.
+#[test]
+fn a_server_backup_restores_on_a_new_directory_and_serves_the_same_users_and_data() {
+    let temp = TempDir::new("server-backup");
+    let dir = ServerDir::init(temp.path().join("srv")).unwrap().dir;
+    let root = dir.root().to_path_buf();
+    let root_text = root.to_str().unwrap();
+    modern_db(&dir, "acme");
+    let (code, out, err) = console(&["user", "add", "bob", "--dir", root_text, "--json"], &[]);
+    assert_eq!(code, 0, "{err}");
+    let bob = json(&out)["token"].as_str().unwrap().to_string();
+    for args in [
+        vec!["user", "grant", "bob", "acme", "read"],
+        vec!["db", "alias", "set", "current", "acme"],
+        vec!["mcp", "db", "acme", "read-only", "on"],
+        vec!["db", "set", "acme", "limit", "timeout_ms", "5000"],
+    ] {
+        let mut args = args.clone();
+        args.extend(["--dir", root_text]);
+        let (code, _, err) = console(&args, &[]);
+        assert_eq!(code, 0, "{args:?}: {err}");
+    }
+
+    // Through the running server (it copies its files under its locks), with the databases.
+    let full = temp.path().join("full.zip");
+    let (mut server, address) = serve_dir(&root);
+    let (status, _, body) = call(address, "POST", "/api/admin/databases/acme/load", &[], "");
+    assert!(status == 200 || status == 202, "{body}");
+    let (code, out, err) = console(
+        &[
+            "backup",
+            "--dir",
+            root_text,
+            "--out",
+            full.to_str().unwrap(),
+            "--with-databases",
+        ],
+        &[],
+    );
+    assert_eq!(code, 0, "{err}");
+    assert!(err.contains("the backup came from its admin API"), "{err}");
+    assert!(out.starts_with("Server backup written to "), "{out}");
+    assert!(out.contains("1 included"), "{out}");
+    assert!(out.contains("token hashes"), "{out}");
+    assert!(out.contains("restore "), "{out}");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&full).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+    stop_and_wait(&mut server);
+    // Offline: configuration only.
+    let conf = temp.path().join("conf.zip");
+    let (code, out, err) = console(
+        &[
+            "backup",
+            "--dir",
+            root_text,
+            "--out",
+            conf.to_str().unwrap(),
+            "--json",
+        ],
+        &[],
+    );
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(json(&out)["withDatabases"], false, "{out}");
+
+    // Restore the full backup into a new directory and serve it.
+    let new = temp.path().join("moved");
+    let new_text = new.to_str().unwrap();
+    let (code, out, err) = console(&["restore", full.to_str().unwrap(), "--dir", new_text], &[]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("databases:"), "{out}");
+    assert!(out.contains("acme"), "{out}");
+    assert!(out.contains(&format!("serve --dir {new_text}")), "{out}");
+    for file in [
+        "access.toml",
+        "aliases.toml",
+        "mcp.toml",
+        "databases/acme/database.toml",
+    ] {
+        assert_eq!(
+            std::fs::read_to_string(new.join(sep(file))).unwrap(),
+            std::fs::read_to_string(root.join(sep(file))).unwrap(),
+            "{file}"
+        );
+    }
+    let (code, _, err) = console(&["restore", full.to_str().unwrap(), "--dir", new_text], &[]);
+    assert_eq!(code, 1);
+    assert!(err.contains("NEW server directory"), "{err}");
+
+    let (mut server, address) = serve_dir(&new);
+    // bob logs in with the token he had.
+    let login = serde_json::json!({ "token": bob }).to_string();
+    let (status, _, body) = send(
+        address,
+        "POST",
+        "/api/login",
+        &[("Content-Type", "application/json")],
+        "",
+        &login,
+    );
+    assert_eq!(status, 200, "{body}");
+    let bearer = format!("Authorization: Bearer {bob}\r\n");
+    let (status, _, body) = send(address, "GET", "/api/databases", &[], &bearer, "");
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("\"acme\""), "{body}");
+    let (status, _, body) = call(address, "GET", "/api/admin/aliases", &[], "");
+    assert_eq!(status, 200);
+    assert_eq!(json(&body)["aliases"]["current"], "acme", "{body}");
+    let (status, _, body) = call(address, "POST", "/api/admin/databases/acme/load", &[], "");
+    assert!(status == 200 || status == 202, "{body}");
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while send(address, "GET", "/db/acme/api/info", &[], &bearer, "").0 != 200 {
+        assert!(Instant::now() < deadline, "acme never loaded");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    // The data, read by bob (read grant): the modern sample's 6 vertices.
+    let script = serde_json::json!({ "script": "g.v().count()" }).to_string();
+    let (status, _, body) = send(
+        address,
+        "POST",
+        "/db/acme/api/execute",
+        &[("Content-Type", "application/json")],
+        &bearer,
+        &script,
+    );
+    assert_eq!(status, 200, "{body}");
+    let result = &json(&body)["execution"]["results"][0];
+    assert!(
+        result.as_i64() == Some(6) || result["value"].as_i64() == Some(6),
+        "{body}"
+    );
+    // The settings: the query limit override came along.
+    let (status, _, body) = call(
+        address,
+        "GET",
+        "/api/admin/databases/acme/settings",
+        &[],
+        "",
+    );
+    assert_eq!(status, 200);
+    assert!(body.contains("5000"), "{body}");
+    stop_and_wait(&mut server);
+
+    // The configuration-only archive: no database, the users and aliases.
+    let bare = temp.path().join("bare");
+    let (code, out, err) = console(
+        &[
+            "restore",
+            conf.to_str().unwrap(),
+            "--dir",
+            bare.to_str().unwrap(),
+            "--json",
+        ],
+        &[],
+    );
+    assert_eq!(code, 0, "{err}");
+    let report = json(&out);
+    assert_eq!(report["databases"], serde_json::json!([]), "{out}");
+    assert_eq!(report["skipped"][0]["name"], "acme", "{out}");
+}

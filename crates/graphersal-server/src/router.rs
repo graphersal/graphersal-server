@@ -422,6 +422,24 @@ impl Router {
             let admin = crate::ops::Admin::online(loader.clone())
                 .with_audit(access.audit_as(&principal))
                 .with_access(access.clone(), principal.clone());
+            if crate::admin_api::is_server_backup(&method, endpoint) {
+                if principal.kind == crate::access::PrincipalKind::Everyone {
+                    return Answer::Response(Response::json(
+                        403,
+                        &serde_json::json!({
+                            "error": "a server backup holds the users' token hashes: it needs the \
+                                      operator token or an admin user's token, also with access \
+                                      control off",
+                            "help": "run graphersal-server backup --dir DIR as the directory's \
+                                     owner, or send an admin user's token",
+                        }),
+                    ));
+                }
+                return match crate::admin_api::server_backup(&admin, query) {
+                    Ok(download) => Answer::Download(download),
+                    Err(response) => Answer::Response(response),
+                };
+            }
             if let Some(name) = crate::admin_api::export_target(&method, endpoint) {
                 return match crate::admin_api::export(&admin, name, query) {
                     Ok(download) => Answer::Download(download),

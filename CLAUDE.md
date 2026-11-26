@@ -432,6 +432,48 @@ from published files). When this file disagrees with the code, the code wins: sa
   SIGKILL of a child mid-writes) and `a_damaged_database_is_in_maintenance_and_is_repaired_and_swapped`,
   `ui/tests/recovery.test.mjs`. Docs: `docs/server-dir.md` "`server.open` and
   `recovery.json`" and "After a crash", `docs/admin-api.md` "Verify, repair and swap".
+- `server_backup` (round 3 B-CONF, public): the backup of the whole server in ONE ZIP and its
+  restore into a NEW directory. Container `archive` (private: stored entries, zip64 always,
+  CRC-32 + SHA-256 (`ring`) per entry; `ZipWriter::add_bytes/add_file/finish`, one-pass
+  `ZipReader::next_entry` -> `Entry` (Read) + `finish()` = CRC check + SHA-256; graphersal's own
+  zip.rs is private, so a copy of its subset). Entries: `ROOT_FILES` (`server.toml`,
+  `aliases.toml`, `access.toml`, `mcp.toml`), `databases/<n>/database.toml`, `models.json`,
+  with databases `databases/<n>/backup.zip` + `backup.toml` (the per-database backup's first
+  half `Admin::backup_to_tmp` in `ops_transfer.rs`, shared with `Admin::backup`; `Sidecar` is
+  `pub(crate)`) and `models/blobs/<2>/<hash>`, `manifest.json` LAST (`Manifest`:
+  format/`FORMAT_VERSION` 1/serverVersion/createdAt/sourceDir (name only)/withDatabases/files
+  (path, bytes, sha256)/databases (included, reason)/excluded (`EXCLUDED` + per-db stores)).
+  Writer `ops_server_backup.rs` (`Admin::server_backup(with_databases, out)`,
+  `server_backup_to_file` (`.part` 0600 + rename, audited `AuditEvent::ServerBackedUp`),
+  `server_backup_to_tmp` (the API download)); `config_snapshot` copies the files under the
+  registry read lock, then `Access::hold()`, then `McpControl::hold()` (both new read-lock
+  helpers); a database whose backup fails is left out with a reason (never fails the whole
+  backup). Route `GET /api/admin/server-backup[?withDatabases=1]` answered by the router as an
+  `Answer::Download` (`admin_api::is_server_backup`/`server_backup`; `Download` is now generic:
+  `Download::of(TmpFile, headers, what)`, `serve::pump` takes a `TmpFile`; headers
+  `X-Graphersal-Server-Backup`, `-Databases`, `-Skipped`); `everyone` `403` in the router.
+  `restore(archive, dir, RestoreOptions)`: `check_target` (missing or empty, owner), pass 1
+  `read_entries` (small entries kept, `EntryKind::of` whitelist), `check_manifest` (format,
+  version, server version newer -> `Refused` unless `with_force_version`; every listed file's
+  bytes+sha; no unlisted entry; unknown names refused unless forced), parse checks, then
+  `Cleanup` guard (removes everything on error), `server.toml` 0600, `ServerDir::init_with(root,
+  false)` (no first admin), pass 2 blobs -> `models/blobs/`, db zips -> `backups/<n>/from-server-
+  backup.zip`, `Admin::open_offline` + `Admin::restore` per db (non-layers first; leftover-grant
+  drop is a no-op: `access.toml` is written AFTER), archive `database.toml` written back when
+  kind/role/base match, then `aliases.toml`/`mcp.toml`/`access.toml` (0600), every top dir 0700,
+  `tighten`; databases without data skipped + notes. `ServerError::BackupArchive {path,
+  message}`. Console `console/backup.rs` (`server_backup` offline under the lock or download
+  through the server into `.part` 0600, `server_backup_with_token`, `default_backup_file`,
+  `server_backup_text`, `restore_json`, `restore_text`); `main.rs` `backup` / `restore`
+  (`parse_simple`). UI: Backups tab section "Server backup" (`admin-api.js`
+  `serverBackupPath`, `fileNameOf`, `fetchServerBackup`, `SERVER_BACKUP_WARNING`). Tests:
+  `archive::tests`, `server_backup::tests`, `ops_server_backup_tests.rs`, `router_access_tests.rs`
+  `the_server_backup_download_is_for_admins_only_and_audited`, `server_tests.rs`
+  `a_server_backup_restores_on_a_new_directory_and_serves_the_same_users_and_data`,
+  `ui/tests/server-backup.test.mjs`, smoke step. Docs: `docs/server-dir.md` "Server backups" +
+  "Move a server to a new machine", `docs/access.md` "Server backups are secrets",
+  `docs/admin-api.md` "Server backup". No scheduled server backup (the job mechanism is per
+  database in the engine).
 - `model_archive` (private, V18): `is_tar` (ustar magic + checksum) and `unpack(archive, dir)`,
   the safe unpack of a model directory's tar (rules in its module docs; tests beside it, their
   `entry`/`archive`/`model_tar`/`gzip` builders reused by `models_tests.rs`); `is_gzip` (magic
@@ -541,7 +583,8 @@ from published files). When this file disagrees with the code, the code wins: sa
   --list`), `models list|add SOURCE [--repo R] [--license L]|remove REPO
   --dir DIR [--json]` (`DbCommand::Models*`; SOURCE absolute when it exists, else a repo),
   `user list|add NAME [--admin]|token NAME [--revoke]|remove NAME|admin NAME on|off|grant SUBJECT
-  DATABASE read|write|revoke SUBJECT DATABASE --dir DIR [--json]` (`DbCommand::User*`; tests in
+  DATABASE read|write|revoke SUBJECT DATABASE --dir DIR [--json]`, `backup --dir DIR [--out FILE]
+  [--with-databases]` and `restore FILE --dir NEWDIR [--force-version]` (B-CONF) (`DbCommand::User*`; tests in
   `console/user_tests.rs`, both paths; `db`/`import`/`models`/`user` take `--token TOKEN`
   (env `GRAPHERSAL_SERVER_TOKEN`) and `--server ADDRESS` (`Remote::of`; `--server` without a
   token = usage error; `print_outcome` -> `console::run_with_token`); a console command

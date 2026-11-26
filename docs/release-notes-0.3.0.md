@@ -340,3 +340,35 @@ now the server finds out, checks and offers the way back
   and `database.toml` stay. Or keep both; or restore a backup (`db backups`, `db restore`).
 - Audit records: `unclean shutdown ... found`, `database 'x' checked`, `database 'x' repaired
   into 'y'`, `database 'y' took the name 'x'`.
+
+## Server backups: back up the whole server, restore it on a new machine
+
+One archive now holds the server itself
+([`docs/server-dir.md`, "Server backups"](server-dir.md#server-backups)):
+
+- **`graphersal-server backup --dir DIR [--out FILE] [--with-databases]`** writes ONE ZIP
+  (mode `0600`, through `FILE.part`): `server.toml`, `aliases.toml`, `access.toml` (users with
+  their token hashes, roles and grants), `mcp.toml`, every database's `database.toml` (its
+  settings: flags, description, limits, role and base), `models.json` (the shared models:
+  repository, licence, blob hash) and `manifest.json` (format version, server version, time,
+  the source directory's name, every file with its SHA-256, what was left out and why).
+  Sessions, logs, `server.run`/`.lock`/`.open`, `recovery.json`, `tmp/`, `trash/`, `imports/`
+  and `backups/` are never in it. `--with-databases` adds a fresh verified backup of every
+  database (with its saved queries and backup jobs) and the shared model blobs: a full backup.
+  Offline or through a running server, which copies its configuration files under their locks
+  (one consistent state); `--token` works as for `db`.
+- **`GET /api/admin/server-backup[?withDatabases=1]`** streams the same archive (the operator
+  and admin users only; `everyone` of a server without access control is refused; audited), and
+  the Backups tab has **"Download server backup"** (with or without the databases) beside the
+  warning that the archive holds the token hashes.
+- **`graphersal-server restore FILE --dir NEWDIR [--force-version]`** builds a NEW server
+  directory (a missing or empty one only; never over a live directory): every checksum, the
+  format version and the server version are checked before anything is written; the layout is
+  owner only (`0700` directories, `0600` files); the databases come back from their embedded
+  backups (bases before their layers), then the configuration. A database whose data the
+  archive does not hold is skipped and reported, never half-registered; a failure leaves
+  nothing behind. Users log in with their old tokens; sessions start afresh. The output ends
+  with `serve --dir NEWDIR`. Recipe: "Move a server to a new machine".
+- The archive is a secret ([`docs/access.md`](access.md#server-backups-are-secrets)).
+- Not included: a scheduled server backup (the engine's backup jobs belong to one database);
+  run `graphersal-server backup` from cron or a systemd timer.

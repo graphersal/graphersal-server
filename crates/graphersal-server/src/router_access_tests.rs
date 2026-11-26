@@ -3145,3 +3145,107 @@ fn a_base_keeps_read_only_and_shows_its_layers_in_the_settings() {
     assert_eq!(layer["database"]["base"], "h");
     assert!(layer["store"]["layerBase"].is_string(), "{layer}");
 }
+
+/// `GET /api/admin/server-backup`: the operator and admin users only (anonymous `401`, other
+/// users the unknown-endpoint `404`, `everyone` of a server without access control `403`: the
+/// archive holds the token hashes); a ZIP download, audited.
+#[test]
+fn the_server_backup_download_is_for_admins_only_and_audited() {
+    let fx = fixture("server-backup-access");
+    assert_unauthorized(
+        &get(&fx, Who::Anonymous, "/api/admin/server-backup"),
+        "anonymous",
+    );
+    for who in [Who::Bearer(&fx.bob), Who::Bearer(&fx.carol)] {
+        assert_eq!(get(&fx, who, "/api/admin/server-backup").status(), 404);
+    }
+    for who in [Who::Bearer(OPERATOR), Who::Bearer(&fx.alice)] {
+        let answer = get(&fx, who, "/api/admin/server-backup");
+        assert_eq!(
+            answer.status(),
+            200,
+            "{}",
+            String::from_utf8_lossy(answer.body())
+        );
+        assert_eq!(
+            header(&answer, "Content-Type"),
+            Some("application/octet-stream")
+        );
+        let disposition = header(&answer, "Content-Disposition").unwrap_or_default();
+        assert!(disposition.contains("-server-backup-"), "{disposition}");
+        assert_eq!(
+            header(&answer, "X-Graphersal-Server-Backup"),
+            Some("config")
+        );
+        assert!(answer.body().starts_with(b"PK\x03\x04"));
+    }
+    // With the databases (all three loaded: backed up from their open Stores).
+    let full = get(
+        &fx,
+        Who::Bearer(&fx.alice),
+        "/api/admin/server-backup?withDatabases=1",
+    );
+    assert_eq!(
+        full.status(),
+        200,
+        "{}",
+        String::from_utf8_lossy(full.body())
+    );
+    assert_eq!(
+        header(&full, "X-Graphersal-Server-Backup"),
+        Some("with-databases")
+    );
+    assert_eq!(header(&full, "X-Graphersal-Databases"), Some("3"));
+    assert_eq!(header(&full, "X-Graphersal-Skipped"), Some(""));
+    assert_eq!(
+        get(
+            &fx,
+            Who::Bearer(&fx.alice),
+            "/api/admin/server-backup?full=1"
+        )
+        .status(),
+        400
+    );
+    assert_eq!(
+        send(
+            &fx,
+            Who::Bearer(&fx.alice),
+            Method::Post,
+            "/api/admin/server-backup",
+            None,
+            &[]
+        )
+        .status(),
+        404
+    );
+    let lines = fx.audit.lines();
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("server backup (configuration only") && l.contains("alice")),
+        "{lines:?}"
+    );
+    assert!(
+        lines.iter().any(|l| l.contains("with 3 database(s)")),
+        "{lines:?}"
+    );
+
+    // Without access control: `everyone` is refused, an admin's token still works.
+    let open = fixture_with(
+        "server-backup-access-off",
+        Vec::new(),
+        modes(false, false, super::DEFAULT_COOKIE_MAX_AGE_SECS),
+    );
+    let refused = get(&open, Who::Anonymous, "/api/admin/server-backup");
+    assert_eq!(refused.status(), 403);
+    assert!(
+        json_of(&refused)["error"]
+            .as_str()
+            .unwrap()
+            .contains("token hashes")
+    );
+    assert_eq!(
+        get(&open, Who::Bearer(&open.alice), "/api/admin/server-backup").status(),
+        200
+    );
+}
