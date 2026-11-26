@@ -3591,6 +3591,147 @@ fn console_commands_with_a_token_go_through_the_running_server() {
     assert!(!line.contains("(os:"), "{line}");
 }
 
+/// SEC L2: with a stale `server.run` (no server holds the lock; another program listens on
+/// its address), a console token is never sent there; `stop`/`status` with a token refuse too.
+#[test]
+fn a_token_is_not_sent_to_the_address_of_a_stale_run_file() {
+    let temp = TempDir::new("sec-l2-squat");
+    let root = temp.path().join("srv");
+    let root_text = root.to_str().unwrap();
+    let dir = ServerDir::init(&root).unwrap().dir;
+    let (code, out, err) = console(
+        &[
+            "user", "add", "carol", "--admin", "--dir", root_text, "--json",
+        ],
+        &[],
+    );
+    assert_eq!(code, 0, "{err}");
+    let carol = json(&out)["token"].as_str().unwrap().to_string();
+    // The squatter: a listener on the address the stale run file names.
+    let squatter = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = squatter.local_addr().unwrap();
+    RunInfo::new(address, format!("http://{address}/"))
+        .write(&dir)
+        .unwrap();
+    squatter.set_nonblocking(true).unwrap();
+    let (code, _, err) = console(&["db", "list", "--dir", root_text, "--token", &carol], &[]);
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains("no server holds server.lock"), "{err}");
+    for command in ["stop", "status"] {
+        let (code, out, err) = service(command, &root, &["--token", &carol]);
+        assert_ne!(code, 0, "{command}: {out}{err}");
+        assert!(
+            err.contains("no server holds server.lock"),
+            "{command}: {err}"
+        );
+    }
+    match squatter.accept() {
+        Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {}
+        other => panic!("the squatter got a connection: {other:?}"),
+    }
+}
+
+/// SEC INFO: `--token-file PATH` (and `-` for stdin) instead of a token on the command line,
+/// which gets a warning.
+#[test]
+fn a_token_file_keeps_the_token_off_the_command_line() {
+    let temp = TempDir::new("sec-token-file");
+    let root = temp.path().join("srv");
+    let root_text = root.to_str().unwrap();
+    let dir = ServerDir::init(&root).unwrap().dir;
+    let (code, out, err) = console(
+        &[
+            "user", "add", "carol", "--admin", "--dir", root_text, "--json",
+        ],
+        &[],
+    );
+    assert_eq!(code, 0, "{err}");
+    let carol = json(&out)["token"].as_str().unwrap().to_string();
+    let file = temp.path().join("token.txt");
+    std::fs::write(&file, format!("\n  {carol}  \n")).unwrap();
+    let file_text = file.to_str().unwrap();
+    // Usage errors before anything runs.
+    let (code, _, err) = console(
+        &[
+            "db",
+            "list",
+            "--dir",
+            root_text,
+            "--token",
+            &carol,
+            "--token-file",
+            file_text,
+        ],
+        &[],
+    );
+    assert_eq!(code, 2, "{err}");
+    assert!(err.contains("not both"), "{err}");
+    let empty = temp.path().join("empty.txt");
+    std::fs::write(&empty, "\n").unwrap();
+    let (code, _, err) = console(
+        &[
+            "db",
+            "list",
+            "--dir",
+            root_text,
+            "--token-file",
+            empty.to_str().unwrap(),
+        ],
+        &[],
+    );
+    assert_eq!(code, 2, "{err}");
+    assert!(err.contains("holds no token"), "{err}");
+
+    let mut server = ServerProcess::spawn(
+        Command::new(BIN)
+            .args(["serve", "--dir", root_text, "--listen", "127.0.0.1:0"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped()),
+    );
+    wait_for_run_file(&dir);
+    let (code, out, err) = console(
+        &[
+            "user",
+            "list",
+            "--dir",
+            root_text,
+            "--token-file",
+            file_text,
+        ],
+        &[],
+    );
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("carol"), "{out}");
+    assert!(!err.contains("warning"), "{err}");
+    let (code, _, err) = console(
+        &["user", "list", "--dir", root_text, "--token", &carol],
+        &[],
+    );
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        err.contains("warning: a token on the command line is visible"),
+        "{err}"
+    );
+    let mut child = Command::new(BIN)
+        .args(["user", "list", "--dir", root_text, "--token-file", "-"])
+        .env_remove("GRAPHERSAL_SERVER_TOKEN")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(carol.as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success(), "{}", text(&output.stderr));
+    assert!(text(&output.stdout).contains("carol"));
+    stop_and_wait(&mut server);
+}
+
 /// A server `start` runs in the background on a directory: killed on drop when it still runs
 /// (its pid from `server.run`), so a failing test leaves no process behind.
 struct Background(PathBuf);

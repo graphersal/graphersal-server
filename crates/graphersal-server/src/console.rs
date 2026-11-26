@@ -730,7 +730,9 @@ pub fn run(dir: &ServerDir, command: &DbCommand) -> Result<Outcome, ServerError>
 
 /// Runs `command` through the running server of `dir` with the admin token `token` (a user's,
 /// `--token`), instead of the operator token of `server.run`: the server's address is
-/// `address`, else the one `dir`'s `server.run` names. No file of the directory is written and
+/// `address`, else the one `dir`'s `server.run` names while a server holds the directory's lock
+/// and the file is the directory owner's ([`RunInfo::read_live`], SEC L2: a stale file's address
+/// may be another program's now). No file of the directory is written and
 /// its permissions are not checked (the token is the credential; the audit records name its
 /// user). Without a running server it is refused: nothing acts on the directory offline with
 /// a token.
@@ -746,7 +748,7 @@ pub fn run_with_token(
 ) -> Result<Outcome, ServerError> {
     let server = match address {
         Some(address) => RunInfo::new(address, format!("http://{address}/")),
-        None => match RunInfo::read(dir) {
+        None => match RunInfo::read_live(dir) {
             Ok(Some(info)) => RunInfo::new(info.address, info.url),
             Ok(None) => {
                 return Err(ServerError::Connect {
@@ -757,6 +759,7 @@ pub fn run_with_token(
                         .to_string(),
                 });
             }
+            Err(err @ ServerError::Connect { .. }) => return Err(err),
             Err(err) => {
                 return Err(ServerError::Connect {
                     address: dir.run_path().display().to_string(),

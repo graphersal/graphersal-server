@@ -542,9 +542,16 @@ fn token_target(
 ) -> Result<Option<RunInfo>, ServerError> {
     match address {
         Some(address) => Ok(Some(RunInfo::new(address, format!("http://{address}/")))),
-        None => RunInfo::read(dir).map_err(|err| ServerError::Connect {
-            address: dir.run_path().display().to_string(),
-            message: format!("{err}; name the running server's address with --server ADDRESS"),
+        // Only the run file of a live server (SEC L2: a stale file's address may be another
+        // program's now); no file: not running.
+        None => RunInfo::read_live(dir).map_err(|err| match err {
+            ServerError::Connect { .. } => err,
+            other => ServerError::Connect {
+                address: dir.run_path().display().to_string(),
+                message: format!(
+                    "{other}; name the running server's address with --server ADDRESS"
+                ),
+            },
         }),
     }
 }
