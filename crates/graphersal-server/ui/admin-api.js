@@ -1405,18 +1405,26 @@ export function grantDatabaseText(g) {
   }
 }
 
+/** Names in natural order, case-insensitive (`db2` before `db10`), as the tables sort them. */
+const nameCollator = typeof Intl !== 'undefined' && Intl.Collator
+  ? new Intl.Collator('en', { numeric: true, sensitivity: 'base' })
+  : null;
+
 /**
- * The choices of the grant form's database picker from `databaseRows`' rows: the real databases
- * by name, then the aliases marked with their current target, `[{value, text, kind}]`, each part
- * sorted by name ("every database" is the form's own last choice).
+ * The choices of the grant form's database picker from `databaseRows`' rows (round 4: aliases
+ * first): the aliases marked with their current target (`cur → acme (alias)`), then the real
+ * databases, `[{value, text, kind}]`, each part in natural alphabetical order ("every database"
+ * is the form's own last choice).
  */
 export function grantChoices(rows) {
   const list = Array.isArray(rows) ? rows : [];
-  const byName = (a, b) => (a.value < b.value ? -1 : a.value > b.value ? 1 : 0);
+  const byName = (a, b) => (nameCollator
+    ? nameCollator.compare(a.value, b.value) || (a.value < b.value ? -1 : a.value > b.value ? 1 : 0)
+    : (a.value < b.value ? -1 : a.value > b.value ? 1 : 0));
   const real = realRows(list).map((r) => ({ value: r.name, text: r.name, kind: 'database' })).sort(byName);
   const aliases = list.filter((r) => r.aliasOf)
     .map((r) => ({ value: r.name, text: `${r.name} → ${r.aliasOf} (alias)`, kind: 'alias' })).sort(byName);
-  return [...real, ...aliases];
+  return [...aliases, ...real];
 }
 
 /** The words of a grant subject: `everyone (anonymous)`, `<user>`, or the subject as it is. */

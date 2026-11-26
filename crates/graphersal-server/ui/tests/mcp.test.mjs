@@ -10,7 +10,7 @@ import http from 'node:http';
 import { readFileSync } from 'node:fs';
 import {
   mcpRequest, createMcp, statusOf, mcpRows, usageOf, usageText, connectInfo, exposedTitle,
-  readOnlyTitle, TOKEN_PLACEHOLDER, MCP_ROW_KINDS,
+  readOnlyTitle, TOKEN_PLACEHOLDER, MCP_ROW_KINDS, MCP_OFF_CONFIRM,
 } from '../mcp-api.js';
 import { isConflict, refusalNotice } from '../admin-api.js';
 
@@ -173,4 +173,18 @@ test('the tab: reads its state on every visit, sorts every table, sends the revi
   }
   const profile = JSON.parse(readFileSync(new URL('../profile.json', import.meta.url), 'utf8'));
   assert.deepEqual(profile.tabs.find((t) => t.id === 'mcp'), { id: 'mcp', title: 'MCP', module: 'mcp-tab.js' });
+});
+
+test('the switch-off question says exactly what happens to connected agents', () => {
+  // The router answers every MCP request 503 while off and leaves the session table alone, so
+  // a connected agent continues with the same session id and selection when MCP is on again.
+  assert.match(MCP_OFF_CONFIRM, /^Switch MCP off for the whole server\?/);
+  assert.match(MCP_OFF_CONFIRM, /every MCP request is refused with 503, also the requests of agents that are connected now/);
+  assert.match(MCP_OFF_CONFIRM, /sessions are not ended/);
+  assert.match(MCP_OFF_CONFIRM, /continue with the same session id and the same selected database, without connecting again/);
+  assert.ok(!/are kept\b/.test(MCP_OFF_CONFIRM), 'no ambiguous "kept"');
+  const src = readFileSync(new URL('../mcp-tab.js', import.meta.url), 'utf8');
+  assert.ok(src.includes('window.confirm(MCP_OFF_CONFIRM)'));
+  const off = statusOf({ enabled: false, endpointBuilt: true });
+  assert.match(off.help, /also to the agents connected before/);
 });

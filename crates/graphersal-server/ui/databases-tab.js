@@ -21,8 +21,11 @@
 // (a confirmed swap: the damaged one moves to trash/) or "Keep both", with the hint to restore a
 // backup instead; above the table the last unclean shutdown (`GET api/admin/recovery`: the
 // databases the server had open when it was killed, each with its recovery and verify result).
-// B-OPENAPI: each row links its database's OpenAPI description (`db/<name>/openapi.json`) and
-// the head the server's own (`openapi.json`), for HTTP clients.
+// B-OPENAPI: each row's menu links its database's OpenAPI description (`db/<name>/openapi.json`).
+// Round 4 B-UI: every row action (and the OpenAPI link) sits behind ONE "…" button per row
+// (./shared.js `ActionMenu`), so the table fits its width without a horizontal scroll; the
+// table sorts by name until another column is chosen; outcomes and failures of row actions are
+// toasts (./shared.js `notify`), a dialog's error shows under its own buttons (`FormError`).
 
 import { reactive, ref, computed, nextTick } from 'vue';
 import {
@@ -31,7 +34,7 @@ import {
   isOpenState, damageActions, verifyText, verifyDamaged, verifyAllText, problemLines, repairSummary, repairedName, uncleanRows, REPAIR_HELP, RESTORE_HINT,
 } from './admin-api.js';
 import {
-  admin, list, reload, patchRow, errorNotice, noticeClass, pageHref, openapiHref, serverOpenapiHref, useFreshData, useSort, SortTh,
+  admin, list, reload, patchRow, errorNotice, notify, pageHref, openapiHref, useFreshData, useSort, SortTh, ActionMenu, FormError,
 } from './shared.js';
 import { diskTitle, memoryText, memoryTitle, memoryRows, SIZE_COLUMNS } from './databases.js';
 
@@ -48,6 +51,11 @@ const DATABASE_COLUMNS = Object.freeze({
   ...SIZE_COLUMNS,
 });
 
+/** What the State badge says while an action of the row runs. */
+const BUSY_TEXT = Object.freeze({
+  load: 'loading…', unload: 'unloading…', verify: 'verifying…', promote: 'promoting…', delete: 'deleting…',
+});
+
 /** The sortable columns of the alias table. */
 const ALIAS_COLUMNS = Object.freeze({ alias: { type: 'text' }, target: { type: 'text' } });
 
@@ -55,25 +63,23 @@ const emptyCreate = () => ({ name: '', kind: 'plain', role: 'normal', base: '', 
 const freshDialog = () => ({ mode: null, source: '', form: emptyCreate(), alias: '', target: '', newName: '', existing: false, problems: [], error: null, busy: false, repaired: null });
 
 export default {
-  components: { SortTh },
+  components: { SortTh, ActionMenu, FormError },
   props: { api: { type: Object, required: true }, params: { type: Object, default: () => ({}) } },
   setup(props) {
     const busy = reactive({});
-    const notice = ref(null);
     const dlg = ref(null);
     const dialog = reactive(freshDialog());
 
-    /** Runs one action of `subject`: busy marker, outcome or error notice, list reload. */
+    /** Runs one action of `subject`: busy marker, outcome or error toast, list reload. */
     async function run(subject, action, fn) {
       busy[subject] = action;
-      notice.value = null;
       try {
         const answer = (await fn()) || {};
         const failed = action === 'load' && (answer.state === 'failed' || answer.state === 'needs-model');
-        notice.value = { tone: failed ? 'error' : outcomeTone(answer), text: outcomeText(action, subject, answer), help: '' };
+        notify({ tone: failed ? 'error' : outcomeTone(answer), text: outcomeText(action, subject, answer), help: '' });
         return true;
       } catch (err) {
-        notice.value = errorNotice(err);
+        notify(errorNotice(err));
         return false;
       } finally {
         delete busy[subject];
@@ -81,8 +87,8 @@ export default {
       }
     }
 
-    const dbSort = useSort('databases', DATABASE_COLUMNS);
-    const aliasSort = useSort('aliases', ALIAS_COLUMNS);
+    const dbSort = useSort('databases', DATABASE_COLUMNS, { key: 'name', dir: 'asc' });
+    const aliasSort = useSort('aliases', ALIAS_COLUMNS, { key: 'alias', dir: 'asc' });
     const rows = computed(() => dbSort.rows(list.rows));
     const aliases = computed(() => aliasSort.rows(list.aliases));
     const aliasTargets = computed(() => list.aliases.map((a) => a.target));
@@ -123,19 +129,18 @@ export default {
       if (!window.confirm(confirmText('promote', row.name))) return;
       run(row.name, 'promote', () => admin.promote(row.name));
     }
-    /** Verifies one database: the result as the notice, its problems as lines. */
+    /** Verifies one database: the result as a toast, its problems as lines. */
     async function verifyDb(row) {
       busy[row.name] = 'verify';
-      notice.value = null;
       try {
         const answer = await admin.verify(row.name);
-        notice.value = {
+        notify({
           tone: verifyDamaged(answer) ? 'error' : 'ok',
           text: verifyText(answer),
           help: verifyDamaged(answer) ? `${problemLines(answer).join('\n')}${problemLines(answer).length ? '\n' : ''}Repair… builds a repaired copy as a new database. ${RESTORE_HINT}` : '',
-        };
+        });
       } catch (err) {
-        notice.value = errorNotice(err);
+        notify(errorNotice(err));
       } finally {
         delete busy[row.name];
         await reload();
@@ -144,12 +149,11 @@ export default {
     const verifyingAll = ref(false);
     async function verifyAll() {
       verifyingAll.value = true;
-      notice.value = null;
       try {
         const summary = verifyAllText(await admin.verifyAll());
-        notice.value = { tone: summary.tone, text: summary.text, help: summary.lines.join('\n') };
+        notify({ tone: summary.tone, text: summary.text, help: summary.lines.join('\n') });
       } catch (err) {
-        notice.value = errorNotice(err);
+        notify(errorNotice(err));
       } finally {
         verifyingAll.value = false;
         await reload();
@@ -165,7 +169,7 @@ export default {
       dialog.error = null;
       try {
         const answer = (await admin.swap(done.source, done.name)) || {};
-        notice.value = { tone: 'ok', text: outcomeText('swap', done.source, answer), help: '' };
+        notify({ tone: 'ok', text: outcomeText('swap', done.source, answer), help: '' });
       } catch (err) {
         dialog.error = errorNotice(err);
         return;
@@ -177,7 +181,7 @@ export default {
     }
     function keepBoth() {
       const done = dialog.repaired;
-      if (done) notice.value = { tone: 'ok', text: `Kept both: "${done.source}" as it is and the repaired copy "${done.name}".`, help: 'Delete either one later with Delete… on its row.' };
+      if (done) notify({ tone: 'ok', text: `Kept both: "${done.source}" as it is and the repaired copy "${done.name}".`, help: 'Delete either one later with Delete… on its row.' });
       closeDialog();
     }
     function deleteDb(row) {
@@ -264,7 +268,6 @@ export default {
       if (!req.send) return;
       dialog.busy = true;
       dialog.error = null;
-      notice.value = null;
       try {
         const answer = (await req.send()) || {};
         if (req.keepOpen) {
@@ -273,7 +276,7 @@ export default {
           await reload();
           return;
         }
-        notice.value = { tone: outcomeTone(answer), text: outcomeText(req.action, req.subject, answer), help: '' };
+        notify({ tone: outcomeTone(answer), text: outcomeText(req.action, req.subject, answer), help: '' });
       } catch (err) {
         // The dialog stays open with the server's words, so the input can be fixed; a change
         // someone else made meanwhile (409) reads the list again first.
@@ -291,11 +294,55 @@ export default {
       run(a.alias, 'removeAlias', () => admin.removeAlias(a.alias, list.aliasesRevision));
     }
 
+    /** The actions of a database row's "…" menu (./shared.js `ActionMenu`), in groups. */
+    function databaseItems(row) {
+      const a = acts(row);
+      const m = more(row);
+      const d = dmg(row);
+      const p = promo(row);
+      const open = isOpenState(row.state);
+      return [
+        open
+          ? { key: 'unload', text: 'Unload…', enabled: a.unload.enabled, title: a.unload.title, run: () => unloadDb(row) }
+          : { key: 'load', text: 'Load', enabled: a.load.enabled, title: a.load.title, run: () => loadDb(row) },
+        { key: 'settings', text: 'Settings…', title: 'Everything about it: identity, state, sizes, query limits, MCP, grants, backups, Store; change its description, flags and limits', run: () => openSettings(row) },
+        ...(open ? [{ key: 'runs', text: 'Runs…', title: 'The queries that wait or run on it, whatever their client; stop one', run: () => openRuns(row) }] : []),
+        { key: 'sep-copy', separator: true },
+        { key: 'clone', text: 'Clone…', enabled: a.clone.enabled, title: a.clone.title, run: () => openClone(row) },
+        { key: 'backups', text: 'Backups…', enabled: m.backups.enabled, title: m.backups.title, run: () => openBackups(row.name) },
+        { key: 'export', text: 'Export…', enabled: m.export.enabled, title: m.export.title, run: () => openExport(row) },
+        { key: 'sep-store', separator: true },
+        { key: 'verify', text: 'Verify', enabled: d.verify.enabled, title: d.verify.title, run: () => verifyDb(row) },
+        { key: 'repair', text: 'Repair…', enabled: d.repair.enabled, title: d.repair.title, run: () => openRepair(row) },
+        { key: 'promote', text: 'Promote to base…', enabled: p.enabled, title: p.title, run: () => promoteDb(row) },
+        { key: 'sep-api', separator: true },
+        { key: 'openapi', text: 'OpenAPI description', href: openapiHref(row), title: "The OpenAPI description of this database's HTTP API (to generate a client)" },
+        { key: 'sep-delete', separator: true },
+        { key: 'delete', text: 'Delete…', danger: true, enabled: a.delete.enabled, title: a.delete.title, run: () => deleteDb(row) },
+      ];
+    }
+    /** The actions of an alias row's "…" menu (in the database table). */
+    function aliasItems(row) {
+      const alias = list.aliases.find((x) => x.alias === row.name) || { alias: row.name, target: row.aliasOf };
+      const idle = !busy[row.name];
+      return [
+        { key: 'settings', text: `Settings of "${row.aliasOf}"…`, title: 'The settings of the database the alias names', run: () => openSettings(row) },
+        { key: 'point', text: 'Point to…', enabled: idle, run: () => openAlias(alias) },
+        { key: 'rename', text: 'Rename…', enabled: idle, title: 'A new name for the alias, same database; open MCP sessions that selected it follow', run: () => openRename(alias) },
+        { key: 'sep-api', separator: true },
+        { key: 'openapi', text: 'OpenAPI description', href: openapiHref(row), title: "The OpenAPI description of the database's HTTP API under this alias (to generate a client)" },
+        { key: 'sep-remove', separator: true },
+        { key: 'remove', text: 'Remove…', danger: true, enabled: idle, run: () => removeAlias(alias) },
+      ];
+    }
+    const rowItems = (row) => (row.aliasOf ? aliasItems(row) : databaseItems(row));
+    const badgeText = (row) => BUSY_TEXT[busy[row.name]] || poolText(row);
+
     useFreshData(() => Promise.all([reload(), readMemory(), readRecovery()]));
 
     return {
-      list, rows, aliases, memory, diskTitle, memoryText, memoryTitle, dbSort, aliasSort, kindHelp, baseHelp: BASE_HELP, promoteHelp: PROMOTE_HELP, kindHelpOf: KIND_HELP, busy, notice, dlg, dialog, acts, more, promo, dmg, bases, databaseNames, showSize, showMemory,
-      bytesText, needsModelHint, poolText, noticeClass, href: pageHref, apiHref: openapiHref, serverApiHref: serverOpenapiHref(), reload, nameHint: NAME_HINT,
+      list, rows, aliases, memory, diskTitle, memoryText, memoryTitle, dbSort, aliasSort, kindHelp, baseHelp: BASE_HELP, promoteHelp: PROMOTE_HELP, kindHelpOf: KIND_HELP, busy, dlg, dialog, acts, bases, databaseNames, showSize, showMemory,
+      bytesText, needsModelHint, poolText, badgeText, rowItems, href: pageHref, reload, nameHint: NAME_HINT,
       unclean, hideUnclean, isOpenState, verifyDb, verifyAll, verifyingAll, openRepair, swapRepaired, keepBoth, repairHelp: REPAIR_HELP, restoreHint: RESTORE_HINT,
       loadDb, unloadDb, deleteDb, promoteDb, setFlag, openCreate, openClone, openAlias, openRename, closeDialog, submitDialog, removeAlias,
       openBackups: (name) => props.api.navigate('backups', name ? { db: name } : {}),
@@ -324,12 +371,6 @@ export default {
       <button class="btn" type="button" @click="verifyAll" :disabled="!list.loaded || !!list.error || verifyingAll" title="Verify the Store of every database (after a crash, or regularly: it finds damage while older snapshots can still repair it)">{{ verifyingAll ? 'Verifying…' : 'Verify all' }}</button>
       <button class="btn" type="button" @click="openImport" :disabled="!list.loaded || !!list.error">Import…</button>
       <button class="btn primary" type="button" @click="openCreate" :disabled="!list.loaded || !!list.error">New database…</button>
-    </div>
-    <p class="muted srv-api-note">HTTP clients: <a :href="serverApiHref" target="_blank" rel="noopener" data-server-openapi>the server's API (OpenAPI)</a> (login, databases, this admin API); each database's link "OpenAPI" describes its own API. Send a token as <span class="mono">Authorization: Bearer &lt;token&gt;</span>.</p>
-    <div v-if="notice" class="notice srv-notice" :class="noticeClass(notice)" :role="notice.tone === 'ok' ? 'status' : 'alert'">
-      <div class="srv-notice-text"><span>{{ notice.text }}</span>
-        <p v-if="notice.help" class="srv-help srv-pre">{{ notice.help }}</p></div>
-      <button type="button" class="icon-btn" @click="notice = null" aria-label="Dismiss">×</button>
     </div>
     <div v-if="unclean && !hideUnclean" class="notice srv-notice srv-unclean" :class="unclean.rows.some((r) => r.damaged) ? 'srv-error' : 'srv-warn-notice'" role="status" data-unclean>
       <div class="srv-notice-text">
@@ -366,9 +407,8 @@ export default {
         <tr v-for="row in rows" :key="(row.aliasOf ? '@' : '') + row.name" :data-db="row.name" :class="{ 'alias-row': row.aliasOf }">
           <td><a :href="href(row)" class="mono">{{ row.name }}</a>
             <span v-if="row.aliasOf" class="muted"> → {{ row.aliasOf }}</span>
-            <a :href="apiHref(row)" class="srv-api-link" target="_blank" rel="noopener" data-openapi title="The OpenAPI description of this database's HTTP API (to generate a client)">OpenAPI</a>
             <div v-if="row.description" class="muted srv-sub">{{ row.description }}</div></td>
-          <td><span class="badge" :class="row.pooled && !isOpenState(row.state) ? 'accent' : row.tone" :title="row.damage || row.reason || poolText(row)">{{ busy[row.name] === 'unload' ? 'unloading…' : busy[row.name] === 'verify' ? 'verifying…' : poolText(row) }}</span>
+          <td><span class="badge" :class="row.pooled && !isOpenState(row.state) ? 'accent' : row.tone" :title="row.damage || row.reason || poolText(row)">{{ badgeText(row) }}</span>
             <div v-if="row.reason" class="muted srv-sub">{{ row.reason }}</div>
             <details v-if="row.damage" class="srv-sub srv-damage"><summary>Damage report</summary><pre class="mono">{{ row.damage }}</pre></details>
             <div v-if="row.model" class="muted srv-sub mono">{{ row.model }}</div>
@@ -381,20 +421,7 @@ export default {
                      :aria-label="'Auto-load: ' + row.name" @change="setFlag(row, 'autoLoad', $event)"></td>
           <td v-if="showSize" class="num" :title="diskTitle(row) || null">{{ bytesText(row.sizeBytes) }}</td>
           <td v-if="showMemory" class="num" :title="memoryTitle(row) || null">{{ memoryText(row) }}</td>
-          <td class="srv-actions">
-            <template v-if="!row.aliasOf">
-              <button v-if="isOpenState(row.state)" type="button" class="btn small" :disabled="!acts(row).unload.enabled" :title="acts(row).unload.title" @click="unloadDb(row)">Unload…</button>
-              <button v-else type="button" class="btn small" :disabled="!acts(row).load.enabled" :title="acts(row).load.title" @click="loadDb(row)">{{ busy[row.name] === 'load' || row.state === 'loading' ? 'Loading…' : 'Load' }}</button>
-              <button type="button" class="btn small" title="Everything about it: identity, state, sizes, query limits, MCP, grants, backups, Store; change its description, flags and limits" data-settings-open @click="openSettings(row)">Settings…</button>
-              <button type="button" class="btn small" :disabled="!acts(row).clone.enabled" :title="acts(row).clone.title" @click="openClone(row)">Clone…</button>
-              <button type="button" class="btn small" :disabled="!more(row).backups.enabled" :title="more(row).backups.title" @click="openBackups(row.name)">Backups…</button>
-              <button type="button" class="btn small" :disabled="!more(row).export.enabled" :title="more(row).export.title" @click="openExport(row)">Export…</button>
-              <button v-if="isOpenState(row.state) && !row.aliasOf" type="button" class="btn small" title="The queries that wait or run on it, whatever their client; stop one" @click="openRuns(row)">Runs…</button>
-              <button type="button" class="btn small" data-verify :disabled="!dmg(row).verify.enabled" :title="dmg(row).verify.title" @click="verifyDb(row)">{{ busy[row.name] === 'verify' ? 'Verifying…' : 'Verify' }}</button>
-              <button type="button" class="btn small" :class="{ primary: row.state === 'maintenance' }" data-repair :disabled="!dmg(row).repair.enabled" :title="dmg(row).repair.title" @click="openRepair(row)">Repair…</button>
-              <button type="button" class="btn small" :disabled="!promo(row).enabled" :title="promo(row).title" @click="promoteDb(row)">{{ busy[row.name] === 'promote' ? 'Promoting…' : 'Promote to base…' }}</button>
-              <button type="button" class="btn small danger" :disabled="!acts(row).delete.enabled" :title="acts(row).delete.title" @click="deleteDb(row)">Delete…</button>
-            </template>
+          <td class="srv-menu-cell"><action-menu :items="rowItems(row)" :label="'Actions of ' + row.name"></action-menu>
           </td>
         </tr>
       </tbody>
@@ -483,11 +510,6 @@ export default {
             <p>The alias "{{ dialog.alias }}" (database "{{ dialog.target }}") gets a new name. Links to db/{{ dialog.alias }}/ stop working; open MCP sessions that selected it move to the new name.</p>
             <label>New name <input v-model="dialog.newName" name="newName" class="mono" autocomplete="off" spellcheck="false"><small class="srv-field-hint">{{ nameHint }}</small></label>
           </template>
-          <ul v-if="dialog.problems.length" class="srv-problems" role="alert"><li v-for="p in dialog.problems" :key="p">{{ p }}</li></ul>
-          <div v-if="dialog.error" class="notice srv-notice srv-error" role="alert">
-            <div class="srv-notice-text"><span>{{ dialog.error.text }}</span>
-              <p v-if="dialog.error.help" class="srv-help">{{ dialog.error.help }}</p></div>
-          </div>
           <div v-if="dialog.mode === 'repair' && dialog.repaired" class="store-dialog-buttons">
             <button type="button" class="btn primary" data-swap :disabled="dialog.busy" @click="swapRepaired">{{ dialog.busy ? 'Working…' : 'Let it take the name…' }}</button>
             <button type="button" class="btn" data-keep :disabled="dialog.busy" @click="keepBoth">Keep both</button>
@@ -496,6 +518,7 @@ export default {
             <button type="submit" class="btn primary" :disabled="dialog.busy">{{ dialog.busy ? 'Working…' : dialog.mode === 'create' ? 'Create' : dialog.mode === 'clone' ? 'Clone' : dialog.mode === 'rename' ? 'Rename' : dialog.mode === 'repair' ? 'Repair' : 'Save' }}</button>
             <button type="button" class="btn" :disabled="dialog.busy" @click="closeDialog">Cancel</button>
           </div>
+          <form-error :error="dialog.error" :problems="dialog.problems"></form-error>
         </div>
       </form>
     </dialog>

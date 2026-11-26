@@ -91,6 +91,75 @@ p.srv-problems { padding-left: 0; }
 .srv-unclean-list li { margin: 0.15em 0; }
 .srv-repair-lines { margin: 0.4em 0; padding-left: 1.2em; font-size: 0.9em; }
 
-/* The OpenAPI links (B-OPENAPI): small, beside a database's name. */
+/* The OpenAPI link of "My databases" (B-OPENAPI): small, beside a database's name. */
 .srv-api-link { margin-left: 6px; font-size: 12px; }
-.srv-api-note { margin: 4px 0 8px; font-size: 12px; }
+
+/* The Databases table fits its width (no horizontal scroll down to ~1024 px): long names and
+   texts wrap, the row actions sit behind one "…" button (shared.js ActionMenu). */
+.srv-databases td { white-space: normal; overflow: visible; overflow-wrap: anywhere; }
+.srv-databases td:first-child { min-width: 14ch; max-width: none; }
+.srv-databases td.num, .srv-databases .badge { white-space: nowrap; overflow-wrap: normal; }
+.srv-table td.srv-menu-cell { width: 1%; white-space: nowrap; text-align: right; overflow: visible; }
+
+/* The row actions menu (shared.js ActionMenu, ui/menu.js): fixed to the viewport, so a table
+   wrapper never clips it. */
+.srv-menu { display: inline-block; }
+.srv-menu-button { min-width: 32px; font-weight: 600; letter-spacing: .05em; }
+.srv-menu-list {
+  position: fixed; z-index: 120; display: flex; flex-direction: column; min-width: 190px; max-width: min(320px, calc(100vw - 16px));
+  overflow-y: auto; padding: 4px; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--surface); box-shadow: var(--shadow); text-align: left;
+}
+.srv-menu-item {
+  display: block; width: 100%; box-sizing: border-box; padding: 6px 10px; border: 0; border-radius: 5px;
+  background: transparent; color: var(--text); font: inherit; font-size: 13px; text-align: left; text-decoration: none;
+  white-space: nowrap; cursor: pointer;
+}
+.srv-menu-item:hover, .srv-menu-item:focus-visible { background: var(--surface-3); outline: none; }
+.srv-menu-item:focus-visible { box-shadow: inset 0 0 0 2px var(--accent); }
+.srv-menu-item.danger { color: var(--danger); }
+.srv-menu-item[aria-disabled="true"] { color: var(--text-faint); cursor: default; }
+.srv-menu-item[aria-disabled="true"]:hover { background: transparent; }
+.srv-menu-sep { height: 1px; margin: 4px 2px; background: var(--border); }
+
+/* A form's error, right under its submit button (shared.js FormError). */
+.srv-form-error { margin: 8px 0 0; }
+.srv-form-error .srv-problems { margin-top: 0; }
+.srv-form-error .notice { margin-top: 4px; }
+.srv-inline-form .srv-form-error { flex: 1 0 100%; margin-top: -2px; }
+.srv-limit-edit-cell .srv-form-error { max-width: 32ch; margin-left: auto; text-align: left; white-space: normal; }
+
+/* The toasts of every tab (shared.js ToastStack, ui/toasts.js), modelled on the playground's
+   system journal notices: top right below the top bar, never moving the page; the stack lets
+   clicks through, only the toasts take them. */
+.srv-toasts {
+  position: fixed; top: 54px; right: 14px; z-index: 130;
+  display: flex; flex-direction: column; gap: 8px; width: min(380px, calc(100vw - 28px));
+  pointer-events: none;
+}
+.srv-toast {
+  position: relative; pointer-events: auto;
+  border: 1px solid var(--border); border-left: 4px solid var(--ok, var(--accent)); border-radius: 8px;
+  background: var(--surface); box-shadow: var(--shadow); color: var(--text); font-size: 13px;
+  animation: srv-toast-in .18s ease-out;
+}
+.srv-toast-ok { border-left-color: var(--ok, var(--accent)); }
+.srv-toast-warn { border-left-color: var(--warn); background: var(--warn-soft); }
+.srv-toast-error { border-left-color: var(--danger); background: var(--danger-soft); }
+.srv-toast-body { padding: 8px 30px 8px 10px; }
+.srv-toast-text { overflow-wrap: anywhere; }
+.srv-toast-error .srv-toast-text { color: var(--danger); }
+.srv-toast-count { color: var(--text-muted); font-size: 12px; }
+.srv-toast-help { margin: 4px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12.5px; max-height: 14em; overflow-y: auto; }
+.srv-toast-links { margin: 4px 0 0; font-size: 12.5px; }
+.srv-toast-close {
+  position: absolute; top: 4px; right: 4px; width: 22px; height: 22px; padding: 0;
+  border: 0; border-radius: 4px; background: transparent; color: var(--text-muted);
+  font-size: 16px; line-height: 1; cursor: pointer; opacity: 0;
+}
+.srv-toast:hover .srv-toast-close, .srv-toast:focus-within .srv-toast-close, .srv-toast-error .srv-toast-close { opacity: 1; }
+.srv-toast-close:hover { background: var(--surface-3); color: var(--text); }
+.srv-toast-close:focus-visible { opacity: 1; outline: 2px solid var(--accent); outline-offset: 0; }
+@media (hover: none) { .srv-toast-close { opacity: 1; } }
+@keyframes srv-toast-in { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) { .srv-toast { animation: none; } }

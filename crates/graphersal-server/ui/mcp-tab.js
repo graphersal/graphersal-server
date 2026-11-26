@@ -7,14 +7,16 @@
 // command with a placeholder token). Every change sends the state's revision: a change
 // someone else made meanwhile is refused (409) and the tab reads the state again. The state is
 // read on every visit of the tab and when the window gets the focus back (./shared.js
-// `useFreshData`); every table sorts by any column. Requests, rows and texts: ./mcp-api.js.
+// `useFreshData`); every table sorts by any column, the databases by name until another column
+// is chosen. Outcomes and failures of the switches are toasts (./shared.js `notify`). Requests,
+// rows and texts: ./mcp-api.js.
 
 import { reactive, ref, computed } from 'vue';
 import {
-  createMcp, statusOf, mcpRows, usageOf, usageText, exposedTitle, readOnlyTitle, connectInfo,
+  createMcp, statusOf, mcpRows, usageOf, usageText, exposedTitle, readOnlyTitle, connectInfo, MCP_OFF_CONFIRM,
 } from './mcp-api.js';
 import {
-  ROOT, requestOptions, errorNotice, noticeClass, useFreshData, useSort, SortTh,
+  ROOT, requestOptions, errorNotice, notify, noticeClass, useFreshData, useSort, SortTh,
 } from './shared.js';
 
 /** The MCP client (model: ./mcp-api.js). */
@@ -55,14 +57,13 @@ export default {
   setup() {
     const s = reactive({ answer: null, revision: '', read: false, error: null });
     const busy = reactive({});
-    const notice = ref(null);
     const copied = ref('');
 
     const status = computed(() => statusOf(s.answer || {}));
     const rows = computed(() => mcpRows(s.answer || {}));
     const usage = computed(() => usageOf(s.answer || {}));
     const connect = computed(() => connectInfo(ROOT.href, (s.answer && s.answer.endpoint) || '/mcp'));
-    const dbSort = useSort('mcp-databases', DB_COLUMNS);
+    const dbSort = useSort('mcp-databases', DB_COLUMNS, { key: 'name', dir: 'asc' });
     const toolSort = useSort('mcp-tools', COUNTER_COLUMNS);
     const userSort = useSort('mcp-users', COUNTER_COLUMNS);
     const sessionSort = useSort('mcp-sessions', SESSION_COLUMNS);
@@ -89,13 +90,12 @@ export default {
     /** Runs one change under the busy marker `key`; a refused stale change reads the state again. */
     async function run(key, text, fn) {
       busy[key] = true;
-      notice.value = null;
       try {
         await fn();
-        notice.value = { tone: 'ok', text, help: '' };
+        notify({ tone: 'ok', text, help: '' });
       } catch (err) {
         // A refused stale change says so; the state is read again either way.
-        notice.value = errorNotice(err);
+        notify(errorNotice(err));
       } finally {
         delete busy[key];
         await refresh();
@@ -104,7 +104,7 @@ export default {
 
     function toggleMcp() {
       const on = !(s.answer && s.answer.enabled !== false);
-      if (!on && !window.confirm('Switch MCP off for the whole server? Every MCP request is refused (503) until it is switched on again; open sessions are kept.')) return;
+      if (!on && !window.confirm(MCP_OFF_CONFIRM)) return;
       run('global', on ? 'MCP is switched on.' : 'MCP is switched off.', () => mcp.setEnabled(on, s.revision));
     }
     const toggleExposed = (r) => run(r.name, `${r.name}: ${r.exposed ? 'hidden from' : 'offered to'} MCP.`,
@@ -124,7 +124,7 @@ export default {
     useFreshData(refresh);
 
     return {
-      s, busy, notice, copied, status, rows, usage, connect, databases, tools, users, sessions, errors,
+      s, busy, copied, status, rows, usage, connect, databases, tools, users, sessions, errors,
       dbSort, toolSort, userSort, sessionSort, errorSort, noticeClass, usageText, exposedTitle, readOnlyTitle,
       refresh, toggleMcp, toggleExposed, toggleReadOnly, copy,
     };
@@ -138,11 +138,6 @@ export default {
     </div>
     <p class="muted">AI agents reach the databases over the Model Context Protocol: <span class="mono">/mcp</span> serves every database the agent's token is granted, <span class="mono">/db/&lt;name&gt;/mcp</span> one database. Here MCP is switched on or off, databases are hidden from MCP or made read-only for it, and its use is counted.</p>
 
-    <div v-if="notice" class="notice srv-notice" :class="noticeClass(notice)" role="status">
-      <div class="srv-notice-text"><span>{{ notice.text }}</span>
-        <p v-if="notice.help" class="srv-help">{{ notice.help }}</p></div>
-      <button type="button" class="icon-btn" @click="notice = null" aria-label="Dismiss">×</button>
-    </div>
     <div v-if="s.error" class="notice srv-notice srv-error" role="alert">
       <div class="srv-notice-text"><span>{{ s.error.text }}</span>
         <p v-if="s.error.help" class="srv-help">{{ s.error.help }}</p></div>

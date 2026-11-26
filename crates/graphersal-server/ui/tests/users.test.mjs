@@ -267,7 +267,7 @@ test('grants on aliases: every grant table marks an alias with its target, a rea
     { database: 'prod', level: 'read', kind: 'alias', target: 'prod-2026-11' },
   ] }] });
   assert.deepEqual(bob.grants, [{ database: 'prod', level: 'read', kind: 'alias', target: 'prod-2026-11', databaseText: 'prod → prod-2026-11 (alias)' }]);
-  // The grant form's picker offers the aliases too, marked, after the real databases.
+  // The grant form's picker offers the aliases too, marked, BEFORE the real databases (round 4).
   const choices = grantChoices([
     { name: 'prod', aliasOf: 'prod-2026-11' },
     { name: 'prod-2026-11', aliasOf: null },
@@ -275,10 +275,10 @@ test('grants on aliases: every grant table marks an alias with its target, a rea
     { name: 'cur', aliasOf: 'acme' },
   ]);
   assert.deepEqual(choices, [
-    { value: 'acme', text: 'acme', kind: 'database' },
-    { value: 'prod-2026-11', text: 'prod-2026-11', kind: 'database' },
     { value: 'cur', text: 'cur → acme (alias)', kind: 'alias' },
     { value: 'prod', text: 'prod → prod-2026-11 (alias)', kind: 'alias' },
+    { value: 'acme', text: 'acme', kind: 'database' },
+    { value: 'prod-2026-11', text: 'prod-2026-11', kind: 'database' },
   ]);
   assert.deepEqual(grantChoices(null), []);
   assert.equal(
@@ -290,6 +290,7 @@ test('grants on aliases: every grant table marks an alias with its target, a rea
   const tab = readFileSync(new URL('../users-tab.js', import.meta.url), 'utf8');
   assert.ok(tab.includes('grantChoices(list.rows)'), 'the picker is built from grantChoices');
   assert.ok(tab.includes('{{ c.text }}'), 'the picker shows the marked text');
+  assert.ok(tab.indexOf('label="Aliases"') < tab.indexOf('label="Databases"'), 'aliases first in the picker');
   assert.ok(tab.includes('{{ g.databaseText }}'), 'the grants table shows the marked text');
   assert.ok(tab.includes('${g.databaseText}: ${g.level}'), 'a user\'s grants show the marked text');
 });

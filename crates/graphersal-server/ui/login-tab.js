@@ -11,10 +11,11 @@ import {
   login, tokenProblem, afterLoginTarget, nextFromSearch, fetchMine, mineNote, emptyMineText,
 } from './access-api.js';
 import {
-  ROOT, headers, errorNotice, pageHref, useFreshData,
+  ROOT, headers, errorNotice, pageHref, useFreshData, FormError,
 } from './shared.js';
 
 export default {
+  components: { FormError },
   props: { api: { type: Object, required: true }, params: { type: Object, default: () => ({}) } },
   setup() {
     const s = reactive({ token: '', busy: false, problem: '', error: null, open: [], openRead: false });
@@ -55,14 +56,10 @@ export default {
     <form class="srv-form srv-narrow" @submit.prevent="submit">
       <label>Token
         <input v-model="s.token" name="token" type="password" class="mono" autocomplete="current-password" spellcheck="false" autofocus></label>
-      <p v-if="s.problem" class="srv-problems" role="alert">{{ s.problem }}</p>
-      <div v-if="s.error" class="notice srv-notice srv-error" role="alert">
-        <div class="srv-notice-text"><span>{{ s.error.text }}</span>
-          <p v-if="s.error.help" class="srv-help">{{ s.error.help }}</p></div>
-      </div>
       <div class="store-dialog-buttons">
         <button type="submit" class="btn primary" :disabled="s.busy">{{ s.busy ? 'Signing in…' : 'Sign in' }}</button>
       </div>
+      <form-error :error="s.error" :problems="s.problem ? [s.problem] : []"></form-error>
     </form>
     <template v-if="s.openRead && s.open.length">
       <h2>Open to everyone</h2>

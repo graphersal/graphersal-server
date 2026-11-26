@@ -636,9 +636,22 @@ from published files). When this file disagrees with the code, the code wins: sa
   the header component `SortTh`), `fresh.js` (the playground keeps profile tabs alive in
   `<keep-alive>`, so `onMounted` runs once: EVERY tab reads its data through `useFreshData`, on
   set-up, on each later visit and on window focus/visibility while shown; a refresh replaces
-  only shown data, never form or dialog input; a poll runs only while its tab is active) and
+  only shown data, never form or dialog input; a poll runs only while its tab is active),
   `sort.js` (typed stable comparator, header toggling, the sort kept per table in localStorage;
-  every table header is a `<sort-th>`, checked by `ui/tests/sort.test.mjs`); uploads (Import tab, Models tab's "A file from this
+  every table header is a `<sort-th>`, checked by `ui/tests/sort.test.mjs`; `useSort(table,
+  columns, defaultSort)`: Databases, Aliases, MCP default to name), `toasts.js` (round 4 B-UI:
+  the ONE notice system of every tab: `shared.js` `notify(notice)` pushes a toast into a stack
+  mounted once on `document.body` (`ToastStack`, its own `createApp`), fixed top right below the
+  top bar (modelled on the playground's system journal notices), ok 6 s, warn 12 s, error until
+  closed, paused on hover/focus, at most 5, repeats counted; NO tab renders a notice banner any
+  more, checked by `ui/tests/toasts.test.mjs`; persistent states (a read error, the unclean
+  shutdown, the MCP status, a token shown once) stay inline), `menu.js` (the row actions menu
+  `shared.js` `ActionMenu` (`items` `{key, text, title, enabled, danger, href | run}` or
+  `{separator}`): WAI-ARIA menu button, fixed to the viewport (`menuPlacement`: upward near the
+  bottom), outside click/scroll/resize/Escape close it; the Databases table has one per row
+  holding every row action and the OpenAPI link: no horizontal scroll down to ~1024 px) and
+  `shared.js` `FormError` (a form's error and problems right UNDER its submit button: every admin
+  form and the sign-in form; checked by `ui/tests/toasts.test.mjs`); uploads (Import tab, Models tab's "A file from this
   computer": `modelUploadRequest` + `uploadImport({kind: 'model'})`) go through XHR with
   progress, sized against `api.info.host.uploadBytes` first; `server-ui.css` (`srv-*` classes on the playground's
   theme tokens and generic classes). Modules import ONLY `vue` and `./<own file>.js` (checked by

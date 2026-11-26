@@ -19,7 +19,7 @@ import {
   uploadLimit, uploadSizeProblem, progressText, confirmText, outcomeText, bytesText,
 } from './admin-api.js';
 import {
-  admin, ROOT, headers, list, reload, errorNotice, noticeClass, useFreshData, useSort, SortTh,
+  admin, ROOT, headers, list, reload, errorNotice, notify, useFreshData, useSort, SortTh, FormError,
 } from './shared.js';
 
 /** The sortable columns of the model table. */
@@ -36,7 +36,7 @@ import { hostInfo } from './databases.js';
 const freshForm = () => ({ source: 'upload', file: null, path: '', repo: '', license: '' });
 
 export default {
-  components: { SortTh },
+  components: { SortTh, FormError },
   props: { api: { type: Object, required: true }, params: { type: Object, default: () => ({}) } },
   setup(props) {
     const models = ref([]);
@@ -44,7 +44,6 @@ export default {
     const error = ref(null);
     const loaded = ref(false);
     const busy = reactive({});
-    const notice = ref(null);
     const dlg = ref(null);
     const dialog = reactive({ form: freshForm(), problems: [], error: null, busy: false, loaded: 0, total: 0, sent: false });
     const fileInput = ref(null);
@@ -88,9 +87,9 @@ export default {
       busy[m.blob] = true;
       try {
         const answer = await admin.removeModel(m.id);
-        notice.value = { tone: 'ok', text: outcomeText('removeModel', m.id, answer), help: '' };
+        notify({ tone: 'ok', text: outcomeText('removeModel', m.id, answer), help: '' });
       } catch (err) {
-        notice.value = errorNotice(err);
+        notify(errorNotice(err));
       } finally {
         delete busy[m.blob];
         await changed();
@@ -100,9 +99,9 @@ export default {
     async function addByRepo(repo) {
       busy[`repo:${repo}`] = true;
       try {
-        notice.value = addedNotice(await admin.addModel({ repo }));
+        notify(addedNotice(await admin.addModel({ repo })));
       } catch (err) {
-        notice.value = errorNotice(err);
+        notify(errorNotice(err));
       } finally {
         delete busy[`repo:${repo}`];
         await changed();
@@ -152,7 +151,7 @@ export default {
           answer = await admin.addModel(built.body);
         }
         dialog.busy = false;
-        notice.value = addedNotice(answer);
+        notify(addedNotice(answer));
         closeAdd();
       } catch (err) {
         dialog.error = errorNotice(err);
@@ -170,9 +169,9 @@ export default {
     const missingList = computed(() => missingSort.rows(missing.value));
     watch(() => list.version, load);
     return {
-      models, missing, modelSort, missingSort, modelList, missingList, error, loaded, busy, notice, dlg, dialog, load, remove, addByRepo, openAdd, closeAdd, cancelAdd, submitAdd,
+      models, missing, modelSort, missingSort, modelList, missingList, error, loaded, busy, dlg, dialog, load, remove, addByRepo, openAdd, closeAdd, cancelAdd, submitAdd,
       fileInput, pickFile, limit, fileProblem, percent, progressText,
-      bytesText, noticeClass, removeAct: removeModelAction,
+      bytesText, removeAct: removeModelAction,
       held: (repo) => models.value.some((m) => m.repo === repo),
       shortHash: (h) => h.slice(0, 12),
     };
@@ -184,11 +183,6 @@ export default {
       <span class="spacer"></span>
       <button class="btn" type="button" @click="load">Refresh</button>
       <button class="btn primary" type="button" @click="openAdd()">Add model…</button>
-    </div>
-    <div v-if="notice" class="notice srv-notice" :class="noticeClass(notice)" :role="notice.tone === 'ok' ? 'status' : 'alert'">
-      <div class="srv-notice-text"><span>{{ notice.text }}</span>
-        <p v-if="notice.help" class="srv-help">{{ notice.help }}</p></div>
-      <button type="button" class="icon-btn" @click="notice = null" aria-label="Dismiss">×</button>
     </div>
     <div v-if="error" class="notice srv-notice srv-error" role="alert">
       <div class="srv-notice-text"><span>The models could not be read: {{ error.text }}</span>
@@ -261,15 +255,11 @@ export default {
             <progress :value="dialog.sent ? 100 : percent" max="100"></progress>
             <span class="muted">{{ dialog.sent ? 'Uploaded; the server is adding the model…' : 'Uploading ' + progressText(dialog.loaded, dialog.total) }}</span>
           </div>
-          <ul v-if="dialog.problems.length" class="srv-problems" role="alert"><li v-for="p in dialog.problems" :key="p">{{ p }}</li></ul>
-          <div v-if="dialog.error" class="notice srv-notice srv-error" role="alert">
-            <div class="srv-notice-text"><span>{{ dialog.error.text }}</span>
-              <p v-if="dialog.error.help" class="srv-help">{{ dialog.error.help }}</p></div>
-          </div>
           <div class="store-dialog-buttons">
             <button type="submit" class="btn primary" :disabled="dialog.busy || !!fileProblem">{{ dialog.busy ? 'Adding…' : 'Add' }}</button>
             <button type="button" class="btn" :disabled="dialog.busy && (dialog.form.source !== 'upload' || dialog.sent)" @click="cancelAdd">{{ dialog.busy && dialog.form.source === 'upload' && !dialog.sent ? 'Cancel upload' : 'Cancel' }}</button>
           </div>
+          <form-error :error="dialog.error" :problems="dialog.problems"></form-error>
         </div>
       </form>
     </dialog>

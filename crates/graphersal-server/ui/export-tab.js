@@ -11,18 +11,18 @@
 // The database list is read again on every visit and when the window gets the focus back
 // (./shared.js `useFreshData`; the chosen options stay).
 
-import { reactive, ref, computed, watch } from 'vue';
+import { reactive, computed, watch } from 'vue';
 import { exportPath, parseAdminError, AdminError, realRows, transferActions } from './admin-api.js';
 import { downloadBlob } from './databases.js';
 import {
-  ROOT, headers, list, reload, noticeClass, useFreshData,
+  ROOT, headers, list, reload, notify, useFreshData, FormError,
 } from './shared.js';
 
 export default {
+  components: { FormError },
   props: { api: { type: Object, required: true }, params: { type: Object, default: () => ({}) } },
   setup(props) {
     const s = reactive({ name: '', models: true, materialize: false, busy: false, error: null });
-    const notice = ref(null);
     const rows = computed(() => realRows(list.rows));
     const row = computed(() => rows.value.find((r) => r.name === s.name) || null);
     const layer = computed(() => !!row.value && row.value.kind === 'layer');
@@ -40,12 +40,11 @@ export default {
       props.api.navigate('export', s.name ? { db: s.name } : {});
     }
     function linkClicked() {
-      notice.value = { tone: 'ok', text: `The download of ${target.value.fileName} started.`, help: '' };
+      notify({ tone: 'ok', text: `The download of ${target.value.fileName} started.`, help: '' });
     }
     async function fetchAndSave() {
       s.busy = true;
       s.error = null;
-      notice.value = null;
       try {
         let r;
         try {
@@ -55,7 +54,7 @@ export default {
         }
         if (!r.ok) throw parseAdminError(r.status, await r.text());
         downloadBlob(await r.blob(), target.value.fileName);
-        notice.value = { tone: 'ok', text: `Saved ${target.value.fileName}.`, help: '' };
+        notify({ tone: 'ok', text: `Saved ${target.value.fileName}.`, help: '' });
       } catch (err) {
         s.error = { text: err && err.message ? err.message : String(err), help: err && err.help ? err.help : '' };
       } finally {
@@ -73,7 +72,7 @@ export default {
       await reload();
     });
 
-    return { s, notice, loaded: computed(() => list.loaded), rows, row, layer, allowed, withHeaders, target, href, modelsApply, picked, linkClicked, fetchAndSave, noticeClass };
+    return { s, loaded: computed(() => list.loaded), rows, row, layer, allowed, withHeaders, target, href, modelsApply, picked, linkClicked, fetchAndSave };
   },
   template: `
   <div class="srv-tab">
@@ -100,15 +99,8 @@ export default {
           <a v-if="!withHeaders" class="btn primary" :href="href" :download="target.fileName" @click="linkClicked">Download {{ target.fileName }}</a>
           <button v-else type="button" class="btn primary" :disabled="s.busy" @click="fetchAndSave">{{ s.busy ? 'Downloading…' : 'Download ' + target.fileName }}</button>
         </div>
+        <form-error :error="s.error"></form-error>
       </template>
-      <div v-if="s.error" class="notice srv-notice srv-error" role="alert">
-        <div class="srv-notice-text"><span>{{ s.error.text }}</span>
-          <p v-if="s.error.help" class="srv-help">{{ s.error.help }}</p></div>
-      </div>
-      <div v-if="notice" class="notice srv-notice" :class="noticeClass(notice)" role="status">
-        <div class="srv-notice-text"><span>{{ notice.text }}</span></div>
-        <button type="button" class="icon-btn" @click="notice = null" aria-label="Dismiss">×</button>
-      </div>
     </form>
   </div>
   `,

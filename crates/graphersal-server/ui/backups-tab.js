@@ -13,13 +13,13 @@
 // a plain link (the browser streams the file); with them it is fetched and saved
 // (`fetchServerBackup`), a refusal showing the server's `error`/`help`.
 
-import { reactive, ref, computed, watch } from 'vue';
+import { reactive, computed, watch } from 'vue';
 import {
   serverBackupPath, fetchServerBackup, SERVER_BACKUP_WARNING,
   backupRows, restoreOverAction, nameProblem, existingNameProblem, restoredName, NAME_HINT, RESTORE_GRANTS_NOTE, confirmText, outcomeText, outcomeTone, bytesText, realRows, kindHelp,
 } from './admin-api.js';
 import {
-  ROOT, headers, admin, list, reload, errorNotice, noticeClass, useFreshData, useSort, SortTh,
+  ROOT, headers, admin, list, reload, errorNotice, notify, useFreshData, useSort, SortTh, FormError,
 } from './shared.js';
 import { downloadBlob } from './databases.js';
 
@@ -34,30 +34,29 @@ const BACKUP_COLUMNS = Object.freeze({
 });
 
 export default {
-  components: { SortTh },
+  components: { SortTh, FormError },
   props: { api: { type: Object, required: true }, params: { type: Object, default: () => ({}) } },
   setup(props) {
     const s = reactive({
       name: '', typed: '', list: [], listed: false, error: null, busy: '', restoring: null, target: 'over', newName: '',
+      showError: null, backupError: null, restoreError: null,
     });
-    const notice = ref(null);
     // The server backup (below the database's backups).
-    const sb = reactive({ full: false, busy: false, error: null, notice: null });
+    const sb = reactive({ full: false, busy: false, error: null });
     const withHeaders = Object.keys(headers).length > 0;
     const serverBackupHref = computed(() => new URL(serverBackupPath({ withDatabases: sb.full }).path, ROOT).href);
     function serverBackupStarted() {
       sb.error = null;
-      sb.notice = { tone: 'ok', text: 'The server backup is being prepared; the download starts when it is written.' };
+      notify({ tone: 'ok', text: 'The server backup is being prepared; the download starts when it is written.' });
     }
     async function downloadServerBackup() {
       sb.busy = true;
       sb.error = null;
-      sb.notice = null;
       try {
         const got = await fetchServerBackup({ base: ROOT, headers, withDatabases: sb.full });
         downloadBlob(got.blob, got.fileName);
         const left = got.skipped.length ? ` Left out (their backup failed): ${got.skipped.join(', ')}.` : '';
-        sb.notice = { tone: got.skipped.length ? 'warn' : 'ok', text: `Saved ${got.fileName}.${left}` };
+        notify({ tone: got.skipped.length ? 'warn' : 'ok', text: `Saved ${got.fileName}.${left}` });
       } catch (err) {
         sb.error = errorNotice(err);
       } finally {
@@ -86,17 +85,17 @@ export default {
 
     /** Shows the backups of `name` ('' = none chosen). */
     async function choose(name) {
-      Object.assign(s, { name: name || '', typed: name || '', list: [], listed: false, error: null, busy: '', restoring: null });
+      Object.assign(s, {
+        name: name || '', typed: name || '', list: [], listed: false, error: null, busy: '', restoring: null, showError: null, backupError: null, restoreError: null,
+      });
       await refresh();
     }
     /** The form: a database of the list or any name (a deleted database's backups). */
     function show() {
       // Any name a database had (one made before 0.3.0 may break the rule of new names).
       const problem = existingNameProblem(s.typed, 'database name');
-      if (problem) {
-        s.error = { tone: 'error', text: problem, help: '' };
-        return;
-      }
+      s.showError = problem ? { tone: 'error', text: problem, help: '' } : null;
+      if (problem) return;
       const name = s.typed.trim().toLowerCase();
       if (name === (props.params.db || '')) choose(name);
       else props.api.navigate('backups', { db: name });
@@ -104,14 +103,13 @@ export default {
 
     async function backupNow() {
       s.busy = 'backup';
-      s.error = null;
-      notice.value = null;
+      s.backupError = null;
       try {
         const answer = await admin.backup(s.name);
-        notice.value = { tone: 'ok', text: outcomeText('backup', s.name, answer), help: '' };
+        notify({ tone: 'ok', text: outcomeText('backup', s.name, answer), help: '' });
         await refresh();
       } catch (err) {
-        s.error = errorNotice(err);
+        s.backupError = errorNotice(err);
       } finally {
         s.busy = '';
       }
@@ -121,7 +119,7 @@ export default {
       s.restoring = b.backup;
       s.target = over.value.enabled ? 'over' : 'new';
       s.newName = restoredName(s.name);
-      s.error = null;
+      s.restoreError = null;
     }
     async function restore() {
       const backup = s.restoring;
@@ -129,7 +127,7 @@ export default {
       if (s.target === 'new') {
         const problem = nameProblem(s.newName, 'name for the restored database');
         if (problem) {
-          s.error = { tone: 'error', text: problem, help: '' };
+          s.restoreError = { tone: 'error', text: problem, help: '' };
           return;
         }
         newName = s.newName.trim().toLowerCase();
@@ -137,15 +135,14 @@ export default {
         return;
       }
       s.busy = 'restore';
-      s.error = null;
-      notice.value = null;
+      s.restoreError = null;
       try {
         const answer = await admin.restore(s.name, backup, newName || undefined);
-        notice.value = { tone: outcomeTone(answer), text: outcomeText('restore', newName || s.name, answer), help: '' };
+        notify({ tone: outcomeTone(answer), text: outcomeText('restore', newName || s.name, answer), help: '' });
         s.restoring = null;
         await reload();
       } catch (err) {
-        s.error = errorNotice(err);
+        s.restoreError = errorNotice(err);
       } finally {
         s.busy = '';
       }
@@ -165,7 +162,7 @@ export default {
       }
     });
 
-    return { sb, withHeaders, serverBackupHref, serverBackupStarted, downloadServerBackup, serverBackupWarning: SERVER_BACKUP_WARNING, s, backups, backupSort, kindText, kindHelp, notice, names, row, over, show, backupNow, startRestore, restore, bytesText, refresh, noticeClass, nameHint: NAME_HINT, grantsNote: RESTORE_GRANTS_NOTE };
+    return { sb, withHeaders, serverBackupHref, serverBackupStarted, downloadServerBackup, serverBackupWarning: SERVER_BACKUP_WARNING, s, backups, backupSort, kindText, kindHelp, names, row, over, show, backupNow, startRestore, restore, bytesText, refresh, nameHint: NAME_HINT, grantsNote: RESTORE_GRANTS_NOTE };
   },
   template: `
   <div class="srv-tab">
@@ -175,18 +172,15 @@ export default {
         <input v-model="s.typed" name="database" class="mono" list="srv-backup-names" autocomplete="off" spellcheck="false"></label>
       <datalist id="srv-backup-names"><option v-for="n in names" :key="n" :value="n"></option></datalist>
       <button type="submit" class="btn">Show</button>
+      <form-error :error="s.showError"></form-error>
     </form>
-    <div v-if="notice" class="notice srv-notice" :class="noticeClass(notice)" role="status">
-      <div class="srv-notice-text"><span>{{ notice.text }}</span>
-        <p v-if="notice.help" class="srv-help">{{ notice.help }}</p></div>
-      <button type="button" class="icon-btn" @click="notice = null" aria-label="Dismiss">×</button>
-    </div>
     <div v-if="s.name" class="srv-bar">
       <span class="muted">Verified ZIP backups in the server's backups/{{ s.name }}/ directory.</span>
       <span class="spacer"></span>
       <button type="button" class="btn small" :disabled="!!s.busy" @click="refresh">Refresh</button>
       <button v-if="row && row.kind" type="button" class="btn small primary" :disabled="!!s.busy" @click="backupNow">{{ s.busy === 'backup' ? 'Backing up…' : 'Back up now' }}</button>
     </div>
+    <form-error v-if="s.name" :error="s.backupError"></form-error>
     <p v-else class="muted">Choose a database to see its backups.</p>
     <p v-if="s.listed && !s.list.length" class="muted">No backups yet.</p>
     <div v-if="s.list.length" class="srv-table-wrap">
@@ -215,6 +209,7 @@ export default {
         <button type="submit" class="btn primary" :disabled="!!s.busy">{{ s.busy === 'restore' ? 'Restoring…' : 'Restore' }}</button>
         <button type="button" class="btn" :disabled="!!s.busy" @click="s.restoring = null">Cancel</button>
       </div>
+      <form-error :error="s.restoreError"></form-error>
     </form>
     <div v-if="s.error" class="notice srv-notice srv-error" role="alert">
       <div class="srv-notice-text"><span>{{ s.error.text }}</span>
@@ -229,14 +224,7 @@ export default {
         <a v-if="!withHeaders" class="btn" :href="serverBackupHref" download @click="serverBackupStarted">Download server backup</a>
         <button v-else type="button" class="btn" :disabled="sb.busy" @click="downloadServerBackup">{{ sb.busy ? 'Preparing…' : 'Download server backup' }}</button>
       </div>
-      <div v-if="sb.error" class="notice srv-notice srv-error" role="alert">
-        <div class="srv-notice-text"><span>{{ sb.error.text }}</span>
-          <p v-if="sb.error.help" class="srv-help">{{ sb.error.help }}</p></div>
-      </div>
-      <div v-if="sb.notice" class="notice srv-notice" :class="noticeClass(sb.notice)" role="status">
-        <div class="srv-notice-text"><span>{{ sb.notice.text }}</span></div>
-        <button type="button" class="icon-btn" @click="sb.notice = null" aria-label="Dismiss">×</button>
-      </div>
+      <form-error :error="sb.error"></form-error>
     </section>
   </div>
   `,

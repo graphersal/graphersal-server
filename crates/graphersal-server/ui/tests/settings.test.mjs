@@ -272,5 +272,6 @@ test('the tab: fresh on every visit, sortable tables, revisions, links; the Data
   assert.deepEqual(profile.tabs.find((t) => t.id === 'settings'), { id: 'settings', title: 'Database settings', module: 'settings-tab.js' });
   const databases = readFileSync(new URL('../databases-tab.js', import.meta.url), 'utf8');
   assert.ok(databases.includes("navigate('settings', { db: row.aliasOf || row.name })"), 'Settings… on every row');
-  assert.ok(databases.includes('data-settings-open'));
+  // Round 4: "Settings…" is an item of the row's "…" menu (was a button with data-settings-open).
+  assert.ok(databases.includes("{ key: 'settings', text: 'Settings…'"));
 });

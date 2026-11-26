@@ -7,12 +7,12 @@
 // (`POST api/admin/databases/<name>/runs/cancel`). Rules and texts: ./admin-api.js. The server's
 // `error`/`help` stay shown.
 
-import { reactive, ref, computed, watch, onDeactivated, onUnmounted } from 'vue';
+import { reactive, computed, watch, onDeactivated, onUnmounted } from 'vue';
 import {
   runRows, durationText, runTextHead, cancelRunAction, confirmText, outcomeText, realRows, RUNS_POLL_MS, isOpenState,
 } from './admin-api.js';
 import {
-  admin, list, reload, errorNotice, noticeClass, useFreshData, useSort, SortTh,
+  admin, list, reload, errorNotice, notify, useFreshData, useSort, SortTh,
 } from './shared.js';
 
 /** The sortable columns of the run table. */
@@ -32,7 +32,6 @@ export default {
     const s = reactive({
       db: '', runs: [], textHeadChars: 200, loaded: true, read: false, error: null, busy: '',
     });
-    const notice = ref(null);
     let timer = null;
     let alive = true;
 
@@ -70,12 +69,11 @@ export default {
     async function stop(run) {
       if (!window.confirm(confirmText('cancelRun', run.database, String(run.id)))) return;
       s.busy = `${run.database}/${run.id}`;
-      notice.value = null;
       try {
         const answer = await admin.cancelRun(run.database, run.id);
-        notice.value = { tone: answer.cancelled ? 'ok' : 'warn', text: outcomeText('cancelRun', run.database, answer), help: '' };
+        notify({ tone: answer.cancelled ? 'ok' : 'warn', text: outcomeText('cancelRun', run.database, answer), help: '' });
       } catch (err) {
-        s.error = errorNotice(err);
+        notify(errorNotice(err));
       } finally {
         s.busy = '';
       }
@@ -104,7 +102,7 @@ export default {
     });
 
     return {
-      s, runs, runSort, notice, loadedNames, refresh, filter, stop, noticeClass, durationText,
+      s, runs, runSort, loadedNames, refresh, filter, stop, durationText,
       textOf: (run) => runTextHead(run, s.textHeadChars),
       stopAction: (run) => cancelRunAction(run, { busy: !!s.busy }),
       openDb: (db) => props.api.navigate('runs', { db }),
@@ -123,10 +121,6 @@ export default {
       <span class="muted">Every client's queries that wait or run; refreshed every 2 s.</span>
       <span class="spacer"></span>
       <button type="button" class="btn small" @click="refresh">Refresh</button>
-    </div>
-    <div v-if="notice" class="notice srv-notice" :class="noticeClass(notice)" role="status">
-      <div class="srv-notice-text"><span>{{ notice.text }}</span></div>
-      <button type="button" class="icon-btn" @click="notice = null" aria-label="Dismiss">×</button>
     </div>
     <p v-if="s.read && s.db && !s.loaded" class="muted">"{{ s.db }}" is not loaded: nothing runs on it.</p>
     <p v-else-if="s.read && !s.runs.length" class="muted">Nothing runs now.</p>

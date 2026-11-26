@@ -114,7 +114,7 @@ test('every table of the admin UI sorts: its headers are sort-th, its rows come 
   };
   for (const [file, sorters] of Object.entries(tables)) {
     const src = readFileSync(new URL(`../${file}`, import.meta.url), 'utf8');
-    assert.ok(src.includes('components: { SortTh }'), `${file} registers the header`);
+    assert.ok(/components: \{ SortTh[ ,]/.test(src), `${file} registers the header`);
     for (const s of sorters) {
       assert.ok(src.includes(`:s="${s}"`), `${file}: ${s} drives headers`);
       assert.ok(src.includes(`${s}.rows(`), `${file}: ${s} sorts the rows`);

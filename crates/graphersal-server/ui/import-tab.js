@@ -18,7 +18,7 @@ import {
   outcomeText, outcomeTone, needsModelHint, bytesText, baseNames, inboxRows, IMPORT_FORMATS, BASE_IS_FROZEN,
 } from './admin-api.js';
 import {
-  admin, ROOT, headers, list, reload, noticeClass, useFreshData, useSort, SortTh,
+  admin, ROOT, headers, list, reload, notify, useFreshData, useSort, SortTh, FormError,
 } from './shared.js';
 
 /** The sortable columns of the inbox table. */
@@ -33,12 +33,11 @@ import { hostInfo } from './databases.js';
 const freshForm = (source = 'upload') => ({ source, file: null, path: '', inbox: '', name: '', base: '', format: '', description: '', role: 'normal' });
 
 export default {
-  components: { SortTh },
+  components: { SortTh, FormError },
   props: { api: { type: Object, required: true }, params: { type: Object, default: () => ({}) } },
   setup(props) {
     const form = reactive(freshForm());
     const s = reactive({ busy: false, problems: [], error: null, loaded: 0, total: 0, sent: false });
-    const notice = ref(null);
     const inbox = reactive({ dir: '', rows: [], loading: false, error: null, loaded: false });
     const fileInput = ref(null);
     let running = null;
@@ -91,11 +90,16 @@ export default {
       const imp = answer.import && typeof answer.import === 'object' ? answer.import : {};
       const notes = Array.isArray(imp.notes) ? imp.notes.filter((n) => typeof n === 'string') : [];
       const hint = needsModelHint(answer);
-      notice.value = {
-        tone: answer.state === 'needs-model' ? 'warn' : outcomeTone(answer),
+      const warn = answer.state === 'needs-model';
+      notify({
+        tone: warn ? 'warn' : outcomeTone(answer),
         text: outcomeText('import', subject, answer),
         help: [hint, ...notes].filter(Boolean).join('\n'),
-      };
+        links: [
+          { text: 'Databases', run: () => props.api.navigate('databases') },
+          ...(warn ? [{ text: 'Models', run: () => props.api.navigate('models') }] : []),
+        ],
+      });
     }
 
     async function submit() {
@@ -106,7 +110,6 @@ export default {
       if (built.problems) return;
       const subject = form.name.trim().toLowerCase();
       s.busy = true;
-      notice.value = null;
       try {
         let answer;
         if (built.upload) {
@@ -146,7 +149,7 @@ export default {
     const inboxList = computed(() => inboxSort.rows(inbox.rows));
 
     return {
-      form, s, notice, inbox, inboxSort, inboxList, loadInbox, pickInbox, fileInput, bases, limit, fileProblem, percent, cancel, submit, pickFile, pathChanged, noticeClass,
+      form, s, inbox, inboxSort, inboxList, loadInbox, pickInbox, fileInput, bases, limit, fileProblem, percent, cancel, submit, pickFile, pathChanged,
       progressText, bytesText, formats: IMPORT_FORMATS, frozen: BASE_IS_FROZEN, nameHint: NAME_HINT,
       touchName: () => { nameTouched = true; },
       openDatabases: () => props.api.navigate('databases'),
@@ -156,12 +159,6 @@ export default {
   template: `
   <div class="srv-tab">
     <div class="srv-head"><h1>Import a database</h1></div>
-    <div v-if="notice" class="notice srv-notice" :class="noticeClass(notice)" :role="notice.tone === 'ok' ? 'status' : 'alert'">
-      <div class="srv-notice-text"><span>{{ notice.text }}</span>
-        <p v-if="notice.help" class="srv-help">{{ notice.help }}</p>
-        <p class="srv-help"><a href="#" @click.prevent="openDatabases">Databases</a><template v-if="notice.tone === 'warn'"> · <a href="#" @click.prevent="openModels">Models</a></template></p></div>
-      <button type="button" class="icon-btn" @click="notice = null" aria-label="Dismiss">×</button>
-    </div>
     <form class="srv-form srv-narrow" @submit.prevent="submit">
       <fieldset :disabled="s.busy">
         <legend>Source</legend>
@@ -213,15 +210,11 @@ export default {
         <span class="muted">{{ s.sent ? 'Uploaded; the server is importing it…' : 'Uploading ' + progressText(s.loaded, s.total) }}</span>
       </div>
       <p v-else-if="s.busy" class="muted" role="status">The server is importing it…</p>
-      <ul v-if="s.problems.length" class="srv-problems" role="alert"><li v-for="p in s.problems" :key="p">{{ p }}</li></ul>
-      <div v-if="s.error" class="notice srv-notice srv-error" role="alert">
-        <div class="srv-notice-text"><span>{{ s.error.text }}</span>
-          <p v-if="s.error.help" class="srv-help">{{ s.error.help }}</p></div>
-      </div>
       <div class="store-dialog-buttons">
         <button type="submit" class="btn primary" :disabled="s.busy || !!fileProblem">{{ s.busy ? 'Importing…' : 'Import' }}</button>
         <button type="button" class="btn" :disabled="s.busy && (form.source !== 'upload' || s.sent)" @click="cancel">{{ s.busy && form.source === 'upload' && !s.sent ? 'Cancel upload' : 'Clear' }}</button>
       </div>
+      <form-error :error="s.error" :problems="s.problems"></form-error>
     </form>
   </div>
   `,

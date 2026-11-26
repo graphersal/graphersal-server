@@ -17,7 +17,7 @@ Both are OpenAPI 3.1 JSON. Use the database's description for data access, the s
 administration. `GET /api/info` names both (`openapi`: `/openapi.json`, `databaseOpenapi`:
 `/db/{name}/openapi.json`); `GET /api/databases` names each reachable database's as
 `openapi`. The web UI links them: "My databases" has an "OpenAPI" link per database, the
-admin's Databases tab one per row and "the server's API (OpenAPI)" above the table.
+admin's Databases tab "OpenAPI description" in each row's "…" menu.
 
 **`servers`** is the URL the request came to: `server.toml [http] public_scheme` (`https`
 behind a TLS proxy) and the request's `Host` (the listen address's names, or a name of `[http]

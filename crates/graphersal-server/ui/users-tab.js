@@ -8,7 +8,10 @@
 // verbatim). Users and grants are read again on every visit of the tab and when the window gets
 // the focus back (./shared.js `useFreshData`: a user added in the console or another browser
 // shows up; the Add dialog and the grant form keep their input); both tables sort by any column.
-// Requests, rules and texts: ./admin-api.js.
+// Round 4 B-UI: the outcome or failure of a row action is a toast (./shared.js `notify`); the
+// grant form's and the Add dialog's errors show under their own submit buttons (`FormError`);
+// the grant form's Database picker lists the aliases first, then the databases, each
+// alphabetical (./admin-api.js `grantChoices`). Requests, rules and texts: ./admin-api.js.
 
 import { reactive, ref, computed, nextTick } from 'vue';
 import {
@@ -16,7 +19,7 @@ import {
   shownToken, grantChoices, GRANT_LEVELS, NAME_HINT,
 } from './admin-api.js';
 import {
-  admin, list, reload, errorNotice, noticeClass, useFreshData, useSort, SortTh,
+  admin, list, reload, errorNotice, notify, useFreshData, useSort, SortTh, FormError,
 } from './shared.js';
 
 /** The grants of a user row as one text (its Grants cell). */
@@ -39,21 +42,23 @@ const GRANT_COLUMNS = Object.freeze({
 const freshAdd = () => ({ name: '', admin: false, problems: [], error: null, busy: false });
 
 export default {
-  components: { SortTh },
+  components: { SortTh, FormError },
   props: { api: { type: Object, required: true }, params: { type: Object, default: () => ({}) } },
   setup() {
     // `revision`: of the users and grants shown; every change sends it, so a change someone
     // else made meanwhile refuses it (409: the notice says so and the tab reads them again).
     const s = reactive({ users: [], grants: [], revision: '', read: false, error: null });
     const busy = reactive({});
-    const notice = ref(null);
     const token = ref(null);
+    const tokenBox = ref(null);
     const copied = ref(false);
     const dlg = ref(null);
     const add = reactive(freshAdd());
-    const grant = reactive({ subject: 'anonymous', database: '', level: 'read', problems: [], busy: false });
+    const grant = reactive({ subject: 'anonymous', database: '', level: 'read', problems: [], error: null, busy: false });
 
     const databaseChoices = computed(() => grantChoices(list.rows));
+    const aliasChoices = computed(() => databaseChoices.value.filter((c) => c.kind === 'alias'));
+    const realChoices = computed(() => databaseChoices.value.filter((c) => c.kind !== 'alias'));
     const userSort = useSort('users', USER_COLUMNS);
     const grantSort = useSort('grants', GRANT_COLUMNS);
     const users = computed(() => userSort.rows(s.users));
@@ -73,22 +78,26 @@ export default {
       }
     }
 
-    /** Runs one action of `subject`: busy marker, outcome or error notice, the token when the
-     * answer carries one, the list again. */
-    async function run(subject, action, fn) {
+    /** Shows a token the server made (once), scrolled into view. */
+    async function showToken(shown) {
+      if (!shown) return;
+      token.value = shown;
+      copied.value = false;
+      await nextTick();
+      if (tokenBox.value && tokenBox.value.scrollIntoView) tokenBox.value.scrollIntoView({ block: 'nearest' });
+    }
+
+    /** Runs one action of `subject`: busy marker, outcome toast, the token when the answer
+     * carries one, the list again. A failure is a toast, or `onError(notice)`'s (a form's). */
+    async function run(subject, action, fn, onError = notify) {
       busy[subject] = action;
-      notice.value = null;
       try {
         const answer = (await fn()) || {};
-        notice.value = { tone: 'ok', text: userOutcomeText(action, subject, answer), help: '' };
-        const shown = shownToken(answer);
-        if (shown) {
-          token.value = shown;
-          copied.value = false;
-        }
+        notify({ tone: 'ok', text: userOutcomeText(action, subject, answer), help: '' });
+        showToken(shownToken(answer));
         return true;
       } catch (err) {
-        notice.value = errorNotice(err);
+        onError(errorNotice(err));
         return false;
       } finally {
         delete busy[subject];
@@ -126,11 +135,10 @@ export default {
       add.busy = true;
       try {
         const answer = await admin.addUser(form.name, form.admin);
-        token.value = shownToken(answer);
-        copied.value = false;
-        notice.value = { tone: 'ok', text: userOutcomeText('addUser', form.name, answer), help: '' };
+        notify({ tone: 'ok', text: userOutcomeText('addUser', form.name, answer), help: '' });
         add.busy = false;
         closeAdd();
+        showToken(shownToken(answer));
       } catch (err) {
         add.error = errorNotice(err);
         add.busy = false;
@@ -141,9 +149,10 @@ export default {
     async function submitGrant() {
       const form = grantForm(grant);
       grant.problems = form.problems || [];
+      grant.error = null;
       if (form.problems) return;
       grant.busy = true;
-      await run(`${form.subject}/${form.database}`, 'grant', () => admin.grant(form.subject, form.database, form.level, s.revision));
+      await run(`${form.subject}/${form.database}`, 'grant', () => admin.grant(form.subject, form.database, form.level, s.revision), (e) => { grant.error = e; });
       grant.busy = false;
     }
 
@@ -167,7 +176,7 @@ export default {
     });
 
     return {
-      s, users, grants, userSort, grantSort, busy, notice, token, copied, dlg, add, grant, databaseChoices, GRANT_LEVELS, noticeClass, nameHint: NAME_HINT,
+      s, users, grants, userSort, grantSort, busy, token, tokenBox, copied, dlg, add, grant, databaseChoices, aliasChoices, realChoices, GRANT_LEVELS, nameHint: NAME_HINT,
       acts: (u) => userActions(u, s.users, { busy: !!busy[u.name] }),
       grantsText: grantsTextOf,
       newToken, revokeToken, toggleAdmin, removeUser, revokeGrant, openAdd, closeAdd, submitAdd, submitGrant, copyToken, refresh,
@@ -183,7 +192,7 @@ export default {
     </div>
     <p class="muted">Who may sign in, with which token, and which databases each one reaches. An admin reaches every database and these tabs.</p>
 
-    <div v-if="token" class="notice srv-notice srv-token" role="status">
+    <div v-if="token" ref="tokenBox" class="notice srv-notice srv-token" role="status">
       <div class="srv-notice-text">
         <span>The token of <strong class="mono">{{ token.name }}</strong>. It is shown only once: copy it now and hand it over safely.</span>
         <div class="srv-token-row">
@@ -192,11 +201,6 @@ export default {
         </div>
       </div>
       <button type="button" class="icon-btn" @click="token = null" aria-label="Dismiss">×</button>
-    </div>
-    <div v-if="notice" class="notice srv-notice" :class="noticeClass(notice)" role="status">
-      <div class="srv-notice-text"><span>{{ notice.text }}</span>
-        <p v-if="notice.help" class="srv-help">{{ notice.help }}</p></div>
-      <button type="button" class="icon-btn" @click="notice = null" aria-label="Dismiss">×</button>
     </div>
     <div v-if="s.error" class="notice srv-notice srv-error" role="alert">
       <div class="srv-notice-text"><span>{{ s.error.text }}</span>
@@ -232,8 +236,13 @@ export default {
           <option v-for="u in s.users" :key="u.name" :value="u.name">{{ u.name }}</option>
         </select></label>
       <label>Database
-        <select v-model="grant.database" name="database">
-          <option v-for="c in databaseChoices" :key="c.value" :value="c.value">{{ c.text }}</option>
+        <select v-model="grant.database" name="database" @change="grant.error = null">
+          <optgroup v-if="aliasChoices.length" label="Aliases">
+            <option v-for="c in aliasChoices" :key="c.value" :value="c.value">{{ c.text }}</option>
+          </optgroup>
+          <optgroup v-if="realChoices.length" label="Databases">
+            <option v-for="c in realChoices" :key="c.value" :value="c.value">{{ c.text }}</option>
+          </optgroup>
           <option value="*">every database</option>
         </select></label>
       <label>Level
@@ -241,8 +250,8 @@ export default {
           <option v-for="l in GRANT_LEVELS" :key="l" :value="l">{{ l }}</option>
         </select></label>
       <button type="submit" class="btn small" :disabled="grant.busy">Grant</button>
+      <form-error :error="grant.error" :problems="grant.problems"></form-error>
     </form>
-    <ul v-if="grant.problems.length" class="srv-problems" role="alert"><li v-for="p in grant.problems" :key="p">{{ p }}</li></ul>
     <p v-if="s.read && !s.grants.length" class="muted">No grants: only admins reach a database.</p>
     <div v-else-if="s.grants.length" class="srv-table-wrap">
     <table class="data-table srv-table srv-grants">
@@ -268,15 +277,11 @@ export default {
           <label>Name <input v-model="add.name" class="mono" name="name" autocomplete="off" spellcheck="false"><small class="srv-field-hint">{{ nameHint }}</small></label>
           <label class="inline"><input type="checkbox" name="admin" v-model="add.admin"> Admin (every database, the admin API and these tabs)</label>
           <p class="muted">The server makes a token for the user and shows it once.</p>
-          <ul v-if="add.problems.length" class="srv-problems" role="alert"><li v-for="p in add.problems" :key="p">{{ p }}</li></ul>
-          <div v-if="add.error" class="notice srv-notice srv-error" role="alert">
-            <div class="srv-notice-text"><span>{{ add.error.text }}</span>
-              <p v-if="add.error.help" class="srv-help">{{ add.error.help }}</p></div>
-          </div>
           <div class="store-dialog-buttons">
             <button type="submit" class="btn primary" :disabled="add.busy">{{ add.busy ? 'Working…' : 'Add' }}</button>
             <button type="button" class="btn" :disabled="add.busy" @click="closeAdd">Cancel</button>
           </div>
+          <form-error :error="add.error" :problems="add.problems"></form-error>
         </div>
       </form>
     </dialog>
