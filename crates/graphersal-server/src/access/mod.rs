@@ -29,6 +29,7 @@ use std::time::SystemTime;
 
 use graphersal_serve::Request;
 
+pub(crate) use auth::sessions_over_cap;
 pub use auth::{
     AuthError, AuthStep, Authenticator, BrowserSession, MemorySessions, OperatorToken,
     SESSION_COOKIE, SessionCookie, SessionLimits, SessionTable, UserTokens, authenticate_with,
@@ -45,6 +46,10 @@ use crate::audit::{Audit, AuditEvent};
 use crate::error::ServerError;
 use crate::layout::ServerDir;
 use crate::registry::Registry;
+
+/// The most browser sessions one user holds (SEC L3): a new login drops the user's oldest
+/// session beyond it, so a login loop cannot grow `sessions/browser.json` without bound.
+pub const MAX_BROWSER_SESSIONS_PER_USER: usize = 32;
 
 /// The first admin of a server directory, made because it had no `access.toml`: its token,
 /// to be shown ONCE.
@@ -215,7 +220,7 @@ impl Access {
         let id = Secret::generate().map_err(AuthError::Unavailable)?;
         let session = BrowserSession::new(principal.id.clone(), hash, SystemTime::now());
         self.sessions
-            .insert(id.hash(), session)
+            .insert_capped(id.hash(), session, MAX_BROWSER_SESSIONS_PER_USER)
             .map_err(|err| AuthError::Unavailable(err.to_string()))?;
         self.audit
             .with_actor(principal.identity())

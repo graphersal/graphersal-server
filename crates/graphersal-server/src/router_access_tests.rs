@@ -1457,7 +1457,7 @@ fn access_off_makes_every_request_an_admin() {
 
 #[test]
 fn access_on_is_the_default_mode() {
-    assert_eq!(Modes::default(), modes(true, false, 400 * 24 * 60 * 60));
+    assert_eq!(Modes::default(), modes(true, false, 30 * 24 * 60 * 60));
     let config = crate::config::ServerConfig::default();
     assert_eq!(Modes::of(&config), Modes::default());
     let config = crate::config::ServerConfig::parse(
@@ -1487,10 +1487,11 @@ fn login_and_logout_cookies(fx: &Fixture, token: &str) -> (String, String) {
 
 #[test]
 fn the_login_cookie_is_secure_only_on_https_and_persistent() {
-    // http (the default): no Secure, Max-Age 400 days; the clear cookie Max-Age=0.
+    // http (the default): no Secure, Max-Age 30 days (the default lifetime); the clear cookie
+    // Max-Age=0.
     let fx = fixture_with("modes-http", Vec::new(), Modes::default());
     let (set, cleared) = login_and_logout_cookies(&fx, &fx.bob.clone());
-    assert!(set.contains("; Max-Age=34560000;"), "{set}");
+    assert!(set.contains("; Max-Age=2592000;"), "{set}");
     assert!(!set.contains("Secure"), "{set}");
     assert!(cleared.starts_with("gs_session=;") && cleared.contains("; Max-Age=0;"));
     assert!(!cleared.contains("Secure"), "{cleared}");
@@ -4012,4 +4013,182 @@ fn a_layer_reset_over_http_discards_the_changes_and_keeps_grants_aliases_and_mcp
     for db in ["l0", "l9"] {
         let _ = fx.loader.unload(db);
     }
+}
+
+// SEC-FIX: the findings of the security review that the router fixes.
+
+/// SEC L1: with access control off, `everyone` may not make a user or a token (it would make
+/// itself an admin token and get past the shutdown and server-backup refusals); an admin's
+/// own token still may, and nothing changed for the refused requests.
+#[test]
+fn access_off_refuses_new_users_and_tokens_to_everyone() {
+    let fx = fixture_with(
+        "sec-l1-access-off",
+        Vec::new(),
+        modes(false, false, super::DEFAULT_COOKIE_MAX_AGE_SECS),
+    );
+    for who in [Who::Anonymous, Who::Bearer(&fx.carol), Who::Bearer("nope")] {
+        let created = post(&fx, who, "/api/admin/users", json!({"name": "eve"}));
+        assert_eq!(created.status(), 403, "{}", json_of(&created));
+        assert!(
+            json_of(&created)["error"]
+                .as_str()
+                .unwrap()
+                .contains("also with access control off")
+        );
+        for url in [
+            "/api/admin/users/alice/token",
+            "/api/admin/users/alice/token/",
+        ] {
+            let issued = post(&fx, who, url, json!({}));
+            assert_eq!(issued.status(), 403, "{url}: {}", json_of(&issued));
+        }
+    }
+    assert!(fx.access.file().user("eve").is_none());
+    // alice's token is still the one she holds: no rotation happened.
+    assert_eq!(
+        expect(get(&fx, Who::Bearer(&fx.alice), "/api/info"), 200)["principal"]["id"],
+        "alice"
+    );
+    // Reading the users stays open to everyone (access control is off), and an admin's
+    // token still makes users.
+    expect(get(&fx, Who::Anonymous, "/api/admin/users"), 200);
+    let created = post(
+        &fx,
+        Who::Bearer(&fx.alice),
+        "/api/admin/users",
+        json!({"name": "eve"}),
+    );
+    assert_eq!(created.status(), 201, "{}", json_of(&created));
+    // With access control on, an admin is not refused either.
+    let on = fixture("sec-l1-access-on");
+    let issued = post(
+        &on,
+        Who::Bearer(OPERATOR),
+        "/api/admin/users/bob/token",
+        json!({}),
+    );
+    assert_eq!(issued.status(), 200, "{}", json_of(&issued));
+}
+
+/// SEC M3, the reproduced scenario: the operator's page commits under the client id
+/// `victim-page-1`; bob (read grant only) reads the change feed and does not see that id, and
+/// his `POST /api/cancel` with the same `X-Graphersal-Client` stops nothing; the operator's
+/// own page still cancels its run.
+#[test]
+fn a_reader_cannot_see_or_cancel_another_identitys_runs() {
+    let fx = fixture("sec-m3-cancel");
+    let victim = [("X-Graphersal-Client", "victim-page-1")];
+    let commit = send(
+        &fx,
+        Who::Bearer(OPERATOR),
+        Method::Post,
+        "/db/r/api/execute",
+        Some(json!({"script": WRITE})),
+        &victim,
+    );
+    assert_eq!(commit.status(), 200);
+    let feed = expect(get(&fx, Who::Bearer(&fx.bob), "/db/r/api/changes"), 200);
+    assert!(!feed.to_string().contains("victim-page-1"), "{feed}");
+    let last = feed["recent"].as_array().unwrap().last().unwrap().clone();
+    assert_eq!(last["by"], super::mounts::OTHER_IDENTITY, "{feed}");
+    // The writer sees its own page id as it sent it (the playground tells its own changes).
+    let own = expect(
+        send(
+            &fx,
+            Who::Bearer(OPERATOR),
+            Method::Get,
+            "/db/r/api/changes",
+            None,
+            &victim,
+        ),
+        200,
+    );
+    assert_eq!(
+        own["recent"].as_array().unwrap().last().unwrap()["by"],
+        "victim-page-1",
+        "{own}"
+    );
+
+    // The operator's endless query, under the same client id.
+    std::thread::scope(|scope| {
+        let page = scope.spawn(|| {
+            send(
+                &fx,
+                Who::Bearer(OPERATOR),
+                Method::Post,
+                "/db/r/api/execute",
+                Some(json!({"script": "let n = 0; loop { n += 1; }"})),
+                &victim,
+            )
+        });
+        let deadline = std::time::Instant::now() + WAIT;
+        loop {
+            let runs = expect(
+                get(&fx, Who::Bearer(OPERATOR), "/api/admin/databases/r/runs"),
+                200,
+            );
+            if runs["runs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|run| run["state"] == "running")
+            {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "the run never showed");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        // bob with the same header: his own identity, so nothing of his to cancel.
+        let answer = send(
+            &fx,
+            Who::Bearer(&fx.bob),
+            Method::Post,
+            "/db/r/api/cancel",
+            None,
+            &victim,
+        );
+        assert_eq!(expect(answer, 200)["cancelled"], false);
+        let answer = send(
+            &fx,
+            Who::Bearer(&fx.bob),
+            Method::Post,
+            "/db/r/api/cancel",
+            None,
+            &[],
+        );
+        assert_eq!(
+            expect(answer, 200)["cancelled"],
+            false,
+            "no shared empty key"
+        );
+        let runs = expect(
+            get(&fx, Who::Bearer(OPERATOR), "/api/admin/databases/r/runs"),
+            200,
+        );
+        assert!(
+            runs["runs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|run| run["state"] == "running" && run["cancelled"] == false),
+            "{runs}"
+        );
+        // The operator's own page stops it.
+        let answer = send(
+            &fx,
+            Who::Bearer(OPERATOR),
+            Method::Post,
+            "/db/r/api/cancel",
+            None,
+            &victim,
+        );
+        assert_eq!(expect(answer, 200)["cancelled"], true);
+        let finished = page.join().unwrap();
+        assert!(
+            String::from_utf8_lossy(finished.body()).contains("cancel"),
+            "{}",
+            String::from_utf8_lossy(finished.body())
+        );
+    });
 }

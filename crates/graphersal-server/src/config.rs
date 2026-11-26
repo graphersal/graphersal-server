@@ -25,9 +25,9 @@
 //! [limits.query]              # query limits of every database (crate::limits); none by default
 //! timeout_ms = 30000          # a database.toml's [limits.query] overrides single keys
 //!
-//! [sessions]                  # browser sessions (they survive a restart); unlimited by default
-//! lifetime_secs = 2592000     # the longest a session lasts after its login
-//! idle_timeout_secs = 604800  # the longest a session lasts after its last request
+//! [sessions]                  # browser sessions (they survive a restart); 0 = no limit
+//! lifetime_secs = 2592000     # the longest a session lasts after its login (default 30 days)
+//! idle_timeout_secs = 604800  # the longest after its last request (default 7 days)
 //!
 //! [access]
 //! enabled = true              # false: no access control, every request is an admin
@@ -191,7 +191,8 @@ pub struct HttpConfig {
 }
 
 /// How long browser sessions last (`[sessions]` of `server.toml`), read at start. Both keys
-/// are optional: a missing key is no limit (the default). Sessions survive a restart either
+/// are optional: a missing key is its default (30 days since the login, 7 days since the last
+/// request), `0` is no limit. Sessions survive a restart either
 /// way (there is no setting for that: `crate::sessions`).
 ///
 /// `#[non_exhaustive]`: further settings may be added.
@@ -199,22 +200,49 @@ pub struct HttpConfig {
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct SessionsConfig {
-    /// The longest a browser session lasts after its login, in seconds (at least 1; missing:
-    /// no limit). The browser logs in again afterwards.
+    /// The longest a browser session lasts after its login, in seconds (missing:
+    /// [`DEFAULT_SESSION_LIFETIME_SECS`], 30 days; `0`: no limit). The browser logs in again
+    /// afterwards.
     #[serde(default)]
     pub lifetime_secs: Option<u64>,
-    /// The longest a browser session lasts after its last request, in seconds (at least 1;
-    /// missing: no limit). Counted coarsely: the last request is recorded at most every minute.
+    /// The longest a browser session lasts after its last request, in seconds (missing:
+    /// [`DEFAULT_SESSION_IDLE_TIMEOUT_SECS`], 7 days; `0`: no limit). Counted coarsely: the last
+    /// request is recorded at most every minute.
     #[serde(default)]
     pub idle_timeout_secs: Option<u64>,
 }
 
+/// The default lifetime of a browser session ([`SessionsConfig::lifetime_secs`]): 30 days.
+pub const DEFAULT_SESSION_LIFETIME_SECS: u64 = 30 * 24 * 60 * 60;
+
+/// The default idle timeout of a browser session ([`SessionsConfig::idle_timeout_secs`]): 7
+/// days.
+pub const DEFAULT_SESSION_IDLE_TIMEOUT_SECS: u64 = 7 * 24 * 60 * 60;
+
+/// A session limit in seconds as it applies: missing = `default`, `0` = no limit (`None`).
+fn session_limit(value: Option<u64>, default: u64) -> Option<u64> {
+    match value.unwrap_or(default) {
+        0 => None,
+        secs => Some(secs),
+    }
+}
+
 impl SessionsConfig {
+    /// The lifetime that applies, in seconds (`None`: no limit).
+    pub fn effective_lifetime_secs(&self) -> Option<u64> {
+        session_limit(self.lifetime_secs, DEFAULT_SESSION_LIFETIME_SECS)
+    }
+
+    /// The idle timeout that applies, in seconds (`None`: no limit).
+    pub fn effective_idle_timeout_secs(&self) -> Option<u64> {
+        session_limit(self.idle_timeout_secs, DEFAULT_SESSION_IDLE_TIMEOUT_SECS)
+    }
+
     /// The limits the browser sessions run with.
     pub fn limits(&self) -> SessionLimits {
         SessionLimits::unlimited()
-            .with_lifetime(self.lifetime_secs.map(Duration::from_secs))
-            .with_idle_timeout(self.idle_timeout_secs.map(Duration::from_secs))
+            .with_lifetime(self.effective_lifetime_secs().map(Duration::from_secs))
+            .with_idle_timeout(self.effective_idle_timeout_secs().map(Duration::from_secs))
     }
 }
 
@@ -476,16 +504,6 @@ impl ServerConfig {
                     .to_string(),
             ));
         }
-        for (key, value) in [
-            ("lifetime_secs", config.sessions.lifetime_secs),
-            ("idle_timeout_secs", config.sessions.idle_timeout_secs),
-        ] {
-            if value == Some(0) {
-                return Err(invalid(format!(
-                    "sessions.{key}: must be at least 1 (leave it out for no limit)"
-                )));
-            }
-        }
         config.http.allowed_hosts = allowed_hosts(&config.http.allowed_hosts)
             .map_err(|err| invalid(format!("http.allowed_hosts: {err}")))?;
         if config
@@ -696,14 +714,14 @@ pub fn default_config_text() -> String {
          \n\
          [sessions]\n\
          # Browser sessions (the login cookie) and MCP sessions survive a restart (kept in\n\
-         # sessions/, hashes only). How long a browser session lasts, in seconds; no limit\n\
-         # when left out. Read when the server starts.\n\
-         # Since its login (30 days here):\n\
+         # sessions/, hashes only). How long a browser session lasts, in seconds; 0 = no\n\
+         # limit. Read when the server starts (the admin API applies a change at once).\n\
+         # Since its login (default 30 days):\n\
          # lifetime_secs = 2592000\n\
-         # Since its last request (7 days here; counted coarsely, up to a minute):\n\
+         # Since its last request (default 7 days; counted coarsely, up to a minute):\n\
          # idle_timeout_secs = 604800\n\
-         # The login cookie lasts as long as lifetime_secs, else 400 days (a browser restart\n\
-         # keeps the login).\n\
+         # The login cookie lasts as long as the lifetime (400 days, the longest a browser\n\
+         # keeps a cookie, with lifetime_secs = 0).\n\
          \n\
          [access]\n\
          # Access control: requests need a user token or a browser login (access.toml).\n\
@@ -860,11 +878,18 @@ mod tests {
         }
     }
 
+    /// SEC L4: browser sessions expire by default (30 days since the login, 7 days since the
+    /// last request); `0` lifts a limit.
     #[test]
-    fn session_limits_are_unlimited_by_default_and_at_least_1() {
+    fn session_limits_have_defaults_and_0_lifts_them() {
         let config = parse(&default_config_text()).unwrap();
         assert_eq!(config.sessions, SessionsConfig::default());
-        assert_eq!(config.sessions.limits(), SessionLimits::unlimited());
+        assert_eq!(
+            config.sessions.limits(),
+            SessionLimits::unlimited()
+                .with_lifetime(Some(Duration::from_secs(30 * 86_400)))
+                .with_idle_timeout(Some(Duration::from_secs(7 * 86_400)))
+        );
         assert!(default_config_text().contains("[sessions]"));
         let limits = parse("[sessions]\nlifetime_secs = 3600\nidle_timeout_secs = 60")
             .unwrap()
@@ -872,16 +897,9 @@ mod tests {
             .limits();
         assert_eq!(limits.lifetime, Some(Duration::from_secs(3600)));
         assert_eq!(limits.idle_timeout, Some(Duration::from_secs(60)));
-        for (text, key) in [
-            ("[sessions]\nlifetime_secs = 0", "sessions.lifetime_secs"),
-            (
-                "[sessions]\nidle_timeout_secs = 0",
-                "sessions.idle_timeout_secs",
-            ),
-        ] {
-            let err = parse(text).unwrap_err().to_string();
-            assert!(err.contains(key) && err.contains("no limit"), "{err}");
-        }
+        let lifted = parse("[sessions]\nlifetime_secs = 0\nidle_timeout_secs = 0").unwrap();
+        assert_eq!(lifted.sessions.limits(), SessionLimits::unlimited());
+        assert_eq!(lifted.sessions.effective_lifetime_secs(), None);
         assert!(parse("[sessions]\nenabled = false").is_err());
     }
 

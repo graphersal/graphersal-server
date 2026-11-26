@@ -277,13 +277,13 @@ pub const KEYS: &[Key] = &[
         "sessions.lifetime_secs",
         Kind::Count,
         Applies::Now,
-        "The longest a browser session lasts after its login, in seconds (unset: no limit).",
+        "The longest a browser session lasts after its login, in seconds (unset: 30 days; 0: no limit).",
     ),
     key(
         "sessions.idle_timeout_secs",
         Kind::Count,
         Applies::Now,
-        "The longest a browser session lasts after its last request, in seconds (unset: no limit).",
+        "The longest a browser session lasts after its last request, in seconds (unset: 7 days; 0: no limit).",
     ),
     key(
         "access.enabled",
@@ -814,13 +814,13 @@ impl LiveConfig {
             == PublicScheme::Https
     }
 
-    /// The login cookie's `Max-Age` now (`[sessions] lifetime_secs`, else the default).
+    /// The login cookie's `Max-Age` now (the session lifetime, else 400 days).
     pub(crate) fn cookie_max_age_secs(&self) -> u64 {
         self.applied
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .sessions
-            .lifetime_secs
+            .effective_lifetime_secs()
             .unwrap_or(crate::router::DEFAULT_COOKIE_MAX_AGE_SECS)
     }
 
@@ -1049,7 +1049,7 @@ mod tests {
             ("http.public_scheme", json!("ftp"), "http"),
             ("http.allowed_hosts", json!(["a b"]), "allowed_hosts"),
             ("limits.memory_limit", json!("lots"), "memory_limit"),
-            ("sessions.lifetime_secs", json!(0), "sessions.lifetime_secs"),
+            ("mcp.max_sessions", json!(0), "mcp.max_sessions"),
         ] {
             let changes = [(name.to_string(), toml_of_json(name, &value).unwrap())];
             let err = edit(&text, path(), &changes).unwrap_err().to_string();

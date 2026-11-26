@@ -5612,7 +5612,7 @@ fn server_settings_apply_at_once_or_after_a_restart_over_http() {
     let token = user["token"].as_str().unwrap().to_string();
     let before = login_cookie_header(address, &token);
     assert!(
-        before.contains("Max-Age=34560000") && !before.contains("Secure"),
+        before.contains("Max-Age=2592000") && !before.contains("Secure"),
         "{before}"
     );
     let old_cookie = before.split(';').next().unwrap().to_string();

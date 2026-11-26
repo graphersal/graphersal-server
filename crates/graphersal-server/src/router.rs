@@ -5,7 +5,7 @@
 //! principal:
 //!
 //! - `POST /api/login {"token"}`: a browser session for a user token, its id in the
-//!   `gs_session` cookie (`Max-Age=<[sessions] lifetime_secs, else 400 days>; HttpOnly;
+//!   `gs_session` cookie (`Max-Age=<the session lifetime (default 30 days), else 400 days>; HttpOnly;
 //!   SameSite=Strict; Path=/`, plus `Secure` when `[http] public_scheme = "https"`: a browser
 //!   restart keeps the login); `POST /api/logout` ends it and clears the cookie (`Max-Age=0`).
 //!   Both run before authentication (a stale cookie must not lock a browser out of logging in
@@ -115,8 +115,8 @@ pub(crate) struct Router {
     stop_hook: Option<crate::serve::StopHook>,
 }
 
-/// The default `Max-Age` of the login cookie without `[sessions] lifetime_secs`: 400 days, the
-/// longest a browser keeps a cookie.
+/// The `Max-Age` of the login cookie without a session lifetime (`[sessions] lifetime_secs =
+/// 0`): 400 days, the longest a browser keeps a cookie.
 pub(crate) const DEFAULT_COOKIE_MAX_AGE_SECS: u64 = 400 * 24 * 60 * 60;
 
 /// The modes of `server.toml` the router answers in, read at start.
@@ -127,8 +127,9 @@ pub(crate) struct Modes {
     /// `[http] public_scheme = "https"`: the login cookie gets `Secure`, and the API
     /// descriptions name `https://` URLs ([`crate::openapi`]).
     pub(crate) secure_cookies: bool,
-    /// The login cookie's `Max-Age` in seconds: `[sessions] lifetime_secs`, else
-    /// [`DEFAULT_COOKIE_MAX_AGE_SECS`] (a browser restart keeps the login).
+    /// The login cookie's `Max-Age` in seconds: the session lifetime (`[sessions]
+    /// lifetime_secs`, default 30 days), else [`DEFAULT_COOKIE_MAX_AGE_SECS`] (a browser
+    /// restart keeps the login).
     pub(crate) cookie_max_age_secs: u64,
 }
 
@@ -137,7 +138,7 @@ impl Default for Modes {
         Self {
             access_enabled: true,
             secure_cookies: false,
-            cookie_max_age_secs: DEFAULT_COOKIE_MAX_AGE_SECS,
+            cookie_max_age_secs: crate::config::DEFAULT_SESSION_LIFETIME_SECS,
         }
     }
 }
@@ -150,7 +151,7 @@ impl Modes {
             secure_cookies: config.http.public_scheme == crate::config::PublicScheme::Https,
             cookie_max_age_secs: config
                 .sessions
-                .lifetime_secs
+                .effective_lifetime_secs()
                 .unwrap_or(DEFAULT_COOKIE_MAX_AGE_SECS),
         }
     }
@@ -456,6 +457,19 @@ impl Router {
             let admin = crate::ops::Admin::online(loader.clone())
                 .with_audit(access.audit_as(&principal))
                 .with_access(access.clone(), principal.clone());
+            if principal.kind == crate::access::PrincipalKind::Everyone
+                && crate::admin_api::issues_credentials(&method, endpoint)
+            {
+                return Answer::Response(Response::json(
+                    403,
+                    &serde_json::json!({
+                        "error": "making a user or a token needs the operator token or an admin \
+                                  user's token, also with access control off",
+                        "help": "run graphersal-server user add NAME (or user token NAME) --dir \
+                                 DIR as the directory's owner, or send an admin user's token",
+                    }),
+                ));
+            }
             if crate::admin_api::is_server_backup(&method, endpoint) {
                 if principal.kind == crate::access::PrincipalKind::Everyone {
                     return Answer::Response(Response::json(
@@ -585,7 +599,14 @@ impl Router {
             forwarded.mark_read_only();
         }
         let identity = forwarded.identity().map(str::to_string);
+        let feed = forwarded.method() == &Method::Get && rest == "api/changes";
         let answer = self.lifecycle.handle(forwarded);
+        // The change feed names client ids: only the reader's own are shown (SEC M3).
+        let answer = if feed {
+            mounts::own_changes(answer, identity.as_deref())
+        } else {
+            answer
+        };
         if let (Some(control), Some(sent)) = (mcp_control, &buffered) {
             let new_session = crate::mcp::header_of(answer.headers(), crate::mcp::SESSION_HEADER);
             control.usage().observe(

@@ -82,8 +82,9 @@ pub use admin::{Renamed, TmpBuild};
 pub use audit::{Audit, AuditEvent, AuditSink};
 pub use config::{
     AccessConfig, DEFAULT_HEADER_TIMEOUT_SECS, DEFAULT_IDLE_TIMEOUT_SECS, DEFAULT_LISTEN,
-    DEFAULT_MAX_CONNECTIONS, DEFAULT_MCP_SESSIONS, DatabaseDefaults, HttpConfig, Limits, McpConfig,
-    PublicScheme, ServerConfig, SessionsConfig,
+    DEFAULT_MAX_CONNECTIONS, DEFAULT_MCP_SESSIONS, DEFAULT_SESSION_IDLE_TIMEOUT_SECS,
+    DEFAULT_SESSION_LIFETIME_SECS, DatabaseDefaults, HttpConfig, Limits, McpConfig, PublicScheme,
+    ServerConfig, SessionsConfig,
 };
 pub use database::{DatabaseConfig, DatabaseKind, DatabaseRole};
 pub use error::ServerError;
