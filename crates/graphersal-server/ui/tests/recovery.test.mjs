@@ -109,7 +109,8 @@ test('verify texts: ok, damaged, maintenance, a failure, every database', () => 
   const all = verifyAllText({ results: [ok, bad, { database: 'x', ok: false, error: 'boom' }], ok: false });
   assert.equal(all.tone, 'error');
   assert.match(all.text, /^2 databases of 3 damaged or not verifiable: acme, x\./);
-  assert.equal(all.lines.length, 2);
+  // B-VERIFY: each database's line is followed by its problem lines (acme has two).
+  assert.equal(all.lines.length, 4);
   assert.equal(verifyAllText({ results: [] }).text, 'No databases to verify.');
   assert.equal(outcomeText('verify', 'acme', ok), verifyText(ok));
 });

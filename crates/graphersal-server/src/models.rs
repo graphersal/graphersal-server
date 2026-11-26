@@ -465,6 +465,15 @@ impl ModelsDir {
         out
     }
 
+    /// The repository of the model blob `hash` (SHA-256 hex) in `models/blobs/`, from its
+    /// manifest: `None` when `models/` lacks the blob or it is not a readable model archive.
+    pub fn repo_of_blob(&self, hash: &str) -> Option<String> {
+        if hash.len() < 3 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
+        }
+        manifest_of(&self.blob_path(hash)).ok().flatten()?.repo
+    }
+
     /// Whether `models/blobs/` holds a model of the repository `repo` (read from the blobs'
     /// manifests; a directory that cannot be read holds nothing).
     pub fn holds(&self, repo: &str) -> bool {

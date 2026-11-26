@@ -27,7 +27,12 @@
 //! `formatVersion`, `backend`, `commitSeq`, `lastCommitAt`, `layerBase`, `snapshots`,
 //! `walBytes`, `clean`; read-only) or `storeError`, and `recovery` (round 3 B-CRASH:
 //! `maintenance` (bool), `damage` (the damage report of a database in maintenance, else
-//! `null`), `help` (in maintenance: repair or restore), `uncleanShutdown` (`null`, or
+//! `null`), `needsModel` (B-VERIFY: the missing model's repository of a `needs-model`
+//! database, else `null`), `lastVerify` (B-VERIFY: `null` = never verified, or the last verify
+//! kept in `databases/<name>/verify.json`: `version`, `atMs`, `verdict` (`ok` | `needs-model`
+//! | `damaged` | `failed`), `how`, `problemCount`, `problems` (at most 100, the verify result's
+//! problem objects), `modelsMissing`, `error` (`failed`), `headline` (in words)), `help` (in
+//! maintenance: repair or restore), `uncleanShutdown` (`null`, or
 //! `{"detectedAtMs", "previousPid", "check"}` when the last unclean shutdown's check covered
 //! this database: `check` = its `DatabaseCheck`, `crate::recovery`)).
 //!
@@ -246,9 +251,20 @@ fn recovery_json(admin: &Admin, entry: &DatabaseEntry) -> Value {
             .find(|c| c["name"].as_str() == Some(entry.name.as_str()))
             .cloned()
     });
+    let needs_model = match &entry.state {
+        crate::registry::DbState::NeedsModel { repo } => Some(repo.clone()),
+        _ => None,
+    };
+    let last = crate::recovery::LastVerify::read(&entry.dir);
     let mut out = json!({
         "maintenance": damage.is_some(),
         "damage": damage,
+        "needsModel": needs_model,
+        "lastVerify": last.as_ref().map(|last| {
+            let mut value = serde_json::to_value(last).unwrap_or(Value::Null);
+            value["headline"] = json!(last.headline());
+            value
+        }),
         "uncleanShutdown": check.map(|check| json!({
             "detectedAtMs": unclean["detectedAtMs"],
             "previousPid": unclean["previousPid"],

@@ -51,7 +51,7 @@ databases and missing models. Paths and commands are never wrapped.
 | `db alias set ALIAS DATABASE [--mcp\|--no-mcp]`, `db alias remove ALIAS`, `db alias rename OLD NEW` | aliases (a flip takes effect at once, also for the grants on the alias; a rename moves open MCP sessions and the alias's grants with it; a removal removes its grants) |
 | `db backup NAME`, `db backups NAME` | verified ZIP backups in `DIR/backups/NAME/` |
 | `db restore NAME BACKUP [--name NEW] [--mcp\|--no-mcp]` | over NAME (unloaded; it keeps its MCP setting) or into the new database NEW |
-| `db verify NAME`, `db verify --all` | the engine's scrub of NAME's Store (a loaded one: its open Store; damage found makes it read-only, state `maintenance`) or of every database's; exit 1 when damage is found |
+| `db verify NAME`, `db verify --all` | the engine's scrub of NAME's Store (a loaded one: its open Store; damage found makes it read-only, state `maintenance`) or of every database's; a missing embedding model blob is named as its model with the `models add` command that fixes it (state `needs-model`, not damage); the result is kept as the database's last verify (`db info` shows it); exit 1 when damage or a missing model is found |
 | `db repair NAME [--name NEW]` | a repaired copy of the plain database NAME as the new database NEW (default `NAME-repaired`; never in place, NAME is not changed): what was rebuilt, lost or diverged; the copy is verified |
 | `db swap NAME WITH --yes` | WITH (a repaired copy) takes the name NAME: NAME moves to `DIR/trash/`, WITH's name goes away; NAME's grants, aliases and settings stay; both unloaded first, NAME loaded again when it was |
 | `db export NAME --out FILE [--no-models] [--materialize]` | a packed snapshot (`.gsnap`) |

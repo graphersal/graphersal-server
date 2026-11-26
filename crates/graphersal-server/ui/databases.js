@@ -63,12 +63,26 @@ export const SERVER_OPENAPI_HREF = 'openapi.json';
  * The list's rows from a `GET /api/admin/databases` answer:
  * `{rows: [{name, href, state, stateText, tone, kind, role, readOnly, autoLoad, description,
  * base, created, aliasOf, reason, model, sizeBytes, memoryBytes, memoryReported, sharedMemoryBytes,
- * pooled, pooledBy, linkWarning, revision}], skipped, aliases: [{alias, target}], aliasesRevision, problems: [text]}`, sorted by
+ * pooled, pooledBy, linkWarning, revision, lastVerify}], skipped, aliases: [{alias, target}], aliasesRevision, problems: [text]}`, sorted by
  * name (`revision`, `aliasesRevision`: what a change of the row's settings or of the aliases
  * sends, '' from an older server); `skipped` counts the
  * malformed entries. An unknown `state` is shown as it is (a newer server). Throws an Error when
  * the answer has no `databases` list.
  */
+/**
+ * A row's last verify (`lastVerify` of a list entry): `{atMs, verdict, problemCount,
+ * modelsMissing}`, or null (never verified, an older server, a malformed value).
+ */
+export function lastVerifyOf(v) {
+  if (!v || typeof v !== 'object' || typeof v.verdict !== 'string') return null;
+  return {
+    atMs: typeof v.atMs === 'number' ? v.atMs : null,
+    verdict: v.verdict,
+    problemCount: typeof v.problemCount === 'number' ? v.problemCount : 0,
+    modelsMissing: Array.isArray(v.modelsMissing) ? v.modelsMissing.filter((m) => typeof m === 'string' && m) : [],
+  };
+}
+
 export function databaseRows(answer) {
   if (!answer || typeof answer !== 'object' || !Array.isArray(answer.databases)) {
     throw new Error('the server answered no database list');
@@ -105,6 +119,7 @@ export function databaseRows(answer) {
       pooledBy: Array.isArray(d.pooledBy) ? d.pooledBy.filter((x) => typeof x === 'string' && x) : [],
       linkWarning: typeof d.linkWarning === 'string' ? d.linkWarning : '',
       revision: typeof d.revision === 'string' ? d.revision : '',
+      lastVerify: lastVerifyOf(d.lastVerify),
     });
   }
   rows.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));

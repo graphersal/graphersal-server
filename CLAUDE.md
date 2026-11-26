@@ -449,6 +449,34 @@ from published files). When this file disagrees with the code, the code wins: sa
   `ui/tests/recovery.test.mjs`. Docs: `book/src/reference/server_directory.md` "`server.open` and
   `recovery.json`", `book/src/troubleshooting.md` "A server was killed by force" and "A database
   is in maintenance", `book/src/reference/admin_api.md` "Verify, repair and swap".
+  Round 4 B-VERIFY: `ProblemFacts` gained `kind` (`damage` | `model`), `model`, `candidates`,
+  `blob`, `shared`, `remedy` (serde defaults: old `recovery.json` reads); `VerifyFacts` gained
+  `verdict` (`ok` | `needs-model` | `damaged`; `verdict()` derives it for old reports) and
+  `models_missing`; `VerifyFacts::name_models(known, missing, shared)` names a missing blob
+  (engine text "the blob is missing", path `blobs/../<hash>`) by `known(hash)` (the open plain
+  Store's catalog via `GraphStorage::definitions` + `ModelDefinition::blob().hash_hex()`, else
+  `ModelsDir::repo_of_blob` = the manifest of `models/blobs/<hash>`), else by elimination among
+  `VerifyReport::models` in `ModelState::Missing` (graphersal 0.8.0 exposes no blob hash per
+  `ModelInfo`); only model problems = verdict `needs-model`. `Admin::verify` then
+  `follow_models` (plain, not base, state unloaded/needs-model: `Registry::set_needs_model` +
+  state `needs-model`, so `models add` resolves it; a `needs-model` db verifying ok: marker
+  cleared, `unloaded`; loaded/layer/base untouched) and `keep_last_verify`: `LastVerify`
+  (`recovery.rs`, `databases/<name>/verify.json` = `LAST_VERIFY_FILE`, `write_atomic`, version 1,
+  first 100 problems; `LastVerify::failed` for a verify that failed; read on demand, no cache:
+  it lives and dies with the database directory). JSON: verify result `verdict`, `modelsMissing`,
+  `help` = `model_help` for needs-model; list rows `lastVerify` (`last_verify_brief`); settings
+  `recovery.needsModel` + `recovery.lastVerify` (+ `headline`). Console: `verify_note` /
+  `problem_text` / `render_verify_all` ("needs model", `models add` commands), `db info` rows
+  "needs model" + "last verify". UI: `admin-api.js` `verifyVerdict`, `problemText`,
+  `modelRemedy`, `verifyHelp`, `verifyAllText(results, {total, cancelled})`, `verifyAllLabel`,
+  `runVerifyAll` (Verify all = per-database calls from the UI: progress `x/y`, Cancel before the
+  next), `verifyBadge`; `databases.js` `lastVerifyOf` (row `lastVerify`); `settings-api.js`
+  `verifyView` (one wording: last verify / needs-model / never verified), block
+  `data-settings-verify` in `settings-tab.js`. Tests: `models_tests.rs`
+  `a_verify_names_a_missing_model_blob_and_its_remedy_and_keeps_the_last_result`,
+  `name_models_by_catalog_elimination_and_leaves_other_blobs_as_damage`,
+  `a_loaded_database_names_a_vanished_model_blob_from_its_catalog_and_stays_loaded`, console
+  `db_verify_names_a_missing_model_and_the_command_that_adds_it`, `ui/tests/verify.test.mjs`.
 - `server_backup` (round 3 B-CONF, public): the backup of the whole server in ONE ZIP and its
   restore into a NEW directory. Container `archive` (private: stored entries, zip64 always,
   CRC-32 + SHA-256 (`ring`) per entry; `ZipWriter::add_bytes/add_file/finish`, one-pass

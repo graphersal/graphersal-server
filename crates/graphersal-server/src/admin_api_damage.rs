@@ -11,12 +11,22 @@
 //! | GET | `recovery` | | `200 {"uncleanShutdown": report \| null}` (the last unclean shutdown) |
 //!
 //! A verify result: `database`, `state` (afterwards; `maintenance` when the verify of the open
-//! Store found damage under the damage policy `maintenance`), `ok`, `how` (`open store` |
-//! `files`), `problems` (`[{"path", "offset", "reason"}]`), `notes`, `snapshotsChecked`,
+//! Store found damage under the damage policy `maintenance`; `needs-model` when a plain, not
+//! loaded database's only problems are missing embedding model blobs), `ok` (no problem at
+//! all), `verdict` (B-VERIFY: `ok` | `needs-model` (only embedding model blobs are missing: the
+//! graph data is intact, the remedy is adding the model, not a repair) | `damaged`), `how`
+//! (`open store` | `files`), `problems` (`[{"path", "offset", "reason", "kind"}]`; `kind`
+//! `damage`, or `model` for a missing model blob with `model` (its repository; else
+//! `candidates` when several models are missing), `blob` (the hash), `shared` (the server's
+//! `models/` holds it) and `remedy`), `modelsMissing`, `notes`, `snapshotsChecked`,
 //! `segmentsChecked`, `recordsChecked`, `firstCommit`, `lastCommit`, `modelsChecked`,
 //! `blobsChecked`, `damage` (a database in maintenance: the damage report), and when it is not
-//! ok `help` (repair into a new database, or restore a backup). A verify is synchronous (it
-//! reads the whole Store; the console waits up to 10 minutes).
+//! ok `help` (`damaged`: repair into a new database, or restore a backup; `needs-model`: add
+//! the model). Every verify is kept as the database's last verify (`databases/<name>/verify.json`,
+//! [`crate::recovery::LastVerify`]): the entry rows' `lastVerify` and the settings'
+//! `recovery.lastVerify`. A verify is synchronous (it reads the whole Store; the console waits
+//! up to 10 minutes; the web UI's Verify all calls the per-database route one database after
+//! the other, for its progress).
 //!
 //! A repair (synchronous as well) builds a NEW plain database from the damaged one with the
 //! engine's repair (never in place; default name `<name>-repaired`), verified before it is
@@ -42,6 +52,7 @@ use serde_json::{Value, json};
 use super::{body_of, entry_json, error_answer, relative};
 use crate::names::fold;
 use crate::ops::{Admin, Verified, repair_json};
+use crate::recovery::{VERDICT_DAMAGED, VERDICT_NEEDS_MODEL, VERDICT_OK, VerifyFacts};
 use crate::registry::DbState;
 
 /// `POST databases/<name>/repair`.
@@ -144,11 +155,41 @@ pub(crate) fn verify_json(verified: &Verified) -> Value {
     if let DbState::Maintenance { damage } = &verified.state {
         out["damage"] = Value::String(damage.clone());
     }
-    let damaged = !verified.facts.ok || matches!(verified.state, DbState::Maintenance { .. });
-    if damaged {
+    let maintenance = matches!(verified.state, DbState::Maintenance { .. });
+    let verdict = if maintenance {
+        VERDICT_DAMAGED
+    } else {
+        verified.facts.verdict()
+    };
+    out["verdict"] = Value::String(verdict.to_string());
+    if verdict == VERDICT_NEEDS_MODEL {
+        out["help"] = Value::String(model_help(&verified.facts));
+    } else if verdict != VERDICT_OK {
         out["help"] = Value::String(damage_help(&verified.name));
     }
     out
+}
+
+/// What to do about missing embedding models (verdict `needs-model`): add each one.
+pub(crate) fn model_help(facts: &VerifyFacts) -> String {
+    let mut parts = vec![
+        "the graph data is intact; only embedding model blobs are missing (not damage: no \
+         repair needed)"
+            .to_string(),
+    ];
+    for problem in &facts.problems {
+        if let Some(remedy) = &problem.remedy
+            && !parts.contains(remedy)
+        {
+            parts.push(remedy.clone());
+        }
+    }
+    parts.push(
+        "the admin API: POST /api/admin/models {\"path\": \"<model directory, .tar or \
+         .gsnap>\"} or {\"repo\": \"<owner/name>\"}"
+            .to_string(),
+    );
+    parts.join("; ")
 }
 
 /// What to do about the damaged database `name`.

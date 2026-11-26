@@ -6,7 +6,7 @@
 // the loaded session runs under now), MCP, grants, backups and the Store's creation
 // parameters (read-only). Imports only ./admin-api.js.
 
-import { sendAdmin, bytesText } from './admin-api.js';
+import { sendAdmin, bytesText, problemText, modelRemedy } from './admin-api.js';
 
 const seg = (name) => encodeURIComponent(String(name));
 const str = (v) => (typeof v === 'string' ? v : '');
@@ -250,6 +250,53 @@ export function recoveryView(answer = {}) {
     help: typeof r.help === 'string' ? r.help : '',
     unclean,
   };
+}
+
+/**
+ * The verify part of "Damage and recovery" (B-VERIFY), one wording for every source: the
+ * database's last verify (`recovery.lastVerify`), its `needs-model` state (`recovery.needsModel`)
+ * and the maintenance state. `{tone ('ok' | 'warn' | 'error' | ''), text, problems: [line],
+ * more (problems not listed), remedy}`:
+ *
+ * - never verified: `Never verified: Verify (Databases tab, the row's … menu) checks the whole Store.`
+ * - `Last verify <time>: no problem found.`
+ * - `Last verify <time>: the embedding model NAME is missing (the graph data is intact).` + the remedy
+ * - `Last verify <time>: N problems: its Store is damaged.` + repair or restore
+ * - `needs-model` without such a verify: `It needs the embedding model NAME …` + the remedy
+ */
+export function verifyView(answer = {}) {
+  const r = answer.recovery && typeof answer.recovery === 'object' ? answer.recovery : {};
+  const last = r.lastVerify && typeof r.lastVerify === 'object' && typeof r.lastVerify.verdict === 'string' ? r.lastVerify : null;
+  const needsModel = str(r.needsModel);
+  const problems = last ? arr(last.problems).map(problemText).filter(Boolean) : [];
+  const count = last && typeof last.problemCount === 'number' ? last.problemCount : problems.length;
+  const more = Math.max(0, count - problems.length);
+  const when = last && typeof last.atMs === 'number' ? new Date(last.atMs).toISOString().replace(/\.\d{3}Z$/, 'Z') : '';
+  const plural = (n, thing) => `${n} ${thing}${n === 1 ? '' : 's'}`;
+  const modelRemedyOf = (models) => modelRemedy({ ...(last || {}), modelsMissing: models });
+  if (!last) {
+    if (needsModel) {
+      return { tone: 'warn', text: `It needs the embedding model ${needsModel}: its blob is missing, so the database cannot load (the graph data is intact). Never verified: Verify checks the whole Store.`, problems: [], more: 0, remedy: modelRemedyOf([needsModel]) };
+    }
+    return { tone: '', text: "Never verified: Verify (Databases tab, the row's … menu) checks the whole Store.", problems: [], more: 0, remedy: '' };
+  }
+  const at = `Last verify ${when}`;
+  switch (last.verdict) {
+    case 'ok':
+      if (needsModel) {
+        return { tone: 'warn', text: `${at}: no problem found; since then it needs the embedding model ${needsModel} (a load found its blob missing).`, problems: [], more: 0, remedy: modelRemedyOf([needsModel]) };
+      }
+      return { tone: 'ok', text: `${at}: no problem found.`, problems: [], more: 0, remedy: '' };
+    case 'needs-model': {
+      const models = arr(last.modelsMissing).filter((m) => typeof m === 'string' && m);
+      const named = models.length ? models.join(', ') : needsModel || 'a model';
+      return { tone: 'warn', text: `${at}: the embedding model ${named} is missing (the graph data is intact; not damage).`, problems, more, remedy: modelRemedyOf(models.length ? models : [needsModel].filter(Boolean)) };
+    }
+    case 'failed':
+      return { tone: 'error', text: `${at}: the verify itself failed: ${str(last.error)}`, problems: [], more: 0, remedy: 'Restore a backup (Backups tab) if the Store cannot be read at all.' };
+    default:
+      return { tone: 'error', text: `${at}: ${plural(count, 'problem')}: its Store is damaged.`, problems, more, remedy: 'Repair it into a new database (Databases tab: Repair…), or restore a backup.' };
+  }
 }
 
 /** The grant rows: `{key, subject, on, level, via, viaText}`. */
