@@ -56,6 +56,17 @@ fn fixture(name: &str) -> Fixture {
 
 /// [`fixture`] with the allowed host names `allowed` and the router's `modes`.
 fn fixture_with(name: &str, allowed: Vec<String>, modes: Modes) -> Fixture {
+    fixture_configured(name, allowed, modes, None)
+}
+
+/// [`fixture_with`] whose loader runs with `config` as the server's live configuration (its
+/// MCP endpoint built from `config.mcp`), when given.
+fn fixture_configured(
+    name: &str,
+    allowed: Vec<String>,
+    modes: Modes,
+    config: Option<crate::config::ServerConfig>,
+) -> Fixture {
     let temp = TempDir::new(name);
     let dir = server(&temp);
     // MCP on (a new server starts with it off: round 4 B-MCPDEF).
@@ -79,12 +90,15 @@ fn fixture_with(name: &str, allowed: Vec<String>, modes: Modes) -> Fixture {
     registry.alias_set("cur", "r").unwrap();
     registry.alias_set("hid", "h").unwrap();
     let control = Arc::new(crate::mcp_control::McpControl::open(&dir).unwrap());
-    let mcp = crate::mcp::endpoint(
-        &crate::config::McpConfig::default(),
-        control.usage().clone(),
-    );
+    let mcp_config = config
+        .as_ref()
+        .map_or_else(crate::config::McpConfig::default, |c| c.mcp.clone());
+    let mcp = crate::mcp::endpoint(&mcp_config, control.usage().clone());
     let loader = Loader::with_mcp(registry, host_check.clone(), mcp);
     loader.set_mcp_control(control);
+    if let Some(config) = config {
+        loader.set_live_config(Arc::new(crate::server_settings::LiveConfig::new(config)));
+    }
     let audit = Arc::new(MemoryAudit::default());
     let (access, _) = Access::open(
         &dir,
@@ -555,7 +569,8 @@ fn mcp_lists_uses_and_calls_per_principal() {
     );
     assert!(!error, "{text}");
     assert_eq!(person_count(&fx, "w"), before + 1);
-    // The session is bob's: nobody else can borrow it (anonymous included).
+    // The session is bob's: nobody else can borrow it (anonymous included: without an
+    // anonymous grant `/mcp` refuses anonymous with 401, SEC M2).
     for who in [Who::Bearer(alice), Who::Anonymous, Who::Bearer(OPERATOR)] {
         let borrowed = mcp(
             &fx,
@@ -564,21 +579,21 @@ fn mcp_lists_uses_and_calls_per_principal() {
             Some(&session),
             json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}),
         );
-        assert_eq!(borrowed.status(), 404);
+        let expected = if matches!(who, Who::Anonymous) {
+            401
+        } else {
+            404
+        };
+        assert_eq!(borrowed.status(), expected);
     }
-    // Anonymous MCP sees nothing without anonymous grants; wrong credentials are 401.
-    let anonymous = mcp_initialize(&fx, Who::Anonymous, "/mcp");
-    let (listing, _) = mcp_tool(
-        &fx,
-        Who::Anonymous,
-        "/mcp",
-        &anonymous,
-        "list_graphs",
-        json!({}),
+    // Anonymous MCP gets nothing without anonymous grants (401, SEC M2); wrong credentials
+    // are 401.
+    let initialize = json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+        "protocolVersion": "2025-06-18", "clientInfo": {"name": "t", "version": "1"}}});
+    assert_unauthorized(
+        &mcp(&fx, Who::Anonymous, "/mcp", None, initialize),
+        "anonymous mcp",
     );
-    for name in ["\"w\"", "\"r\"", "\"h\""] {
-        assert!(!listing.contains(name), "{name}: {listing}");
-    }
     assert_unauthorized(
         &mcp(&fx, Who::Bearer("nope"), "/mcp", None, json!({})),
         "mcp",
@@ -4191,4 +4206,88 @@ fn a_reader_cannot_see_or_cancel_another_identitys_runs() {
             String::from_utf8_lossy(finished.body())
         );
     });
+}
+
+/// SEC M2, the reproduced scenario scaled down (a table of 6 sessions, 2 per principal): a
+/// flood of anonymous `initialize` requests (anonymous granted read on `h`) ends only
+/// anonymous's own sessions, and bob's session lives on; bob's own new sessions end his oldest.
+#[test]
+fn an_initialize_flood_evicts_only_its_own_mcp_sessions() {
+    let config = crate::config::ServerConfig::parse(
+        "[mcp]\nmax_sessions = 6\nmax_sessions_per_identity = 2",
+        std::path::Path::new("server.toml"),
+    )
+    .unwrap();
+    let fx = fixture_configured("sec-m2-flood", Vec::new(), Modes::default(), Some(config));
+    let grant = Grant::new(Subject::parse("anonymous").unwrap(), "h", Level::Read).unwrap();
+    fx.access.grant(&Principal::operator(), grant).unwrap();
+    let tools_list = json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"});
+    let bob = mcp_initialize(&fx, Who::Bearer(&fx.bob), "/mcp");
+    let mut anonymous = Vec::new();
+    for i in 0..12 {
+        let path = if i % 3 == 0 { "/db/h/mcp" } else { "/mcp" };
+        anonymous.push((path, mcp_initialize(&fx, Who::Anonymous, path)));
+    }
+    let alive = |who, path: &str, session: &str| {
+        mcp(&fx, who, path, Some(session), tools_list.clone()).status() == 200
+    };
+    assert!(
+        alive(Who::Bearer(&fx.bob), "/mcp", &bob),
+        "bob's session lives on"
+    );
+    let live: Vec<bool> = anonymous
+        .iter()
+        .map(|(path, id)| alive(Who::Anonymous, path, id))
+        .collect();
+    assert_eq!(live.iter().filter(|l| **l).count(), 2, "{live:?}");
+    assert!(live[10] && live[11], "anonymous keeps its newest: {live:?}");
+    // bob's own sessions over the quota: his oldest ends, his newest live.
+    let second = mcp_initialize(&fx, Who::Bearer(&fx.bob), "/mcp");
+    let third = mcp_initialize(&fx, Who::Bearer(&fx.bob), "/db/w/mcp");
+    assert!(!alive(Who::Bearer(&fx.bob), "/mcp", &bob));
+    assert!(alive(Who::Bearer(&fx.bob), "/mcp", &second));
+    assert!(alive(Who::Bearer(&fx.bob), "/db/w/mcp", &third));
+}
+
+/// SEC M2 and M1: without an anonymous grant `/mcp` refuses anonymous at once (no session, no
+/// body read); with one, an anonymous body is capped at 1 MiB while a user's is not.
+#[test]
+fn anonymous_mcp_needs_a_grant_and_sends_small_bodies() {
+    let fx = fixture("sec-m2-anonymous");
+    let initialize = json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+        "protocolVersion": "2025-06-18", "clientInfo": {"name": "t", "version": "1"}}});
+    assert_unauthorized(
+        &mcp(&fx, Who::Anonymous, "/mcp", None, initialize.clone()),
+        "no anonymous grant",
+    );
+    assert_eq!(
+        fx.loader
+            .mcp_control()
+            .unwrap()
+            .usage()
+            .sessions_of(None)
+            .len(),
+        0
+    );
+    let grant = Grant::new(Subject::parse("anonymous").unwrap(), "h", Level::Read).unwrap();
+    fx.access.grant(&Principal::operator(), grant).unwrap();
+    mcp_initialize(&fx, Who::Anonymous, "/mcp");
+    // A body over 1 MiB: declared or not, anonymous gets 413.
+    let big = json!({"jsonrpc": "2.0", "id": 9, "method": "ping",
+        "params": {"pad": "x".repeat(crate::mcp::MAX_ANONYMOUS_BODY)}});
+    for path in ["/mcp", "/db/h/mcp"] {
+        let answer = mcp(&fx, Who::Anonymous, path, None, big.clone());
+        assert_eq!(answer.status(), 413, "{path}");
+        let bytes = big.to_string().into_bytes();
+        let undeclared = fx.router.route(
+            Request::new(Method::Post, path, std::io::Cursor::new(bytes))
+                .with_header("Host", HOST)
+                .with_header("Content-Type", "application/json")
+                .with_header("Accept", "application/json, text/event-stream"),
+        );
+        assert_eq!(undeclared.status(), 413, "{path} undeclared");
+    }
+    // A user's body of the same size is read (the endpoint answers it).
+    let answer = mcp(&fx, Who::Bearer(&fx.bob), "/mcp", None, big);
+    assert_ne!(answer.status(), 413);
 }

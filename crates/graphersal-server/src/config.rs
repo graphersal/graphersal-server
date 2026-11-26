@@ -7,6 +7,7 @@
 //! enabled = true              # the endpoints exist: /mcp, /db/<name>/mcp (the runtime switch
 //!                             # is mcp.toml's `enabled`, written off by init)
 //! max_sessions = 256          # MCP sessions remembered (the oldest forgotten first)
+//! max_sessions_per_identity = 16 # MCP sessions one principal holds (its oldest ended first)
 //!
 //! [defaults]                  # what a new database starts with (create, import)
 //! chunk_bytes = 1048576       # creation parameters: fixed for the database's life
@@ -359,11 +360,25 @@ pub struct McpConfig {
     /// least 1. One table for `/mcp` and every `/db/<name>/mcp`.
     #[serde(default = "default_mcp_sessions")]
     pub max_sessions: usize,
+    /// How many MCP sessions one principal (a user, the operator, anonymous) holds at once
+    /// (SEC M2); default [`DEFAULT_MCP_SESSIONS_PER_IDENTITY`], at least 1. A new session over
+    /// it first ends that principal's oldest session, so one principal's flood of `initialize`
+    /// requests never evicts another principal's sessions.
+    #[serde(default = "default_mcp_sessions_per_identity")]
+    pub max_sessions_per_identity: usize,
 }
 
 fn default_mcp_sessions() -> usize {
     DEFAULT_MCP_SESSIONS
 }
+
+fn default_mcp_sessions_per_identity() -> usize {
+    DEFAULT_MCP_SESSIONS_PER_IDENTITY
+}
+
+/// The default number of MCP sessions one principal holds
+/// ([`McpConfig::max_sessions_per_identity`]).
+pub const DEFAULT_MCP_SESSIONS_PER_IDENTITY: usize = 16;
 
 /// What a new database starts with (`[defaults]` of `server.toml`), read at every create and
 /// import (round 4 B-SETTINGS): the Store's creation parameters (fixed for the database's life)
@@ -430,6 +445,7 @@ impl Default for McpConfig {
         Self {
             enabled: true,
             max_sessions: DEFAULT_MCP_SESSIONS,
+            max_sessions_per_identity: DEFAULT_MCP_SESSIONS_PER_IDENTITY,
         }
     }
 }
@@ -467,6 +483,12 @@ impl ServerConfig {
         if config.mcp.max_sessions == 0 {
             return Err(invalid(format!(
                 "mcp.max_sessions: must be at least 1 (default {DEFAULT_MCP_SESSIONS})"
+            )));
+        }
+        if config.mcp.max_sessions_per_identity == 0 {
+            return Err(invalid(format!(
+                "mcp.max_sessions_per_identity: must be at least 1 (default \
+                 {DEFAULT_MCP_SESSIONS_PER_IDENTITY})"
             )));
         }
         if config.limits.upload_bytes == 0 {
@@ -658,6 +680,9 @@ pub fn default_config_text() -> String {
          enabled = true\n\
          # How many MCP sessions are remembered (the oldest forgotten first).\n\
          max_sessions = {}\n\
+         # How many MCP sessions one principal (a user, anonymous) holds; a new one over it\n\
+         # ends that principal's oldest session, never another principal's.\n\
+         max_sessions_per_identity = {}\n\
          \n\
          [defaults]\n\
          # What a new database (create, import) starts with; read at every create, so a\n\
@@ -745,6 +770,7 @@ pub fn default_config_text() -> String {
          # mounted storage; created at start. Read when the server starts.\n\
          # backup_root = \"backups/jobs\"\n",
         DEFAULT_MCP_SESSIONS,
+        DEFAULT_MCP_SESSIONS_PER_IDENTITY,
         defaults.chunk_bytes,
         defaults.damage_policy,
         DEFAULT_UPLOAD_BYTES,

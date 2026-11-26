@@ -243,6 +243,16 @@ impl Access {
         Ok(true)
     }
 
+    /// Whether `access.toml` grants anonymous anything (a grant whose subject is
+    /// `anonymous`): without one, the server-wide MCP endpoint refuses anonymous requests
+    /// (SEC M2).
+    pub fn anonymous_has_grant(&self) -> bool {
+        self.read()
+            .grants()
+            .iter()
+            .any(|grant| grant.subject == Subject::Anonymous)
+    }
+
     /// A copy of the access file as it is now.
     pub fn file(&self) -> AccessFile {
         self.read().clone()

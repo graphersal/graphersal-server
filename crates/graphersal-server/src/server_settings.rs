@@ -2,7 +2,8 @@
 //! with the same parser as at start ([`ServerConfig::parse`]), written atomically, applied at
 //! once where that is safe, and otherwise marked "restart pending" until the next start.
 //!
-//! **Keys** ([`KEYS`]): `listen`, `mcp.enabled`, `mcp.max_sessions`, `defaults.chunk_bytes`,
+//! **Keys** ([`KEYS`]): `listen`, `mcp.enabled`, `mcp.max_sessions`,
+//! `mcp.max_sessions_per_identity`, `defaults.chunk_bytes`,
 //! `defaults.damage_policy`, `defaults.auto_load`, `defaults.read_only`,
 //! `limits.upload_bytes`, `limits.max_connections`, `limits.header_timeout_secs`,
 //! `limits.idle_timeout_secs`, `limits.memory_limit`, `limits.memory_headroom`,
@@ -164,6 +165,12 @@ pub const KEYS: &[Key] = &[
         Kind::Count,
         Applies::Restart,
         "How many MCP sessions are remembered (the oldest forgotten first).",
+    ),
+    key(
+        "mcp.max_sessions_per_identity",
+        Kind::Count,
+        Applies::Restart,
+        "How many MCP sessions one principal holds (a new one ends its own oldest first).",
     ),
     key(
         "defaults.chunk_bytes",
@@ -342,6 +349,7 @@ pub fn value_of(config: &ServerConfig, name: &str) -> Option<Value> {
         "listen" => json!(config.listen),
         "mcp.enabled" => json!(config.mcp.enabled),
         "mcp.max_sessions" => json!(config.mcp.max_sessions),
+        "mcp.max_sessions_per_identity" => json!(config.mcp.max_sessions_per_identity),
         "defaults.chunk_bytes" => json!(config.defaults.chunk_bytes),
         "defaults.damage_policy" => match config.damage_policy() {
             Ok(policy) => json!(policy.name()),
@@ -822,6 +830,15 @@ impl LiveConfig {
             .sessions
             .effective_lifetime_secs()
             .unwrap_or(crate::router::DEFAULT_COOKIE_MAX_AGE_SECS)
+    }
+
+    /// How many MCP sessions one principal holds (as at start: a restart key).
+    pub(crate) fn mcp_sessions_per_identity(&self) -> usize {
+        self.applied
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .mcp
+            .max_sessions_per_identity
     }
 
     /// The upload limit now.

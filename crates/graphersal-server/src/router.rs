@@ -415,6 +415,14 @@ impl Router {
                     }
                     return Answer::Response(crate::mcp::switched_off());
                 }
+                // Anonymous may open MCP sessions only where anonymous is granted something
+                // (SEC M2): otherwise its `initialize` flood could evict users' sessions.
+                Some(_) if principal.is_anonymous() && !access.anonymous_has_grant() => {
+                    return Answer::Response(unauthorized(
+                        "log in to use MCP: send a user token (Authorization: Bearer)",
+                        None,
+                    ));
+                }
                 Some(mcp) => {
                     let directory = crate::mcp::Directory {
                         loader,
@@ -580,13 +588,31 @@ impl Router {
                 Err(answer) => return answer,
             }
         } else if mcp_control.is_some() {
-            match crate::mcp::buffer_body(request) {
+            let (max, strict) = crate::mcp::body_limit(principal);
+            match crate::mcp::buffer_body(request, max, strict) {
                 Ok(body) => body,
                 Err(answer) => return answer,
             }
         } else {
             None
         };
+        // A new MCP session: the principal's own oldest ones make room first (SEC M2).
+        if let (Some(control), Some(mcp), Some(body)) = (mcp_control, loader.mcp(), &buffered)
+            && crate::mcp::is_initialize(body)
+        {
+            let directory = crate::mcp::Directory {
+                loader,
+                access,
+                principal,
+            };
+            crate::mcp::make_room(
+                mcp,
+                &directory,
+                control.usage(),
+                principal.identity().as_deref(),
+                crate::mcp::session_quota(loader),
+            );
+        }
         let session = crate::mcp::header_of(request.headers(), crate::mcp::SESSION_HEADER);
         let mut forwarded = match &buffered {
             Some(body) => mounts::forward_with_body(request, &target, &entry.name, body),
@@ -609,6 +635,11 @@ impl Router {
         };
         if let (Some(control), Some(sent)) = (mcp_control, &buffered) {
             let new_session = crate::mcp::header_of(answer.headers(), crate::mcp::SESSION_HEADER);
+            if let Some(opened) = new_session.as_deref()
+                && session.as_deref() != Some(opened)
+            {
+                control.usage().session_opened(opened);
+            }
             control.usage().observe(
                 &crate::mcp_control::ObservedRequest {
                     identity: identity.as_deref(),
