@@ -24,12 +24,12 @@ origin is refused with `403`.
 
 Browser login (beside the admin API): `POST /api/login {"token": "<user token>"}` answers
 `200 {"principal": {"id", "kind", "admin"}}` with the cookie `gs_session` (`Max-Age=<[sessions]
-lifetime_secs, else 400 days>; HttpOnly; SameSite=Strict; Path=/`, plus `Secure` when
-`server.toml [http] public_scheme = "https"`), `401` for a token nobody holds; `POST /api/logout` ends the session
+lifetime_secs, default 30 days; 400 days with 0>; HttpOnly; SameSite=Strict; Path=/`, plus `Secure` when
+`server.toml [http] public_scheme = "https"`), `401` for a token nobody holds, `413` for a body over 4 KiB; `POST /api/logout` ends the session
 of the request's cookie and clears it (`200 {"loggedOut": bool}`). Browser sessions survive a
 server restart (kept in `sessions/browser.json`, hashes only) and last until the logout, a
 change of the user's token, the user's removal, or the `[sessions]` limits of `server.toml`
-(none by default; [Configuration Reference](configuration.md#servertoml)); an ended session's cookie answers `401` and is cleared. `GET /api/info` names the
+(30 days since the login and 7 days since the last request by default; [Configuration Reference](configuration.md#servertoml)); a user holds at most 32 sessions (a new login ends the oldest); an ended session's cookie answers `401` and is cleared. `GET /api/info` names the
 request's `principal` (`{id, kind, admin}`); for anonymous it answers only `server`,
 `protocol`, `dev`, `experimental`, `uiProfile`, `principal`, `login: "/"`, `openapi` and
 `databaseOpenapi` (every principal gets these two: `/openapi.json`, the server's API
@@ -166,10 +166,10 @@ A `failed` database whose `database.toml` cannot be read has only `name`, `state
 | GET | `/api/admin/databases/<name>/runs` | | `200 {"database", "loaded": bool, "runs": [run...], "textHeadChars": 200}` |
 | POST | `/api/admin/databases/<name>/runs/cancel` | `{"id"}` | `200 {"database", "id", "cancelled": bool}` |
 | GET | `/api/admin/users` | | `200 {"users": [user...], "grants": [grant...], "revision"}` (users by name; every grant, also of `anonymous`; `ETag`: the revision) |
-| POST | `/api/admin/users` | `{"name", "admin"?, "revision"?}` | `201` user + `"token"` (shown once) |
+| POST | `/api/admin/users` | `{"name", "admin"?, "revision"?}` | `201` user + `"token"` (shown once); `everyone` (access control off) `403` |
 | GET | `/api/admin/users/<name>` | | `200` user |
 | DELETE | `/api/admin/users/<name>` | | `200 {"name", "removed": true, "grantsRemoved", "mcpSessionsEnded"}` |
-| POST | `/api/admin/users/<name>/token` | | `200` user + `"token"` (shown once) + `"mcpSessionsEnded"` |
+| POST | `/api/admin/users/<name>/token` | | `200` user + `"token"` (shown once) + `"mcpSessionsEnded"`; `everyone` (access control off) `403` |
 | DELETE | `/api/admin/users/<name>/token` | | `200` user (`hasToken: false`) + `"mcpSessionsEnded"` |
 | PUT | `/api/admin/users/<name>/admin` | `{"admin": bool, "revision"?}` | `200` user |
 | PUT | `/api/admin/users/<name>/roles` | `{"roles": [string...], "revision"?}` | `200` user |
@@ -813,7 +813,8 @@ check ended) and `databases`, one check per database it had open:
 requests get 5 s, every database is unloaded, `server.run` removed, the lock released). Only
 the operator (the token of `server.run`) or a user with the admin role may; the principal
 `everyone` of a server with access control off gets `403` (stopping needs real credentials
-even then); a server embedded by a library caller without a stop hook answers `409`. The
+even then; so do `POST users` and `POST users/<name>/token`, which would hand `everyone` such
+credentials: [What access control off protects](../guide/security.md#what-access-control-off-protects)); a server embedded by a library caller without a stop hook answers `409`. The
 request is audited (`server shutdown requested`).
 
 ### Server settings

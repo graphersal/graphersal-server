@@ -331,7 +331,7 @@ fn mode_rows(config: &ServerConfig) -> Vec<(&'static str, String)> {
     };
     let cookie_days = config
         .sessions
-        .lifetime_secs
+        .effective_lifetime_secs()
         .unwrap_or(crate::router::DEFAULT_COOKIE_MAX_AGE_SECS)
         .div_ceil(86_400);
     let scheme = match config.http.public_scheme {
@@ -557,7 +557,7 @@ mod tests {
         assert!(
             rows[1]
                 .1
-                .starts_with("http (login cookie without Secure, kept 400 days"),
+                .starts_with("http (login cookie without Secure, kept 30 days"),
             "{rows:?}"
         );
         assert_eq!(rows[2].0, "allowed hosts");

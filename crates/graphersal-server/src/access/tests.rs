@@ -503,3 +503,49 @@ fn new_user_names_follow_the_new_rule_and_old_ones_keep_working() {
     // The file with these names reads back.
     assert_eq!(AccessFile::read(&f.dir).unwrap().unwrap(), access.file());
 }
+
+/// SEC L3: a login loop cannot grow the browser session table without bound: a user holds at
+/// most [`MAX_BROWSER_SESSIONS_PER_USER`] sessions, a new login drops the oldest, and another
+/// user's sessions are untouched.
+#[test]
+fn a_users_browser_sessions_are_capped_and_the_oldest_dropped() {
+    let f = fixture("access-session-cap");
+    let operator = Principal::operator();
+    let (access, table) = reopened(&f, SessionLimits::unlimited());
+    let bob_token = access.add_user(&operator, "bob", Vec::new()).unwrap();
+    let carol_token = access.add_user(&operator, "carol", Vec::new()).unwrap();
+    let (carol_id, carol) = access.login(carol_token.expose()).unwrap();
+    let ids: Vec<Secret> = (0..MAX_BROWSER_SESSIONS_PER_USER + 3)
+        .map(|_| access.login(bob_token.expose()).unwrap().0)
+        .collect();
+    assert_eq!(table.len(), MAX_BROWSER_SESSIONS_PER_USER + 1);
+    assert_eq!(
+        crate::sessions::FileSessions::open(&f.dir).len(),
+        MAX_BROWSER_SESSIONS_PER_USER + 1,
+        "the file holds the capped table"
+    );
+    assert_eq!(
+        access.authenticate(&with_cookie(&ids[0])),
+        Err(AuthError::InvalidSession),
+        "the oldest session was dropped"
+    );
+    let newest = ids.last().unwrap();
+    assert_eq!(access.authenticate(&with_cookie(newest)).unwrap().id, "bob");
+    assert_eq!(access.authenticate(&with_cookie(&carol_id)).unwrap(), carol);
+    // The in-memory table follows the same cap.
+    let memory = MemorySessions::new();
+    let now = SystemTime::now();
+    for i in 0..5u64 {
+        let session = BrowserSession::new(
+            "bob",
+            TokenHash::of("t"),
+            now + std::time::Duration::from_secs(i),
+        );
+        memory
+            .insert_capped(TokenHash::of(&format!("s{i}")), session, 3)
+            .unwrap();
+    }
+    assert!(memory.get(&TokenHash::of("s1")).is_none());
+    assert!(memory.get(&TokenHash::of("s2")).is_some());
+    assert!(memory.get(&TokenHash::of("s4")).is_some());
+}

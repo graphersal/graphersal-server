@@ -577,7 +577,8 @@ print(next((str(r["id"]) for r in runs if r.get("alias") == "endless" and r.get(
 done
 [ -n "$RUN_ID" ] || fail "the endless query never showed: $(head -c 400 "$BODY")"
 req GET /api/admin/runs
-expect_body_contains '"client":"page:smoke"'
+# The page's client id as the server forwards it: a tag of the caller's identity, then its own.
+expect_body_contains '"client":"page:[0-9a-f]\{12\}-smoke"'
 jreq POST /api/admin/databases/acme/runs/cancel "{\"id\": $RUN_ID}"
 expect_status 200
 expect_json cancelled true

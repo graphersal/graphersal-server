@@ -98,6 +98,40 @@ impl RunInfo {
             })
     }
 
+    /// The run file of `dir` when a user token may be sent to the address it names (SEC L2):
+    /// `None` without one; [`ServerError::Connect`] when no server holds `server.lock` (the
+    /// file is stale: the server is gone and another program may hold its port now) or when
+    /// the file is not owned by the directory's owner (unix). The token is then never sent.
+    pub fn read_live(dir: &ServerDir) -> Result<Option<Self>, ServerError> {
+        let Some(info) = Self::read(dir)? else {
+            return Ok(None);
+        };
+        let refused = |message: String| ServerError::Connect {
+            address: info.address.to_string(),
+            message,
+        };
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let uid = |path: &std::path::Path| {
+                fs::metadata(path)
+                    .map(|meta| meta.uid())
+                    .map_err(|err| ServerError::io("read", path, err))
+            };
+            check_run_owner(uid(&dir.run_path())?, uid(dir.root())?).map_err(refused)?;
+        }
+        if !crate::lock::ServerLock::is_held(dir)? {
+            return Err(refused(format!(
+                "{} names {}, but no server holds server.lock: that server is gone (the file \
+                 is stale) and another program may listen there now, so the token is not \
+                 sent; start the server again, or name its address with --server ADDRESS",
+                dir.run_path().display(),
+                info.address
+            )));
+        }
+        Ok(Some(info))
+    }
+
     /// Removes the run file of `dir` (no error when there is none).
     pub fn remove(dir: &ServerDir) -> Result<(), ServerError> {
         let path = dir.run_path();
@@ -109,10 +143,50 @@ impl RunInfo {
     }
 }
 
+/// `Err` (the refusal's text) when the run file's owner `run_uid` is not the directory's
+/// owner `dir_uid`: another OS user wrote it, so its address is not trusted with a token.
+#[cfg(unix)]
+fn check_run_owner(run_uid: u32, dir_uid: u32) -> Result<(), String> {
+    if run_uid == dir_uid {
+        return Ok(());
+    }
+    Err(format!(
+        "server.run belongs to the OS user {run_uid}, not to the directory's owner \
+         {dir_uid}: its address is not trusted with a token; name the server's address with \
+         --server ADDRESS"
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_support::TempDir;
+
+    /// SEC L2: a token goes to the address of `server.run` only while a server holds the
+    /// lock and the file is the directory owner's.
+    #[test]
+    fn a_stale_or_foreign_run_file_is_not_trusted_with_a_token() {
+        let temp = TempDir::new("run-file-live");
+        let dir = ServerDir::init(temp.path()).unwrap().dir;
+        assert_eq!(RunInfo::read_live(&dir).unwrap(), None);
+        let info = RunInfo::new(
+            "127.0.0.1:4242".parse().unwrap(),
+            "http://127.0.0.1:4242/".to_string(),
+        );
+        info.write(&dir).unwrap();
+        let err = RunInfo::read_live(&dir).unwrap_err().to_string();
+        assert!(err.contains("no server holds server.lock"), "{err}");
+        assert!(err.contains("--server ADDRESS"), "{err}");
+        let lock = crate::lock::ServerLock::acquire(&dir).unwrap();
+        assert_eq!(RunInfo::read_live(&dir).unwrap(), Some(info));
+        drop(lock);
+        #[cfg(unix)]
+        {
+            assert!(check_run_owner(501, 501).is_ok());
+            let err = check_run_owner(1000, 501).unwrap_err();
+            assert!(err.contains("not trusted"), "{err}");
+        }
+    }
 
     #[test]
     fn write_read_remove() {

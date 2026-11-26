@@ -16,7 +16,8 @@
 //! graphersal-server backup --dir DIR [--out FILE] [--with-databases] [--json]
 //! graphersal-server restore FILE --dir NEWDIR [--force-version] [--json]
 //! graphersal-server openapi --dir DIR [--db NAME] [--out FILE] [--server URL]
-//!     (db, import, models, user, mcp, backup, stop, status also: [--token TOKEN [--server ADDRESS]])
+//!     (db, import, models, user, mcp, config, backup, stop, status also:
+//!      [--token TOKEN | --token-file PATH|- [--server ADDRESS]])
 //! ```
 //!
 //! stdout carries only results, stderr diagnostics and the log. Exit codes: `0` ok, `1` the
@@ -291,10 +292,13 @@ refuse a DIR (or access.toml, server.run, sessions/) owned by another user or op
 or others, naming the chmod/chown that fixes it (unix; on Windows DIR's ACL is the boundary).
 Other administrators send an admin token instead:
   ... --token TOKEN [--server ADDRESS]
+  ... --token-file PATH [--server ADDRESS]
       db, import, models, user, mcp, config, backup, stop and status go to the running server with this user's admin token
-      (or the environment variable GRAPHERSAL_SERVER_TOKEN), at ADDRESS (IP:PORT) or the
-      address in DIR/server.run; no file of DIR is written and its permissions are not
-      checked. Refused when no server runs.
+      (--token-file: read from PATH, - for stdin; or the environment variable
+      GRAPHERSAL_SERVER_TOKEN; a token on the command line shows in ps: a warning), at
+      ADDRESS (IP:PORT) or the address in DIR/server.run, used only while its server holds
+      DIR/server.lock and the file is the directory owner's; no file of DIR is written and
+      its permissions are not checked. Refused when no server runs.
 
 stdout carries only results, stderr diagnostics and the log (level: RUST_LOG, default
 info). Exit codes: 0 ok, 1 the command failed, 2 invalid invocation, 3 status: not
@@ -302,6 +306,10 @@ running.";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    let args = match token_args(args) {
+        Ok(args) => args,
+        Err(code) => return code,
+    };
     match args.first().map(String::as_str) {
         None => usage_error("no command given"),
         Some("-h" | "--help" | "help") => {
@@ -839,6 +847,84 @@ fn db_command(args: &[String]) -> ExitCode {
 
 /// The environment variable holding an admin token for the console (as `--token`).
 const TOKEN_ENV: &str = "GRAPHERSAL_SERVER_TOKEN";
+
+/// The commands that take `--token` (and so `--token-file`).
+const TOKEN_COMMANDS: &[&str] = &[
+    "db", "import", "models", "user", "mcp", "config", "backup", "stop", "status",
+];
+
+/// `args` with `--token-file PATH` (`-`: standard input) replaced by `--token <its first
+/// line>`, for the commands that take a token (SEC INFO: a token on the command line shows in
+/// `ps`); a `--token` given on the command line itself gets a warning on stderr. `Err`: the
+/// usage error's exit code (both given, an unreadable or empty file).
+fn token_args(args: Vec<String>) -> Result<Vec<String>, ExitCode> {
+    if !args
+        .first()
+        .is_some_and(|command| TOKEN_COMMANDS.contains(&command.as_str()))
+    {
+        return Ok(args);
+    }
+    let mut out = Vec::with_capacity(args.len());
+    let mut file: Option<String> = None;
+    let mut argv_token = false;
+    let mut rest = args.into_iter();
+    while let Some(arg) = rest.next() {
+        let (flag, inline) = match arg.split_once('=') {
+            Some((flag, value)) if flag.starts_with("--") => {
+                (flag.to_string(), Some(value.to_string()))
+            }
+            _ => (arg.clone(), None),
+        };
+        match flag.as_str() {
+            "--token-file" => {
+                let Some(path) = inline.or_else(|| rest.next()) else {
+                    return Err(usage_error("--token-file needs a path (or - for stdin)"));
+                };
+                if file.replace(path).is_some() {
+                    return Err(usage_error("--token-file given twice"));
+                }
+            }
+            "--token" => {
+                argv_token = true;
+                out.push(arg);
+            }
+            _ => out.push(arg),
+        }
+    }
+    if let Some(path) = file {
+        if argv_token {
+            return Err(usage_error("give --token or --token-file, not both"));
+        }
+        out.push("--token".to_string());
+        out.push(read_token_file(&path)?);
+    } else if argv_token {
+        err(&format!(
+            "warning: a token on the command line is visible to other users of this machine \
+             (ps); prefer --token-file PATH (- for stdin) or {TOKEN_ENV}"
+        ));
+    }
+    Ok(out)
+}
+
+/// The token in the file `path` (`-`: standard input): its first non-empty line, trimmed.
+fn read_token_file(path: &str) -> Result<String, ExitCode> {
+    use std::io::Read;
+    let mut text = String::new();
+    let read = if path == "-" {
+        std::io::stdin().read_to_string(&mut text).map(|_| ())
+    } else {
+        std::fs::read_to_string(path).map(|t| text = t)
+    };
+    if let Err(error) = read {
+        return Err(usage_error(&format!("--token-file {path}: {error}")));
+    }
+    match text.lines().map(str::trim).find(|line| !line.is_empty()) {
+        Some(token) => Ok(token.to_string()),
+        None => Err(usage_error(&format!(
+            "--token-file {path}: the file holds no token"
+        ))),
+    }
+}
 
 /// How a console command reaches the server directory: `None` = as the operator (offline on
 /// the directory, or through its running server with the operator token of `server.run`),

@@ -56,6 +56,17 @@ fn fixture(name: &str) -> Fixture {
 
 /// [`fixture`] with the allowed host names `allowed` and the router's `modes`.
 fn fixture_with(name: &str, allowed: Vec<String>, modes: Modes) -> Fixture {
+    fixture_configured(name, allowed, modes, None)
+}
+
+/// [`fixture_with`] whose loader runs with `config` as the server's live configuration (its
+/// MCP endpoint built from `config.mcp`), when given.
+fn fixture_configured(
+    name: &str,
+    allowed: Vec<String>,
+    modes: Modes,
+    config: Option<crate::config::ServerConfig>,
+) -> Fixture {
     let temp = TempDir::new(name);
     let dir = server(&temp);
     // MCP on (a new server starts with it off: round 4 B-MCPDEF).
@@ -79,12 +90,15 @@ fn fixture_with(name: &str, allowed: Vec<String>, modes: Modes) -> Fixture {
     registry.alias_set("cur", "r").unwrap();
     registry.alias_set("hid", "h").unwrap();
     let control = Arc::new(crate::mcp_control::McpControl::open(&dir).unwrap());
-    let mcp = crate::mcp::endpoint(
-        &crate::config::McpConfig::default(),
-        control.usage().clone(),
-    );
+    let mcp_config = config
+        .as_ref()
+        .map_or_else(crate::config::McpConfig::default, |c| c.mcp.clone());
+    let mcp = crate::mcp::endpoint(&mcp_config, control.usage().clone());
     let loader = Loader::with_mcp(registry, host_check.clone(), mcp);
     loader.set_mcp_control(control);
+    if let Some(config) = config {
+        loader.set_live_config(Arc::new(crate::server_settings::LiveConfig::new(config)));
+    }
     let audit = Arc::new(MemoryAudit::default());
     let (access, _) = Access::open(
         &dir,
@@ -555,7 +569,8 @@ fn mcp_lists_uses_and_calls_per_principal() {
     );
     assert!(!error, "{text}");
     assert_eq!(person_count(&fx, "w"), before + 1);
-    // The session is bob's: nobody else can borrow it (anonymous included).
+    // The session is bob's: nobody else can borrow it (anonymous included: without an
+    // anonymous grant `/mcp` refuses anonymous with 401, SEC M2).
     for who in [Who::Bearer(alice), Who::Anonymous, Who::Bearer(OPERATOR)] {
         let borrowed = mcp(
             &fx,
@@ -564,21 +579,21 @@ fn mcp_lists_uses_and_calls_per_principal() {
             Some(&session),
             json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}),
         );
-        assert_eq!(borrowed.status(), 404);
+        let expected = if matches!(who, Who::Anonymous) {
+            401
+        } else {
+            404
+        };
+        assert_eq!(borrowed.status(), expected);
     }
-    // Anonymous MCP sees nothing without anonymous grants; wrong credentials are 401.
-    let anonymous = mcp_initialize(&fx, Who::Anonymous, "/mcp");
-    let (listing, _) = mcp_tool(
-        &fx,
-        Who::Anonymous,
-        "/mcp",
-        &anonymous,
-        "list_graphs",
-        json!({}),
+    // Anonymous MCP gets nothing without anonymous grants (401, SEC M2); wrong credentials
+    // are 401.
+    let initialize = json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+        "protocolVersion": "2025-06-18", "clientInfo": {"name": "t", "version": "1"}}});
+    assert_unauthorized(
+        &mcp(&fx, Who::Anonymous, "/mcp", None, initialize),
+        "anonymous mcp",
     );
-    for name in ["\"w\"", "\"r\"", "\"h\""] {
-        assert!(!listing.contains(name), "{name}: {listing}");
-    }
     assert_unauthorized(
         &mcp(&fx, Who::Bearer("nope"), "/mcp", None, json!({})),
         "mcp",
@@ -1457,7 +1472,7 @@ fn access_off_makes_every_request_an_admin() {
 
 #[test]
 fn access_on_is_the_default_mode() {
-    assert_eq!(Modes::default(), modes(true, false, 400 * 24 * 60 * 60));
+    assert_eq!(Modes::default(), modes(true, false, 30 * 24 * 60 * 60));
     let config = crate::config::ServerConfig::default();
     assert_eq!(Modes::of(&config), Modes::default());
     let config = crate::config::ServerConfig::parse(
@@ -1487,10 +1502,11 @@ fn login_and_logout_cookies(fx: &Fixture, token: &str) -> (String, String) {
 
 #[test]
 fn the_login_cookie_is_secure_only_on_https_and_persistent() {
-    // http (the default): no Secure, Max-Age 400 days; the clear cookie Max-Age=0.
+    // http (the default): no Secure, Max-Age 30 days (the default lifetime); the clear cookie
+    // Max-Age=0.
     let fx = fixture_with("modes-http", Vec::new(), Modes::default());
     let (set, cleared) = login_and_logout_cookies(&fx, &fx.bob.clone());
-    assert!(set.contains("; Max-Age=34560000;"), "{set}");
+    assert!(set.contains("; Max-Age=2592000;"), "{set}");
     assert!(!set.contains("Secure"), "{set}");
     assert!(cleared.starts_with("gs_session=;") && cleared.contains("; Max-Age=0;"));
     assert!(!cleared.contains("Secure"), "{cleared}");
@@ -4011,5 +4027,299 @@ fn a_layer_reset_over_http_discards_the_changes_and_keeps_grants_aliases_and_mcp
     );
     for db in ["l0", "l9"] {
         let _ = fx.loader.unload(db);
+    }
+}
+
+// SEC-FIX: the findings of the security review that the router fixes.
+
+/// SEC L1: with access control off, `everyone` may not make a user or a token (it would make
+/// itself an admin token and get past the shutdown and server-backup refusals); an admin's
+/// own token still may, and nothing changed for the refused requests.
+#[test]
+fn access_off_refuses_new_users_and_tokens_to_everyone() {
+    let fx = fixture_with(
+        "sec-l1-access-off",
+        Vec::new(),
+        modes(false, false, super::DEFAULT_COOKIE_MAX_AGE_SECS),
+    );
+    for who in [Who::Anonymous, Who::Bearer(&fx.carol), Who::Bearer("nope")] {
+        let created = post(&fx, who, "/api/admin/users", json!({"name": "eve"}));
+        assert_eq!(created.status(), 403, "{}", json_of(&created));
+        assert!(
+            json_of(&created)["error"]
+                .as_str()
+                .unwrap()
+                .contains("also with access control off")
+        );
+        for url in [
+            "/api/admin/users/alice/token",
+            "/api/admin/users/alice/token/",
+        ] {
+            let issued = post(&fx, who, url, json!({}));
+            assert_eq!(issued.status(), 403, "{url}: {}", json_of(&issued));
+        }
+    }
+    assert!(fx.access.file().user("eve").is_none());
+    // alice's token is still the one she holds: no rotation happened.
+    assert_eq!(
+        expect(get(&fx, Who::Bearer(&fx.alice), "/api/info"), 200)["principal"]["id"],
+        "alice"
+    );
+    // Reading the users stays open to everyone (access control is off), and an admin's
+    // token still makes users.
+    expect(get(&fx, Who::Anonymous, "/api/admin/users"), 200);
+    let created = post(
+        &fx,
+        Who::Bearer(&fx.alice),
+        "/api/admin/users",
+        json!({"name": "eve"}),
+    );
+    assert_eq!(created.status(), 201, "{}", json_of(&created));
+    // With access control on, an admin is not refused either.
+    let on = fixture("sec-l1-access-on");
+    let issued = post(
+        &on,
+        Who::Bearer(OPERATOR),
+        "/api/admin/users/bob/token",
+        json!({}),
+    );
+    assert_eq!(issued.status(), 200, "{}", json_of(&issued));
+}
+
+/// SEC M3, the reproduced scenario: the operator's page commits under the client id
+/// `victim-page-1`; bob (read grant only) reads the change feed and does not see that id, and
+/// his `POST /api/cancel` with the same `X-Graphersal-Client` stops nothing; the operator's
+/// own page still cancels its run.
+#[test]
+fn a_reader_cannot_see_or_cancel_another_identitys_runs() {
+    let fx = fixture("sec-m3-cancel");
+    let victim = [("X-Graphersal-Client", "victim-page-1")];
+    let commit = send(
+        &fx,
+        Who::Bearer(OPERATOR),
+        Method::Post,
+        "/db/r/api/execute",
+        Some(json!({"script": WRITE})),
+        &victim,
+    );
+    assert_eq!(commit.status(), 200);
+    let feed = expect(get(&fx, Who::Bearer(&fx.bob), "/db/r/api/changes"), 200);
+    assert!(!feed.to_string().contains("victim-page-1"), "{feed}");
+    let last = feed["recent"].as_array().unwrap().last().unwrap().clone();
+    assert_eq!(last["by"], super::mounts::OTHER_IDENTITY, "{feed}");
+    // The writer sees its own page id as it sent it (the playground tells its own changes).
+    let own = expect(
+        send(
+            &fx,
+            Who::Bearer(OPERATOR),
+            Method::Get,
+            "/db/r/api/changes",
+            None,
+            &victim,
+        ),
+        200,
+    );
+    assert_eq!(
+        own["recent"].as_array().unwrap().last().unwrap()["by"],
+        "victim-page-1",
+        "{own}"
+    );
+
+    // The operator's endless query, under the same client id.
+    std::thread::scope(|scope| {
+        let page = scope.spawn(|| {
+            send(
+                &fx,
+                Who::Bearer(OPERATOR),
+                Method::Post,
+                "/db/r/api/execute",
+                Some(json!({"script": "let n = 0; loop { n += 1; }"})),
+                &victim,
+            )
+        });
+        let deadline = std::time::Instant::now() + WAIT;
+        loop {
+            let runs = expect(
+                get(&fx, Who::Bearer(OPERATOR), "/api/admin/databases/r/runs"),
+                200,
+            );
+            if runs["runs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|run| run["state"] == "running")
+            {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "the run never showed");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        // bob with the same header: his own identity, so nothing of his to cancel.
+        let answer = send(
+            &fx,
+            Who::Bearer(&fx.bob),
+            Method::Post,
+            "/db/r/api/cancel",
+            None,
+            &victim,
+        );
+        assert_eq!(expect(answer, 200)["cancelled"], false);
+        let answer = send(
+            &fx,
+            Who::Bearer(&fx.bob),
+            Method::Post,
+            "/db/r/api/cancel",
+            None,
+            &[],
+        );
+        assert_eq!(
+            expect(answer, 200)["cancelled"],
+            false,
+            "no shared empty key"
+        );
+        let runs = expect(
+            get(&fx, Who::Bearer(OPERATOR), "/api/admin/databases/r/runs"),
+            200,
+        );
+        assert!(
+            runs["runs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|run| run["state"] == "running" && run["cancelled"] == false),
+            "{runs}"
+        );
+        // The operator's own page stops it.
+        let answer = send(
+            &fx,
+            Who::Bearer(OPERATOR),
+            Method::Post,
+            "/db/r/api/cancel",
+            None,
+            &victim,
+        );
+        assert_eq!(expect(answer, 200)["cancelled"], true);
+        let finished = page.join().unwrap();
+        assert!(
+            String::from_utf8_lossy(finished.body()).contains("cancel"),
+            "{}",
+            String::from_utf8_lossy(finished.body())
+        );
+    });
+}
+
+/// SEC M2, the reproduced scenario scaled down (a table of 6 sessions, 2 per principal): a
+/// flood of anonymous `initialize` requests (anonymous granted read on `h`) ends only
+/// anonymous's own sessions, and bob's session lives on; bob's own new sessions end his oldest.
+#[test]
+fn an_initialize_flood_evicts_only_its_own_mcp_sessions() {
+    let config = crate::config::ServerConfig::parse(
+        "[mcp]\nmax_sessions = 6\nmax_sessions_per_identity = 2",
+        std::path::Path::new("server.toml"),
+    )
+    .unwrap();
+    let fx = fixture_configured("sec-m2-flood", Vec::new(), Modes::default(), Some(config));
+    let grant = Grant::new(Subject::parse("anonymous").unwrap(), "h", Level::Read).unwrap();
+    fx.access.grant(&Principal::operator(), grant).unwrap();
+    let tools_list = json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"});
+    let bob = mcp_initialize(&fx, Who::Bearer(&fx.bob), "/mcp");
+    let mut anonymous = Vec::new();
+    for i in 0..12 {
+        let path = if i % 3 == 0 { "/db/h/mcp" } else { "/mcp" };
+        anonymous.push((path, mcp_initialize(&fx, Who::Anonymous, path)));
+    }
+    let alive = |who, path: &str, session: &str| {
+        mcp(&fx, who, path, Some(session), tools_list.clone()).status() == 200
+    };
+    assert!(
+        alive(Who::Bearer(&fx.bob), "/mcp", &bob),
+        "bob's session lives on"
+    );
+    let live: Vec<bool> = anonymous
+        .iter()
+        .map(|(path, id)| alive(Who::Anonymous, path, id))
+        .collect();
+    assert_eq!(live.iter().filter(|l| **l).count(), 2, "{live:?}");
+    assert!(live[10] && live[11], "anonymous keeps its newest: {live:?}");
+    // bob's own sessions over the quota: his oldest ends, his newest live.
+    let second = mcp_initialize(&fx, Who::Bearer(&fx.bob), "/mcp");
+    let third = mcp_initialize(&fx, Who::Bearer(&fx.bob), "/db/w/mcp");
+    assert!(!alive(Who::Bearer(&fx.bob), "/mcp", &bob));
+    assert!(alive(Who::Bearer(&fx.bob), "/mcp", &second));
+    assert!(alive(Who::Bearer(&fx.bob), "/db/w/mcp", &third));
+}
+
+/// SEC M2 and M1: without an anonymous grant `/mcp` refuses anonymous at once (no session, no
+/// body read); with one, an anonymous body is capped at 1 MiB while a user's is not.
+#[test]
+fn anonymous_mcp_needs_a_grant_and_sends_small_bodies() {
+    let fx = fixture("sec-m2-anonymous");
+    let initialize = json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+        "protocolVersion": "2025-06-18", "clientInfo": {"name": "t", "version": "1"}}});
+    assert_unauthorized(
+        &mcp(&fx, Who::Anonymous, "/mcp", None, initialize.clone()),
+        "no anonymous grant",
+    );
+    assert_eq!(
+        fx.loader
+            .mcp_control()
+            .unwrap()
+            .usage()
+            .sessions_of(None)
+            .len(),
+        0
+    );
+    let grant = Grant::new(Subject::parse("anonymous").unwrap(), "h", Level::Read).unwrap();
+    fx.access.grant(&Principal::operator(), grant).unwrap();
+    mcp_initialize(&fx, Who::Anonymous, "/mcp");
+    // A body over 1 MiB: declared or not, anonymous gets 413.
+    let big = json!({"jsonrpc": "2.0", "id": 9, "method": "ping",
+        "params": {"pad": "x".repeat(crate::mcp::MAX_ANONYMOUS_BODY)}});
+    for path in ["/mcp", "/db/h/mcp"] {
+        let answer = mcp(&fx, Who::Anonymous, path, None, big.clone());
+        assert_eq!(answer.status(), 413, "{path}");
+        let bytes = big.to_string().into_bytes();
+        let undeclared = fx.router.route(
+            Request::new(Method::Post, path, std::io::Cursor::new(bytes))
+                .with_header("Host", HOST)
+                .with_header("Content-Type", "application/json")
+                .with_header("Accept", "application/json, text/event-stream"),
+        );
+        assert_eq!(undeclared.status(), 413, "{path} undeclared");
+    }
+    // A user's body of the same size is read (the endpoint answers it).
+    let answer = mcp(&fx, Who::Bearer(&fx.bob), "/mcp", None, big);
+    assert_ne!(answer.status(), 413);
+}
+
+/// SEC L6: the admin UI, a database's playground and the API answers refuse framing, plugins and
+/// a changed base URL.
+#[test]
+fn every_page_refuses_framing() {
+    let fx = fixture("sec-l6-framing");
+    for (who, url) in [
+        (Who::Anonymous, "/"),
+        (Who::Anonymous, "/server-ui/databases-tab.js"),
+        (Who::Bearer(OPERATOR), "/db/w/"),
+        (Who::Bearer(OPERATOR), "/db/w/api/info"),
+        (Who::Bearer(OPERATOR), "/api/admin/databases"),
+        (Who::Anonymous, "/api/admin/databases"),
+    ] {
+        let answer = get(&fx, who, url);
+        assert_eq!(header(&answer, "X-Frame-Options"), Some("DENY"), "{url}");
+        let policy = header(&answer, "Content-Security-Policy").unwrap_or_default();
+        for directive in [
+            "frame-ancestors 'none'",
+            "object-src 'none'",
+            "base-uri 'none'",
+        ] {
+            assert!(policy.contains(directive), "{url}: {policy}");
+        }
+        let count = answer
+            .headers()
+            .iter()
+            .filter(|(n, _)| n.eq_ignore_ascii_case("X-Frame-Options"))
+            .count();
+        assert_eq!(count, 1, "{url}");
     }
 }

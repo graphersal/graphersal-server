@@ -290,13 +290,27 @@ pub(crate) fn route(mcp: &Mcp, directory: &Directory<'_>, request: &mut Request<
     let method = request.method().as_str().to_string();
     let identity = request.identity().map(str::to_string);
     let usage = directory.loader.mcp_control().map(|c| c.usage().clone());
-    let buffered = match &usage {
-        Some(_) => match buffer_body(request) {
+    let (max, strict) = body_limit(directory.principal);
+    let buffered = if usage.is_some() || strict {
+        match buffer_body(request, max, strict) {
             Ok(body) => body,
             Err(answer) => return answer,
-        },
-        None => None,
+        }
+    } else {
+        None
     };
+    // A new session: the principal's own oldest ones make room first (SEC M2).
+    if let (Some(usage), Some(body)) = (&usage, &buffered)
+        && is_initialize(body)
+    {
+        make_room(
+            mcp,
+            directory,
+            usage,
+            identity.as_deref(),
+            session_quota(directory.loader),
+        );
+    }
     let mut mcp_request = match &buffered {
         Some(body) => McpRequest::new(&method, body.as_slice()),
         None => McpRequest::new(&method, request.body()),
@@ -310,6 +324,11 @@ pub(crate) fn route(mcp: &Mcp, directory: &Directory<'_>, request: &mut Request<
     let (status, answer_headers, body) = mcp.handle_directory(directory, mcp_request).into_parts();
     if let (Some(usage), Some(sent)) = (&usage, &buffered) {
         let session = header_of(&headers, SESSION_HEADER);
+        if let Some(new_session) = header_of(&answer_headers, SESSION_HEADER)
+            && session.as_deref() != Some(new_session.as_str())
+        {
+            usage.session_opened(&new_session);
+        }
         usage.observe(
             &ObservedRequest {
                 identity: identity.as_deref(),
@@ -334,7 +353,11 @@ pub(crate) const SESSION_HEADER: &str = "Mcp-Session-Id";
 
 /// The largest body read to count its tool calls (the endpoint's own body limit, 16 MiB): a
 /// larger declared body is passed on unread (the endpoint refuses it).
-const MAX_OBSERVED_BODY: usize = 16 * 1024 * 1024;
+pub(crate) const MAX_OBSERVED_BODY: usize = 16 * 1024 * 1024;
+
+/// The largest body of an anonymous request to an MCP endpoint (SEC M1): larger is `413`, read
+/// no further. A request without credentials must not make the server buffer 16 MiB.
+pub(crate) const MAX_ANONYMOUS_BODY: usize = 1024 * 1024;
 
 /// The first header `name` of `headers` (case-insensitive).
 pub(crate) fn header_of(headers: &[(String, String)], name: &str) -> Option<String> {
@@ -344,31 +367,110 @@ pub(crate) fn header_of(headers: &[(String, String)], name: &str) -> Option<Stri
         .map(|(_, value)| value.clone())
 }
 
-/// The body of a `POST` to an MCP endpoint, read into memory (at most one byte over the
-/// endpoint's limit, so the endpoint still sees an oversize body as one) to count its tool
-/// calls; `None` for another method or a declared body over the limit; `Err`: the answer when
-/// the body cannot be read.
-pub(crate) fn buffer_body(request: &mut Request<'_>) -> Result<Option<Vec<u8>>, Response> {
+/// The body of a `POST` to an MCP endpoint, read into memory (at most one byte over `max`, so
+/// the endpoint still sees an oversize body as one) to count its tool calls; `None` for another
+/// method or a declared body over `max` (passed on unread: the endpoint refuses it); `Err`: the
+/// answer when the body cannot be read. With `strict` (an anonymous request, [`MAX_ANONYMOUS_BODY`])
+/// a body over `max`, declared or read, is answered `413` here instead.
+pub(crate) fn buffer_body(
+    request: &mut Request<'_>,
+    max: usize,
+    strict: bool,
+) -> Result<Option<Vec<u8>>, Response> {
     use std::io::Read;
-    if request.method().as_str() != "POST"
-        || request
-            .body_length()
-            .is_some_and(|len| len > MAX_OBSERVED_BODY)
-    {
+    let too_large = || {
+        Response::json(
+            413,
+            &serde_json::json!({
+                "error": format!("the body is larger than {max} bytes"),
+                "help": "requests without credentials to an MCP endpoint are small; send a \
+                         token for larger ones",
+            }),
+        )
+    };
+    if request.method().as_str() != "POST" {
         return Ok(None);
     }
+    if request.body_length().is_some_and(|len| len > max) {
+        return if strict { Err(too_large()) } else { Ok(None) };
+    }
     let mut bytes = Vec::new();
-    match request
-        .body()
-        .take(MAX_OBSERVED_BODY as u64 + 1)
-        .read_to_end(&mut bytes)
-    {
+    match request.body().take(max as u64 + 1).read_to_end(&mut bytes) {
+        Ok(_) if strict && bytes.len() > max => Err(too_large()),
         Ok(_) => Ok(Some(bytes)),
         Err(err) => Err(Response::json(
             400,
             &serde_json::json!({ "error": format!("cannot read the body: {err}") }),
         )),
     }
+}
+
+/// The body limit of an MCP request by `principal`: [`MAX_ANONYMOUS_BODY`] (strict) for
+/// anonymous, else [`MAX_OBSERVED_BODY`].
+pub(crate) fn body_limit(principal: &Principal) -> (usize, bool) {
+    if principal.is_anonymous() {
+        (MAX_ANONYMOUS_BODY, true)
+    } else {
+        (MAX_OBSERVED_BODY, false)
+    }
+}
+
+/// Whether the JSON-RPC body `body` holds an `initialize` request (alone or in a batch).
+pub(crate) fn is_initialize(body: &[u8]) -> bool {
+    let is_init = |message: &serde_json::Value| message["method"] == "initialize";
+    match serde_json::from_slice::<serde_json::Value>(body) {
+        Ok(serde_json::Value::Array(batch)) => batch.iter().any(is_init),
+        Ok(message) => is_init(&message),
+        Err(_) => false,
+    }
+}
+
+/// Before a new MCP session of `identity` (`None`: anonymous) is made (SEC M2): when it holds
+/// `quota` sessions already, its oldest ones are ended (`DELETE` on the endpoint as that
+/// identity) until one more fits, so a principal's flood of `initialize` requests ends only its
+/// own sessions. A session restored from `sessions/mcp.json` has no id in memory: reaching one
+/// ends all the sessions of `identity` (`Mcp::forget_sessions_of`). Answers how many ended.
+pub(crate) fn make_room(
+    mcp: &Mcp,
+    directory: &dyn GraphDirectory,
+    usage: &McpUsage,
+    identity: Option<&str>,
+    quota: usize,
+) -> usize {
+    let own = usage.sessions_of(identity);
+    let excess = (own.len() + 1).saturating_sub(quota.max(1));
+    let mut ended = 0;
+    for id in own.into_iter().take(excess) {
+        let Some(id) = id else {
+            ended += mcp.forget_sessions_of(identity);
+            break;
+        };
+        let mut request = McpRequest::new("DELETE", &[][..]).header(SESSION_HEADER, &id);
+        if let Some(identity) = identity {
+            request = request.with_identity(identity);
+        }
+        if mcp.handle_directory(directory, request).status() == 200 {
+            ended += 1;
+        }
+    }
+    if ended > 0 {
+        tracing::info!(
+            target: "graphersal_server",
+            "MCP: {} reached its session quota ({quota}); its {ended} oldest session(s) ended",
+            identity.unwrap_or("anonymous")
+        );
+    }
+    ended
+}
+
+/// The per-identity MCP session quota of the running server (`[mcp]
+/// max_sessions_per_identity`, the default without a live configuration).
+pub(crate) fn session_quota(loader: &Loader) -> usize {
+    loader
+        .live_config()
+        .map_or(crate::config::DEFAULT_MCP_SESSIONS_PER_IDENTITY, |live| {
+            live.mcp_sessions_per_identity()
+        })
 }
 
 /// The answer of an MCP endpoint while MCP is switched off (`mcp.toml` `enabled = false`).

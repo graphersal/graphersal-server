@@ -4,7 +4,7 @@
     "title": "graphersal-server HTTP API (EXPERIMENTAL)",
     "version": "0.0.0",
     "summary": "The server's own routes: login, the caller's databases and the admin API.",
-    "description": "**EXPERIMENTAL.** The HTTP API of graphersal-server itself: the probes, the browser login, the caller's databases and the admin API below `/api/admin/` (admins only). `info.version` is the server's version.\n\n**The databases.** Each database (or alias) `<name>` serves its own HTTP API below `/db/<name>/` (queries, schema, saved queries, indexes, jobs, Store, ...), described by its own document at `GET /db/<name>/openapi.json` (`/api/info` names the path template as `databaseOpenapi`, `GET /api/databases` the path of each database as `openapi`); generate a client from that one for data access.\n\n**MCP.** `/mcp` (every database the caller may see) and `/db/<name>/mcp` (one database) are MCP endpoints (Streamable HTTP, JSON-RPC), not REST routes: point an MCP client at them with the same Bearer token. `404` when `server.toml [mcp] enabled = false`, `503` while `mcp.toml` switches MCP off. See the repository's book, `book/src/guide/mcp.md`.\n\n**Security.** Send a user token as `Authorization: Bearer <64 hex digits>` (`bearerAuth`); a browser uses the `gs_session` cookie set by `POST /api/login` (`sessionCookie`). Wrong credentials are `401`, never anonymous. The admin API needs the admin role: anonymous gets `401`, a user without the role `404` as if the API did not exist. With `server.toml [access] enabled = false` every request runs as the admin `everyone`.\n\n**Every request** but the probes is checked by `Host` (the listen address's names and `server.toml [http] allowed_hosts`) and `Origin` (a browser page of another origin): `403`. While the server starts or stops it answers `503` with `Retry-After: 1`.\n\n**Conventions.** Request bodies are JSON (`Content-Type: application/json`, at most 16 MiB; unknown fields `400`), except the uploads of import and models. An error is `{\"error\", \"help\"?}`. Every answer carries `Cache-Control: no-store`. Shared objects carry a `revision` (users and grants, aliases, each database's settings, the MCP settings): a change may name the revision it was based on (the body's `revision`, else `If-Match: \"<revision>\"`) and is refused with `409 {error, help, revision}` when someone else changed the object since; nothing changes. Every `GET` but the downloads also answers `HEAD`. The admin actions take real database names; names are case-insensitive. The repository's book (`book/src/reference/admin_api.md`) documents every answer in full; this description is deliberately looser.",
+    "description": "**EXPERIMENTAL.** The HTTP API of graphersal-server itself: the probes, the browser login, the caller's databases and the admin API below `/api/admin/` (admins only). `info.version` is the server's version.\n\n**The databases.** Each database (or alias) `<name>` serves its own HTTP API below `/db/<name>/` (queries, schema, saved queries, indexes, jobs, Store, ...), described by its own document at `GET /db/<name>/openapi.json` (`/api/info` names the path template as `databaseOpenapi`, `GET /api/databases` the path of each database as `openapi`); generate a client from that one for data access.\n\n**MCP.** `/mcp` (every database the caller may see) and `/db/<name>/mcp` (one database) are MCP endpoints (Streamable HTTP, JSON-RPC), not REST routes: point an MCP client at them with the same Bearer token. `404` when `server.toml [mcp] enabled = false`, `503` while `mcp.toml` switches MCP off; `/mcp` answers anonymous `401` unless anonymous holds a grant. See the repository's book, `book/src/guide/mcp.md`.\n\n**Security.** Send a user token as `Authorization: Bearer <64 hex digits>` (`bearerAuth`); a browser uses the `gs_session` cookie set by `POST /api/login` (`sessionCookie`). Wrong credentials are `401`, never anonymous. The admin API needs the admin role: anonymous gets `401`, a user without the role `404` as if the API did not exist. With `server.toml [access] enabled = false` every request runs as the admin `everyone`, which is refused (`403`) only the shutdown, the server backup, new users and new tokens.\n\n**Every request** but the probes is checked by `Host` (the listen address's names and `server.toml [http] allowed_hosts`) and `Origin` (a browser page of another origin): `403`. While the server starts or stops it answers `503` with `Retry-After: 1`.\n\n**Conventions.** Request bodies are JSON (`Content-Type: application/json`, at most 16 MiB; unknown fields `400`), except the uploads of import and models. An error is `{\"error\", \"help\"?}`. Every answer carries `Cache-Control: no-store`, `X-Frame-Options: DENY` and a `Content-Security-Policy` refusing framing. A request that may run without credentials (the login; with access control on, one naming no credentials) has 10 s for its whole body; the login body is at most 4 KiB. Shared objects carry a `revision` (users and grants, aliases, each database's settings, the MCP settings): a change may name the revision it was based on (the body's `revision`, else `If-Match: \"<revision>\"`) and is refused with `409 {error, help, revision}` when someone else changed the object since; nothing changes. Every `GET` but the downloads also answers `HEAD`. The admin actions take real database names; names are case-insensitive. The repository's book (`book/src/reference/admin_api.md`) documents every answer in full; this description is deliberately looser.",
     "license": {
       "name": "Apache-2.0",
       "identifier": "Apache-2.0"
@@ -248,7 +248,7 @@
       "post": {
         "operationId": "postLogin",
         "summary": "Browser login",
-        "description": "Starts a browser session for a user token: the answer sets the cookie `gs_session` (`HttpOnly; SameSite=Strict; Path=/`, `Max-Age` = `[sessions] lifetime_secs`, else 400 days; `Secure` with `public_scheme = \"https\"`). Clients that are not browsers send `Authorization: Bearer <token>` instead and never need this. Runs before authentication: a stale cookie does not block it.",
+        "description": "Starts a browser session for a user token: the answer sets the cookie `gs_session` (`HttpOnly; SameSite=Strict; Path=/`, `Max-Age` = the session lifetime, `[sessions] lifetime_secs` (default 30 days; 400 days with `0`); `Secure` with `public_scheme = \"https\"`). Clients that are not browsers send `Authorization: Bearer <token>` instead and never need this. Runs before authentication: a stale cookie does not block it.",
         "tags": [
           "session"
         ],
@@ -303,6 +303,9 @@
           },
           "405": {
             "$ref": "#/components/responses/NotAllowed"
+          },
+          "413": {
+            "$ref": "#/components/responses/TooLarge"
           },
           "500": {
             "$ref": "#/components/responses/Failure"
@@ -2919,7 +2922,14 @@
             "$ref": "#/components/responses/Unauthorized"
           },
           "403": {
-            "$ref": "#/components/responses/HostRefused"
+            "description": "The principal `everyone` (access control off: it may not make credentials), or a refused Host/Origin.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           },
           "404": {
             "$ref": "#/components/responses/AdminNotFound"
@@ -3105,7 +3115,14 @@
             "$ref": "#/components/responses/Unauthorized"
           },
           "403": {
-            "$ref": "#/components/responses/HostRefused"
+            "description": "The principal `everyone` (access control off: it may not make credentials), or a refused Host/Origin.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           },
           "404": {
             "$ref": "#/components/responses/AdminNotFound"

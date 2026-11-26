@@ -73,7 +73,7 @@ fn a_connection_over_the_cap_is_answered_503_with_retry_after() {
     std::thread::sleep(Duration::from_millis(200));
 
     let mut refused = TcpStream::connect(running.address()).unwrap();
-    send_get(&mut refused, &running, "/healthz");
+    send_get(&mut refused, &running, "/api/info");
     let answer = read_to_close(&mut refused);
     assert!(answer.starts_with("HTTP/1.1 503"), "{answer}");
     assert!(answer.contains("\r\nRetry-After: 1\r\n"), "{answer}");
@@ -95,7 +95,7 @@ fn a_connection_over_the_cap_is_answered_503_with_retry_after() {
         let mut stream = TcpStream::connect(running.address()).unwrap();
         write!(
             stream,
-            "GET /healthz HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+            "GET /api/info HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
             running.address()
         )
         .unwrap();
@@ -295,9 +295,164 @@ fn an_h2c_connection_over_the_cap_is_answered_503_too() {
     let running = serve(&temp, ServeOptions::new().with_max_connections(1));
     let holder = TcpStream::connect(running.address()).unwrap();
     std::thread::sleep(Duration::from_millis(200));
-    let (status, version, body) = h2_request(&running, "GET", "/healthz", b"");
+    let (status, version, body) = h2_request(&running, "GET", "/api/info", b"");
     assert_eq!((status, version), (503, Version::HTTP_2), "{body}");
     assert!(body["help"].as_str().unwrap().contains("max_connections"));
     drop(holder);
+    running.stop().unwrap();
+}
+
+// SEC M1: slow clients without credentials cannot hold the connection cap, and the probes
+// answer through it.
+
+/// Sends `head` on a new connection, then trickles one byte of the declared body every 200 ms
+/// (each read of the server gets a byte well within its 120 s idle timeout) until the server
+/// answers and closes: (the answer, how long it took). A 20 s read timeout stops a hung test.
+fn trickle(running: &Running, head: &str) -> (String, Duration) {
+    let mut stream = TcpStream::connect(running.address()).unwrap();
+    stream.write_all(head.as_bytes()).unwrap();
+    let begun = Instant::now();
+    let writer = stream.try_clone().unwrap();
+    let trickling = std::thread::spawn(move || {
+        let mut writer = writer;
+        for _ in 0..200 {
+            if writer.write_all(b" ").is_err() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+    });
+    let answer = read_to_close(&mut stream);
+    let took = begun.elapsed();
+    drop(stream);
+    let _ = trickling.join();
+    (answer, took)
+}
+
+#[test]
+fn a_trickled_login_body_is_cut_at_the_deadline() {
+    let temp = TempDir::new("serve-sec-login-trickle");
+    let deadline = Duration::from_secs(1);
+    let running = serve(&temp, ServeOptions::new().with_body_deadline(deadline));
+    let (answer, took) = trickle(
+        &running,
+        &format!(
+            "POST /api/login HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\n\
+             Content-Length: 1000\r\n\r\n{{",
+            running.address()
+        ),
+    );
+    assert!(answer.starts_with("HTTP/1.1 400"), "{answer}");
+    assert!(answer.contains("too slowly"), "{answer}");
+    assert!(took >= deadline - Duration::from_millis(100), "{took:?}");
+    running.stop().unwrap();
+}
+
+#[test]
+fn a_trickled_body_without_credentials_is_cut_and_its_drain_too() {
+    let temp = TempDir::new("serve-sec-anonymous-trickle");
+    let running = serve(
+        &temp,
+        ServeOptions::new().with_body_deadline(Duration::from_secs(1)),
+    );
+    // Anonymous: refused (401) before its body is read; the drain of the short rest is
+    // bounded too, so the trickle does not hold the connection.
+    let (answer, _) = trickle(
+        &running,
+        &format!(
+            "POST /api/admin/databases HTTP/1.1\r\nHost: {}\r\n\
+             Content-Type: application/json\r\nContent-Length: 1000\r\n\r\n{{",
+            running.address()
+        ),
+    );
+    assert!(answer.starts_with("HTTP/1.1 401"), "{answer}");
+    // Wrong credentials: the same (refused before the body, the drain bounded).
+    let (answer, _) = trickle(
+        &running,
+        &format!(
+            "POST /api/admin/databases HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer nope\r\n\
+             Content-Type: application/json\r\nContent-Length: 1000\r\n\r\n{{",
+            running.address()
+        ),
+    );
+    assert!(answer.starts_with("HTTP/1.1 401"), "{answer}");
+    // An authenticated body slower than the deadline is still read whole.
+    let body = br#"{"name": "slow"}"#;
+    let mut stream = TcpStream::connect(running.address()).unwrap();
+    write!(
+        stream,
+        "POST /api/admin/databases HTTP/1.1\r\nHost: {}\r\n{}Content-Type: application/json\r\n\
+         Content-Length: {}\r\nConnection: close\r\n\r\n",
+        running.address(),
+        crate::test_support::admin_header(running.address()),
+        body.len()
+    )
+    .unwrap();
+    for chunk in body.chunks(4) {
+        std::thread::sleep(Duration::from_millis(400));
+        stream.write_all(chunk).unwrap();
+    }
+    let answer = read_to_close(&mut stream);
+    assert!(answer.starts_with("HTTP/1.1 201"), "{answer}");
+    running.stop().unwrap();
+}
+
+#[test]
+fn a_login_body_over_4_kib_is_refused_unread() {
+    let temp = TempDir::new("serve-sec-login-cap");
+    let running = serve(&temp, ServeOptions::new());
+    let token = "x".repeat(5000);
+    let body = format!(r#"{{"token": "{token}"}}"#);
+    // Declared: 413 at once.
+    let mut stream = TcpStream::connect(running.address()).unwrap();
+    write!(
+        stream,
+        "POST /api/login HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\n\
+         Content-Length: {}\r\nConnection: close\r\n\r\n",
+        running.address(),
+        body.len()
+    )
+    .unwrap();
+    let answer = read_to_close(&mut stream);
+    assert!(answer.starts_with("HTTP/1.1 413"), "{answer}");
+    // Chunked (undeclared): 413 after 4 KiB.
+    let mut stream = TcpStream::connect(running.address()).unwrap();
+    write!(
+        stream,
+        "POST /api/login HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\n\
+         Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n{:x}\r\n{body}\r\n0\r\n\r\n",
+        running.address(),
+        body.len()
+    )
+    .unwrap();
+    let answer = read_to_close(&mut stream);
+    assert!(answer.starts_with("HTTP/1.1 413"), "{answer}");
+    running.stop().unwrap();
+}
+
+#[test]
+fn the_probes_answer_also_over_the_connection_cap() {
+    let temp = TempDir::new("serve-sec-probes");
+    let running = serve(&temp, ServeOptions::new().with_max_connections(1));
+    let holder = TcpStream::connect(running.address()).unwrap();
+    std::thread::sleep(Duration::from_millis(200));
+    for (path, expected) in [("/healthz", "\"ok\""), ("/readyz", "\"ready\"")] {
+        let mut stream = TcpStream::connect(running.address()).unwrap();
+        send_get(&mut stream, &running, path);
+        let answer = read_to_close(&mut stream);
+        assert!(answer.starts_with("HTTP/1.1 200"), "{path}: {answer}");
+        assert!(answer.contains(expected), "{path}: {answer}");
+        assert!(answer.contains("no-store"), "{path}: {answer}");
+    }
+    let (status, version, body) = h2_request(&running, "GET", "/healthz", b"");
+    assert_eq!((status, version), (200, Version::HTTP_2), "{body}");
+    // Every other request still gets the 503.
+    let mut stream = TcpStream::connect(running.address()).unwrap();
+    send_get(&mut stream, &running, "/api/info");
+    assert!(read_to_close(&mut stream).starts_with("HTTP/1.1 503"));
+    drop(holder);
+    assert_eq!(blocking_threads(256), 288);
+    assert_eq!(blocking_threads(1), 33);
+    assert_eq!(blocking_threads(100_000), 512);
     running.stop().unwrap();
 }

@@ -643,7 +643,8 @@ try {
     }
     Expect ($runId -ne "") "the endless query never showed: $(Head400 $script:Body)"
     Req GET /api/admin/runs
-    Expect-BodyContains '"client":"page:smoke"'
+    # The page's client id as the server forwards it: a tag of the caller's identity, then its own.
+    Expect ($script:Body -match '"client":"page:[0-9a-f]{12}-smoke"') "the answer lacks the client page:<tag>-smoke: $(Head400 $script:Body)"
     Req POST /api/admin/databases/acme/runs/cancel -Json "{`"id`": $runId}"
     Expect-Status 200
     Expect-Json cancelled true

@@ -62,7 +62,7 @@ Every request is answered for ONE principal:
 | a user | a request with `Authorization: Bearer <user token>`, or with the browser's `gs_session` cookie after a login | `user:<name>` |
 | the operator | the console of the OS user owning the server directory: offline on the directory, or through the server with the per-run operator token from `server.run` (`Authorization: Bearer`); an admin | `operator`; the audit adds the OS user: `operator (os:<name>)` |
 | anonymous | a request without credentials | none |
-| everyone | every request while access control is off (`[access] enabled = false`); an admin | `everyone` |
+| everyone | every request while access control is off (`[access] enabled = false`); an admin, but refused the shutdown, the server backup, new users and new tokens ([Security Model](security.md#what-access-control-off-protects)) | `everyone` |
 
 Wrong credentials (a token nobody holds, an ended session's cookie) are `401`. They never
 fall back to anonymous. `GET /api/info` names the request's principal: `principal {id, kind,
@@ -249,8 +249,8 @@ Set-Cookie: gs_session=<session id>; Max-Age=<seconds>; HttpOnly; SameSite=Stric
 
 - `HttpOnly`: page scripts cannot read the cookie. `SameSite=Strict`: other sites cannot send
   it.
-- `Max-Age` is `[sessions] lifetime_secs` when that is set, else 400 days, so a browser
-  restart keeps the login.
+- `Max-Age` is the session lifetime, `[sessions] lifetime_secs` (default 30 days; 400 days
+  with `0`), so a browser restart keeps the login.
 - `Secure` is added when `[http] public_scheme = "https"`.
 
 After logging in, the page goes to its `?next=` path (only a path from the server root) or to
@@ -268,7 +268,9 @@ no setting to turn this off. A session ends at:
 - a new token or a revoke for its user, or the user's removal (at once, also through the
   offline console);
 - `[sessions] lifetime_secs` after its login, or `[sessions] idle_timeout_secs` after its last
-  request (both unset, so no limit, by default; [Configuration Reference](../reference/configuration.md#servertoml)).
+  request (by default 30 days and 7 days; `0` lifts a limit; [Configuration
+  Reference](../reference/configuration.md#servertoml));
+- a newer login of the same user when it already holds 32 browser sessions (its oldest ends).
 
 A session's last request is recorded coarsely, at most once a minute. Deleting `sessions/`
 while no server runs logs every browser out.

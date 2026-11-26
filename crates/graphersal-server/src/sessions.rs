@@ -218,6 +218,32 @@ impl SessionTable for FileSessions {
         Ok(())
     }
 
+    /// Drops the user's oldest sessions over the cap, adds the new one and writes the file
+    /// once; a failed write restores the table as it was (`Err`).
+    fn insert_capped(
+        &self,
+        id: TokenHash,
+        session: BrowserSession,
+        max_per_user: usize,
+    ) -> Result<usize, ServerError> {
+        let mut sessions = self.lock();
+        let dropped: Vec<(TokenHash, BrowserSession)> =
+            crate::access::sessions_over_cap(&sessions, &session.user, max_per_user)
+                .into_iter()
+                .filter_map(|old| sessions.remove(&old).map(|s| (old, s)))
+                .collect();
+        let before = sessions.insert(id, session);
+        if let Err(err) = self.save(&sessions) {
+            match before {
+                Some(old) => sessions.insert(id, old),
+                None => sessions.remove(&id),
+            };
+            sessions.extend(dropped);
+            return Err(err);
+        }
+        Ok(dropped.len())
+    }
+
     fn get(&self, id: &TokenHash) -> Option<BrowserSession> {
         self.lock().get(id).cloned()
     }

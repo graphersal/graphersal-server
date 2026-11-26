@@ -255,6 +255,56 @@ pub trait SessionTable: Send + Sync {
     fn remove(&self, id: &TokenHash) -> Result<Option<BrowserSession>, ServerError>;
     /// Keeps only the sessions `keep` accepts: how many were removed.
     fn retain(&self, keep: &dyn Fn(&BrowserSession) -> bool) -> Result<usize, ServerError>;
+
+    /// Adds a session, first dropping the oldest sessions of the same user so that it holds at
+    /// most `max_per_user` afterwards (SEC L3: a login loop cannot grow the table without
+    /// bound): how many were dropped. The default runs [`Self::retain`] and [`Self::insert`];
+    /// the tables of this crate do it under one lock with one write.
+    fn insert_capped(
+        &self,
+        id: TokenHash,
+        session: BrowserSession,
+        max_per_user: usize,
+    ) -> Result<usize, ServerError> {
+        let created = Mutex::new(Vec::new());
+        self.retain(&|other| {
+            if other.user == session.user {
+                created
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .push(other.created);
+            }
+            true
+        })?;
+        let mut created = created.into_inner().unwrap_or_else(|p| p.into_inner());
+        created.sort_unstable();
+        let excess = (created.len() + 1).saturating_sub(max_per_user.max(1));
+        let dropped = match excess.checked_sub(1).and_then(|last| created.get(last)) {
+            Some(&cutoff) => {
+                self.retain(&|other| !(other.user == session.user && other.created <= cutoff))?
+            }
+            None => 0,
+        };
+        self.insert(id, session)?;
+        Ok(dropped)
+    }
+}
+
+/// The sessions of `user` in `sessions` to drop before one more is added, so that it holds at
+/// most `max_per_user` afterwards: the oldest first (by creation, then id).
+pub(crate) fn sessions_over_cap(
+    sessions: &HashMap<TokenHash, BrowserSession>,
+    user: &str,
+    max_per_user: usize,
+) -> Vec<TokenHash> {
+    let mut own: Vec<(SystemTime, TokenHash)> = sessions
+        .iter()
+        .filter(|(_, session)| session.user == user)
+        .map(|(id, session)| (session.created, *id))
+        .collect();
+    let excess = (own.len() + 1).saturating_sub(max_per_user.max(1));
+    own.sort_unstable_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.to_hex().cmp(&b.1.to_hex())));
+    own.into_iter().take(excess).map(|(_, id)| id).collect()
 }
 
 /// The in-memory session table (sessions end with the process).
@@ -300,6 +350,21 @@ impl SessionTable for MemorySessions {
         let before = sessions.len();
         sessions.retain(|_, session| keep(session));
         Ok(before - sessions.len())
+    }
+
+    fn insert_capped(
+        &self,
+        id: TokenHash,
+        session: BrowserSession,
+        max_per_user: usize,
+    ) -> Result<usize, ServerError> {
+        let mut sessions = self.lock();
+        let dropped = sessions_over_cap(&sessions, &session.user, max_per_user);
+        for old in &dropped {
+            sessions.remove(old);
+        }
+        sessions.insert(id, session);
+        Ok(dropped.len())
     }
 }
 

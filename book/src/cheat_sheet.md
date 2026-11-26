@@ -185,7 +185,8 @@ curl -s http://127.0.0.1:8484/openapi.json                             # the sam
 export GRAPHERSAL_SERVER_TOKEN=<an admin's token>                      # keeps the token out of the process list
 graphersal-server db list --dir ./srv                                  # through the running server
 graphersal-server db list --dir ./srv --server 127.0.0.1:8484          # at this address
-graphersal-server user list --dir ./srv --token <an admin's token>
+graphersal-server user list --dir ./srv --token-file ~/.graphersal-token  # the token from a file (- = stdin)
+graphersal-server user list --dir ./srv --token <an admin's token>     # works, but shows in ps: a warning
 graphersal-server status --dir ./srv --server 127.0.0.1:8484
 ```
 

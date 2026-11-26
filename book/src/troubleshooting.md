@@ -406,6 +406,14 @@ graphersal-server db auto-load acme on --dir ./srv     # and at every start
 failed](#a-database-is-failed). `it needs the embedding model ...`: [A database needs a
 model](#a-database-needs-a-model).
 
+## A slow client gets 400 "sent the body too slowly"
+
+A request without credentials (the login; with access control on, any request without a token
+or session cookie) has 10 seconds for its whole body, and a login body is at most 4 KiB (`413`).
+A client on a very slow link, or one that sends a large anonymous body, is cut off: send a token
+(`Authorization: Bearer`) with large or slow requests; authenticated bodies have no total
+deadline.
+
 ## A user gets 401 or 404
 
 - `401 {"error", "login": "/"}`: no credentials (and no anonymous grant), or a token nobody holds
@@ -476,7 +484,13 @@ graphersal-server user remove admin --dir ./srv
 - `404` on `/mcp` and `/db/<name>/mcp` while the rest works: `server.toml [mcp] enabled =
   false`. Set it to `true` and restart.
 - `404` for a session id: the session ended (a new token for its user, the user removed, more than
-  `[mcp] max_sessions` sessions). The client initializes again and selects its database again.
+  `[mcp] max_sessions` sessions, or the same principal opened more than `[mcp]
+  max_sessions_per_identity` sessions, default 16: its oldest end first). The client initializes
+  again and selects its database again. A client that opens a new session per task and never
+  ends it (`DELETE /mcp`) loses its oldest ones this way.
+- `401` on `/mcp` without a token: anonymous may use MCP only when `access.toml` grants
+  anonymous something. Send a user token (`Authorization: Bearer`), or grant anonymous a
+  database (`user grant anonymous DATABASE read`).
 
 More in [MCP](guide/mcp.md).
 
@@ -486,14 +500,25 @@ More in [MCP](guide/mcp.md).
   another address. A token works only through a running server.
 - `401`: the token is wrong or was replaced.
 - `404` on admin commands: the token's user is not an admin.
-- `--server` without a token is a usage error: set `--token` or `GRAPHERSAL_SERVER_TOKEN`.
+- `--server` without a token is a usage error: set `--token-file`, `--token` or
+  `GRAPHERSAL_SERVER_TOKEN`.
+- `no server holds server.lock`: `server.run` is stale (the server crashed or was killed), and
+  its address may belong to another program now, so the token is not sent there. Start the
+  server again, or name its address with `--server ADDRESS` when you know it runs there.
+- `server.run belongs to the OS user ...`: the run file was not written by the directory's
+  owner; its address is not trusted. Name the address with `--server ADDRESS`.
+- `warning: a token on the command line is visible to other users`: not an error; use
+  `--token-file PATH` (`-` for stdin) or `GRAPHERSAL_SERVER_TOKEN` to keep the token out of
+  `ps`.
 
 ## Everybody is logged out after a restart
 
 Sessions survive a restart in `sessions/`. A warning at start that a sessions file cannot be read
 or parsed means it was damaged: the server starts without those sessions (users sign in again,
 MCP clients initialize again) and overwrites the file with the next change. Sessions also end
-by `[sessions] lifetime_secs` and `idle_timeout_secs`.
+by `[sessions] lifetime_secs` and `idle_timeout_secs`: by default 30 days after the login and 7
+days after the last request (`0` lifts a limit), and a user's 33rd login ends that user's oldest
+browser session.
 
 A restored server backup never holds sessions: every user signs in again.
 

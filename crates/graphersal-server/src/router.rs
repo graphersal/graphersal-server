@@ -5,7 +5,7 @@
 //! principal:
 //!
 //! - `POST /api/login {"token"}`: a browser session for a user token, its id in the
-//!   `gs_session` cookie (`Max-Age=<[sessions] lifetime_secs, else 400 days>; HttpOnly;
+//!   `gs_session` cookie (`Max-Age=<the session lifetime (default 30 days), else 400 days>; HttpOnly;
 //!   SameSite=Strict; Path=/`, plus `Secure` when `[http] public_scheme = "https"`: a browser
 //!   restart keeps the login); `POST /api/logout` ends it and clears the cookie (`Max-Age=0`).
 //!   Both run before authentication (a stale cookie must not lock a browser out of logging in
@@ -53,6 +53,8 @@
 //!
 //! Every answer the server sends carries `Cache-Control: no-store` exactly once ([`no_store`]):
 //! the API answers (root, admin and each database's), the UI files, the errors and redirects.
+//! Every in-memory answer also carries `X-Frame-Options: DENY` and a `Content-Security-Policy`
+//! ([`framing_refused`], SEC L6).
 //! A browser never shows an answer it kept from an earlier visit (the web UI reads every tab's
 //! data again on each visit).
 //!
@@ -115,8 +117,8 @@ pub(crate) struct Router {
     stop_hook: Option<crate::serve::StopHook>,
 }
 
-/// The default `Max-Age` of the login cookie without `[sessions] lifetime_secs`: 400 days, the
-/// longest a browser keeps a cookie.
+/// The `Max-Age` of the login cookie without a session lifetime (`[sessions] lifetime_secs =
+/// 0`): 400 days, the longest a browser keeps a cookie.
 pub(crate) const DEFAULT_COOKIE_MAX_AGE_SECS: u64 = 400 * 24 * 60 * 60;
 
 /// The modes of `server.toml` the router answers in, read at start.
@@ -127,8 +129,9 @@ pub(crate) struct Modes {
     /// `[http] public_scheme = "https"`: the login cookie gets `Secure`, and the API
     /// descriptions name `https://` URLs ([`crate::openapi`]).
     pub(crate) secure_cookies: bool,
-    /// The login cookie's `Max-Age` in seconds: `[sessions] lifetime_secs`, else
-    /// [`DEFAULT_COOKIE_MAX_AGE_SECS`] (a browser restart keeps the login).
+    /// The login cookie's `Max-Age` in seconds: the session lifetime (`[sessions]
+    /// lifetime_secs`, default 30 days), else [`DEFAULT_COOKIE_MAX_AGE_SECS`] (a browser
+    /// restart keeps the login).
     pub(crate) cookie_max_age_secs: u64,
 }
 
@@ -137,7 +140,7 @@ impl Default for Modes {
         Self {
             access_enabled: true,
             secure_cookies: false,
-            cookie_max_age_secs: DEFAULT_COOKIE_MAX_AGE_SECS,
+            cookie_max_age_secs: crate::config::DEFAULT_SESSION_LIFETIME_SECS,
         }
     }
 }
@@ -150,7 +153,7 @@ impl Modes {
             secure_cookies: config.http.public_scheme == crate::config::PublicScheme::Https,
             cookie_max_age_secs: config
                 .sessions
-                .lifetime_secs
+                .effective_lifetime_secs()
                 .unwrap_or(DEFAULT_COOKIE_MAX_AGE_SECS),
         }
     }
@@ -316,6 +319,30 @@ impl Router {
             })
     }
 
+    /// Whether a request to `path` with `headers` may run without credentials, so its body
+    /// gets a deadline (SEC M1, [`crate::serve`]): the login always; with access control on,
+    /// a request that names no credentials (no `Authorization`, no session cookie). A request
+    /// with wrong credentials is refused before its body is read.
+    pub(crate) fn may_run_without_credentials(
+        &self,
+        path: &str,
+        headers: &[(String, String)],
+    ) -> bool {
+        if path == LOGIN {
+            return true;
+        }
+        if !self.modes().access_enabled {
+            return false;
+        }
+        let named = |name: &str| headers.iter().any(|(n, _)| n.eq_ignore_ascii_case(name));
+        let cookie = headers.iter().any(|(n, v)| {
+            n.eq_ignore_ascii_case("cookie")
+                && v.split(';')
+                    .any(|pair| pair.trim().starts_with(&format!("{SESSION_COOKIE}=")))
+        });
+        !named("Authorization") && !cookie
+    }
+
     /// Answers one request, a download buffered into the answer (tests).
     #[cfg(test)]
     pub(crate) fn route(&self, request: Request<'_>) -> Response {
@@ -330,7 +357,7 @@ impl Router {
     /// it itself).
     pub(crate) fn answer(&self, request: Request<'_>) -> Answer {
         match self.answer_uncached(request) {
-            Answer::Response(response) => Answer::Response(no_store(response)),
+            Answer::Response(response) => Answer::Response(framing_refused(no_store(response))),
             download @ Answer::Download(_) => download,
         }
     }
@@ -414,6 +441,14 @@ impl Router {
                     }
                     return Answer::Response(crate::mcp::switched_off());
                 }
+                // Anonymous may open MCP sessions only where anonymous is granted something
+                // (SEC M2): otherwise its `initialize` flood could evict users' sessions.
+                Some(_) if principal.is_anonymous() && !access.anonymous_has_grant() => {
+                    return Answer::Response(unauthorized(
+                        "log in to use MCP: send a user token (Authorization: Bearer)",
+                        None,
+                    ));
+                }
                 Some(mcp) => {
                     let directory = crate::mcp::Directory {
                         loader,
@@ -456,6 +491,19 @@ impl Router {
             let admin = crate::ops::Admin::online(loader.clone())
                 .with_audit(access.audit_as(&principal))
                 .with_access(access.clone(), principal.clone());
+            if principal.kind == crate::access::PrincipalKind::Everyone
+                && crate::admin_api::issues_credentials(&method, endpoint)
+            {
+                return Answer::Response(Response::json(
+                    403,
+                    &serde_json::json!({
+                        "error": "making a user or a token needs the operator token or an admin \
+                                  user's token, also with access control off",
+                        "help": "run graphersal-server user add NAME (or user token NAME) --dir \
+                                 DIR as the directory's owner, or send an admin user's token",
+                    }),
+                ));
+            }
             if crate::admin_api::is_server_backup(&method, endpoint) {
                 if principal.kind == crate::access::PrincipalKind::Everyone {
                     return Answer::Response(Response::json(
@@ -566,13 +614,31 @@ impl Router {
                 Err(answer) => return answer,
             }
         } else if mcp_control.is_some() {
-            match crate::mcp::buffer_body(request) {
+            let (max, strict) = crate::mcp::body_limit(principal);
+            match crate::mcp::buffer_body(request, max, strict) {
                 Ok(body) => body,
                 Err(answer) => return answer,
             }
         } else {
             None
         };
+        // A new MCP session: the principal's own oldest ones make room first (SEC M2).
+        if let (Some(control), Some(mcp), Some(body)) = (mcp_control, loader.mcp(), &buffered)
+            && crate::mcp::is_initialize(body)
+        {
+            let directory = crate::mcp::Directory {
+                loader,
+                access,
+                principal,
+            };
+            crate::mcp::make_room(
+                mcp,
+                &directory,
+                control.usage(),
+                principal.identity().as_deref(),
+                crate::mcp::session_quota(loader),
+            );
+        }
         let session = crate::mcp::header_of(request.headers(), crate::mcp::SESSION_HEADER);
         let mut forwarded = match &buffered {
             Some(body) => mounts::forward_with_body(request, &target, &entry.name, body),
@@ -585,9 +651,21 @@ impl Router {
             forwarded.mark_read_only();
         }
         let identity = forwarded.identity().map(str::to_string);
+        let feed = forwarded.method() == &Method::Get && rest == "api/changes";
         let answer = self.lifecycle.handle(forwarded);
+        // The change feed names client ids: only the reader's own are shown (SEC M3).
+        let answer = if feed {
+            mounts::own_changes(answer, identity.as_deref())
+        } else {
+            answer
+        };
         if let (Some(control), Some(sent)) = (mcp_control, &buffered) {
             let new_session = crate::mcp::header_of(answer.headers(), crate::mcp::SESSION_HEADER);
+            if let Some(opened) = new_session.as_deref()
+                && session.as_deref() != Some(opened)
+            {
+                control.usage().session_opened(opened);
+            }
             control.usage().observe(
                 &crate::mcp_control::ObservedRequest {
                     identity: identity.as_deref(),
@@ -761,6 +839,46 @@ fn admin_refused(principal: &Principal, path: &str) -> Response {
     }
 }
 
+/// The largest body of `POST /api/login` (SEC M1): it carries one token; larger is `413`, read
+/// no further.
+pub(crate) const MAX_LOGIN_BODY: usize = 4 * 1024;
+
+/// The JSON object of a body of at most `max` bytes (`413` beyond it, declared or read; `415`
+/// without `Content-Type: application/json`).
+fn small_json_body(request: &mut Request<'_>, max: usize) -> Result<serde_json::Value, HttpError> {
+    use std::io::Read;
+    let json_type = request.header("Content-Type").is_some_and(|t| {
+        t.trim_start()
+            .to_ascii_lowercase()
+            .starts_with("application/json")
+    });
+    if !json_type {
+        return Err(HttpError::new(
+            415,
+            "send the body as Content-Type: application/json",
+        ));
+    }
+    let too_large = || HttpError::new(413, format!("the body is larger than {max} bytes"));
+    if request.body_length().is_some_and(|len| len > max) {
+        return Err(too_large());
+    }
+    let mut bytes = Vec::new();
+    request
+        .body()
+        .take(max as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|err| HttpError::bad_request(format!("cannot read the body: {err}")))?;
+    if bytes.len() > max {
+        return Err(too_large());
+    }
+    let body: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|err| HttpError::bad_request(format!("malformed JSON body: {err}")))?;
+    if !body.is_object() {
+        return Err(HttpError::bad_request("the body must be a JSON object"));
+    }
+    Ok(body)
+}
+
 /// The body of `POST /api/login`.
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -771,7 +889,7 @@ struct LoginBody {
 /// `POST /api/login {"token"}`: a browser session for the user token, its id in the
 /// `gs_session` cookie; `401` for a token no user holds.
 fn login(access: &Access, modes: &Modes, request: &mut Request<'_>) -> Result<Response, HttpError> {
-    let body = request.json_body()?;
+    let body = small_json_body(request, MAX_LOGIN_BODY)?;
     let body: LoginBody = serde_json::from_value(body)
         .map_err(|err| HttpError::bad_request(format!("the body must be {{\"token\"}}: {err}")))?;
     match access.login(body.token.trim()) {
@@ -810,6 +928,35 @@ fn logout(access: &Access, modes: &Modes, request: &Request<'_>) -> Result<Respo
     };
     Ok(Response::json(200, &json!({ "loggedOut": ended }))
         .with_header("Set-Cookie", &modes.cleared_session_cookie()))
+}
+
+/// The `Content-Security-Policy` of every answer (SEC L6): no page of this server may be framed
+/// (`frame-ancestors 'none'`), load plugins (`object-src 'none'`) or change its base URL
+/// (`base-uri 'none'`). Scripts are not restricted further: the embedded playground runs inline
+/// scripts, an import map and modules from its CDNs.
+pub(crate) const CONTENT_SECURITY_POLICY: &str =
+    "frame-ancestors 'none'; object-src 'none'; base-uri 'none'";
+
+/// `response` with `X-Frame-Options: DENY` and [`CONTENT_SECURITY_POLICY`] (SEC L6: the admin
+/// UI and every database's playground share one origin; no other site may frame them), each
+/// unless it names one already.
+pub(crate) fn framing_refused(response: Response) -> Response {
+    let named = |response: &Response, name: &str| {
+        response
+            .headers()
+            .iter()
+            .any(|(field, _)| field.eq_ignore_ascii_case(name))
+    };
+    let response = if named(&response, "X-Frame-Options") {
+        response
+    } else {
+        response.with_header("X-Frame-Options", "DENY")
+    };
+    if named(&response, "Content-Security-Policy") {
+        response
+    } else {
+        response.with_header("Content-Security-Policy", CONTENT_SECURITY_POLICY)
+    }
 }
 
 /// `response` with `Cache-Control: no-store`, unless it names a `Cache-Control` already (the

@@ -414,6 +414,19 @@ struct UsageState {
     users: BTreeMap<String, Counter>,
     databases: BTreeMap<String, Counter>,
     recent: VecDeque<RecentError>,
+    /// The session ids of the sessions opened since the start (SHA-256 -> id): what the
+    /// per-identity quota ends a session by ([`crate::mcp::make_room`]).
+    plain: PlainIds,
+}
+
+/// Session ids in clear text, kept in memory only and never shown (`Debug` names the count).
+#[derive(Default)]
+struct PlainIds(HashMap<String, String>);
+
+impl std::fmt::Debug for PlainIds {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "PlainIds({} ids)", self.0.len())
+    }
 }
 
 /// The usage of the MCP endpoints since the server started (module docs), in memory only.
@@ -497,7 +510,31 @@ impl McpUsage {
         let keep: std::collections::HashSet<&str> =
             open.iter().map(|s| s.id_sha256.as_str()).collect();
         state.mounts.retain(|id, _| keep.contains(id.as_str()));
+        state.plain.0.retain(|id, _| keep.contains(id.as_str()));
         state.sessions = open;
+    }
+
+    /// The session `session_id` was just opened (its id is kept in memory, so the per-identity
+    /// quota can end it later: [`crate::mcp::make_room`]).
+    pub(crate) fn session_opened(&self, session_id: &str) {
+        let id = sha256_hex(session_id);
+        let mut state = self.lock();
+        if state.sessions.iter().any(|s| s.id_sha256 == id) {
+            state.plain.0.insert(id, session_id.to_string());
+        }
+    }
+
+    /// The open sessions of `identity` (`None`: anonymous), oldest first: each one's id when
+    /// it was opened since the start ([`Self::session_opened`]), `None` for one restored from
+    /// `sessions/mcp.json`.
+    pub(crate) fn sessions_of(&self, identity: Option<&str>) -> Vec<Option<String>> {
+        let state = self.lock();
+        state
+            .sessions
+            .iter()
+            .filter(|s| s.identity.as_deref() == identity)
+            .map(|s| state.plain.0.get(&s.id_sha256).cloned())
+            .collect()
     }
 
     /// A session `session_id` was opened on the per-database endpoint of `name`.

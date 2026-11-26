@@ -1516,6 +1516,20 @@ pub(crate) fn is_server_backup(method: &Method, endpoint: &str) -> bool {
     matches!(method, Method::Get) && endpoint == "server-backup"
 }
 
+/// Whether `method endpoint` (below `/api/admin/`) hands out a new credential: `POST users`
+/// (a new user with its token) or `POST users/<name>/token` (a new token for a user). The
+/// router refuses both to `everyone` of a server without access control (SEC L1), like the
+/// shutdown and the server backup: otherwise a request without credentials could make itself
+/// an admin token and get past those refusals.
+pub(crate) fn issues_credentials(method: &Method, endpoint: &str) -> bool {
+    if !matches!(method, Method::Post) {
+        return false;
+    }
+    let endpoint = endpoint.split('?').next().unwrap_or_default();
+    let parts: Vec<&str> = endpoint.trim_end_matches('/').split('/').collect();
+    matches!(parts.as_slice(), ["users"] | ["users", _, "token"])
+}
+
 /// `GET server-backup?withDatabases=1`: the server backup ([`crate::server_backup`]) written
 /// into `tmp/`, as a download; an error as its JSON answer. The router has refused every
 /// principal but the operator and admin users (`everyone` of a server without access control

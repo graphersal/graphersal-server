@@ -73,23 +73,116 @@ key:
 
 ### The console with an admin token
 
-`--token TOKEN` (or the environment variable `GRAPHERSAL_SERVER_TOKEN`, which keeps the token
-out of the process list) sends a console command (`db`, `import`, `models`, `user`) to the
-running server with that user's token, instead of acting as the operator. The server's address
-is `--server ADDRESS` (`IP:PORT` or `http://IP:PORT/`), else the address in the directory's
-`server.run`. Nothing in the directory is written, so the permission checks do not apply: the
-token is the credential, and the server checks it like any request (a wrong token is refused
-with `401`; a user without the admin role sees no admin API). The audit names the token's user.
-Without a running server a token is refused (no command acts on the directory offline with a
-token). `--server` without a token is a usage error. `--dir DIR` is still required; with
-`--server` it only names the directory in the printed text.
+`--token-file PATH` (`-` reads the token from standard input), the environment variable
+`GRAPHERSAL_SERVER_TOKEN` or `--token TOKEN` sends a console command (`db`, `import`,
+`models`, `user`, `mcp`, `config`, `backup`, `stop`, `status`) to the running server with that
+user's token, instead of acting as the operator. A token on the command line (`--token`) is
+visible to every user of the machine in the process list (`ps`): the console prints a warning
+on stderr then; the file and the variable keep it out. The server's address is `--server
+ADDRESS` (`IP:PORT` or `http://IP:PORT/`), else the address in the directory's `server.run`.
+Nothing in the directory is written, so the permission checks do not apply: the token is the
+credential, and the server checks it like any request (a wrong token is refused with `401`; a
+user without the admin role sees no admin API). The audit names the token's user. Without a
+running server a token is refused (no command acts on the directory offline with a token).
+`--server` without a token is a usage error. `--dir DIR` is still required; with `--server` it
+only names the directory in the printed text.
 
 ```bash
 # another OS user, or another machine through an SSH tunnel to the loopback address
-export GRAPHERSAL_SERVER_TOKEN=<an admin's token>
-graphersal-server db list --dir /srv/graphs --server 127.0.0.1:8484
-graphersal-server user grant bob acme read --dir /srv/graphs --server 127.0.0.1:8484
+graphersal-server db list --dir /srv/graphs --server 127.0.0.1:8484 --token-file ~/.graphersal-token
+echo "$TOKEN" | graphersal-server user grant bob acme read --dir /srv/graphs --token-file -
 ```
+
+**Port squatting on a shared machine.** A port is not owned by anyone: when the server is down,
+any local user may listen on its address and collect the `Authorization` header a console or a
+browser sends there. So without `--server` the console sends a token to the address of
+`server.run` only while a server holds `server.lock` of that directory and `server.run` belongs
+to the directory's owner; a stale `server.run` (left by a crash) is refused with "no server
+holds server.lock". With `--server ADDRESS` nothing can check who listens there: on a machine
+other users log in to, name the address only while you know the server runs (`graphersal-server
+status --dir DIR` as its owner), and never paste a token into a login page you reached after a
+restart you did not see. A privileged port (below 1024) or a reverse proxy that ends TLS on its
+own port keeps other users from taking the address.
+
+## What access control off protects
+
+With `[access] enabled = false` every request is the admin principal `everyone` (valid admin
+credentials keep their identity). `everyone` is refused only what would hand out or use real
+credentials, with `403`:
+
+- the shutdown (`POST /api/admin/shutdown`, `stop` through the API) and the server backup
+  (`GET /api/admin/server-backup`, it holds the token hashes);
+- a new user (`POST /api/admin/users`) and a new token for a user (`POST
+  /api/admin/users/<name>/token`): otherwise a request without credentials could make itself
+  an admin token and get past the two refusals above.
+
+Nothing else is refused. Whoever reaches the address reads, changes and deletes every database,
+changes the grants and the settings, revokes tokens and imports files, as an admin would.
+Access control off is for a server only you can reach (the loopback address of a one-user
+machine, a container nobody else talks to); it protects no data.
+
+## Admins have the service account's file access
+
+An admin (the operator, a user with the admin role) acts with the file access of the OS account
+the server runs as:
+
+- `POST /api/admin/import {"path"}` and `POST /api/admin/models {"path"}` (the console's
+  `import DIR SOURCE`, `models add SOURCE`) read any file or directory that account can read. Only
+  what parses imports (GraphSON, GraphML, a snapshot, a Store directory, a model); errors never
+  echo a file's content, but a readable Store of another server directory imports fine;
+- `PUT /api/admin/config` with `jobs.backup_root` (applies at the next start) moves the file root
+  of every database's backup jobs to any directory that account can write.
+
+Give the admin role only to people you would let act as that account on its files. Run every
+server directory under a service account of its own: then an admin of one server cannot import
+another's databases by path.
+
+## Limits for clients without credentials
+
+A client without credentials can reach the login, the UI files, the probes and, with an
+anonymous grant, the databases granted to anonymous. What it can make the server hold is
+bounded:
+
+- the login body is at most 4 KiB (`413` beyond, read no further);
+- the body of a request that may run without credentials (the login; with access control on,
+  any request naming no `Authorization` and no session cookie) must arrive within 10 seconds,
+  and the unread rest of a refused request's body is drained for at most 5 seconds; a slower
+  client gets `400` and its connection is closed. Authenticated bodies (a large upload) have no
+  total deadline, only the 120-second wait for each next piece;
+- an anonymous body to an MCP endpoint is at most 1 MiB (`413`);
+- `/mcp` refuses anonymous with `401` unless `access.toml` grants anonymous something, and one
+  principal holds at most `[mcp] max_sessions_per_identity` MCP sessions (default 16): a new one
+  ends that principal's own oldest, so a flood of `initialize` requests never evicts another
+  principal's sessions;
+- `/healthz` and `/readyz` are answered at once, also when every connection place is taken (a
+  liveness probe does not kill a server that is being flooded); the request threads are bounded
+  (`[limits] max_connections` + 32, between 32 and 512), further requests wait for one;
+- one user holds at most 32 browser sessions (a new login ends the oldest), and a session ends
+  30 days after its login or 7 days after its last request by default (`[sessions]`; `0` lifts
+  a limit).
+
+The connection cap itself (`[limits] max_connections`, the 30-second header timeout) still
+lets a client that opens many connections fill it for a while; put a reverse proxy with
+per-client limits in front of a server reachable from untrusted networks.
+
+## Runs and the change feed
+
+A database's playground names its page with `X-Graphersal-Client`, and the engine keys a page's
+runs (stopping them with `POST /db/<name>/api/cancel`) and names its changes (`GET
+/db/<name>/api/changes`, `recent[].by`) by it. The header is chosen by the client, so the server
+never passes it on: it replaces it with a keyed hash of the principal's identity (a key made at
+each start, never the identity itself) followed by the page's own id. Another principal sending
+the same id gets another key and stops nothing. The change feed shows a reader only its own
+page ids; a change of another identity is `by: "another identity"` without its detail. The run
+administration (`/api/admin/runs`) shows the rewritten ids.
+
+## Pages and framing
+
+Every answer carries `X-Frame-Options: DENY` and `Content-Security-Policy: frame-ancestors
+'none'; object-src 'none'; base-uri 'none'`: no other site may frame the admin UI or a
+database's playground (which share one origin), load plugins into them or change their base
+URL. Scripts are not restricted further, because the embedded playground runs inline scripts,
+an import map and modules from its CDNs.
 
 ## Modes
 

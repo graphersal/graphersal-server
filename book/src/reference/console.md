@@ -13,9 +13,12 @@ directory is its operator. `init` makes the directory private (mode `0700`, the 
 user or open to group or others, naming the `chmod`/`chown` that fixes it
 ([Security Model](../guide/security.md#the-directory-owner-is-the-operator)). Run a shared server under a dedicated
 service user; other administrators run the console as that user, or send an admin token:
-`--token TOKEN` (or `GRAPHERSAL_SERVER_TOKEN`) goes through the running server (address
-`--server ADDRESS`, else from `DIR/server.run`) and touches no file of the directory. The
-audit names the OS user of the operator's actions (`operator (os:<name>)`) and the token's
+`--token-file PATH` (`-` reads standard input), `GRAPHERSAL_SERVER_TOKEN` or `--token TOKEN`
+goes through the running server (address `--server ADDRESS`, else from `DIR/server.run`, used
+only while its server holds `DIR/server.lock` and the file is the directory owner's) and
+touches no file of the directory. A token given with `--token` shows in the process list of
+the machine (`ps`), so the console warns on stderr; prefer the file or the environment
+variable. `--token` and `--token-file` together are a usage error. The audit names the OS user of the operator's actions (`operator (os:<name>)`) and the token's
 user otherwise.
 
 ## Output and the two paths

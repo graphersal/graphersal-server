@@ -2,7 +2,8 @@
 //! with the same parser as at start ([`ServerConfig::parse`]), written atomically, applied at
 //! once where that is safe, and otherwise marked "restart pending" until the next start.
 //!
-//! **Keys** ([`KEYS`]): `listen`, `mcp.enabled`, `mcp.max_sessions`, `defaults.chunk_bytes`,
+//! **Keys** ([`KEYS`]): `listen`, `mcp.enabled`, `mcp.max_sessions`,
+//! `mcp.max_sessions_per_identity`, `defaults.chunk_bytes`,
 //! `defaults.damage_policy`, `defaults.auto_load`, `defaults.read_only`,
 //! `limits.upload_bytes`, `limits.max_connections`, `limits.header_timeout_secs`,
 //! `limits.idle_timeout_secs`, `limits.memory_limit`, `limits.memory_headroom`,
@@ -166,6 +167,12 @@ pub const KEYS: &[Key] = &[
         "How many MCP sessions are remembered (the oldest forgotten first).",
     ),
     key(
+        "mcp.max_sessions_per_identity",
+        Kind::Count,
+        Applies::Restart,
+        "How many MCP sessions one principal holds (a new one ends its own oldest first).",
+    ),
+    key(
         "defaults.chunk_bytes",
         Kind::Count,
         Applies::NewDatabases,
@@ -277,13 +284,13 @@ pub const KEYS: &[Key] = &[
         "sessions.lifetime_secs",
         Kind::Count,
         Applies::Now,
-        "The longest a browser session lasts after its login, in seconds (unset: no limit).",
+        "The longest a browser session lasts after its login, in seconds (unset: 30 days; 0: no limit).",
     ),
     key(
         "sessions.idle_timeout_secs",
         Kind::Count,
         Applies::Now,
-        "The longest a browser session lasts after its last request, in seconds (unset: no limit).",
+        "The longest a browser session lasts after its last request, in seconds (unset: 7 days; 0: no limit).",
     ),
     key(
         "access.enabled",
@@ -342,6 +349,7 @@ pub fn value_of(config: &ServerConfig, name: &str) -> Option<Value> {
         "listen" => json!(config.listen),
         "mcp.enabled" => json!(config.mcp.enabled),
         "mcp.max_sessions" => json!(config.mcp.max_sessions),
+        "mcp.max_sessions_per_identity" => json!(config.mcp.max_sessions_per_identity),
         "defaults.chunk_bytes" => json!(config.defaults.chunk_bytes),
         "defaults.damage_policy" => match config.damage_policy() {
             Ok(policy) => json!(policy.name()),
@@ -814,14 +822,23 @@ impl LiveConfig {
             == PublicScheme::Https
     }
 
-    /// The login cookie's `Max-Age` now (`[sessions] lifetime_secs`, else the default).
+    /// The login cookie's `Max-Age` now (the session lifetime, else 400 days).
     pub(crate) fn cookie_max_age_secs(&self) -> u64 {
         self.applied
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .sessions
-            .lifetime_secs
+            .effective_lifetime_secs()
             .unwrap_or(crate::router::DEFAULT_COOKIE_MAX_AGE_SECS)
+    }
+
+    /// How many MCP sessions one principal holds (as at start: a restart key).
+    pub(crate) fn mcp_sessions_per_identity(&self) -> usize {
+        self.applied
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .mcp
+            .max_sessions_per_identity
     }
 
     /// The upload limit now.
@@ -1049,7 +1066,7 @@ mod tests {
             ("http.public_scheme", json!("ftp"), "http"),
             ("http.allowed_hosts", json!(["a b"]), "allowed_hosts"),
             ("limits.memory_limit", json!("lots"), "memory_limit"),
-            ("sessions.lifetime_secs", json!(0), "sessions.lifetime_secs"),
+            ("mcp.max_sessions", json!(0), "mcp.max_sessions"),
         ] {
             let changes = [(name.to_string(), toml_of_json(name, &value).unwrap())];
             let err = edit(&text, path(), &changes).unwrap_err().to_string();

@@ -28,6 +28,7 @@ listen = "127.0.0.1:8484"   # IP:PORT or localhost:PORT; port 0 = a free port
 enabled = true              # /mcp and /db/<name>/mcp exist (false: both answer 404); the
                             # runtime switch is mcp.toml's enabled (init writes it off)
 max_sessions = 256          # MCP sessions remembered, the oldest forgotten first
+max_sessions_per_identity = 16  # MCP sessions one principal holds (its oldest ended first)
 
 [defaults]                  # what a NEW database (create, import) starts with
 chunk_bytes = 1048576       # uncompressed snapshot chunk size of a new Store (>= 1)
@@ -53,9 +54,9 @@ idle_timeout_secs = 60      # a connection without a running request is closed a
 # max_materialized_bytes = 524288000
 # max_value_depth = 128
 
-[sessions]                  # how long a browser session lasts; no limit when left out
-# lifetime_secs = 2592000   # since its login
-# idle_timeout_secs = 604800   # since its last request
+[sessions]                  # how long a browser session lasts; 0 = no limit
+# lifetime_secs = 2592000   # since its login (default 30 days)
+# idle_timeout_secs = 604800   # since its last request (default 7 days)
 
 [access]
 enabled = true              # false: NO access control, every request is an admin
@@ -81,6 +82,7 @@ of the file applies at the next start (or, for load and create keys, when they a
 | `listen` (top level) | `127.0.0.1:8484` | restart | the listen address; `serve --listen ADDR` overrides it. Any address that is not a loopback address gets a warning in the `serve` start block: tokens travel in clear text over plain HTTP |
 | `[mcp] enabled` | `true` | restart (the MCP tab's runtime switch is `mcp.toml`) | serve the MCP endpoints (MCP) |
 | `[mcp] max_sessions` | `256` | restart | MCP sessions remembered (at least 1) |
+| `[mcp] max_sessions_per_identity` | `16` | restart | MCP sessions one principal (a user, the operator, anonymous as one) holds at once, on `/mcp` and every `/db/<name>/mcp` together (at least 1). A new session over it first ends that principal's oldest sessions, so one principal's `initialize` requests never push another principal's sessions out of the table. After a restart the restored sessions of a principal that reaches the quota all end at its next `initialize` (the server knows only their hashes) |
 | `[defaults] chunk_bytes` | `1048576` | create | a new Store's chunk size (fixed for the database's life) |
 | `[defaults] damage_policy` | `"maintenance"` | create | a new Store's damage policy (fixed for the database's life) |
 | `[defaults] auto_load` | `false` | create | whether a new database (create, import) loads at server start: copied into its `database.toml`, changeable per database afterwards; a create request or `db create --auto-load`/`--no-auto-load` wins |
@@ -99,9 +101,9 @@ of the file applies at the next start (or, for load and create keys, when they a
 | `[limits.query] max_traversers` | none (engine default 10M) | load | the `traversal.max_traversers` default: traversers one step may leave alive (`--max-traversers`); `0` = unlimited |
 | `[limits.query] max_materialized_bytes` | none (engine default 1 GiB) | load | the `traversal.max_materialized_bytes` default: the memory one query holds at once (`--max-materialized-bytes`); `0` = unlimited |
 | `[limits.query] max_value_depth` | none (128) | load | the deepest nesting of arrays and maps in one value, script and engine values (`--max-value-depth`); `0` = the default, never unlimited |
-| `[sessions] lifetime_secs` | none (no limit) | live (existing sessions too; the login cookie's `Max-Age` of new logins) | the longest a browser session lasts after its login, in seconds (at least 1); the browser logs in again afterwards |
-| `[sessions] idle_timeout_secs` | none (no limit) | live | the longest a browser session lasts after its last request, in seconds (at least 1); counted coarsely (the last request is recorded at most every minute, every quarter of a shorter timeout) |
-| `[access] enabled` | `true` | restart | `false` turns access control off: nothing is refused, every request is an admin. Valid admin credentials keep their identity (the console's operator, an admin user); every other request (none, a user without the admin role, wrong credentials) runs as the admin principal `everyone`, which the audit names. Login still works but is not needed. The `serve` start block warns loudly, and louder (in the banner too) when the address is not a loopback address. `access.toml` is still read and its first admin created, so turning access back on needs no other change |
+| `[sessions] lifetime_secs` | `2592000` (30 days) | live (existing sessions too; the login cookie's `Max-Age` of new logins) | the longest a browser session lasts after its login, in seconds; `0` = no limit (the cookie then lasts 400 days, the longest a browser keeps one); the browser logs in again afterwards. Before 0.3.0 a missing key meant no limit |
+| `[sessions] idle_timeout_secs` | `604800` (7 days) | live | the longest a browser session lasts after its last request, in seconds; `0` = no limit; counted coarsely (the last request is recorded at most every minute, every quarter of a shorter timeout). Before 0.3.0 a missing key meant no limit |
+| `[access] enabled` | `true` | restart | `false` turns access control off: every request is an admin. Valid admin credentials keep their identity (the console's operator, an admin user); every other request (none, a user without the admin role, wrong credentials) runs as the admin principal `everyone`, which the audit names. `everyone` is refused only what would hand out or use real credentials: the shutdown, the server backup, a new user and a new token (`403`). It protects no data: whoever reaches the address reads, changes and deletes every database ([Security Model](../guide/security.md#what-access-control-off-protects)). Login still works but is not needed. The `serve` start block warns loudly, and louder (in the banner too) when the address is not a loopback address. `access.toml` is still read and its first admin created, so turning access back on needs no other change |
 | `[http] public_scheme` | `"http"` | live (the cookie of new logins, the API descriptions' URLs; the start block's warnings at the next start) | how clients reach the server: `"http"`, or `"https"` when a reverse proxy ends TLS. `https` gives the `gs_session` login cookie `Secure` (a browser drops a `Secure` cookie over plain HTTP, except on localhost). On `http` with an address that is not a loopback address, the start block warns that tokens travel in clear text; on `https` it warns to let only the proxy reach the address |
 | `[http] allowed_hosts` | `[]` | restart (every database context checks `Host` with the list it was built with) | further names a request's `Host` (and an `http://`/`https://` `Origin`) may name besides this machine's loopback names and the listen address: the public names behind a reverse proxy. Each a host name or IP address with an optional port (`"db.example.com"`, `"db.example.com:443"`); the port is not checked (a name is admitted on any port); lower case, no scheme or path. Other names are refused with `403` as before (DNS rebinding) |
 | `[jobs] backup_root` | `"backups/jobs"` | restart | the backup root: the only directory backup jobs, and the Store panel's fork, attic fork and backup `dir`, may write into ("Backup jobs" under `backups/`). A relative path is relative to the server directory; an absolute one may name a mounted storage. Created (with its parents) by `serve` and `init`; must not be empty |
@@ -149,9 +151,12 @@ what a new database would get.
 
 ### The login cookie
 
-The login cookie (`gs_session`) carries `Max-Age` = `[sessions] lifetime_secs` when set, else
-400 days (the longest a browser keeps a cookie), so a browser restart keeps the login; the
-server still ends the session by its own limits. The logout clears it with `Max-Age=0`.
+The login cookie (`gs_session`) carries `Max-Age` = the session lifetime (`[sessions]
+lifetime_secs`, default 30 days), or 400 days (the longest a browser keeps a cookie) with
+`lifetime_secs = 0`, so a browser restart keeps the login; the server still ends the session
+by its own limits (by default also after 7 days without a request). One user holds at most 32
+browser sessions: a new login ends that user's oldest. The logout clears the cookie with
+`Max-Age=0`.
 
 ### Query limits
 
