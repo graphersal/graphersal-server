@@ -23,7 +23,7 @@ const PROFILE: &str = include_str!("../ui/profile.json");
 const VIEWS: &str = include_str!("../ui/profile-views.json");
 
 /// The files under [`FILES_PREFIX`]: name and bytes.
-const FILES: [(&str, &[u8]); 21] = [
+const FILES: [(&str, &[u8]); 23] = [
     ("profile.json", PROFILE.as_bytes()),
     ("profile-views.json", VIEWS.as_bytes()),
     ("access-api.js", include_bytes!("../ui/access-api.js")),
@@ -45,6 +45,8 @@ const FILES: [(&str, &[u8]); 21] = [
     ("runs-tab.js", include_bytes!("../ui/runs-tab.js")),
     ("mcp-api.js", include_bytes!("../ui/mcp-api.js")),
     ("mcp-tab.js", include_bytes!("../ui/mcp-tab.js")),
+    ("settings-api.js", include_bytes!("../ui/settings-api.js")),
+    ("settings-tab.js", include_bytes!("../ui/settings-tab.js")),
 ];
 
 /// Which profile a principal gets (module docs).
@@ -150,7 +152,7 @@ mod tests {
             assert_eq!(file(style).map(|f| f.1), Some("text/css; charset=utf-8"));
         }
         let tabs = profile["tabs"].as_array().unwrap();
-        assert_eq!(tabs.len(), 8);
+        assert_eq!(tabs.len(), 9);
         for tab in tabs {
             let module = tab["module"].as_str().unwrap();
             assert!(file(module).is_some(), "{module} is not built in");
@@ -202,7 +204,8 @@ mod tests {
                 "models",
                 "runs",
                 "users",
-                "mcp"
+                "mcp",
+                "settings"
             ]
         );
         assert_eq!(ids(View::User), ["mine"]);

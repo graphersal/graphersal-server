@@ -13,7 +13,8 @@
     { "id": "models", "title": "Models", "module": "models-tab.js" },
     { "id": "runs", "title": "Runs", "module": "runs-tab.js" },
     { "id": "users", "title": "Users", "module": "users-tab.js" },
-    { "id": "mcp", "title": "MCP", "module": "mcp-tab.js" }
+    { "id": "mcp", "title": "MCP", "module": "mcp-tab.js" },
+    { "id": "settings", "title": "Database settings", "module": "settings-tab.js" }
   ],
   "header": { "module": "header.js" },
   "cards": {},

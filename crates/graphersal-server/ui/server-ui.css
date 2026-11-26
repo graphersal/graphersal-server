@@ -24,6 +24,12 @@
 .srv-memory > div { display: flex; gap: 6px; }
 .srv-memory dt { color: var(--text-muted); }
 .srv-memory dd { margin: 0; font-variant-numeric: tabular-nums; }
+.srv-facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 16px; margin: 6px 0 10px; font-size: 12.5px; }
+.srv-facts dt { color: var(--text-muted); }
+.srv-facts dd { margin: 0; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.srv-limit-edit { display: flex; gap: 4px; align-items: center; justify-content: flex-end; }
+.srv-limit-edit input { width: 9em; font: inherit; }
+.srv-settings-limits tr.srv-differs td { background: color-mix(in srgb, var(--warn) 10%, transparent); }
 .srv-problems { margin: 10px 0 0; padding-left: 18px; color: var(--danger); font-size: 12.5px; }
 p.srv-problems { padding-left: 0; }
 .srv-warn { color: var(--warn); }

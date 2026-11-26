@@ -133,6 +133,8 @@ A `failed` database whose `database.toml` cannot be read has only `name`, `state
 | POST | `/api/admin/databases/<name>/promote` | | `200` entry (`role: base`, `readOnly: true`; one way) |
 | PUT | `/api/admin/databases/<name>/read-only` | `{"readOnly": bool, "revision"?}` | `200` entry (with its new `revision`) |
 | PUT | `/api/admin/databases/<name>/auto-load` | `{"autoLoad": bool, "revision"?}` | `200` entry (with its new `revision`) |
+| GET | `/api/admin/databases/<name>/settings` | | `200` the settings: everything about the database (see Database settings; `<name>` may be an alias; `ETag`: its `revision`) |
+| PUT | `/api/admin/databases/<name>/settings` | `{"description"?, "readOnly"?, "autoLoad"?, "limits"?: {key: n \| null}, "revision"?}` | `200` the settings + `"changed": [field...]` |
 | POST | `/api/admin/databases/<name>/backup` | | `201` backup |
 | GET | `/api/admin/databases/<name>/backups` | | `200 {"database", "backups": [backup...]}` (oldest first; also for the name of a deleted database) |
 | POST | `/api/admin/databases/<name>/restore` | `{"backup", "name"?}` | `201` entry + `"restoredFrom": {"database", "backup"}`, `"replaced": bool`, `"trash"` (when replaced) |
@@ -179,7 +181,7 @@ the object meanwhile) is refused instead of silently overwriting the other chang
 |---|---|---|---|
 | users and grants | `access.toml` | `revision` of `GET users` and `GET grants` (and their `ETag`) | `POST users`, `DELETE users/<n>`, `POST`/`DELETE users/<n>/token`, `PUT users/<n>/admin`, `PUT users/<n>/roles`, `POST grants`, `DELETE grants/<s>/<d>` |
 | aliases | `aliases.toml` | `revision` of `GET aliases` (and its `ETag`), `aliasesRevision` of `GET databases` | `PUT aliases/<a>`, `DELETE aliases/<a>`, `POST aliases/<a>/rename` |
-| a database's settings | `databases/<name>/database.toml` | `revision` of its entry (every listing row; `GET databases/<name>` also as `ETag`) | `PUT databases/<name>/read-only`, `PUT databases/<name>/auto-load` |
+| a database's settings | `databases/<name>/database.toml` | `revision` of its entry (every listing row; `GET databases/<name>` and `GET databases/<name>/settings` also as `ETag`) | `PUT databases/<name>/read-only`, `PUT databases/<name>/auto-load`, `PUT databases/<name>/settings` |
 
 A revision is an opaque string (16 hex digits derived from the file's content: the same state
 has the same revision, also after a restart or a console change). Send it as the body's
@@ -197,7 +199,7 @@ Read the object again (it may already be what you wanted) and repeat the change 
 revision. A change WITHOUT a revision is applied to the current state, as before 0.3.0: the
 console's commands, scripts and older clients send none. The web UI sends the revision of what
 it shows with every change of an existing object (the Users tab, alias set/flip/rename/remove,
-the read-only and auto-load toggles) and on a `409` shows the notice and reads the tab's data
+the read-only and auto-load toggles, every change of the Database settings tab) and on a `409` shows the notice and reads the tab's data
 again. Creating a database, deleting one, load/unload, promote, backups, restores, imports and
 models take no revision (they create or remove whole objects and refuse what is no longer
 possible on their own).
@@ -284,6 +286,47 @@ base cannot get a model later); a failed one. An unknown name is `404`.
 `read-only` is persisted in the database's `database.toml` and, when the database is loaded,
 applied at once: writes through its API and MCP endpoint are refused with a read-only error;
 a running request finishes. A base refuses `false` (`409`). `auto-load` is persisted only.
+
+### Database settings
+
+`GET /api/admin/databases/<name>/settings` answers everything about one database (the web UI's
+Database settings tab, `graphersal-server db info NAME`); `<name>` may be an alias (then
+`requested` names it and the rest is its database's):
+
+| Field | Meaning |
+|---|---|
+| `name`, `requested`? | the database's real name; the alias asked for (absent otherwise) |
+| `revision` | of its `database.toml` (also the `ETag`): what a change is based on |
+| `database` | its listing row (Entry, plus `sizeBytes`, `memoryBytes`, `sharedMemoryBytes`, `pooled`/`pooledBy`, `linkWarning`): state, kind, role, base, `readOnly`, `autoLoad`, `description`, `created` |
+| `aliases` | the aliases naming it |
+| `layers` | a base: the layers over it |
+| `limits` | `loaded`, `reloadNeeded` (loaded, and what its next load reads differs from what it runs under now), `applies` (when a change applies, as text), `serverError` (a `server.toml` that cannot be read, else `null`), `keys`: one row per key of `[limits.query]` in file order: `key`, `override` (the database's own value, `null` when none), `server` (`server.toml`'s or `null`), `effective` (what the next load uses: the override, else the server's), `source` (`database` \| `server` \| `none`), `inEffect` (only while loaded: what its session runs under now) |
+| `mcp` | `enabled`, `endpointBuilt`, `serving`, `revision` of the MCP settings and `names`: the MCP rows of the database and its aliases (the fields of the MCP state's `databases`); or `{"error"}` |
+| `grants` | the grants that reach it: `{"subject", "database", "level", "via": "database" \| "alias" \| "all"}` (on its name, on an alias naming it: only through that alias, on `*`) |
+| `admins` | the users with the admin role: they reach every database |
+| `backups` | `count`, `bytes`, `latest` (the newest backup row, or `null`) |
+| `store`, `storeError` | the Store's creation parameters (fixed for its life) and position, read with the engine's `Store::inspect` (works while it is loaded): `storeId`, `graphId`, `damagePolicy` (`maintenance` \| `continue`), `chunkBytes`, `createdAt` (RFC 3339 UTC), `formatVersion`, `backend` (`directory`), `commitSeq`, `lastCommitAt`, `layerBase` (a layer Store's base identity), `snapshots`, `walBytes`, `clean`; read-only. `storeError` instead when the Store cannot be read |
+
+`PUT /api/admin/databases/<name>/settings` changes what can change at runtime, all given fields
+in ONE atomic write of `database.toml`, based on the `revision` (else `If-Match`; stale: `409`
+with the current one, nothing changed):
+
+| Field | Rule | Takes effect |
+|---|---|---|
+| `description` | one line, at most 1000 characters (no line breaks, tabs or control characters); `""` clears it | at once |
+| `readOnly` | `bool`; a base refuses `false` (`409`, help: make a layer over it) | at once: a loaded database is flipped (a running request finishes under the old mode) |
+| `autoLoad` | `bool` | at the next server start |
+| `limits` | `{key: n \| null}`, keys of `[limits.query]` (`timeout_ms`, `max_operations`, `max_string_size`, `max_array_size`, `max_map_size`, `max_traversers`, `max_materialized_bytes`, `max_value_depth`): a whole number `0..=9223372036854775807` sets the override (`0` = no limit; for `max_value_depth` the default 128), `null` clears it (the server's default applies again) | at the database's NEXT LOAD (unload + load, or a restart): graphersal-serve fixes a context's session presets when it is built, so a loaded database keeps its limits until then (`reloadNeeded` in the answer) |
+
+At least one field; a change takes the real database name (an alias is `404` with a help naming
+the database's route). Refusals before anything is written: `400` for an empty change, an
+unknown key (`memory_limit` names `server.toml`), a negative, fractional or non-number value,
+a bad description or an unknown body field; `404`; `409` (stale revision, a base's read-only,
+a failed database). The answer is the settings (with the new `revision`) plus `"changed"`:
+the fields in body order (`description`, `readOnly`, `autoLoad`, `limits.<key>`). Each field
+is audited: `database '<n>' description set to "..."` (or `cleared`), `read-only on|off`,
+`auto-load on|off`, `query limit <key> = <n> (applies at its next load)` or `query limit <key>
+cleared`.
 
 ### Aliases
 
@@ -673,6 +716,8 @@ layers use names each layer's `unload`.
 graphersal-server db list | create NAME [...] | delete NAME | clone SOURCE NAME --dir DIR [--json]
 graphersal-server db load NAME [--no-wait] | unload NAME | promote NAME --dir DIR [--json]
 graphersal-server db read-only NAME on|off | auto-load NAME on|off --dir DIR [--json]
+graphersal-server db info NAME | set NAME description TEXT --dir DIR [--json]
+graphersal-server db set NAME limit KEY VALUE | set NAME limit KEY --clear --dir DIR [--json]
 graphersal-server db alias set ALIAS DATABASE | alias remove ALIAS | alias rename OLD NEW --dir DIR [--json]
 graphersal-server db backup NAME | backups NAME | restore NAME BACKUP [--name NEW] --dir DIR [--json]
 graphersal-server db export NAME --out FILE [--no-models] [--materialize] --dir DIR [--json]
@@ -689,6 +734,15 @@ With a server running on `DIR` (its `server.lock` is held) the console sends the
 the address in `DIR/server.run` and notes so on stderr; otherwise it takes the lock itself and
 answers them on the directory (then `load`/`unload` are refused: nothing would serve the
 database). `--json` prints the answer above; errors go to stderr with `help:`; exit code `1`.
+
+`db info NAME` is `GET databases/NAME/settings` (sections: the database, its state and sizes,
+the query limits table with the database's own values, the server's defaults, what the next load
+uses and, while it is loaded, what it runs under now; MCP, grants, backups and the Store's
+creation parameters). `db set NAME description TEXT` and `db set NAME limit KEY VALUE|--clear`
+are `PUT databases/NAME/settings` (`{"description"}`, `{"limits": {KEY: VALUE|null}}`); VALUE is
+checked before anything is sent (a whole number, `_` allowed between digits; else a usage error,
+exit code `2`); a loaded database's text names the unload and load that apply a limit now.
+Offline both work on the directory (`database.toml` written atomically under the server lock).
 
 `db export` writes `FILE` (through `FILE.part`, renamed when complete): offline the admin core
 writes it, through a server the console streams the download. Its `--json` answer is

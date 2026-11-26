@@ -33,6 +33,7 @@
 //! | POST | `aliases/<alias>/rename` | `{"name", "revision"?}` | `200 {"alias", "renamedFrom", "target", "mcpSessionsMoved", "grantsMoved"}` |
 //! | GET, POST, PUT, DELETE | `users...`, `grants...` | | the users and grants of `access.toml` (the `admin_api_users.rs` table) |
 //! | GET, PUT | `mcp`, `mcp/databases/<name>` | | the MCP switches of `mcp.toml` and the usage statistics (the `admin_api_mcp.rs` table) |
+//! | GET, PUT | `databases/<name>/settings` | `{"description"?, "readOnly"?, "autoLoad"?, "limits"?: {key: n \| null}, "revision"?}` | everything about one database, and the change of its editable settings (the `admin_api_settings.rs` table) |
 //!
 //! A new database or alias never inherits grants left on its name (from a database or alias
 //! deleted while an older version ran, or whose grants could not be removed then): create,
@@ -41,7 +42,7 @@
 //! grant, and the answer then carries `"leftoverGrantsRemoved": n` (absent when none).
 //!
 //! Revisions ([`crate::revision`]): the changes of users and grants, of aliases and of a
-//! database's read-only/auto-load are based on the revision in the body's `revision`, else in
+//! database's settings (read-only, auto-load, `settings`) are based on the revision in the body's `revision`, else in
 //! `If-Match` (none: no check); a stale one is `409 {"error", "help": "changed by someone else:
 //! reload", "revision": <current>}`, nothing changed.
 //!
@@ -180,6 +181,9 @@ pub(crate) fn route(
     if segments.first() == Some(&"mcp")
         && let Some(answer) = mcp::route(admin, method, &segments, request, &expecting)
     {
+        return answer;
+    }
+    if let Some(answer) = settings::route(admin, method, &segments, request, &expecting) {
         return answer;
     }
     let answer = match (method, segments.as_slice()) {
@@ -1669,6 +1673,9 @@ mod users;
 
 #[path = "admin_api_mcp.rs"]
 mod mcp;
+
+#[path = "admin_api_settings.rs"]
+mod settings;
 
 #[cfg(test)]
 mod tests {

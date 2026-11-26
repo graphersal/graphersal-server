@@ -71,8 +71,30 @@ from published files). When this file disagrees with the code, the code wins: sa
   `DatabaseLimits` = `database.toml` `[limits]` (only `query`; memory keys refused with a
   hint); `Loader::query_presets` reads `server.toml` and `database.toml` again at EVERY load
   (a bad file fails the load), refreshes the registry's copy (`Registry::refresh_limits`);
-  `update_config` keeps the file's limits when it rewrites `database.toml`, so a hand edit of
-  `[limits.query]` survives admin changes; tests `loader_tests.rs` `query_limits_*`), `sessions` (B9: sessions survive a
+  `update_config` keeps the file's limits when it rewrites `database.toml` (read BEFORE the
+  change, so only a settings change alters them), so a hand edit of
+  `[limits.query]` survives admin changes; tests `loader_tests.rs` `query_limits_*`;
+  `QUERY_LIMIT_KEYS`, `MAX_LIMIT_VALUE` (2^63-1), `QueryLimits::get/set(key)`; the merged limits
+  a load used are kept per loaded database: `Loader::limits_in_effect`), `settings` (round 3
+  B7, private: a database's runtime-editable settings as ONE change, `SettingsChange
+  {description, read_only, auto_load, limits: [(key, Option<u64>)]}` + `check` (description one
+  line, <= `MAX_DESCRIPTION_CHARS` 1000; keys; values), `limit_value_of_json`/`_of_text`,
+  `LIMITS_APPLY_TEXT` (a limit applies at the NEXT LOAD: graphersal-serve 0.8.0 fixes a
+  context's presets at build); writer `Registry::change_settings` (one `update_config` under the
+  registry's write lock, revision checked; a base with layers refuses read-only off), online
+  `Loader::change_settings` (flip lock, then registry, then the context's read-only flip),
+  `Admin::change_settings` in `ops_settings.rs` (offline base rule; audits `DescriptionSet`,
+  `ReadOnlySet`, `AutoLoadSet`, `QueryLimitSet` per field; also `limits_in_effect`,
+  `server_query_limits`, `store_facts` = `Store::inspect` -> `StoreFacts`); route
+  `admin_api_settings.rs` (`GET|PUT databases/<n>/settings`: the view = listing row + aliases,
+  layers, limits rows (override/server/effective/source/inEffect, `reloadNeeded`), the MCP
+  state's rows of the name and its aliases, grants (`via` database|alias|all), admins, backups
+  summary, store facts or `storeError`; a PUT takes the real name; `changed` fields); console
+  `db info NAME` / `db set NAME description TEXT|limit KEY VALUE|limit KEY --clear`
+  (`DbCommand::Info`/`Set`, `DbSetting::limit` validates for `main.rs`; `render_info`,
+  `render_set`); UI `settings-tab.js` + model `settings-api.js`; tests `settings::tests`,
+  `router_access_tests.rs` `database_settings_*`/`a_base_keeps_read_only_*`, `server_tests.rs`
+  `db_info_and_db_set_offline_and_through_a_server`, `ui/tests/settings.test.mjs`), `sessions` (B9: sessions survive a
   restart, ALWAYS on, no setting: `sessions/browser.json` = `FileSessions` (a `SessionTable`,
   write-through on insert/touch/remove/retain, a failed insert rolled back) and
   `sessions/mcp.json` = `McpSessionFile` (graphersal-mcp `SessionStore`; `keeping(identity
@@ -196,7 +218,7 @@ from published files). When this file disagrees with the code, the code wins: sa
   `model_add` of that path), `DELETE models/<repo...>`; 409 helps: name taken,
   read-only base, base of layers (delete), base of loaded layers (unload); `GET /api/admin/databases/<name|alias>`; field names = the web UI's
   (`ui/databases.js` `databaseRows`); the actions: `POST databases` create, `DELETE databases/<name>`, `POST
-  .../<name>/clone|load|unload|promote`, `PUT .../<name>/read-only|auto-load`, `GET aliases`, `PUT|DELETE
+  .../<name>/clone|load|unload|promote`, `PUT .../<name>/read-only|auto-load`, `GET|PUT .../<name>/settings` (B7, `admin_api_settings.rs`), `GET aliases`, `PUT|DELETE
   aliases/<alias>`, `POST aliases/<alias>/rename {"name"}` (`Admin::alias_rename`: `Registry::alias_rename`
   rewrites `aliases.toml` and, under the registry's write lock, calls `Mcp::rename_selection` so
   open `/mcp` sessions move to the new name with one note; answer `mcpSessionsMoved`); JSON bodies `deny_unknown_fields`; core errors -> `{"error","help"?}` via
@@ -458,8 +480,9 @@ from published files). When this file disagrees with the code, the code wins: sa
   state, then registry. Tests in `loader_tests.rs` (synthetic stores from the `modern` and
   `large` samples; `test_support::skip_on_ci`).
 - `src/main.rs`: the hand-parsed command line (no parser crate, like graphersal's CLI): `init`,
-  `serve`, `db list|create|delete|clone|load|unload|promote|read-only|auto-load|alias|backup|
-  backups|restore|export ... --dir DIR [--json]`, `import DIR SOURCE --name N [--base B] [--format F]
+  `serve`, `db list|create|delete|clone|load|unload|promote|read-only|auto-load|info|set|alias|backup|
+  backups|restore|export ... --dir DIR [--json]` (`db set NAME limit KEY --clear`: the only
+  `--clear`), `import DIR SOURCE --name N [--base B] [--format F]
   [--description D] [--role normal|base] [--json]` (or `--inbox FILE` instead of SOURCE; `import DIR
   --list`), `models list|add SOURCE [--repo R] [--license L]|remove REPO
   --dir DIR [--json]` (`DbCommand::Models*`; SOURCE absolute when it exists, else a repo),
@@ -480,7 +503,9 @@ from published files). When this file disagrees with the code, the code wins: sa
 - `crates/graphersal-server/ui/`: the server's web UI, the playground UI profile `server`
   (the graphersal-memory `memory` profile's pattern; the engine's playground mechanism: its
   `playground/CLAUDE.md` "UI profiles"): `profile.json` (the admin's: module tabs Databases, Backups, Import,
-  Export, Models, Runs, Users, MCP (`mcp-tab.js` over `mcp-api.js`, B6), `header` = `header.js`; no workspace: the root has no graph; `files` = `server-ui/` relative to `/`),
+  Export, Models, Runs, Users, MCP (`mcp-tab.js` over `mcp-api.js`, B6), Database settings
+  (`settings-tab.js` over `settings-api.js`, B7; id `settings`, address parameter `db`, opened by
+  a Databases row's "Settings…"), `header` = `header.js`; no workspace: the root has no graph; `files` = `server-ui/` relative to `/`),
   `profile-views.json` (the keys a user's view (`mine-tab.js`, "My databases" over `GET
   api/databases`) and anonymous's (`login-tab.js`, "Sign in": paste a token, `POST api/login`,
   then the address's `?next=` if `access-api.js` `safeNext` takes it, else the root) replace;

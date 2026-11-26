@@ -6,7 +6,7 @@ use std::path::Path;
 
 use serde_json::Value;
 
-use super::{DbCommand, Outcome};
+use super::{DbCommand, DbSetting, Outcome};
 use crate::config::DEFAULT_LISTEN;
 use crate::database::DatabaseKind;
 use crate::error::ServerError;
@@ -159,6 +159,8 @@ fn render_with(command: &DbCommand, answer: &Value, dir: &Path, server: Option<&
             on_off(answer["autoLoad"] == Value::Bool(true))
         ))
         .text(),
+        DbCommand::Info { .. } => render_info(answer, &dir_arg),
+        DbCommand::Set { name, setting } => render_set(name, setting, answer, &dir_arg),
         DbCommand::AliasSet { .. } => leftover_note(
             Note::new(format!(
                 "Alias '{}' -> database '{}'",
@@ -639,6 +641,282 @@ fn render_mcp(answer: &Value, dir_arg: &str) -> String {
         sections.push(section);
     }
     text::render(&sections)
+}
+
+/// A limit value for people: `5000`, `0 (no limit)`, `-` (not set).
+fn limit_text(key: &str, value: &Value) -> String {
+    match value.as_u64() {
+        None => "-".to_string(),
+        Some(0) if key == "max_value_depth" => "0 (default 128)".to_string(),
+        Some(0) => "0 (no limit)".to_string(),
+        Some(n) => n.to_string(),
+    }
+}
+
+/// `db info NAME` (`GET databases/<name>/settings`).
+fn render_info(answer: &Value, dir_arg: &str) -> String {
+    let name = answer["name"].as_str().unwrap_or_default();
+    let db = &answer["database"];
+    let yes_no = |v: &Value| if *v == Value::Bool(true) { "yes" } else { "no" };
+    let list = |v: &Value| {
+        let items: Vec<&str> = v
+            .as_array()
+            .map(|a| a.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
+        if items.is_empty() {
+            "none".to_string()
+        } else {
+            items.join(", ")
+        }
+    };
+    let mut identity = Section::new(format!("Database '{name}'"));
+    if let Some(requested) = answer["requested"].as_str() {
+        identity.row("asked for", format!("the alias '{requested}'"));
+    }
+    identity.row("kind", kind(db));
+    identity.row("role", db["role"].as_str().unwrap_or("-"));
+    if answer["layers"].as_array().is_some_and(|l| !l.is_empty()) {
+        identity.row("layers over it", list(&answer["layers"]));
+    }
+    identity.row("aliases", list(&answer["aliases"]));
+    identity.row("created", db["created"].as_str().unwrap_or("-"));
+    let description = db["description"].as_str().unwrap_or_default();
+    identity.row(
+        "description",
+        if description.is_empty() {
+            "-"
+        } else {
+            description
+        },
+    );
+    let mut state = Section::new("State");
+    state.row("state", db["state"].as_str().unwrap_or("?"));
+    if let Some(reason) = db["reason"].as_str() {
+        state.row("reason", reason_text(reason));
+    }
+    state.row("read-only", yes_no(&db["readOnly"]));
+    state.row("auto-load", yes_no(&db["autoLoad"]));
+    state.row(
+        "on disk",
+        db["sizeBytes"]
+            .as_u64()
+            .map_or("-".to_string(), text::bytes),
+    );
+    state.row(
+        "in memory",
+        match db["memoryBytes"].as_u64() {
+            Some(bytes) => match db["sharedMemoryBytes"].as_u64() {
+                Some(shared) => format!(
+                    "{} (+ {} of its base, shared)",
+                    text::bytes(bytes),
+                    text::bytes(shared)
+                ),
+                None => text::bytes(bytes),
+            },
+            None => "- (not loaded)".to_string(),
+        },
+    );
+    let limits = &answer["limits"];
+    let loaded = limits["loaded"] == Value::Bool(true);
+    let mut limit_section = Section::new("Query limits");
+    let rows: Vec<Vec<String>> = limits["keys"]
+        .as_array()
+        .map(|rows| {
+            rows.iter()
+                .map(|row| {
+                    let key = row["key"].as_str().unwrap_or_default();
+                    let mut cells = vec![
+                        key.to_string(),
+                        limit_text(key, &row["override"]),
+                        limit_text(key, &row["server"]),
+                        limit_text(key, &row["effective"]),
+                        row["source"].as_str().unwrap_or_default().to_string(),
+                    ];
+                    if loaded {
+                        cells.push(limit_text(key, &row["inEffect"]));
+                    }
+                    cells
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut header = vec!["KEY", "DATABASE", "SERVER", "NEXT LOAD", "FROM"];
+    if loaded {
+        header.push("NOW");
+    }
+    limit_section.lines(table(&header, &rows));
+    if let Some(problem) = limits["serverError"].as_str() {
+        limit_section.row("server.toml", problem);
+    }
+    if limits["reloadNeeded"] == Value::Bool(true) {
+        limit_section.row("note", "changed since the load: applies at the next load");
+        limit_section.unwrapped(
+            "reload",
+            format!(
+                "{BIN} db unload {name} --dir {dir_arg} && {BIN} db load {name} --dir {dir_arg}"
+            ),
+        );
+    }
+    limit_section.unwrapped(
+        "change",
+        format!("{BIN} db set {name} limit KEY VALUE|--clear --dir {dir_arg}"),
+    );
+    let mcp = &answer["mcp"];
+    let mut mcp_section = Section::new("MCP");
+    if let Some(problem) = mcp["error"].as_str() {
+        mcp_section.row("error", problem);
+    } else {
+        mcp_section.row(
+            "server",
+            if mcp["serving"] == Value::Bool(true) {
+                "on"
+            } else {
+                "off"
+            },
+        );
+        for row in mcp["names"].as_array().into_iter().flatten() {
+            let label = match row["kind"].as_str() {
+                Some("alias") => format!("alias {}", row["name"].as_str().unwrap_or_default()),
+                _ => row["name"].as_str().unwrap_or_default().to_string(),
+            };
+            mcp_section.row(
+                label,
+                format!(
+                    "offered {}, read-only {}, {} open session(s), {} call(s)",
+                    yes_no(&row["effectiveExposed"]),
+                    yes_no(&row["effectiveReadOnly"]),
+                    row["sessions"].as_u64().unwrap_or(0),
+                    row["calls"].as_u64().unwrap_or(0)
+                ),
+            );
+        }
+    }
+    let mut grants = Section::new("Grants");
+    let grant_rows: Vec<Vec<String>> = answer["grants"]
+        .as_array()
+        .map(|rows| {
+            rows.iter()
+                .map(|g| {
+                    let database = g["database"].as_str().unwrap_or_default();
+                    let via = match g["via"].as_str() {
+                        Some("alias") => format!("{database} (alias)"),
+                        Some("all") => "* (every database)".to_string(),
+                        _ => database.to_string(),
+                    };
+                    vec![
+                        g["subject"].as_str().unwrap_or_default().to_string(),
+                        via,
+                        g["level"].as_str().unwrap_or_default().to_string(),
+                    ]
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if grant_rows.is_empty() {
+        grants.row("grants", "none");
+    } else {
+        grants.lines(table(&["SUBJECT", "ON", "LEVEL"], &grant_rows));
+    }
+    grants.row(
+        "admins",
+        format!("{} (every database)", list(&answer["admins"])),
+    );
+    let backups = &answer["backups"];
+    let mut backup_section = Section::new("Backups");
+    backup_section.row(
+        "count",
+        format!(
+            "{} ({})",
+            backups["count"].as_u64().unwrap_or(0),
+            text::bytes(backups["bytes"].as_u64().unwrap_or(0))
+        ),
+    );
+    if let Some(latest) = backups["latest"].as_object() {
+        backup_section.row(
+            "latest",
+            latest["backup"].as_str().unwrap_or_default().to_string(),
+        );
+    }
+    let mut store = Section::new("Store (creation parameters are fixed)");
+    if let Some(problem) = answer["storeError"].as_str() {
+        store.row("error", problem);
+    } else {
+        let info = &answer["store"];
+        let text_of = |v: &Value| match v {
+            Value::String(s) => s.clone(),
+            Value::Null => "-".to_string(),
+            other => other.to_string(),
+        };
+        store.row("store id", text_of(&info["storeId"]));
+        store.row("damage policy", text_of(&info["damagePolicy"]));
+        store.row(
+            "chunk size",
+            info["chunkBytes"]
+                .as_u64()
+                .map_or("-".to_string(), text::bytes),
+        );
+        store.row("created", text_of(&info["createdAt"]));
+        store.row("backend", text_of(&info["backend"]));
+        store.row("format version", text_of(&info["formatVersion"]));
+        store.row(
+            "last commit",
+            format!(
+                "{} at {}",
+                text_of(&info["commitSeq"]),
+                text_of(&info["lastCommitAt"])
+            ),
+        );
+        if let Some(base) = info["layerBase"].as_str() {
+            store.row("layer base", base);
+        }
+    }
+    text::render(&[
+        identity,
+        state,
+        limit_section,
+        mcp_section,
+        grants,
+        backup_section,
+        store,
+    ])
+}
+
+/// `db set NAME ...`.
+fn render_set(name: &str, setting: &DbSetting, answer: &Value, dir_arg: &str) -> String {
+    match setting {
+        DbSetting::Description(text) if text.is_empty() => {
+            Note::new(format!("Cleared the description of database '{name}'")).text()
+        }
+        DbSetting::Description(text) => {
+            Note::new(format!("Set the description of database '{name}'"))
+                .detail("description", text.as_str())
+                .text()
+        }
+        DbSetting::Limit { key, value } => {
+            let row = answer["limits"]["keys"]
+                .as_array()
+                .and_then(|rows| rows.iter().find(|r| r["key"] == key.as_str()));
+            let effective = row.map_or("-".to_string(), |r| limit_text(key, &r["effective"]));
+            let headline = match value {
+                Some(value) => format!("Set the query limit {key} = {value} of database '{name}'"),
+                None => format!("Cleared the query limit override {key} of database '{name}'"),
+            };
+            let note = Note::new(headline).detail("next load", effective);
+            if answer["limits"]["loaded"] == Value::Bool(true) {
+                let now = row.map_or("-".to_string(), |r| limit_text(key, &r["inEffect"]));
+                note.detail("now", format!("{now} (it is loaded: the change applies at its next load)"))
+                    .command(
+                        "apply it now",
+                        format!(
+                            "{BIN} db unload {name} --dir {dir_arg}\n{BIN} db load {name} --dir {dir_arg}"
+                        ),
+                    )
+                    .text()
+            } else {
+                note.detail("applies", "when it is loaded").text()
+            }
+        }
+    }
 }
 
 /// `1.2 KiB (1234 bytes)` of the answer's `bytes`.

@@ -269,7 +269,8 @@ impl Admin {
     /// The admin whose changes of a shared object are based on its revision `expected`
     /// ([`crate::revision`]): the users and grants ([`Admin::user_add`] ... [`Admin::grant_revoke`]),
     /// the aliases ([`Admin::alias_set`], [`Admin::alias_remove`], [`Admin::alias_rename`]) or
-    /// one database's settings ([`Admin::set_read_only`], [`Admin::set_auto_load`]). A change
+    /// one database's settings ([`Admin::set_read_only`], [`Admin::set_auto_load`], and the
+    /// settings change of the admin API's `PUT databases/<name>/settings`). A change
     /// whose object has another revision now is [`ServerError::Conflict`] (nothing changed);
     /// `None` (the default) checks nothing.
     pub fn expecting(mut self, expected: Option<String>) -> Self {
@@ -832,6 +833,9 @@ pub use runs::DatabaseRun;
 
 #[path = "ops_mcp.rs"]
 mod mcp;
+
+#[path = "ops_settings.rs"]
+mod settings;
 
 #[path = "ops_users.rs"]
 mod users;

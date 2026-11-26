@@ -62,6 +62,7 @@ use graphersal_session::{Session, SessionPresets};
 
 use crate::database::{DatabaseConfig, DatabaseKind, DatabaseRole};
 use crate::error::ServerError;
+use crate::limits::QueryLimits;
 use crate::mounts::DatabaseInfo;
 use crate::names::fold;
 use crate::registry::{DatabaseEntry, DbState, Registry};
@@ -121,6 +122,9 @@ struct LoadedDb {
     served_layer: Option<Arc<Graph<LayeredGraph>>>,
     /// The pooled base this database uses (a layer's base, or a base's own name).
     base: Option<String>,
+    /// The query limits its session runs under (`server.toml`'s with its `database.toml`'s
+    /// over them, as read by this load; [`Loader::limits_in_effect`]).
+    limits: QueryLimits,
 }
 
 /// A base in the pool and the databases using it.
@@ -293,6 +297,16 @@ impl Loader {
             .loaded
             .get(&fold(name))
             .map(|db| db.context.clone())
+    }
+
+    /// The query limits the loaded database `name` runs under: what its last load read from
+    /// `server.toml` and its `database.toml` (a change of either applies at the next load).
+    /// `None` when it is not loaded.
+    pub(crate) fn limits_in_effect(&self, name: &str) -> Option<QueryLimits> {
+        self.lock()
+            .loaded
+            .get(&fold(name))
+            .map(|db| db.limits.clone())
     }
 
     /// The names of the loaded databases.
@@ -644,6 +658,45 @@ impl Loader {
         Ok(entry)
     }
 
+    /// Changes the settings of the database `name` ([`Registry::change_settings`], based on
+    /// its revision `expected`), and, when the change sets read-only, flips its context at once
+    /// when it is loaded (as [`Loader::set_read_only`]; a base refuses `false`). A query limit
+    /// override applies at the next load ([`crate::settings`]).
+    pub(crate) fn change_settings(
+        &self,
+        name: &str,
+        change: &crate::settings::SettingsChange,
+        expected: Option<&str>,
+    ) -> Result<DatabaseEntry, ServerError> {
+        let entry = self.registry.get(name)?;
+        if change.read_only == Some(false)
+            && entry
+                .config
+                .as_ref()
+                .is_some_and(|config| config.role == DatabaseRole::Base)
+        {
+            return Err(refused(
+                &entry.name,
+                "a base database is always served read-only (layers are made over it)",
+            ));
+        }
+        let _flip = self.flips.lock().unwrap_or_else(|p| p.into_inner());
+        let entry = self
+            .registry
+            .change_settings(&entry.name, expected, change)?;
+        if let Some(read_only) = change.read_only
+            && let Some(context) = self.context(&entry.name)
+        {
+            context
+                .set_read_only(read_only)
+                .map_err(|err| ServerError::Serve {
+                    name: entry.name.clone(),
+                    message: format!("cannot turn read-only {}: {err}", on_off(read_only)),
+                })?;
+        }
+        Ok(entry)
+    }
+
     /// Starts loading every database with `auto_load = true` in the background; a failed one
     /// (its directory or configuration broken) is skipped with a warning.
     pub fn auto_load(self: &Arc<Self>) {
@@ -784,7 +837,7 @@ impl Loader {
         config: &DatabaseConfig,
     ) -> Result<LoadedDb, LoadFailure> {
         let key = entry.name.clone();
-        let presets = self.query_presets(entry)?;
+        let (presets, limits) = self.query_presets(entry)?;
         let kind = if config.role == DatabaseRole::Base {
             Kind::Base
         } else if config.kind == DatabaseKind::Layer {
@@ -930,6 +983,7 @@ impl Loader {
             layer_store,
             served_layer,
             base,
+            limits,
         })
     }
 
@@ -937,7 +991,11 @@ impl Loader {
     /// its `database.toml`'s over it, both read now (`crate::limits`: a change applies at the
     /// next load); the registry's copy of the database's limits is refreshed. A file that does
     /// not parse fails the load with its reason.
-    fn query_presets(&self, entry: &DatabaseEntry) -> Result<SessionPresets, LoadFailure> {
+    /// Also answers the merged limits themselves (kept as the limits in effect).
+    fn query_presets(
+        &self,
+        entry: &DatabaseEntry,
+    ) -> Result<(SessionPresets, QueryLimits), LoadFailure> {
         let global = self
             .registry
             .dir()
@@ -958,7 +1016,7 @@ impl Loader {
             );
         }
         self.registry.refresh_limits(&entry.name, own);
-        Ok(limits.presets())
+        Ok((limits.presets(), limits))
     }
 
     /// The pooled base `base` for the database `user`: from the pool, or read from the base

@@ -483,6 +483,43 @@ execute acme 'g.v().has_label("person").count().next()'
 [ "$RESULT" = 1 ] || fail "acme counts $RESULT after the refused write"
 ok
 
+STEP="database settings: view, a change based on the revision, 409, a limit at the next load (B7)"
+req GET /api/admin/databases/acme/settings
+expect_status 200
+expect_json name acme
+expect_json database.state loaded
+expect_json store.damagePolicy maintenance
+expect_json limits.loaded true
+REV=$(jget revision)
+[ "$(header ETag)" = "\"$REV\"" ] || fail "ETag $(header ETag), revision $REV"
+jreq PUT /api/admin/databases/acme/settings "{\"description\": \"smoke settings\", \"revision\": \"$REV\"}"
+expect_status 200
+expect_json database.description "smoke settings"
+jreq PUT /api/admin/databases/acme/settings "{\"autoLoad\": true, \"revision\": \"$REV\"}"
+expect_status 409
+expect_json help "changed by someone else: reload"
+jreq PUT /api/admin/databases/acme/settings '{"limits": {"max_operations": -1}}'
+expect_status 400
+jreq PUT /api/admin/databases/acme/settings '{"limits": {"max_operations": 1000}}'
+expect_status 200
+expect_json limits.reloadNeeded true
+HEAVY='let n = 0; while n < 20000 { n += 1; } n'
+execute acme "$HEAVY"
+[ "$RESULT" = 20000 ] || fail "not limited before the next load: $RESULT"
+req POST /api/admin/databases/acme/unload
+expect_status 200
+load acme
+jreq POST /db/acme/api/execute "$(python3 -I -c 'import json,sys; print(json.dumps({"script": sys.argv[1]}))' "$HEAVY")"
+[ "$(jget ok)" = false ] || fail "the limit did not apply after the load: $(head -c 400 "$BODY")"
+expect_body_contains "operations"
+jreq PUT /api/admin/databases/acme/settings '{"limits": {"max_operations": null}}'
+expect_status 200
+req POST /api/admin/databases/acme/unload
+expect_status 200
+load acme
+execute acme "$HEAVY"
+ok
+
 STEP="run administration (list and stop another client's query)"
 req GET /api/admin/runs
 expect_status 200

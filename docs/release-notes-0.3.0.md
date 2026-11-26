@@ -268,3 +268,36 @@ with no restart:
   the server, with a `revision`: a change based on a stale page is refused with `409` and the tab
   reads the state again; checked by `serve`'s permission check like `aliases.toml`). A renamed
   alias keeps its settings; a deleted database or removed alias loses them. Changes are audited.
+
+## Database settings: see and change a database's parameters
+
+A database had many parameters (`database.toml`, its Store, its grants, MCP settings, backups)
+but no place to see them together, and its description and query limits could only be set by
+hand in `database.toml`. Now:
+
+- **The Database settings tab** (web UI; "Settings…" on every row of the Databases tab opens it
+  for that database, or pick one) shows everything about one database, grouped: identity (name,
+  kind plain/layer, role normal/base, a layer's base, a base's layers, the aliases naming it,
+  created), state and sizes (state, on disk, in memory), the query limits (per key: the
+  database's own override, the server's default, what the next load uses, where it comes from,
+  and while loaded what it runs under now), its MCP settings (link to the MCP tab), the grants
+  on it, on aliases naming it and on `*` plus the admins (link to the Users tab), its backups
+  (count, size, the latest; link to the Backups tab) and the Store's creation parameters,
+  read-only (store id, damage policy, chunk size, creation time, backend, format version, last
+  commit). Its tables sort; it reads the database again on every visit.
+- **Edit in place:** the description, read-only, auto-load and each query limit override (set
+  or clear; checked like `server.toml`: whole numbers, `0` = no limit, `max_value_depth` 0 = the
+  default 128). Description and auto-load apply at once (auto-load at the next start), read-only
+  at once also for a loaded database, a limit at the database's **next load**: the tab says so,
+  marks the limits that differ from the running session and offers "Unload and load now…".
+- **Admin API:** `GET /api/admin/databases/<name>/settings` (also by an alias) and `PUT
+  /api/admin/databases/<name>/settings {"description"?, "readOnly"?, "autoLoad"?, "limits"?:
+  {key: n | null}, "revision"?}`: one atomic write of `database.toml`, based on its revision
+  (`409` when someone changed it meanwhile), every field audited (`description set`, `query
+  limit max_operations = 1000 (applies at its next load)`, `... cleared`, `read-only`,
+  `auto-load`).
+- **Console:** `graphersal-server db info NAME`, `db set NAME description TEXT`, `db set NAME
+  limit KEY VALUE`, `db set NAME limit KEY --clear` (offline or through a running server).
+- `database.toml`'s `[limits.query]` now has a runtime writer (the settings change, under the
+  registry's write lock; `docs/server-dir.md` "Concurrent changes"); every other rewrite still
+  keeps the file's limits, so a hand edit survives.

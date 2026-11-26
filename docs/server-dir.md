@@ -155,9 +155,12 @@ server still ends the session by its own limits. The logout clears it with `Max-
 
 Query limits: `[limits.query]` here applies to every database; a database's `database.toml`
 may carry its own `[limits.query]`, whose keys win one by one (`0` there lifts a global limit
-for that database). Both files are read again whenever a database is loaded, so a change
+for that database; set or cleared at runtime with `graphersal-server db set NAME limit KEY
+VALUE|--clear`, `PUT /api/admin/databases/<name>/settings` or the web UI's Database settings
+tab). Both files are read again whenever a database is loaded, so a change
 applies at the database's next load (unload + load; a server restart loads the `auto_load`
-ones again); a file that does not parse then fails the load (`failed` with the reason). The
+ones again; `db info NAME` and the settings show the limits a loaded database runs under now
+beside what its next load will use); a file that does not parse then fails the load (`failed` with the reason). The
 key names are the graphersal command line's flags; the limits are the session presets of the
 loaded database (`GET /db/<name>/api/statistics` shows them under `limits.presets`). Nothing
 set: no limit at all, as in the graphersal playground. A configured limit is a ceiling: a
@@ -349,13 +352,16 @@ max_traversers = 0               # 0: no limit here, whatever server.toml says
 | `auto_load` | `false` | loaded in the background at server start |
 | `read_only` | `false` | writes through the database's API and MCP endpoint are refused; a base is always read-only |
 | `created` | none | the creation time (UTC, RFC 3339) |
-| `description` | `""` | free text |
-| `[limits.query] ...` | none (`server.toml`'s) | the database's own query limits, the same keys as `server.toml`'s `[limits.query]`; each key set here wins over the global one. Read at every load; may be edited while the server runs (the server keeps the file's limits when it rewrites it) and applies at the next load. `[limits]` holds only `query`: the memory ceiling is server-wide |
+| `description` | `""` | free text, one line (the settings change refuses line breaks and control characters, at most 1000 characters) |
+| `[limits.query] ...` | none (`server.toml`'s) | the database's own query limits, the same keys as `server.toml`'s `[limits.query]`; each key set here wins over the global one. Read at every load, so a change applies at the next load. Set or cleared at runtime by the settings change (`db set NAME limit KEY VALUE\|--clear`, `PUT /api/admin/databases/<name>/settings`, the Database settings tab; validated like this file); may also be edited by hand while the server runs (every other rewrite of the file keeps the file's limits). `[limits]` holds only `query`: the memory ceiling is server-wide |
 | `needs_model` | none | the repository of an embedding model the database's Store names but does not hold, set by an import whose source names a model that `models/` lacks too (one `models/` holds is taken from there at the import): the database is listed as `needs-model` and cannot load until `models add <repo>` (the marker is removed then, or by the first successful load) |
 
 Unknown keys are an error (the database is listed `failed`). The server writes the file
 atomically (temporary file + rename); edit it by hand only while no server runs, except its
-`[limits.query]` (read again at every load).
+`[limits.query]` (read again at every load). While the server runs, change the description,
+the flags and the limits through the settings change instead (`graphersal-server db set`,
+the admin API, the web UI's Database settings tab): it is based on the file's revision, so a
+change someone else made meanwhile is refused (`409`) instead of being overwritten.
 
 The base pool: loading a layer loads its base once into memory, shared by every loaded layer
 over it (and by the base itself when it is loaded for reading); the base leaves memory with its
@@ -531,7 +537,7 @@ What writes which file at runtime, and under which lock:
 | `access.toml` | user and grant changes (admin API, console), alias rename/remove and database delete (grants follow), a new name taking leftover grants, the first admin (`init`, `serve`: created new, never replaced) | the access file's lock (`Access`), online; offline the server lock (one console command) |
 | `aliases.toml` | alias set/flip, rename, remove | the registry's write lock |
 | `mcp.toml` | the MCP switches (admin API, MCP tab, console `mcp`), alias rename (settings move) and remove, database delete and a new name (settings dropped) | the MCP settings' write lock (a leaf: it takes no other lock; a change of a name's settings holds the registry's read lock around it while the name must exist) |
-| `databases/<name>/database.toml` | read-only, auto-load, promote, the `needs_model` marker; a new database's file is written in its build in `tmp/` before the rename into `databases/` | the registry's write lock (read-only also the loader's flip lock) |
+| `databases/<name>/database.toml` | read-only, auto-load, promote, the `needs_model` marker, the settings change (description, read-only, auto-load and the `[limits.query]` overrides in ONE write: `PUT /api/admin/databases/<name>/settings`, `db set`, the Database settings tab); a new database's file is written in its build in `tmp/` before the rename into `databases/` | the registry's write lock, held across the revision check, the read of the file's current limits, the write and the memory update (read-only, also through the settings, also the loader's flip lock, taken before the registry) |
 | `databases/<name>/store/` | the graphersal engine (the Store, its WAL, the database's job definitions) | the engine's own (one open Store per database) |
 | `databases/` (add, remove), `trash/` | create, clone, import, restore (rename of a build), delete, restore over a database | the registry's write lock; delete, promote and a restore over a database also hold the loader's lock (nothing loads meanwhile) |
 | `sessions/browser.json` | login, logout, a session touched or ended | the browser session table's mutex |

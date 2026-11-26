@@ -2759,3 +2759,389 @@ fn mcp_usage_statistics_count_sessions_calls_and_errors() {
     let state = expect(get(&fx, alice, "/api/admin/mcp"), 200);
     assert_eq!(state["usage"]["sessions"]["open"], 1);
 }
+
+/// A script run on `/db/<db>/` as the operator: the answer's JSON, whatever its status.
+fn run_as_operator(fx: &Fixture, db: &str, script: &str) -> Value {
+    json_of(&post(
+        fx,
+        Who::Bearer(OPERATOR),
+        &format!("/db/{db}/api/execute"),
+        json!({ "script": script }),
+    ))
+}
+
+/// Whether the answer of [`run_as_operator`] is a refusal naming `needle`.
+fn refused_with(answer: &Value, needle: &str) -> bool {
+    answer["ok"] == Value::Bool(false) && answer.to_string().contains(needle)
+}
+
+/// The row of the limit `key` in a settings answer.
+fn limit_row(settings: &Value, key: &str) -> Value {
+    settings["limits"]["keys"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["key"] == key)
+        .unwrap_or_else(|| panic!("no {key}: {settings}"))
+        .clone()
+}
+
+const HEAVY: &str = "let n = 0; while n < 20000 { n += 1; } n";
+
+#[test]
+fn database_settings_show_everything_and_change_with_revisions_validation_and_audit() {
+    let fx = fixture("access-settings");
+    let alice = Who::Bearer(&fx.alice);
+    let url = "/api/admin/databases/w/settings";
+    // Admins only.
+    assert_eq!(get(&fx, Who::Bearer(&fx.bob), url).status(), 404);
+    assert_unauthorized(&get(&fx, Who::Anonymous, url), "anonymous settings");
+
+    // The view of `r` (alias `cur`, bob reads it).
+    let view = expect(get(&fx, alice, "/api/admin/databases/r/settings"), 200);
+    assert_eq!(view["name"], "r");
+    assert!(view.get("requested").is_none(), "{view}");
+    assert_eq!(view["aliases"], json!(["cur"]));
+    assert_eq!(view["layers"], json!([]));
+    let db = &view["database"];
+    assert_eq!(db["state"], "loaded");
+    assert_eq!(db["kind"], "plain");
+    assert_eq!(db["role"], "normal");
+    assert_eq!(db["readOnly"], false);
+    assert!(db["sizeBytes"].as_u64().unwrap() > 0, "{db}");
+    assert!(
+        db["memoryBytes"].is_u64() || db["memoryBytes"].is_null(),
+        "{db}"
+    );
+    assert_eq!(view["limits"]["loaded"], true);
+    assert_eq!(view["limits"]["reloadNeeded"], false);
+    assert!(
+        view["limits"]["applies"]
+            .as_str()
+            .unwrap()
+            .contains("next load"),
+        "{view}"
+    );
+    let keys: Vec<&str> = view["limits"]["keys"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["key"].as_str().unwrap())
+        .collect();
+    assert_eq!(keys, crate::limits::QUERY_LIMIT_KEYS.to_vec());
+    let row = limit_row(&view, "max_operations");
+    assert_eq!(row["source"], "none");
+    assert_eq!(row["override"], Value::Null);
+    assert_eq!(row["inEffect"], Value::Null);
+    let mcp_names: Vec<&str> = view["mcp"]["names"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(mcp_names, ["r", "cur"], "{view}");
+    assert_eq!(view["mcp"]["serving"], true, "{view}");
+    assert_eq!(
+        view["grants"],
+        json!([{"subject": "user:bob", "database": "r", "level": "read", "via": "database"}])
+    );
+    assert!(
+        view["admins"].as_array().unwrap().contains(&json!("alice")),
+        "{view}"
+    );
+    assert_eq!(view["backups"]["count"], 0);
+    assert_eq!(view["backups"]["latest"], Value::Null);
+    let store = &view["store"];
+    assert_eq!(store["storeId"].as_str().unwrap().len(), 32, "{store}");
+    assert_eq!(store["damagePolicy"], "maintenance");
+    assert_eq!(store["backend"], "directory");
+    assert!(store["chunkBytes"].as_u64().unwrap() > 0, "{store}");
+    assert!(store["formatVersion"].as_u64().unwrap() > 0, "{store}");
+    assert!(
+        store["createdAt"].as_str().unwrap().ends_with('Z'),
+        "{store}"
+    );
+    assert_eq!(store["layerBase"], Value::Null);
+
+    // Through the alias; a grant on the alias shows as one; a backup is counted.
+    expect(
+        post(
+            &fx,
+            alice,
+            "/api/admin/grants",
+            json!({"subject": "carol", "database": "cur", "level": "read"}),
+        ),
+        200,
+    );
+    expect(
+        post(&fx, alice, "/api/admin/databases/r/backup", json!({})),
+        201,
+    );
+    let via = expect(get(&fx, alice, "/api/admin/databases/cur/settings"), 200);
+    assert_eq!(via["name"], "r");
+    assert_eq!(via["requested"], "cur");
+    assert!(
+        via["grants"].as_array().unwrap().contains(
+            &json!({"subject": "user:carol", "database": "cur", "level": "read", "via": "alias"})
+        ),
+        "{via}"
+    );
+    assert_eq!(via["backups"]["count"], 1);
+    assert!(via["backups"]["latest"]["backup"].is_string(), "{via}");
+    assert_eq!(
+        get(&fx, alice, "/api/admin/databases/nope/settings").status(),
+        404
+    );
+
+    // ETag = the revision; a description change based on it.
+    let answer = get(&fx, alice, url);
+    let w = json_of(&answer);
+    let revision = w["revision"].as_str().unwrap().to_string();
+    assert_eq!(
+        header(&answer, "ETag"),
+        Some(crate::revision::etag(&revision).as_str())
+    );
+    let changed = expect(
+        put(
+            &fx,
+            alice,
+            url,
+            json!({"description": "Acme's graph", "revision": revision}),
+        ),
+        200,
+    );
+    assert_eq!(changed["changed"], json!(["description"]));
+    assert_eq!(changed["database"]["description"], "Acme's graph");
+    let new_revision = changed["revision"].as_str().unwrap().to_string();
+    assert_ne!(new_revision, revision);
+    // The old revision is stale now: 409 with the current one, nothing changed.
+    let stale = expect(
+        put(
+            &fx,
+            alice,
+            url,
+            json!({"description": "lost", "revision": revision}),
+        ),
+        409,
+    );
+    assert_eq!(stale["revision"], new_revision.as_str());
+    assert!(
+        stale["help"].as_str().unwrap().contains("reload"),
+        "{stale}"
+    );
+    let stale = send(
+        &fx,
+        alice,
+        Method::Put,
+        url,
+        Some(json!({"autoLoad": true})),
+        &[("If-Match", &crate::revision::etag(&revision))],
+    );
+    assert_eq!(stale.status(), 409);
+    let now = expect(get(&fx, alice, url), 200);
+    assert_eq!(now["database"]["description"], "Acme's graph");
+    assert_eq!(now["database"]["autoLoad"], false);
+
+    // Read-only and auto-load in one change: the loaded database is flipped at once.
+    let before = person_count(&fx, "w");
+    let changed = expect(
+        put(
+            &fx,
+            alice,
+            url,
+            json!({"readOnly": true, "autoLoad": true, "revision": new_revision}),
+        ),
+        200,
+    );
+    assert_eq!(changed["changed"], json!(["readOnly", "autoLoad"]));
+    assert_eq!(changed["database"]["readOnly"], true);
+    assert_eq!(changed["database"]["autoLoad"], true);
+    let _ = run_as_operator(&fx, "w", WRITE);
+    assert_eq!(person_count(&fx, "w"), before, "read-only at once");
+    let changed = expect(put(&fx, alice, url, json!({"readOnly": false})), 200);
+    assert_eq!(changed["database"]["readOnly"], false);
+    let _ = run_as_operator(&fx, "w", WRITE);
+    assert_eq!(person_count(&fx, "w"), before + 1, "writable again");
+
+    // A limit override: written at once, in effect at the next load.
+    assert_eq!(run_as_operator(&fx, "w", HEAVY)["ok"], true);
+    let changed = expect(
+        put(&fx, alice, url, json!({"limits": {"max_operations": 1000}})),
+        200,
+    );
+    assert_eq!(changed["changed"], json!(["limits.max_operations"]));
+    let row = limit_row(&changed, "max_operations");
+    assert_eq!(row["override"], 1000);
+    assert_eq!(row["effective"], 1000);
+    assert_eq!(row["source"], "database");
+    assert_eq!(row["inEffect"], Value::Null, "the load's limits");
+    assert_eq!(changed["limits"]["reloadNeeded"], true);
+    let file = fx
+        .loader
+        .registry()
+        .dir()
+        .databases()
+        .join("w")
+        .join("database.toml");
+    let text = std::fs::read_to_string(&file).unwrap();
+    assert!(
+        text.contains("[limits.query]\nmax_operations = 1000"),
+        "{text}"
+    );
+    assert!(
+        text.contains("description = \"Acme's graph\""),
+        "the other settings are kept: {text}"
+    );
+    assert_eq!(
+        run_as_operator(&fx, "w", HEAVY)["ok"],
+        true,
+        "not before the next load"
+    );
+    unload_as_admin(&fx, "w");
+    let unloaded = expect(get(&fx, alice, url), 200);
+    assert_eq!(unloaded["limits"]["loaded"], false);
+    assert!(
+        limit_row(&unloaded, "max_operations")
+            .get("inEffect")
+            .is_none()
+    );
+    load_as_admin(&fx, "w");
+    let answer = run_as_operator(&fx, "w", HEAVY);
+    assert!(refused_with(&answer, "operations"), "{answer}");
+    let loaded = expect(get(&fx, alice, url), 200);
+    assert_eq!(loaded["limits"]["reloadNeeded"], false);
+    assert_eq!(limit_row(&loaded, "max_operations")["inEffect"], 1000);
+    // Cleared: the server's default (none) applies at the next load.
+    let changed = expect(
+        put(&fx, alice, url, json!({"limits": {"max_operations": null}})),
+        200,
+    );
+    let row = limit_row(&changed, "max_operations");
+    assert_eq!(row["override"], Value::Null);
+    assert_eq!(row["source"], "none");
+    assert_eq!(row["inEffect"], 1000);
+    assert_eq!(changed["limits"]["reloadNeeded"], true);
+    assert!(
+        !std::fs::read_to_string(&file).unwrap().contains("limits"),
+        "the empty table is not written"
+    );
+
+    // Validation: like server.toml's parser, before anything is written.
+    let revision_before = expect(get(&fx, alice, url), 200)["revision"].clone();
+    for (body, needle) in [
+        (json!({}), "nothing to change"),
+        (json!({"limits": {"max_operations": -1}}), "whole number"),
+        (json!({"limits": {"max_operations": 1.5}}), "whole number"),
+        (json!({"limits": {"timeout_ms": "5"}}), "whole number"),
+        (
+            json!({"limits": {"max_traverser": 1}}),
+            "unknown query limit",
+        ),
+        (json!({"limits": {"memory_limit": 1}}), "server.toml"),
+        (json!({"description": "two\nlines"}), "one line"),
+        (json!({"readonly": true}), "unknown field"),
+    ] {
+        let refusal = expect(put(&fx, alice, url, body.clone()), 400);
+        assert!(
+            refusal["error"].as_str().unwrap().contains(needle),
+            "{body}: {refusal}"
+        );
+    }
+    assert_eq!(
+        expect(get(&fx, alice, url), 200)["revision"],
+        revision_before
+    );
+    // A change takes the real name; an alias names its database in the help.
+    let refusal = expect(
+        put(
+            &fx,
+            alice,
+            "/api/admin/databases/cur/settings",
+            json!({"description": "x"}),
+        ),
+        404,
+    );
+    assert!(
+        refusal["help"]
+            .as_str()
+            .unwrap()
+            .contains("PUT /api/admin/databases/r/settings"),
+        "{refusal}"
+    );
+    assert_eq!(
+        send(&fx, alice, Method::Post, url, Some(json!({})), &[]).status(),
+        405
+    );
+
+    let lines = fx.audit.lines();
+    for needle in [
+        "database 'w' description set to \"Acme's graph\"",
+        "database 'w' read-only on",
+        "database 'w' auto-load on",
+        "database 'w' query limit max_operations = 1000 (applies at its next load)",
+        "database 'w' query limit max_operations cleared",
+    ] {
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.starts_with("user:alice: ") && l.contains(needle)),
+            "{needle}: {lines:?}"
+        );
+    }
+    assert!(
+        !lines.iter().any(|l| l.contains("lost")),
+        "a refused change is not audited: {lines:?}"
+    );
+}
+
+#[test]
+fn a_base_keeps_read_only_and_shows_its_layers_in_the_settings() {
+    let fx = fixture("access-settings-base");
+    let alice = Who::Bearer(&fx.alice);
+    unload_as_admin(&fx, "h");
+    expect(
+        post(&fx, alice, "/api/admin/databases/h/promote", json!({})),
+        200,
+    );
+    expect(
+        post(
+            &fx,
+            alice,
+            "/api/admin/databases",
+            json!({"name": "l1", "kind": "layer", "base": "h"}),
+        ),
+        201,
+    );
+    let base = expect(get(&fx, alice, "/api/admin/databases/h/settings"), 200);
+    assert_eq!(base["database"]["role"], "base");
+    assert_eq!(base["layers"], json!(["l1"]));
+    let refusal = expect(
+        put(
+            &fx,
+            alice,
+            "/api/admin/databases/h/settings",
+            json!({"readOnly": false, "description": "not written"}),
+        ),
+        409,
+    );
+    assert!(
+        refusal["help"].as_str().unwrap().contains("layer over it"),
+        "{refusal}"
+    );
+    let base = expect(get(&fx, alice, "/api/admin/databases/h/settings"), 200);
+    assert_eq!(base["database"]["description"], "");
+    // Other settings of a base change freely.
+    expect(
+        put(
+            &fx,
+            alice,
+            "/api/admin/databases/h/settings",
+            json!({"description": "frozen", "limits": {"timeout_ms": 0}}),
+        ),
+        200,
+    );
+    let layer = expect(get(&fx, alice, "/api/admin/databases/l1/settings"), 200);
+    assert_eq!(layer["database"]["kind"], "layer");
+    assert_eq!(layer["database"]["base"], "h");
+    assert!(layer["store"]["layerBase"].is_string(), "{layer}");
+}

@@ -210,6 +210,7 @@ export default {
       openBackups: (name) => props.api.navigate('backups', name ? { db: name } : {}),
       openExport: (row) => props.api.navigate('export', { db: row.name }),
       openRuns: (row) => props.api.navigate('runs', { db: row.name }),
+      openSettings: (row) => props.api.navigate('settings', { db: row.aliasOf || row.name }),
       openImport: () => props.api.navigate('import'),
       openModels: () => props.api.navigate('models'),
       kindText,
@@ -278,6 +279,7 @@ export default {
             <template v-if="!row.aliasOf">
               <button v-if="row.state === 'loaded'" type="button" class="btn small" :disabled="!acts(row).unload.enabled" :title="acts(row).unload.title" @click="unloadDb(row)">Unload…</button>
               <button v-else type="button" class="btn small" :disabled="!acts(row).load.enabled" :title="acts(row).load.title" @click="loadDb(row)">{{ busy[row.name] === 'load' || row.state === 'loading' ? 'Loading…' : 'Load' }}</button>
+              <button type="button" class="btn small" title="Everything about it: identity, state, sizes, query limits, MCP, grants, backups, Store; change its description, flags and limits" data-settings-open @click="openSettings(row)">Settings…</button>
               <button type="button" class="btn small" :disabled="!acts(row).clone.enabled" :title="acts(row).clone.title" @click="openClone(row)">Clone…</button>
               <button type="button" class="btn small" :disabled="!more(row).backups.enabled" :title="more(row).backups.title" @click="openBackups(row.name)">Backups…</button>
               <button type="button" class="btn small" :disabled="!more(row).export.enabled" :title="more(row).export.title" @click="openExport(row)">Export…</button>

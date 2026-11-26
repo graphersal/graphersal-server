@@ -5,7 +5,7 @@
 //!
 //! Mapped routes: `GET databases`, `DELETE databases/<n>`, `POST databases` (a layer:
 //! `{"name", "base"}`), `POST databases/<n>/load|unload`, `GET databases/<n>/backups`,
-//! `GET databases/<n>/export?...`, `PUT|DELETE aliases/<a>`, `GET models`, `POST models`
+//! `GET databases/<n>/export?...`, `GET|PUT databases/<n>/settings`, `PUT|DELETE aliases/<a>`, `GET models`, `POST models`
 //! (`{"path"}` or `{"repo"}`), `POST import?name=&role=`, `GET imports`, `GET users`, `POST users`
 //! (`{"name", "admin"}`), `POST|DELETE users/<n>/token`, `PUT users/<n>/admin` (`{"admin"}`).
 
@@ -99,6 +99,8 @@ fn command(method: &str, path: &str, body: Option<&Value>, dir_arg: &str) -> Opt
             db(format!("{action} {}", word(name)))
         }
         ("GET", ["databases", name, "backups"]) => db(format!("backups {}", word(name))),
+        ("GET", ["databases", name, "settings"]) => db(format!("info {}", word(name))),
+        ("PUT", ["databases", name, "settings"]) => db(format!("set {} ...", word(name))),
         ("GET", ["databases", name, "export"]) => {
             let mut args = format!("export {} --out FILE", word(name));
             if param("models") == Some("false") {
