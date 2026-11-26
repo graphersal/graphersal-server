@@ -1,6 +1,7 @@
 // The MCP tab of the `server` profile (admins only): the state of the server's MCP endpoints
 // from `GET api/admin/mcp` (on, switched off, or no endpoint because server.toml turns MCP
-// off), the global switch, the per-database table (offered to MCP, read-only for MCP, open
+// off), the global switch, whether new databases and aliases are offered to MCP (round 4
+// B-MCPDEF: off by default), the per-database table (offered to MCP, read-only for MCP, open
 // sessions, tool calls; an alias narrows its database, never widens it), the usage statistics
 // since the server started (open sessions per user, tool calls per tool and per user, the
 // recent errors) and how to connect an agent (the endpoint URL and the `claude mcp add`
@@ -14,6 +15,7 @@
 import { reactive, ref, computed } from 'vue';
 import {
   createMcp, statusOf, mcpRows, usageOf, usageText, exposedTitle, readOnlyTitle, connectInfo, MCP_OFF_CONFIRM,
+  exposeNewOf, EXPOSE_NEW_HELP,
 } from './mcp-api.js';
 import {
   ROOT, requestOptions, errorNotice, notify, noticeClass, useFreshData, useSort, SortTh,
@@ -107,6 +109,11 @@ export default {
       if (!on && !window.confirm(MCP_OFF_CONFIRM)) return;
       run('global', on ? 'MCP is switched on.' : 'MCP is switched off.', () => mcp.setEnabled(on, s.revision));
     }
+    function toggleExposeNew() {
+      const on = !exposeNewOf(s.answer || {});
+      run('exposeNew', on ? 'New databases and aliases are offered to MCP.' : 'New databases and aliases are hidden from MCP.',
+        () => mcp.setExposeNew(on, s.revision));
+    }
     const toggleExposed = (r) => run(r.name, `${r.name}: ${r.exposed ? 'hidden from' : 'offered to'} MCP.`,
       () => mcp.setName(r.name, { exposed: !r.exposed }, s.revision));
     const toggleReadOnly = (r) => run(r.name, `${r.name}: ${r.readOnly ? 'writable' : 'read-only'} for MCP.`,
@@ -126,7 +133,7 @@ export default {
     return {
       s, busy, copied, status, rows, usage, connect, databases, tools, users, sessions, errors,
       dbSort, toolSort, userSort, sessionSort, errorSort, noticeClass, usageText, exposedTitle, readOnlyTitle,
-      refresh, toggleMcp, toggleExposed, toggleReadOnly, copy,
+      exposeNewOf, EXPOSE_NEW_HELP, refresh, toggleMcp, toggleExposeNew, toggleExposed, toggleReadOnly, copy,
     };
   },
   template: `
@@ -151,6 +158,7 @@ export default {
     </div>
 
     <div class="srv-head"><h2>Databases</h2></div>
+    <label class="inline srv-expose-new" :title="EXPOSE_NEW_HELP"><input type="checkbox" :checked="exposeNewOf(s.answer)" :disabled="!!busy.exposeNew" data-mcp-expose-new @change="toggleExposeNew"> Expose new databases and aliases</label>
     <p class="muted">A database or alias hidden from MCP is not listed to agents and answers like an unknown name. Read-only for MCP: agents only read it, whatever their grant (the HTTP API still follows the grant). An alias can narrow its database, never widen it. Sessions and calls count since the server started.</p>
     <p v-if="!rows.length" class="muted">No databases.</p>
     <div v-else class="srv-table-wrap">

@@ -36,6 +36,7 @@ graphersal-server db info acme --dir ./srv                             # everyth
 graphersal-server db create acme --description "Acme" --dir ./srv      # a new empty database
 graphersal-server db create acme --auto-load --dir ./srv               # ... loaded at every start
 graphersal-server db create acme --schema schema.json --dir ./srv      # ... with a schema
+graphersal-server db create acme --mcp --dir ./srv                     # ... offered to MCP at once (also clone, alias set, restore, import)
 graphersal-server db load acme --dir ./srv                             # load (running server only), waits
 graphersal-server db load acme --no-wait --dir ./srv                   # load without waiting
 graphersal-server db unload acme --dir ./srv                           # unload (running server only)
@@ -144,7 +145,8 @@ graphersal-server user revoke bob acme --dir ./srv
 
 ```bash
 graphersal-server mcp status --dir ./srv                               # switches, databases, usage statistics
-graphersal-server mcp off --dir ./srv                                  # | on: MCP for the whole server
+graphersal-server mcp on --dir ./srv                                   # | off: MCP for the whole server (a new server: off)
+graphersal-server mcp expose-new on --dir ./srv                        # | off: offer NEW databases and aliases (default off)
 graphersal-server mcp db acme off --dir ./srv                          # | on: hide acme from MCP
 graphersal-server mcp db acme read-only on --dir ./srv                 # | off: MCP only reads acme
 claude mcp add --transport http --header "Authorization: Bearer <token>" graphersal http://127.0.0.1:8484/mcp

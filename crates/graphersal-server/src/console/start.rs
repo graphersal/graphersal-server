@@ -261,7 +261,8 @@ fn sections(running: &Running, config: Option<&ServerConfig>) -> Vec<Section> {
             mcp.unwrapped("endpoint", format!("{url}/mcp"));
             mcp.row(
                 "graphs",
-                "every database and alias (list_graphs, use_graph)",
+                "the databases and aliases offered to MCP (list_graphs, use_graph; a new one \
+                 is hidden unless created with --mcp: graphersal-server mcp status)",
             );
             mcp.unwrapped("per database", format!("{url}/db/<name>/mcp (once loaded)"));
             let connect = format!(

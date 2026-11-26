@@ -4,10 +4,10 @@
 //! | Method | Path | Body | Answer |
 //! |---|---|---|---|
 //! | GET | `databases` | | `200 {"databases": [entry...], "aliases": {alias: database}, "aliasesRevision", "problems": [text...]}` |
-//! | POST | `databases` | `{"name", "kind"?, "role"?, "base"?, "schema"?, "description"?, "autoLoad"?, "readOnly"?}` | `201` entry |
+//! | POST | `databases` | `{"name", "kind"?, "role"?, "base"?, "schema"?, "description"?, "autoLoad"?, "readOnly"?, "mcp"?}` | `201` entry |
 //! | GET | `databases/<name>` | | `200` entry (`<name>` may be an alias); `ETag` = its `revision` |
 //! | DELETE | `databases/<name>` | | `200 {"name", "trash", "grantsRemoved"}` (its grants go with it) |
-//! | POST | `databases/<name>/clone` | `{"name"}` | `201` entry of the clone |
+//! | POST | `databases/<name>/clone` | `{"name", "mcp"?}` | `201` entry of the clone |
 //! | POST | `databases/<name>/load` | | `202` entry + `"load": "started" \| "already-loading"`, `200` + `"already-loaded"` |
 //! | POST | `databases/<name>/unload` | | `200` entry + `"unloaded": bool` |
 //! | POST | `databases/<name>/promote` | | `200` entry (now `role: base`, read-only; one way) |
@@ -15,11 +15,11 @@
 //! | PUT | `databases/<name>/auto-load` | `{"autoLoad": bool, "revision"?}` | `200` entry |
 //! | POST | `databases/<name>/backup` | | `201` backup |
 //! | GET | `databases/<name>/backups` | | `200 {"database", "backups": [backup...]}` (also for a deleted database's name) |
-//! | POST | `databases/<name>/restore` | `{"backup", "name"?}` | `201` entry + `"restoredFrom": {"database", "backup"}`, `"replaced"`, `"trash"?` |
+//! | POST | `databases/<name>/restore` | `{"backup", "name"?, "mcp"?}` | `201` entry + `"restoredFrom": {"database", "backup"}`, `"replaced"`, `"trash"?` |
 //! | GET | `databases/<name>/export?models=true\|false&materialize=true\|false` | | `200` the `.gsnap` file (download) |
 //! | GET | `server-backup?withDatabases=1` | | `200` the server backup ZIP (download, [`crate::server_backup`]); the operator and admin users only (`everyone` `403`, answered by the router), audited |
-//! | POST | `import?name=<n>&base=<b>&format=<f>&description=<d>&role=<normal\|base>` | the file itself (any content type but JSON) | `201` entry + `"import"` |
-//! | POST | `import` | JSON `{"path" \| "inbox", "name", "base"?, "format"?, "description"?, "role"?}` (`path`: a file or directory on the server's machine, absolute; `inbox`: an entry name of the import inbox `imports/`) | `201` entry + `"import"` |
+//! | POST | `import?name=<n>&base=<b>&format=<f>&description=<d>&role=<normal\|base>&mcp=<true\|false>` | the file itself (any content type but JSON) | `201` entry + `"import"` |
+//! | POST | `import` | JSON `{"path" \| "inbox", "name", "base"?, "format"?, "description"?, "role"?, "mcp"?}` (`path`: a file or directory on the server's machine, absolute; `inbox`: an entry name of the import inbox `imports/`) | `201` entry + `"import"` |
 //! | GET | `imports` | | `200 {"dir", "imports": [{"name", "kind", "directory", "bytes", "modified"}...]}`: the import inbox |
 //! | GET | `models` | | `200 {"models": [model...], "missing": [{"database", "model"}...]}` (rebuilds `models/models.toml`) |
 //! | POST | `models` | `{"path"?, "repo"?, "license"?}` (`path`: a Model2Vec directory or a `.gsnap`, absolute, on the server's machine; `repo` alone: a model `models/` holds) | `201` (from a path) / `200` `{"added": [model...], "resolved": [database...], "stillMissing": [{"database", "model"}...], "notes": [text...]}` |
@@ -29,7 +29,7 @@
 //! | GET | `databases/<name>/runs` | | `200 {"database", "loaded", "runs": [run...], "textHeadChars"}` |
 //! | POST | `databases/<name>/runs/cancel` | `{"id"}` | `200 {"database", "id", "cancelled": bool}` (`false`: no such run now) |
 //! | GET | `aliases` | | `200 {"aliases": {alias: database}, "revision"}` (+ `ETag`) |
-//! | PUT | `aliases/<alias>` | `{"target", "revision"?}` | `200 {"alias", "target"}` |
+//! | PUT | `aliases/<alias>` | `{"target", "mcp"?, "revision"?}` | `200 {"alias", "target", "mcpExposed"}` |
 //! | DELETE | `aliases/<alias>` | | `200 {"alias", "removed": true, "grantsRemoved"}` (its grants go with it) |
 //! | POST | `aliases/<alias>/rename` | `{"name", "revision"?}` | `200 {"alias", "renamedFrom", "target", "mcpSessionsMoved", "grantsMoved"}` |
 //! | GET, POST, PUT, DELETE | `users...`, `grants...` | | the users and grants of `access.toml` (the `admin_api_users.rs` table) |
@@ -38,6 +38,12 @@
 //! | POST | `databases/<name>/repair`, `databases/<name>/swap` | `{"name"?}`, `{"with", "confirm"}` | repair into a new database; let one database take another's name (the `admin_api_damage.rs` table) |
 //! | GET | `recovery` | | `200 {"uncleanShutdown"}`: the last unclean shutdown and its check |
 //! | GET, PUT | `databases/<name>/settings` | `{"description"?, "readOnly"?, "autoLoad"?, "limits"?: {key: n \| null}, "revision"?}` | everything about one database, and the change of its editable settings (the `admin_api_settings.rs` table) |
+//!
+//! MCP exposure of new names (round 4 B-MCPDEF; [`crate::mcp_control`]): a new database
+//! (create, clone, import, a restore into a new name, repair) or a new alias is hidden from
+//! MCP unless the body says `"mcp": true` (an upload import: `mcp=true`) or `mcp.toml`'s
+//! `expose_new` is on; `"mcp": false` hides it whatever the default. The answer carries
+//! `"mcpExposed"` (the new name's own MCP setting).
 //!
 //! A new database or alias never inherits grants left on its name (from a database or alias
 //! deleted while an older version ran, or whose grants could not be removed then): create,
@@ -203,7 +209,8 @@ pub(crate) fn route(
             admin
                 .create_reported(&name, &spec)
                 .map(|(entry, leftover)| {
-                    Response::json(201, &with_leftover(entry_json(&entry, None), leftover))
+                    let answer = with_leftover(entry_json(&entry, None), leftover);
+                    Response::json(201, &with_mcp(admin, answer, &entry.name))
                 })
                 .map_err(|err| {
                     let help = name_taken_help(&err);
@@ -241,9 +248,12 @@ pub(crate) fn route(
         (Method::Post, ["databases", name, "clone"]) => {
             let body: CloneBody = body_of(request)?;
             admin
+                .clone()
+                .exposing(body.mcp)
                 .clone_reported(name, &body.name)
                 .map(|(entry, leftover)| {
-                    Response::json(201, &with_leftover(entry_json(&entry, None), leftover))
+                    let answer = with_leftover(entry_json(&entry, None), leftover);
+                    Response::json(201, &with_mcp(admin, answer, &entry.name))
                 })
                 .map_err(|err| {
                     let help = name_taken_help(&err);
@@ -312,6 +322,8 @@ pub(crate) fn route(
         (Method::Post, ["databases", name, "restore"]) => {
             let body: RestoreBody = body_of(request)?;
             admin
+                .clone()
+                .exposing(body.mcp)
                 .restore(name, &body.backup, body.name.as_deref())
                 .map(|restored| {
                     let mut entry = entry_json(&restored.entry, None);
@@ -323,7 +335,8 @@ pub(crate) fn route(
                     if let Some(trash) = &restored.replaced {
                         entry["trash"] = Value::String(relative(registry.dir().root(), trash));
                     }
-                    Response::json(201, &with_leftover(entry, restored.leftover_grants))
+                    let answer = with_leftover(entry, restored.leftover_grants);
+                    Response::json(201, &with_mcp(admin, answer, &restored.entry.name))
                 })
                 .map_err(|err| {
                     let target = body.name.as_deref().unwrap_or(name);
@@ -417,15 +430,14 @@ pub(crate) fn route(
         (Method::Put, ["aliases", alias]) if !alias.is_empty() => {
             let body: AliasBody = body_of(request)?;
             expecting(body.revision.clone())
+                .exposing(body.mcp)
                 .alias_set(alias, &body.target)
                 .map(|leftover| {
-                    Response::json(
-                        200,
-                        &with_leftover(
-                            json!({ "alias": fold(alias), "target": fold(&body.target) }),
-                            leftover,
-                        ),
-                    )
+                    let answer = with_leftover(
+                        json!({ "alias": fold(alias), "target": fold(&body.target) }),
+                        leftover,
+                    );
+                    Response::json(200, &with_mcp(admin, answer, &fold(alias)))
                 })
                 .map_err(|err| {
                     let help = name_taken_help(&err);
@@ -546,7 +558,7 @@ fn import_path(admin: &Admin, request: &mut Request<'_>) -> Result<Response, Htt
     let role = parse_role(body.role.as_deref())?;
     let source = ImportSource::new(path).with_format(format);
     Ok(import_answer(
-        admin,
+        &admin.clone().exposing(body.mcp),
         &source,
         &body.name,
         body.base.as_deref(),
@@ -560,7 +572,7 @@ fn import_upload(admin: &Admin, request: &mut Request<'_>) -> Result<Response, H
     let mut params = query_params(
         request.url(),
         "import",
-        &["name", "base", "format", "description", "role"],
+        &["name", "base", "format", "description", "role", "mcp"],
     )?;
     let Some(name) = params.remove("name").filter(|n| !n.is_empty()) else {
         return Err(HttpError::bad_request(
@@ -572,6 +584,8 @@ fn import_upload(admin: &Admin, request: &mut Request<'_>) -> Result<Response, H
     let description = params.remove("description");
     let format = parse_format(params.remove("format").as_deref())?;
     let role = parse_role(params.remove("role").as_deref())?;
+    let mcp = parse_mcp(params.remove("mcp").as_deref())?;
+    let admin = &admin.clone().exposing(mcp);
     // The quick refusals before the body is read (the listener drains it).
     let key = fold(&name);
     if let Err(err) = crate::names::validate_new_name(&key) {
@@ -695,6 +709,29 @@ fn parse_format(hint: Option<&str>) -> Result<Option<ImportFormat>, HttpError> {
     }
 }
 
+/// The `mcp` parameter of an import upload: `true`/`false` (`400` for another value; none:
+/// the server's default, `mcp.toml`'s `expose_new`).
+fn parse_mcp(value: Option<&str>) -> Result<Option<bool>, HttpError> {
+    match value.filter(|v| !v.is_empty()) {
+        None => Ok(None),
+        Some("true" | "1" | "on" | "yes") => Ok(Some(true)),
+        Some("false" | "0" | "off" | "no") => Ok(Some(false)),
+        Some(other) => Err(HttpError::bad_request(format!(
+            "import: mcp is true or false, not {other:?}"
+        ))),
+    }
+}
+
+/// `answer` with `"mcpExposed"`: whether MCP offers the new name `name` by its own settings
+/// (round 4 B-MCPDEF: a new name is hidden unless the request or the server's default said
+/// otherwise); absent when `mcp.toml` cannot be read.
+fn with_mcp(admin: &Admin, mut answer: Value, name: &str) -> Value {
+    if let Some(exposed) = admin.mcp_exposed(name) {
+        answer["mcpExposed"] = Value::Bool(exposed);
+    }
+    answer
+}
+
 /// The role of an import (`400` for an unknown one; default `normal`).
 fn parse_role(role: Option<&str>) -> Result<DatabaseRole, HttpError> {
     match role.filter(|r| !r.is_empty()) {
@@ -758,7 +795,8 @@ fn import_answer(
                 details["layerBase"] = json!(layer_base);
             }
             entry["import"] = details;
-            Response::json(201, &with_leftover(entry, imported.leftover_grants))
+            let answer = with_leftover(entry, imported.leftover_grants);
+            Response::json(201, &with_mcp(admin, answer, &imported.entry.name))
         }
         Err(err) => {
             let help = match &err {
@@ -824,6 +862,9 @@ struct ImportBody {
     description: Option<String>,
     #[serde(default)]
     role: Option<String>,
+    /// Offer the new database to MCP (`None`: the server's default).
+    #[serde(default)]
+    mcp: Option<bool>,
 }
 
 /// The JSON body of `request` as `T` (`400` for a body that does not parse or fit).
@@ -852,6 +893,9 @@ struct CreateBody {
     auto_load: bool,
     #[serde(default)]
     read_only: bool,
+    /// Offer the new database to MCP (`None`: the server's default).
+    #[serde(default)]
+    mcp: Option<bool>,
 }
 
 impl CreateBody {
@@ -874,7 +918,8 @@ impl CreateBody {
         .with_role(self.role.unwrap_or_default())
         .with_description(self.description.unwrap_or_default())
         .with_auto_load(self.auto_load)
-        .with_read_only(self.read_only);
+        .with_read_only(self.read_only)
+        .with_mcp(self.mcp);
         spec.schema = self.schema.filter(|schema| !schema.is_null());
         spec
     }
@@ -886,12 +931,19 @@ struct RestoreBody {
     backup: String,
     #[serde(default)]
     name: Option<String>,
+    /// Offer a database restored into a NEW name to MCP (`None`: the server's default; a
+    /// restore over an existing database keeps its MCP settings).
+    #[serde(default)]
+    mcp: Option<bool>,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CloneBody {
     name: String,
+    /// Offer the clone to MCP (`None`: the server's default).
+    #[serde(default)]
+    mcp: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -922,6 +974,9 @@ struct CancelRunBody {
 #[serde(deny_unknown_fields)]
 struct AliasBody {
     target: String,
+    /// Offer a NEW alias to MCP (`None`: the server's default; a flip keeps its settings).
+    #[serde(default)]
+    mcp: Option<bool>,
     /// The aliases' revision the change is based on (crate::revision).
     #[serde(default)]
     revision: Option<String>,

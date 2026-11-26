@@ -168,7 +168,8 @@ const based = (request, revision) => (typeof revision === 'string' && revision ?
 /**
  * The request of one admin action: `{method, path, body?}` with `path` relative to the server
  * root. Actions: list, get, create(body), delete, clone(newName), load, unload,
- * readOnly(value), autoLoad(value), aliases, setAlias(alias, target), removeAlias(alias),
+ * readOnly(value), autoLoad(value), aliases, setAlias(alias, target, revision?, mcp?) (`mcp`
+ * true: a NEW alias is offered to MCP; also `clone(name, newName, mcp?)`), removeAlias(alias),
  * renameAlias(alias, newName) (atomic; open MCP sessions that selected the alias move with it),
  * backup(name), backups(name), restore(name, backup, newName?) (no `name` field when restoring
  * over the database itself), importPath({path | inbox, name, base?, format?, description?, role?}),
@@ -186,18 +187,25 @@ const based = (request, revision) => (typeof revision === 'string' && revision ?
  * `exportPath` (a download) and `uploadImport` (the file as the body: an import, or a model
  * from `modelUploadRequest`).
  */
+/**
+ * `body` with `mcp: true` when `mcp` is true (round 4 B-MCPDEF: the new database or alias is
+ * offered to MCP at birth); otherwise unchanged: the server's default applies (`mcp.toml`'s
+ * `expose_new`, off unless an admin turned it on in the MCP tab).
+ */
+export const withMcp = (body, mcp) => (mcp === true ? { ...body, mcp: true } : body);
+
 export const adminRequest = Object.freeze({
   list: () => ({ method: 'GET', path: 'api/admin/databases' }),
   get: (name) => ({ method: 'GET', path: `api/admin/databases/${seg(name)}` }),
   create: (body) => ({ method: 'POST', path: 'api/admin/databases', body }),
   delete: (name) => ({ method: 'DELETE', path: `api/admin/databases/${seg(name)}` }),
-  clone: (name, newName) => ({ method: 'POST', path: `api/admin/databases/${seg(name)}/clone`, body: { name: newName } }),
+  clone: (name, newName, mcp) => ({ method: 'POST', path: `api/admin/databases/${seg(name)}/clone`, body: withMcp({ name: newName }, mcp) }),
   load: (name) => ({ method: 'POST', path: `api/admin/databases/${seg(name)}/load` }),
   unload: (name) => ({ method: 'POST', path: `api/admin/databases/${seg(name)}/unload` }),
   readOnly: (name, value, revision) => based({ method: 'PUT', path: `api/admin/databases/${seg(name)}/read-only`, body: { readOnly: !!value } }, revision),
   autoLoad: (name, value, revision) => based({ method: 'PUT', path: `api/admin/databases/${seg(name)}/auto-load`, body: { autoLoad: !!value } }, revision),
   aliases: () => ({ method: 'GET', path: 'api/admin/aliases' }),
-  setAlias: (alias, target, revision) => based({ method: 'PUT', path: `api/admin/aliases/${seg(alias)}`, body: { target } }, revision),
+  setAlias: (alias, target, revision, mcp) => based({ method: 'PUT', path: `api/admin/aliases/${seg(alias)}`, body: withMcp({ target }, mcp) }, revision),
   removeAlias: (alias, revision) => based({ method: 'DELETE', path: `api/admin/aliases/${seg(alias)}` }, revision),
   renameAlias: (alias, newName, revision) => based({ method: 'POST', path: `api/admin/aliases/${seg(alias)}/rename`, body: { name: newName } }, revision),
   backup: (name) => ({ method: 'POST', path: `api/admin/databases/${seg(name)}/backup` }),
@@ -325,7 +333,7 @@ export function renameProblem(alias, newName) {
 /**
  * The create body from the create form, or the problems: `{body}` | `{problems: [text]}`.
  * Form: `{name, kind: 'plain'|'layer', role: 'normal'|'base', base, description, schema (JSON
- * text, optional), readOnly, autoLoad}`. Only the documented fields are sent, and only the ones
+ * text, optional), readOnly, autoLoad, mcp (offer it to MCP)}`. Only the documented fields are sent, and only the ones
  * that differ from the server's defaults (a layer sends `kind` + `base`, no `role`).
  */
 export function createBody(form) {
@@ -359,6 +367,8 @@ export function createBody(form) {
     }
   }
   if (f.autoLoad === true) body.autoLoad = true;
+  // Offered to MCP at birth only when asked (otherwise the server's default: hidden).
+  if (f.mcp === true) body.mcp = true;
   // A base is always read-only on the server; the flag is sent only for a normal database.
   if (f.readOnly === true && body.role !== 'base') body.readOnly = true;
   return problems.length ? { problems } : { body };
@@ -631,7 +641,22 @@ export function outcomeTone(answer = {}, tone = 'ok') {
 export function outcomeText(action, subject, answer = {}) {
   const text = baseOutcomeText(action, subject, answer);
   return ['create', 'clone', 'setAlias', 'renameAlias', 'restore', 'import'].includes(action)
-    ? text + leftoverText(answer) : text;
+    ? text + leftoverText(answer) + mcpText(answer) : text;
+}
+
+/**
+ * The tooltip of the "Expose through MCP" checkbox of the create, clone, new alias and import
+ * forms (round 4 B-MCPDEF).
+ */
+export const MCP_NEW_HELP = 'Offer the new database or alias to MCP agents (granted access to it) right away. '
+  + 'Unchecked: the server\'s default for new names applies (MCP tab, "Expose new databases and aliases"; off unless an admin turned it on), '
+  + 'so it stays hidden from MCP until it is exposed on the MCP tab.';
+
+/** The MCP part of a new name's outcome (`mcpExposed` of the answer), or ''. */
+function mcpText(answer) {
+  if (answer.mcpExposed === true) return ' Offered to MCP.';
+  if (answer.mcpExposed === false) return ' Not offered to MCP (expose it on the MCP tab).';
+  return '';
 }
 
 function baseOutcomeText(action, subject, answer) {
@@ -880,7 +905,8 @@ export const IMPORT_FORMATS = Object.freeze(['', 'snapshot', 'store', 'graphson'
  * The import request from the import form, or the problems: `{upload: {path, size}}` (the file
  * as the body of `POST api/admin/import?<query>`), `{request}` (the JSON path form) or
  * `{problems: [text]}`. Form: `{source: 'upload'|'path'|'inbox', file ({size}), path, inbox,
- * name, base, format, description, role: 'normal'|'base'}`; `limit` = `uploadLimit(info)`.
+ * name, base, format, description, role: 'normal'|'base', mcp (true: offer it to MCP; sent
+ * only then, otherwise the server's default applies)}`; `limit` = `uploadLimit(info)`.
  * `inbox` is one entry name of the server's import inbox (`inboxRows`): the JSON form with
  * `{inbox}` instead of `{path}` (the server refuses anything but one entry of `imports/`). Only documented
  * parameters are sent, and only when set: `role` only as `base` (the server's default is
@@ -905,6 +931,7 @@ export function importRequest(form, limit = null) {
   const description = typeof f.description === 'string' ? f.description.trim() : '';
   if (description) fields.description = description;
   if (asBase) fields.role = 'base';
+  if (f.mcp === true) fields.mcp = true;
   if (f.source === 'inbox') {
     const inbox = typeof f.inbox === 'string' ? f.inbox : '';
     if (!inbox) problems.push('Pick a file of the import inbox.');

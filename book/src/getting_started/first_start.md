@@ -14,7 +14,8 @@ creates the first admin user, `admin`. stdout says what it made:
 
 ```text
 Created the server directory ./srv
-  config: ./srv/server.toml (listen 127.0.0.1:8484, MCP on: edit it before serving)
+  config: ./srv/server.toml (listen 127.0.0.1:8484: edit it before serving)
+  MCP:    off, and new databases are not offered to it (switch it on: graphersal-server mcp on --dir ./srv)
   # start it
   graphersal-server serve --dir ./srv
   # or create a database first
@@ -173,6 +174,14 @@ Give bob the token. Signed in with it, bob sees "My databases" with `acme` only,
 request of bob's on `acme` is read-only. More in [Users, Tokens and Grants](../guide/access.md).
 
 ## 9. Connect an AI agent (optional)
+
+A new server has MCP switched off and offers no database to it. Switch it on and offer `acme`
+(or create a database with `--mcp`):
+
+```bash
+graphersal-server mcp on --dir ./srv
+graphersal-server mcp db acme on --dir ./srv
+```
 
 The start block prints the command for Claude Code. With bob's token:
 

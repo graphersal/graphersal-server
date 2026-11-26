@@ -103,6 +103,9 @@ pub struct CreateSpec {
     pub auto_load: bool,
     /// Whether it is served read-only.
     pub read_only: bool,
+    /// Whether MCP offers it (`None`: `mcp.toml`'s `expose_new`, default off; an
+    /// [`Admin::exposing`] choice wins over this one).
+    pub mcp: Option<bool>,
 }
 
 impl CreateSpec {
@@ -147,6 +150,13 @@ impl CreateSpec {
     /// The spec with `read_only`.
     pub fn with_read_only(mut self, read_only: bool) -> Self {
         self.read_only = read_only;
+        self
+    }
+
+    /// The spec offered to MCP (`Some(true)`), hidden from it (`Some(false)`) or following
+    /// the server's default (`None`).
+    pub fn with_mcp(mut self, mcp: Option<bool>) -> Self {
+        self.mcp = mcp;
         self
     }
 
@@ -209,6 +219,9 @@ pub struct Admin {
     principal: crate::access::Principal,
     /// The revision the next change is based on ([`Admin::expecting`]; `None`: no check).
     expected: Option<String>,
+    /// Whether the names this admin creates are offered to MCP ([`Admin::exposing`]; `None`:
+    /// `mcp.toml`'s `expose_new`).
+    expose: Option<bool>,
     #[cfg(test)]
     pub(crate) fail: Option<FailPoint>,
     /// Test hook: the shared models' hard links fail (the copy fallback).
@@ -226,6 +239,7 @@ impl Admin {
             access: None,
             principal: crate::access::Principal::operator(),
             expected: None,
+            expose: None,
             #[cfg(test)]
             fail: None,
             #[cfg(test)]
@@ -243,6 +257,7 @@ impl Admin {
             access: None,
             principal: crate::access::Principal::operator(),
             expected: None,
+            expose: None,
             #[cfg(test)]
             fail: None,
             #[cfg(test)]
@@ -275,6 +290,15 @@ impl Admin {
     /// `None` (the default) checks nothing.
     pub fn expecting(mut self, expected: Option<String>) -> Self {
         self.expected = expected;
+        self
+    }
+
+    /// The admin whose new names (a database made by create, import, clone, a restore into a
+    /// new name or repair; a new alias) are offered to MCP when `expose` is `Some(true)`,
+    /// hidden from it when `Some(false)`; `None` (the default) follows `mcp.toml`'s
+    /// `expose_new` (default off; [`crate::mcp_control`]).
+    pub fn exposing(mut self, expose: Option<bool>) -> Self {
+        self.expose = expose;
         self
     }
 
@@ -375,7 +399,11 @@ impl Admin {
             None => {}
         }
         self.adopt_build(name, &store_dir);
-        let (entry, leftover) = self.commit_new(build)?;
+        let admin = match (self.expose, spec.mcp) {
+            (None, Some(mcp)) => self.clone().exposing(Some(mcp)),
+            _ => self.clone(),
+        };
+        let (entry, leftover) = admin.commit_new(build)?;
         self.audit.record(AuditEvent::DatabaseCreated {
             name: entry.name.clone(),
             detail: describe(entry.config.as_ref()),
@@ -387,13 +415,23 @@ impl Admin {
     /// on its name ([`Admin::drop_leftover_grants`]): the name is reserved by the build, so no
     /// request reaches it meanwhile, and the new database never inherits a deleted one's
     /// grants. Answers the entry and how many grants were removed. A failure to rewrite
-    /// `access.toml` refuses the commit (the build is discarded).
+    /// `access.toml` refuses the commit (the build is discarded). The new name gets its MCP
+    /// settings first ([`Admin::exposing`]; a failure to write `mcp.toml` refuses the commit
+    /// too: the name would be offered to MCP otherwise).
     pub(crate) fn commit_new(
         &self,
         build: crate::admin::TmpBuild,
     ) -> Result<(DatabaseEntry, usize), ServerError> {
         let leftover = self.drop_leftover_grants(build.name())?;
-        Ok((self.registry.commit(build)?, leftover))
+        let name = build.name().to_string();
+        self.claim_mcp_settings(&name)?;
+        match self.registry.commit(build) {
+            Ok(entry) => Ok((entry, leftover)),
+            Err(err) => {
+                self.forget_mcp_settings(&name);
+                Err(err)
+            }
+        }
     }
 
     /// Deletes the unloaded database `name` into `trash/` (module docs) and removes every
@@ -633,7 +671,9 @@ impl Admin {
         let leftover = self
             .registry
             .alias_set_with(alias, target, self.expected(), |name| {
-                self.drop_leftover_grants(name)
+                let leftover = self.drop_leftover_grants(name)?;
+                self.claim_mcp_settings(name)?;
+                Ok(leftover)
             })?;
         self.audit.record(AuditEvent::AliasSet {
             alias: crate::names::fold(alias),

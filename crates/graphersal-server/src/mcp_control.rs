@@ -8,11 +8,23 @@
 //!
 //! ```toml
 //! enabled = true          # false: /mcp and every /db/<name>/mcp answer 503 at once
+//! expose_new = false      # whether a NEW database or alias is offered to MCP (default false)
 //!
 //! [databases.acme]        # a database or an alias, by name
 //! exposed = false         # MCP does not offer it (list_graphs, use_graph, /db/acme/mcp)
 //! read_only = true        # MCP serves it read-only, whatever the caller's grant
 //! ```
+//!
+//! **New servers and new names (round 4 B-MCPDEF).** `init` writes this file with `enabled =
+//! false` and `expose_new = false`: a new server offers nothing to MCP until an admin switches
+//! MCP on and exposes names. Every name the server creates (a database made by create, import,
+//! clone, a restore into a new name, repair; a new alias) gets its entry at birth
+//! ([`McpSettings::new_name`]): `exposed = false` unless `expose_new` is true or the operator
+//! asked for it (`--mcp`, the API's `"mcp": true`, the UI's checkbox). A name WITHOUT an entry
+//! is exposed: the rule of every earlier version, kept so that an upgraded server directory
+//! offers exactly what it offered before (its names have no entries); a missing file (a server
+//! directory made before round 3) is `enabled = true`, `expose_new = false`. A renamed alias
+//! carries its entry; a promoted database or a swap keeps its name and so its entry.
 //!
 //! A setting belongs to a NAME. A request naming `requested` that resolves to the database
 //! `real` is offered when both names are exposed, and read-only when either is read-only (an
@@ -96,9 +108,14 @@ fn default_true() -> bool {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct McpSettings {
-    /// Whether the MCP endpoints answer (default `true`).
+    /// Whether the MCP endpoints answer (default `true`: a missing file or key, a server
+    /// directory older than this file; `init` writes `false`).
     #[serde(default = "default_true")]
     pub(crate) enabled: bool,
+    /// Whether a new database or alias is offered to MCP when its creator does not say
+    /// (default `false`; [`McpSettings::new_name`]).
+    #[serde(default)]
+    pub(crate) expose_new: bool,
     /// The settings per (folded) database or alias name; a name with the defaults is not kept.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub(crate) databases: BTreeMap<String, NameSettings>,
@@ -108,12 +125,30 @@ impl Default for McpSettings {
     fn default() -> Self {
         Self {
             enabled: true,
+            expose_new: false,
             databases: BTreeMap::new(),
         }
     }
 }
 
 impl McpSettings {
+    /// The settings `init` writes into a new server directory: MCP off, new names not exposed.
+    pub(crate) fn initial() -> Self {
+        Self {
+            enabled: false,
+            ..Self::default()
+        }
+    }
+
+    /// The settings of a name the server just created: exposed when `expose` says so, else
+    /// when [`McpSettings::expose_new`] is on; never read-only.
+    pub(crate) fn new_name(&self, expose: Option<bool>) -> NameSettings {
+        NameSettings {
+            exposed: expose.unwrap_or(self.expose_new),
+            read_only: false,
+        }
+    }
+
     /// The settings of `name` (folded), the defaults when it has none.
     pub(crate) fn of(&self, name: &str) -> NameSettings {
         self.databases
@@ -137,6 +172,8 @@ impl McpSettings {
         let mut text = String::from(
             "# MCP settings (written by graphersal-server: the web UI's MCP tab, the admin API,\n\
              # `graphersal-server mcp ...`). enabled = false: the MCP endpoints answer 503.\n\
+             # expose_new: whether a new database or alias is offered to MCP (each new name\n\
+             # gets its own entry below; a name without an entry is offered).\n\
              # [databases.<name>] exposed = false hides a database or alias from MCP;\n\
              # read_only = true serves it read-only to MCP whatever the caller's grant.\n",
         );
@@ -282,6 +319,26 @@ impl McpControl {
                 false
             }
         }
+    }
+
+    /// Gives the name `name`, which the server is creating, its settings
+    /// ([`McpSettings::new_name`]; replaces any left on it): the settings given.
+    ///
+    /// `Err`: [`ServerError::Io`] when `mcp.toml` cannot be written (the creation is refused:
+    /// the name would be offered to MCP otherwise).
+    pub(crate) fn claim_new(
+        &self,
+        name: &str,
+        expose: Option<bool>,
+    ) -> Result<NameSettings, ServerError> {
+        let key = crate::names::fold(name);
+        let mut given = NameSettings::default();
+        self.change(None, |settings| {
+            given = settings.new_name(expose);
+            settings.databases.insert(key.clone(), given);
+            Ok(())
+        })?;
+        Ok(given)
     }
 
     /// Moves the settings of `old` to `new` (a renamed alias). A failure only warns.
@@ -733,7 +790,8 @@ mod tests {
         let temp = TempDir::new("mcp-settings");
         let dir = dir(&temp);
         let control = McpControl::open(&dir).unwrap();
-        assert!(control.enabled());
+        // `init` wrote MCP off (round 4 B-MCPDEF).
+        assert!(!control.enabled());
         assert!(control.exposed("a", "a"));
         assert!(!control.read_only("a", "a"));
         let revision = control.settings().revision();
@@ -782,6 +840,52 @@ mod tests {
         std::fs::write(dir.mcp_settings_path(), "enable = true\n").unwrap();
         let err = McpControl::open(&dir).err().unwrap().to_string();
         assert!(err.contains("enable"), "{err}");
+    }
+
+    #[test]
+    fn a_new_server_starts_off_and_new_names_are_hidden_unless_asked() {
+        let temp = TempDir::new("mcp-settings-new");
+        let dir = dir(&temp);
+        let text = std::fs::read_to_string(dir.mcp_settings_path()).unwrap();
+        assert!(
+            text.contains("enabled = false\nexpose_new = false\n"),
+            "{text}"
+        );
+        let control = McpControl::open(&dir).unwrap();
+        assert_eq!(control.settings(), McpSettings::initial());
+        // A name without an entry is offered (older directories); a new one is not.
+        assert!(control.exposed("old", "old"));
+        assert!(!control.claim_new("New", None).unwrap().exposed);
+        assert!(!control.exposed("new", "new"));
+        assert!(control.claim_new("shown", Some(true)).unwrap().exposed);
+        assert!(!control.has_own("shown"), "an offered name needs no entry");
+        control
+            .change(None, |s| {
+                s.expose_new = true;
+                Ok(())
+            })
+            .unwrap();
+        assert!(control.claim_new("later", None).unwrap().exposed);
+        assert!(!control.claim_new("hidden", Some(false)).unwrap().exposed);
+        // A claim replaces what a gone name left behind.
+        control
+            .change(None, |s| {
+                s.databases.insert(
+                    "reused".into(),
+                    NameSettings {
+                        exposed: false,
+                        read_only: true,
+                    },
+                );
+                Ok(())
+            })
+            .unwrap();
+        assert!(!control.claim_new("reused", None).unwrap().read_only);
+        assert!(control.exposed("reused", "reused"));
+        // A file of round 3 (no expose_new) reads as expose_new = false.
+        std::fs::write(dir.mcp_settings_path(), "enabled = true\n").unwrap();
+        let settings = McpControl::open(&dir).unwrap().settings();
+        assert!(settings.enabled && !settings.expose_new);
     }
 
     #[test]

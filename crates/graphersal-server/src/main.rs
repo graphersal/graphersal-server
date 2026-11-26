@@ -8,11 +8,11 @@
 //! graphersal-server stop --dir DIR [--timeout SECS]
 //! graphersal-server status --dir DIR [--json]
 //! graphersal-server db list|create|delete|clone|load|unload|promote|read-only|auto-load|alias|backup|backups|restore|verify|repair|swap|export ... --dir DIR [--json]
-//! graphersal-server import DIR SOURCE --name NAME [--base BASE] [--format F] [--description TEXT] [--role normal|base] [--json]
+//! graphersal-server import DIR SOURCE --name NAME [--base BASE] [--format F] [--description TEXT] [--role normal|base] [--mcp|--no-mcp] [--json]
 //! graphersal-server import DIR --inbox FILE --name NAME [...] | import DIR --list [--json]
 //! graphersal-server models list|add|remove ... --dir DIR [--json]
 //! graphersal-server user ... --dir DIR [--json]
-//! graphersal-server mcp status|on|off | mcp db NAME [read-only] on|off --dir DIR [--json]
+//! graphersal-server mcp status|on|off | mcp expose-new on|off | mcp db NAME [read-only] on|off --dir DIR [--json]
 //! graphersal-server backup --dir DIR [--out FILE] [--with-databases] [--json]
 //! graphersal-server restore FILE --dir NEWDIR [--force-version] [--json]
 //! graphersal-server openapi --dir DIR [--db NAME] [--out FILE] [--server URL]
@@ -85,7 +85,8 @@ Usage:
       tmp/). DIR must be missing, empty, or a server directory (then only missing
       parts are created; server.toml is kept). A directory without access.toml gets its
       first admin (user admin): its token is printed ONCE on stderr (the first serve of
-      such a directory does the same). DIR becomes private to its owner (mode 0700; the
+      such a directory does the same). A new server has MCP switched off and offers no
+      database to it (mcp.toml: enabled = false, expose_new = false; see mcp). DIR becomes private to its owner (mode 0700; the
       secrets access.toml, server.run, sessions/ owner only); on an existing directory
       init tightens the modes it finds too open.
   graphersal-server serve --dir DIR [--listen ADDR] [--max-connections N]
@@ -116,9 +117,14 @@ Usage:
         db list
         db create NAME [--base BASE] [--kind plain|layer] [--role normal|base]
                   [--schema FILE.json] [--description TEXT] [--auto-load] [--read-only]
+                  [--mcp|--no-mcp]
             A new empty database; --base makes a layer over a role=base database.
+            --mcp offers it to MCP (a new database or alias is hidden from MCP unless
+            mcp expose-new is on; --no-mcp hides it then); also on clone, alias set,
+            restore and import.
         db delete NAME           an unloaded database, moved to DIR/trash/
-        db clone SOURCE NAME     a fork of SOURCE's latest state (it may be loaded)
+        db clone SOURCE NAME [--mcp|--no-mcp]
+                                 a fork of SOURCE's latest state (it may be loaded)
         db load NAME [--no-wait] (running server only)
         db unload NAME           (running server only)
         db promote NAME
@@ -138,17 +144,18 @@ Usage:
             max_materialized_bytes, max_value_depth; 0 = no limit, for max_value_depth the
             default 128); --clear lets the server's default apply again. Applies at NAME's
             next load (unload + load).
-        db alias set ALIAS DATABASE
+        db alias set ALIAS DATABASE [--mcp|--no-mcp]
         db alias remove ALIAS
         db alias rename OLD NEW  the alias OLD becomes NEW (same database); open MCP sessions
                                  that selected OLD move to NEW
         db backup NAME           a verified ZIP backup into DIR/backups/NAME/<UTC time>.zip
                                  (it may be loaded)
         db backups NAME          the backups of NAME (also of a deleted database)
-        db restore NAME BACKUP [--name NEW]
+        db restore NAME BACKUP [--name NEW] [--mcp|--no-mcp]
             Restores the backup BACKUP (a name from db backups) of NAME into NAME (it must
             be unloaded; the replaced database moves to DIR/trash/) or into the new
-            database NEW. A layer's backup needs its base (checked by identity).
+            database NEW (a restore into NAME keeps NAME's MCP settings). A layer's backup
+            needs its base (checked by identity).
         db verify NAME | db verify --all
             The engine's scrub of NAME's Store (every checksum, snapshot and WAL record),
             or of every database's. A loaded database's open Store is verified (damage
@@ -168,7 +175,7 @@ Usage:
             models) unless --materialize (a standalone full snapshot).
       --json prints the admin API's JSON answer instead of text.
   graphersal-server import DIR SOURCE --name NAME [--base BASE] [--format FORMAT]
-                    [--description TEXT] [--role normal|base] [--json]
+                    [--description TEXT] [--role normal|base] [--mcp|--no-mcp] [--json]
       Import SOURCE into DIR as the new database NAME: a packed snapshot (.gsnap; a layer
       snapshot needs a role=base database with its base identity, --base names it), a Store
       directory or .gstore file (copied into a directory Store; a model blob it lacks is
@@ -179,7 +186,7 @@ Usage:
       database is needs-model until `models add`. --role base makes a base (read-only,
       frozen for good) of a plain source (not of a layer, nor of a source naming a model
       neither it nor the shared models carry). Through a running server the server reads
-      SOURCE itself (same machine).
+      SOURCE itself (same machine). --mcp offers the new database to MCP (see db create).
   graphersal-server import DIR --inbox FILE --name NAME [--base BASE] [--format FORMAT]
                     [--description TEXT] [--role normal|base] [--json]
       The same from the import inbox DIR/imports/: FILE is one file or Store directory
@@ -217,7 +224,12 @@ Usage:
         mcp status               on or off, each database's MCP settings, the usage
                                  statistics (open sessions, tool calls) of a running server
         mcp on | mcp off         MCP for the whole server (off: /mcp and /db/NAME/mcp
-                                 answer 503; open sessions go on when it is on again)
+                                 answer 503; open sessions go on when it is on again);
+                                 a new server starts with it off
+        mcp expose-new on|off    whether a new database or alias (create, import, clone,
+                                 a restore into a new name, repair, alias set) is offered
+                                 to MCP when the command does not say --mcp or --no-mcp
+                                 (default off; the names there keep their settings)
         mcp db NAME on|off       offer a database or alias to MCP, or hide it
         mcp db NAME read-only on|off
             MCP sessions only read NAME, whatever their grant.
@@ -684,7 +696,7 @@ fn db_command(args: &[String]) -> ExitCode {
                 values.push((flag, value));
             }
             "--json" | "--auto-load" | "--read-only" | "--no-wait" | "--no-models"
-            | "--materialize" | "--clear" | "--all" | "--yes"
+            | "--materialize" | "--clear" | "--all" | "--yes" | "--mcp" | "--no-mcp"
                 if inline.is_none() =>
             {
                 switches.push(flag);
@@ -827,6 +839,7 @@ fn import_command(args: &[String]) -> ExitCode {
     let mut values: Vec<(String, String)> = Vec::new();
     let mut json = false;
     let mut list = false;
+    let mut mcp: Option<bool> = None;
     let mut rest = args.iter();
     while let Some(arg) = rest.next() {
         if !arg.starts_with("--") {
@@ -850,6 +863,11 @@ fn import_command(args: &[String]) -> ExitCode {
             }
             "--json" if inline.is_none() => json = true,
             "--list" if inline.is_none() => list = true,
+            "--mcp" | "--no-mcp" if inline.is_none() => {
+                if mcp.replace(flag == "--mcp").is_some() {
+                    return usage_error("import: give --mcp or --no-mcp once");
+                }
+            }
             _ => return usage_error(&format!("import: unknown argument {arg:?}")),
         }
     }
@@ -863,9 +881,10 @@ fn import_command(args: &[String]) -> ExitCode {
         let [dir] = positional.as_slice() else {
             return usage_error("import --list takes one argument: the server directory");
         };
-        if values
-            .iter()
-            .any(|(flag, _)| flag != "--token" && flag != "--server")
+        if mcp.is_some()
+            || values
+                .iter()
+                .any(|(flag, _)| flag != "--token" && flag != "--server")
         {
             return usage_error("import --list takes no other option than --json");
         }
@@ -909,6 +928,7 @@ fn import_command(args: &[String]) -> ExitCode {
                     base: value("--base"),
                     format: value("--format"),
                     description: value("--description"),
+                    mcp,
                 }
             }
             None => DbCommand::ImportInbox {
@@ -918,6 +938,7 @@ fn import_command(args: &[String]) -> ExitCode {
                 base: value("--base"),
                 format: value("--format"),
                 description: value("--description"),
+                mcp,
             },
         };
         (dir, command)
@@ -1139,6 +1160,7 @@ fn mcp_command(args: &[String]) -> ExitCode {
     let command = match positional.as_slice() {
         ["status"] => DbCommand::McpStatus,
         [on @ ("on" | "off")] => DbCommand::McpSwitch { on: *on == "on" },
+        ["expose-new", on @ ("on" | "off")] => DbCommand::McpExposeNew { on: *on == "on" },
         ["db", name, on @ ("on" | "off")] => DbCommand::McpDatabase {
             name: name.to_string(),
             exposed: Some(*on == "on"),
@@ -1152,8 +1174,8 @@ fn mcp_command(args: &[String]) -> ExitCode {
         [] => return usage_error("no mcp command given"),
         _ => {
             return usage_error(&format!(
-                "unknown command or wrong arguments: mcp {} (status, on, off, db NAME on|off, \
-                 db NAME read-only on|off)",
+                "unknown command or wrong arguments: mcp {} (status, on, off, expose-new \
+                 on|off, db NAME on|off, db NAME read-only on|off)",
                 positional.join(" ")
             ));
         }
@@ -1186,6 +1208,15 @@ fn parse_db(
         "off" | "false" | "no" => Ok(false),
         other => Err(Problem::Usage(format!("expected on or off, not {other:?}"))),
     };
+    // `--mcp` / `--no-mcp`: the MCP exposure of a new name (create, clone, alias set, restore).
+    let mcp_flag = || match (switch("--mcp"), switch("--no-mcp")) {
+        (true, true) => Err(Problem::Usage(
+            "give either --mcp or --no-mcp, not both".to_string(),
+        )),
+        (true, false) => Ok(Some(true)),
+        (false, true) => Ok(Some(false)),
+        (false, false) => Ok(None),
+    };
     let only_create_flags = || {
         for flag in ["--kind", "--role", "--base", "--schema", "--description"] {
             if value(flag).is_some() {
@@ -1202,7 +1233,14 @@ fn parse_db(
     let command = match words.as_slice() {
         ["list"] => DbCommand::List,
         ["create", name] => {
-            return create_command(name, value, switch);
+            let mcp = mcp_flag()?;
+            return create_command(name, value, switch).map(|command| match command {
+                DbCommand::Create { name, spec } => DbCommand::Create {
+                    name,
+                    spec: spec.with_mcp(mcp),
+                },
+                other => other,
+            });
         }
         ["delete", name] => DbCommand::Delete {
             name: name.to_string(),
@@ -1210,6 +1248,7 @@ fn parse_db(
         ["clone", source, name] => DbCommand::Clone {
             source: source.to_string(),
             name: name.to_string(),
+            mcp: mcp_flag()?,
         },
         ["load", name] => DbCommand::Load {
             name: name.to_string(),
@@ -1273,6 +1312,7 @@ fn parse_db(
         ["alias", "set", alias, target] => DbCommand::AliasSet {
             alias: alias.to_string(),
             target: target.to_string(),
+            mcp: mcp_flag()?,
         },
         ["alias", "remove", alias] => DbCommand::AliasRemove {
             alias: alias.to_string(),
@@ -1291,6 +1331,7 @@ fn parse_db(
             name: name.to_string(),
             backup: backup.to_string(),
             target: value("--name"),
+            mcp: mcp_flag()?,
         },
         ["export", name] => {
             let Some(out) = value("--out") else {
@@ -1317,6 +1358,16 @@ fn parse_db(
         }
     };
     only_create_flags()?;
+    if (switch("--mcp") || switch("--no-mcp"))
+        && !matches!(
+            command,
+            DbCommand::Clone { .. } | DbCommand::AliasSet { .. } | DbCommand::Restore { .. }
+        )
+    {
+        return Err(usage(
+            "--mcp and --no-mcp belong to db create, db clone, db alias set and db restore",
+        ));
+    }
     if switch("--no-wait") && !matches!(command, DbCommand::Load { .. }) {
         return Err(usage("--no-wait belongs to db load"));
     }
