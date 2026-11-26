@@ -165,6 +165,11 @@ Its binary is `target/dist/graphersal-server`.
 come from crates.io, pinned to one exact version in the root `Cargo.toml`. The published
 `graphersal-serve` crate carries the playground, so the binary has the whole web UI built in.
 
+## A Docker image
+
+The repository's `Dockerfile` builds the server into an image of its own (no image is published
+yet): [Running in Docker](../guide/docker.md).
+
 ## Check it
 
 ```bash

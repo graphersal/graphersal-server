@@ -1,0 +1,12 @@
+# The build context of the Dockerfile: the workspace manifest and lock, the crate and the
+# entry point. Everything else (git history, target/, the book, the maintainer's ai/ notes,
+# CI files, server directories made by hand) stays out.
+*
+!Cargo.toml
+!Cargo.lock
+!rustfmt.toml
+!LICENSE-APACHE
+!NOTICE
+!crates/
+!docker/entrypoint.sh
+**/.DS_Store

@@ -795,6 +795,17 @@ cited from tracked files). When this file disagrees with the code, the code wins
   platform list in step with the release matrix and the binstall overrides. `ci.yml` runs BY HAND
   only (user decision 2026-11-26: `gh workflow run CI -f ref=<branch>`): fmt, Linux + Windows
   clippy/test/node/smoke, `cargo deny check` (`deny.toml`), MSRV 1.88.
+- Docker (round R3): `Dockerfile` (multi-stage: `rust:<RUST_VERSION>-alpine` build, `--locked
+  --profile dist`, thin LTO unless `--build-arg LTO=fat`, BuildKit cache mounts; runtime
+  `alpine` for the entry point's shell and busybox `wget` of the `HEALTHCHECK` on `/readyz`;
+  user `graphersal` uid/gid 65532; `/data` 0700 = the server directory, `VOLUME`; `EXPOSE 8484`;
+  OCI labels), `docker/entrypoint.sh` (no arguments or only options: `init /data --set
+  listen=0.0.0.0:$PORT` when `/data` is missing or empty, then `exec serve --dir /data --listen
+  0.0.0.0:$PORT` with the options; other arguments: `exec graphersal-server "$@"`; env
+  `GRAPHERSAL_SERVER_DIR`, `GRAPHERSAL_SERVER_PORT`), `.dockerignore` (an allowlist: manifest,
+  lock, `crates/`, licence files, the entry point). Book: `book/src/guide/docker.md`. A change to
+  the CLI that the entry point relies on (`init --set`, `serve --listen`, the owner check) checks
+  that page and the entry point too.
 - Public-repository files (round R2): `CONTRIBUTING.md` (the human version of these rules: keep
   its commands in step with the Commands section), `SECURITY.md`, `CLA.md` (Graphersal's CLA,
   its "Project" also names this repository; never edit it without the user),
