@@ -1,4 +1,4 @@
-# Admin API (EXPERIMENTAL)
+# Admin API
 
 The admin HTTP API of `graphersal-server`, below `/api/admin/`. The server's web UI at `/` (the
 `server` UI profile, `crates/graphersal-server/ui/`, model `ui/admin-api.js`) and the console (`graphersal-server db ...`, when a server runs on the directory) are its
@@ -7,12 +7,12 @@ below are also what `graphersal-server db ... --json` (and `user ... --json`) pr
 
 Machine-readable: `GET /openapi.json` (public) is the OpenAPI 3.1 description of these routes
 (and of login, `/api/info` and `/api/databases`), `graphersal-server openapi --dir DIR` writes
-it offline; how to generate a client from it: [`http-clients.md`](http-clients.md).
+it offline; how to generate a client from it: [HTTP Clients and OpenAPI](../guide/http_clients.md).
 
-The MCP endpoints (`/mcp`, `/db/<name>/mcp`) are documented in [`mcp.md`](mcp.md), the server
+The MCP endpoints (`/mcp`, `/db/<name>/mcp`) are documented in [MCP](../guide/mcp.md), the server
 directory and its files (`server.toml`, `database.toml`, `models/`, `backups/`) in
-[`server-dir.md`](server-dir.md), the access model (principals, grants, levels, tokens, the
-401/404/303 rules) in [`access.md`](access.md).
+[The Server Directory](server_directory.md), the access model (principals, grants, levels, tokens, the
+401/404/303 rules) in [Users, Tokens and Grants](../guide/access.md).
 
 The admin API is for admins only (a user with the `admin` role in `access.toml`, or the
 console with the run's operator token from `server.run`): send `Authorization: Bearer
@@ -29,7 +29,7 @@ lifetime_secs, else 400 days>; HttpOnly; SameSite=Strict; Path=/`, plus `Secure`
 of the request's cookie and clears it (`200 {"loggedOut": bool}`). Browser sessions survive a
 server restart (kept in `sessions/browser.json`, hashes only) and last until the logout, a
 change of the user's token, the user's removal, or the `[sessions]` limits of `server.toml`
-(none by default; `server-dir.md`); an ended session's cookie answers `401` and is cleared. `GET /api/info` names the
+(none by default; [Configuration Reference](configuration.md#servertoml)); an ended session's cookie answers `401` and is cleared. `GET /api/info` names the
 request's `principal` (`{id, kind, admin}`); for anonymous it answers only `server`,
 `protocol`, `dev`, `experimental`, `uiProfile`, `principal`, `login: "/"`, `openapi` and
 `databaseOpenapi` (every principal gets these two: `/openapi.json`, the server's API
@@ -57,11 +57,11 @@ the databases and aliases the caller may reach, sorted by name:
 read-only database or a base is `read`; an admin: `write`), `readOnly` is `level == "read"`,
 `state` is the entry's state without the admin's `reason`, `playground` the path of its
 playground from the server root, `openapi` the path of its HTTP API's OpenAPI description
-([`http-clients.md`](http-clients.md)), `kind` `database` or `alias`, `aliasOf` (alias rows) the
+([HTTP Clients and OpenAPI](../guide/http_clients.md)), `kind` `database` or `alias`, `aliasOf` (alias rows) the
 database the alias names now. A database the caller has no grant on is never listed; an alias is
 listed when the caller has a grant on its database or on the alias itself (a grant on an alias
-reaches the alias's current database only through the alias, see `docs/access.md` "Grants on
-aliases"); anonymous without anonymous grants
+reaches the alias's current database only through the alias, see [Grants on
+aliases](../guide/access.md#grants-on-aliases)); anonymous without anonymous grants
 gets an empty list (`200`). Wrong credentials are `401`; any method but `GET`/`HEAD` is `405`.
 
 ## Conventions
@@ -359,7 +359,7 @@ a flip keeps the alias's grants.
 atomic rewrite of `aliases.toml`. The answer: `alias` (the new name), `renamedFrom` (the old
 name), `target`, `mcpSessionsMoved` (the open MCP sessions on `/mcp` that had selected the old
 name: they move to the new one, and the next answer of each carries one note, see
-`docs/mcp.md`), `grantsMoved` (the grants on the old name, now on the new one in `access.toml`).
+MCP), `grantsMoved` (the grants on the old name, now on the new one in `access.toml`).
 Refused: an old name that is no alias (`404`; a database name is `409` with
 the help: databases have no rename, point an alias at it), an invalid new name (`400`), a new
 name a database, another alias or the alias itself holds (`409`, help naming the listing), a
@@ -380,7 +380,7 @@ restores only over the same base.
 Scheduled backup jobs of a database (its playground's Jobs panel, `/db/<name>/api/jobs/...`)
 are not part of the admin API: they write only below `server.toml [jobs] backup_root`, a
 job's path relative to it; an absolute path or one leaving the root is refused when the job is
-defined (`server-dir.md`, "Backup jobs").
+defined ([Backup jobs](../guide/backups.md#backup-jobs)).
 
 A backup object:
 
@@ -422,7 +422,7 @@ it, if any). Unknown backup: `404` with help `GET .../<name>/backups`. The resto
 ### Server backup
 
 `GET /api/admin/server-backup` answers ONE ZIP archive of the whole server (the format and the
-restore: `server-dir.md`, "Server backups"): `server.toml`, `aliases.toml`, `access.toml`,
+restore: [Back up the whole server](../guide/backups.md#back-up-the-whole-server)): `server.toml`, `aliases.toml`, `access.toml`,
 `mcp.toml`, every database's `database.toml` (its settings, not its data), `models.json` (the
 shared models: repository, identity, licence, blob hash and size, the databases using them) and
 `manifest.json` (the format and its version, the server version, the time, the source
@@ -443,7 +443,7 @@ with-databases`, `X-Graphersal-Databases` (how many databases' data it holds),
 parameter or value: `400`.
 
 The archive holds the users' token HASHES (never a token) and every grant: it is a secret
-(`access.md`, "Server backups are secrets"). Only the operator token and admin users get it;
+([Server backups are secrets](../guide/security.md#server-backups-are-secrets)). Only the operator token and admin users get it;
 `everyone` of a server without access control is refused (`403`), as for the shutdown. Every
 download is audited (`server backup (configuration only, <bytes> bytes) downloaded`, with the
 actor). The console's `graphersal-server backup` uses this route when a server runs.
@@ -653,7 +653,7 @@ using its database's `POST /db/<name>/api/cancel`.
 
 ### Users and grants
 
-The users and grants of `access.toml` (format: [`server-dir.md`](server-dir.md)). A user:
+The users and grants of `access.toml` (format: [The Server Directory](server_directory.md)). A user:
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -672,7 +672,7 @@ at now; `all`: `*`; `missing`: no database or alias of that name, e.g. one left 
 `target` (`null` unless an alias). A principal reaches a database at the highest level of any of
 its grants, capped by the database's mode (read-only or a base: `read`). A grant on an alias
 reaches the alias's current database only through the alias's name; the real name stays hidden
-without a grant of its own (`docs/access.md` "Grants on aliases").
+without a grant of its own ([Grants on aliases](../guide/access.md#grants-on-aliases)).
 
 - `POST users` makes the user with a new token (256 random bits as 64 hex digits). The token is
   in this answer only (`token`), never again: copy it. `admin: true` gives the `admin` role.
@@ -696,7 +696,7 @@ as the operator); the web UI's Users tab uses them too.
 
 ### MCP
 
-The runtime switches of the MCP endpoints (`mcp.toml`, [`mcp.md`](mcp.md#switches-at-runtime-the-mcp-tab-mcptoml))
+The runtime switches of the MCP endpoints (`mcp.toml`, [MCP](../guide/mcp.md#switches-at-runtime-the-mcp-tab-mcptoml))
 and their usage statistics; the web UI's MCP tab and `graphersal-server mcp ...` use these
 routes. A change takes effect at once (no restart) and may be based on the state's `revision`
 (stale: `409` with the current one). The MCP state:
@@ -768,8 +768,7 @@ request is audited (`server shutdown requested`).
 
 ### Verify, repair and swap
 
-Round 3: what to do with a damaged Store ([`server-dir.md`, "After a
-crash"](server-dir.md#after-a-crash)). All three are synchronous (the console waits up to 10
+Round 3: what to do with a damaged Store ([Troubleshooting](../troubleshooting.md#a-server-was-killed-by-force)). All three are synchronous (the console waits up to 10
 minutes for an answer).
 
 `POST /api/admin/databases/<name>/verify` scrubs the database's Store (the engine's
@@ -875,7 +874,7 @@ time>.zip`; through `FILE.part`, mode `0600`, renamed when complete): offline th
 writes it under the server lock, through a running server the console downloads `GET
 server-backup` (also with `--token`). Its `--json` answer is `{"file", "bytes",
 "withDatabases", "databases", "skipped": [{"name", "reason"}...]}`. `restore` never goes
-through a server: it builds a new directory (`server-dir.md`, "Server backups"); its `--json`
+through a server: it builds a new directory ([Back up the whole server](../guide/backups.md#back-up-the-whole-server)); its `--json`
 answer is `{"dir", "sourceDir", "serverVersion", "createdAt", "withDatabases", "files",
 "databases", "skipped": [{"name", "reason"}...], "modelBlobs", "notes"}`.
 

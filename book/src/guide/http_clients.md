@@ -1,10 +1,10 @@
-# HTTP clients (EXPERIMENTAL)
+# HTTP Clients and OpenAPI
 
 How a program talks to `graphersal-server` over HTTP: the OpenAPI descriptions to generate a
 client from, the token, the error format and the revisions. The routes themselves are
-documented in [`admin-api.md`](admin-api.md) (the admin API) and in the descriptions below;
-access control in [`access.md`](access.md); the MCP endpoints, which are not REST, in
-[`mcp.md`](mcp.md).
+documented in [Admin API](../reference/admin_api.md) (the admin API) and in the descriptions below;
+access control in [Users, Tokens and Grants](access.md); the MCP endpoints, which are not REST, in
+[MCP](mcp.md).
 
 ## Two OpenAPI descriptions
 
@@ -115,7 +115,7 @@ graphersal-server openapi --dir /srv/graphs --db acme --server https://db.exampl
 ## Generating a client
 
 Any OpenAPI 3.1 generator works on the downloaded file; the schemas are deliberately loose
-(objects with the documented keys; [`admin-api.md`](admin-api.md) and the engine's book pages
+(objects with the documented keys; [Admin API](../reference/admin_api.md) and the engine's book pages
 are the authoritative descriptions of every answer). Examples:
 
 ```bash
@@ -166,4 +166,4 @@ someone else changed the object since, the change is refused and nothing changes
 Read the object again, then repeat the change with the new revision. Without a revision a
 change is applied to the current state. The server's description marks these operations with
 the `If-Match` parameter and a `409` (`RevisionConflict`). Details:
-[`admin-api.md`, "Revisions"](admin-api.md#revisions-concurrent-changes).
+[Admin API](../reference/admin_api.md#revisions-concurrent-changes).
