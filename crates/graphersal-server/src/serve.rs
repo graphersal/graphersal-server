@@ -28,7 +28,7 @@
 //! most 120 s for each next piece. A request that may run without credentials (SEC M1: the
 //! login, and with access control on every request that names no credentials) gets
 //! [`UNAUTHENTICATED_BODY_DEADLINE`] for its whole body, and the unread rest drained after an
-//! answer gets [`DRAIN_DEADLINE`]; a body late past either fails its read and closes the
+//! answer gets five seconds; a body late past either fails its read and closes the
 //! connection, so slow clients without credentials cannot hold the connection cap.
 //!
 //! The probes `/healthz` and `/readyz` are answered on the connection's async task, never on
