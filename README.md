@@ -1,36 +1,35 @@
 # graphersal-server
 
-**EXPERIMENTAL. Private until its first public version.** Everything here (commands, files,
-routes, answers) may change without notice.
+**A multi-database server for [Graphersal](https://github.com/graphersal/graphersal): many graph
+databases in one server directory, served by one process over HTTP and MCP, with a web UI, users
+and grants.**
 
-A server for [Graphersal](https://graphersal.dev) graph databases: ONE process serving MANY
-databases from one server directory, over HTTP.
+> **EXPERIMENTAL.** graphersal-server is young. Everything here (commands, files, routes,
+> answers) may change without notice until a stable version.
 
-- A database is a plain Graphersal Store, or a layer over a shared, frozen base database (many
-  layers, one base in memory).
-- Each loaded database gets the Graphersal playground and its HTTP API under `/db/<name>/`.
-- One MCP endpoint (`/mcp`) lets an AI agent list the databases and pick one per session.
-- The admin operations (create, load, clone, back up, restore, export, import, aliases, shared
-  embedding models, users and grants, running queries) are a console (`graphersal-server db
-  ...`), an HTTP API and the server's own web UI at `/`.
-- Access per user: `access.toml` holds the users (token hashes) and their grants per database;
-  a database a user has no grant on does not exist for that user.
+Graphersal is an embeddable graph database and traversal engine in Rust. Its command line has a
+dev server for ONE graph on a developer's machine. graphersal-server is the server for MANY
+graphs: it adds the server directory, a registry of databases, users and grants, backups and the
+admin tools.
 
-## Documentation
+## Features
 
-The book in [`book/`](book/src/SUMMARY.md) is the documentation: installation, the command
-cheat sheet, concepts, databases, backups, models, users and grants, the security model, the web
-UI, MCP, HTTP clients, configuration, running as a service, troubleshooting, the admin API and
-the release notes. It is not published on a website. Read it on GitHub under
-[`book/src/`](book/src/SUMMARY.md), or build and open it with
-[mdBook](https://rust-lang.github.io/mdBook/):
-
-```bash
-mdbook serve book --open
-```
-
-Start with [First Start](book/src/getting_started/first_start.md), the [Command Cheat
-Sheet](book/src/cheat_sheet.md) and [Troubleshooting](book/src/troubleshooting.md).
+- **Many databases, one process.** A database is a Graphersal Store, or a layer over a shared,
+  frozen base database (many layers, one base in memory). Databases load and unload while the
+  server runs.
+- **The Graphersal playground per database.** A loaded database `acme` gets the playground and
+  its HTTP API under `/db/acme/`.
+- **One MCP endpoint for AI agents.** `/mcp` lets an agent list the databases it may see and pick
+  one per session.
+- **Administration three ways.** Create, load, clone, back up, restore, export, import, aliases,
+  shared embedding models, users and grants, running queries: the same operations as a console
+  (`graphersal-server db ...`), an HTTP admin API (with an OpenAPI description) and the server's
+  own web UI at `/`.
+- **Access per user.** Users hold tokens (only their SHA-256 hashes are stored); grants say which
+  database each user may read or write. A database a user has no grant on does not exist for
+  that user.
+- **Backups.** Verified ZIP backups per database, restore into the same or a new name, and a
+  backup of the whole server directory.
 
 ## Install
 
@@ -81,18 +80,30 @@ The server listens on the loopback address by default: tokens travel in clear te
 HTTP. To reach it from other machines put a TLS reverse proxy in front (the book's [Security
 Model](book/src/guide/security.md)).
 
-## Development
+## Documentation
 
-- `scripts/smoke.sh`: an end-to-end smoke test (build, init, serve, the admin API, the database
-  pages, MCP, users, the import inbox, a restart keeping the sessions, a clean stop); needs only
-  bash, curl and python3 (Unix).
-- `scripts/smoke.ps1`: the same walk in PowerShell 7 for Windows, step by step (CI and the
-  release build): `pwsh scripts/smoke.ps1 -Bin <path to graphersal-server.exe>`.
-- CI runs by hand before a release (`gh workflow run CI -f ref=<branch>`: Linux and Windows,
-  cargo-deny, the MSRV); the release workflow (`.github/workflows/release.yml`) builds, smoke-tests
-  and packs the four platforms, tests the installers and drafts the GitHub Release. The release
-  text is the book's page `book/src/release_notes/<version>.md`.
+The book in [`book/src/`](book/src/SUMMARY.md) is the documentation: installation, the command
+cheat sheet, concepts, databases, backups, models, users and grants, the security model, the web
+UI, MCP, HTTP clients, configuration, running as a service, troubleshooting, the admin API and
+the [release notes](book/src/release_notes/index.md). It is not published on a website: read it
+on GitHub, or build and open it with [mdBook](https://rust-lang.github.io/mdBook/):
+
+```bash
+mdbook serve book --open
+```
+
+Start with [First Start](book/src/getting_started/first_start.md), the [Command Cheat
+Sheet](book/src/cheat_sheet.md) and [Troubleshooting](book/src/troubleshooting.md). The query
+language, the playground and the Store format are Graphersal's: see its
+[documentation](https://graphersal.dev).
+
+## Contributing and security
+
+Issues and pull requests are welcome: [CONTRIBUTING.md](CONTRIBUTING.md) (build, tests, the
+Contributor License Agreement). Please report vulnerabilities privately:
+[SECURITY.md](SECURITY.md).
 
 ## Licence
 
-Apache-2.0, see `LICENSE-APACHE` and `NOTICE`.
+Licensed under the [Apache License, Version 2.0](LICENSE-APACHE). See [NOTICE](NOTICE). The name
+"Graphersal" is covered by the [trademark policy](TRADEMARKS.md).

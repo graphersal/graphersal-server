@@ -1,10 +1,9 @@
 # CLAUDE.md
 
-Agent guidance for **graphersal-server** (EXPERIMENTAL, private): one process serving many
-Graphersal graph databases from one server directory over HTTP. Design and plan live in the
-graphersal repository (`../graphersal/ai/roadmap/graphersal-server.md`,
-`../graphersal/ai/graphersal-server/PLAN.md`; git-ignored session files there, never cite them
-from published files). When this file disagrees with the code, the code wins: say so.
+Agent guidance for **graphersal-server** (EXPERIMENTAL, public repository): one process serving
+many Graphersal graph databases from one server directory over HTTP. Design notes and plans are
+the maintainer's local working files outside this repository (git-ignored, never committed or
+cited from tracked files). When this file disagrees with the code, the code wins: say so.
 
 ## Layout
 
@@ -793,21 +792,29 @@ from published files). When this file disagrees with the code, the code wins: sa
   platform list in step with the release matrix and the binstall overrides. `ci.yml` runs BY HAND
   only (user decision 2026-11-26: `gh workflow run CI -f ref=<branch>`): fmt, Linux + Windows
   clippy/test/node/smoke, `cargo deny check` (`deny.toml`), MSRV 1.88.
+- Public-repository files (round R2): `CONTRIBUTING.md` (the human version of these rules: keep
+  its commands in step with the Commands section), `SECURITY.md`, `CLA.md` (Graphersal's CLA,
+  its "Project" also names this repository; never edit it without the user),
+  `.github/workflows/cla.yml` (the CLA check, as graphersal's; signatures on the branch
+  `cla-signatures`), `TRADEMARKS.md` (follows Graphersal's policy), `.github/ISSUE_TEMPLATE/`
+  and `.github/pull_request_template.md`. Nothing tracked names a private path, a private file or
+  a private repository: the history is public.
 - Tests: unit tests beside the code (`test_support::TempDir`), end-to-end tests in
   `crates/graphersal-server/tests/server_tests.rs` (spawns the binary, port 0, SIGTERM; the
   `db`/`import`/`models` console offline and through a running server).
 
 ## Commands
 
-Run every build/test/server under `../graphersal/ai/bench/watchdog.sh` (RSS ceilings).
+On the maintainer's machine every build/test/server runs under the local watchdog script
+`$WD` (RSS ceilings; not part of this repository: without it, run the commands directly).
 
 ```bash
-../graphersal/ai/bench/watchdog.sh cargo test
+$WD cargo test
 cargo fmt --all --check                      # rustfmt.toml: max_width = 100
 node --test crates/graphersal-server/ui/tests/*.test.mjs   # the web UI's modules
-../graphersal/ai/bench/watchdog.sh cargo clippy --all-targets -- -D warnings
+$WD cargo clippy --all-targets -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps -p graphersal-server
-WD_TIMEOUT=600 ../graphersal/ai/bench/watchdog.sh scripts/smoke.sh   # end to end, ok/FAIL lines
+WD_TIMEOUT=600 $WD scripts/smoke.sh   # end to end, ok/FAIL lines
 mdbook build book                            # the book (book/CLAUDE.md); must build without warnings
 ```
 

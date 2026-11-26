@@ -1,0 +1,29 @@
+name: Feature request
+description: A new command, route, setting or ability of the server.
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please describe the problem first, then the solution you have in mind. A larger change is
+        best agreed on here before anyone writes it (CONTRIBUTING.md). Engine features (query
+        language, Store, playground, MCP tools) belong to https://github.com/graphersal/graphersal/issues.
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What you want to do, and what stops you today.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: The proposal
+      description: How it could work: the command, route, setting or UI you imagine.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives
+      description: Workarounds you use today, or other designs you considered.

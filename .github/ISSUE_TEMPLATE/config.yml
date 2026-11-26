@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/graphersal/graphersal-server/security/advisories/new
+    about: Please report vulnerabilities privately, never in a public issue (SECURITY.md).
+  - name: Graphersal engine issues
+    url: https://github.com/graphersal/graphersal/issues
+    about: Queries, the Store, the playground and the MCP tools belong to the engine's repository.
