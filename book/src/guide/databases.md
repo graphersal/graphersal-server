@@ -30,7 +30,7 @@ graphersal-server db info acme --dir ./srv
 `db info` shows the kind, role, base and aliases; the state, flags and sizes; the query limits;
 the MCP switches; the grants; the backups; the damage and recovery report; and the Store's
 creation parameters (store id, damage policy, chunk size, created, backend, format version).
-The web UI's Database settings tab shows the same.
+The web UI's Settings tab shows the same.
 
 ## Create
 
@@ -110,7 +110,7 @@ graphersal-server db unload acme --dir ./srv
 graphersal-server db load acme --dir ./srv
 ```
 
-`db info` (and the Database settings tab) show both the limits in effect now and those of the
+`db info` (and the Settings tab) show both the limits in effect now and those of the
 next load. The tab offers "Unload and load now…" when they differ.
 
 Every settings change names the revision it was based on. When someone else changed the same

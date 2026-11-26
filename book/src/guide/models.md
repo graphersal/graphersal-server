@@ -91,7 +91,7 @@ tab) names it: "the embedding model org/model (blob f0ed7648) is missing", with 
 adds it (`models add org/model` when `models/` holds it, else `models add SOURCE`). This is not
 damage: the graph data is intact and no repair is needed. A plain database that is not loaded
 becomes `needs-model` (marked in its `database.toml`), so adding the model resolves it as for an
-import. The Database settings tab shows the last verify and the missing model.
+import. The Settings tab shows the last verify and the missing model.
 
 **A base cannot get a model later.** An import with `--role base` of a source naming a model
 that neither it nor `models/` carries is refused. Add the model first and import again, or

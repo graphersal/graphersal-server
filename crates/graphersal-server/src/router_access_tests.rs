@@ -3609,6 +3609,7 @@ fn every_route_of_the_router_and_the_admin_api_is_described() {
         include_str!("admin_api_users.rs"),
         include_str!("admin_api_mcp.rs"),
         include_str!("admin_api_settings.rs"),
+        include_str!("admin_api_config.rs"),
         include_str!("admin_api_damage.rs"),
         include_str!("control.rs"),
     ];
@@ -3667,4 +3668,90 @@ fn every_route_of_the_router_and_the_admin_api_is_described() {
     );
     // The database description's route is answered (the mount's own test checks it fully).
     assert!(spec["paths"]["/db/{name}/openapi.json"]["get"].is_object());
+}
+
+#[test]
+fn server_settings_are_for_admins_audited_and_based_on_the_files_revision() {
+    let fx = fixture("access-config");
+    let alice = Who::Bearer(&fx.alice);
+    assert_eq!(
+        get(&fx, Who::Bearer(&fx.bob), "/api/admin/config").status(),
+        404
+    );
+    assert_unauthorized(
+        &get(&fx, Who::Anonymous, "/api/admin/config"),
+        "anonymous config",
+    );
+    let view = expect(get(&fx, alice, "/api/admin/config"), 200);
+    let revision = view["revision"].as_str().unwrap().to_string();
+    // No live settings in this router (the unit fixture): nothing pending, nothing applied.
+    assert_eq!(view["restartPending"], json!([]));
+    assert_eq!(view["mcpExposeNew"], json!(false));
+    let changed = expect(
+        put(
+            &fx,
+            alice,
+            "/api/admin/config",
+            json!({"set": {"limits.query.timeout_ms": 250, "jobs.backup_root": "vault"}, "revision": revision}),
+        ),
+        200,
+    );
+    assert_eq!(
+        changed["changed"],
+        json!(["limits.query.timeout_ms", "jobs.backup_root"])
+    );
+    assert_ne!(changed["revision"], json!(revision));
+    let lines = fx.audit.lines();
+    assert!(
+        lines.iter().any(|l| l.starts_with("user:alice: ")
+            && l.contains("server.toml: limits.query.timeout_ms = 250")),
+        "{lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("server.toml: jobs.backup_root = \"vault\"")),
+        "{lines:?}"
+    );
+    // The database settings see the new server default at once (read at every load).
+    let settings = expect(get(&fx, alice, "/api/admin/databases/w/settings"), 200);
+    let row = settings["limits"]["keys"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["key"] == "timeout_ms")
+        .unwrap()
+        .clone();
+    assert_eq!(
+        (row["server"].clone(), row["source"].clone()),
+        (json!(250), json!("server"))
+    );
+    // The old revision is refused, nothing changed.
+    let stale = expect(
+        put(
+            &fx,
+            alice,
+            "/api/admin/config",
+            json!({"set": {"limits.query.timeout_ms": 1}, "revision": revision}),
+        ),
+        409,
+    );
+    assert_eq!(stale["revision"], changed["revision"]);
+    let view = expect(get(&fx, alice, "/api/admin/config"), 200);
+    let timeout = view["keys"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["key"] == "limits.query.timeout_ms")
+        .unwrap()
+        .clone();
+    assert_eq!(timeout["value"], json!(250));
+    expect(
+        put(&fx, alice, "/api/admin/config", json!({"set": {"x": 1}})),
+        400,
+    );
+    expect(
+        put(&fx, alice, "/api/admin/config", json!({"sett": {}})),
+        400,
+    );
 }

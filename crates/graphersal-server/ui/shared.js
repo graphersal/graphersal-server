@@ -26,6 +26,25 @@ import {
   databaseOpenapiHref,
 } from './databases.js';
 
+/**
+ * The server's own state the top bar shows (round 4 B-SETTINGS): the server.toml keys whose
+ * change waits for a restart (`restartPending` of `GET api/admin/config`), read once by the
+ * header for an admin and updated by the Settings tab's server views after every read and save.
+ */
+export const serverState = reactive({ restartPending: [], read: false });
+
+/** Reads `serverState` (admins only; a refusal or an older server leaves it empty). */
+export async function readServerState() {
+  try {
+    const answer = await sendAdmin({ base: ROOT, fetch: (...a) => globalThis.fetch(...a), headers }, { method: 'GET', path: 'api/admin/config' });
+    serverState.restartPending = Array.isArray(answer.restartPending) ? answer.restartPending.filter((k) => typeof k === 'string') : [];
+  } catch {
+    serverState.restartPending = [];
+  } finally {
+    serverState.read = true;
+  }
+}
+
 /** The server root: the profile's files are served under `<root>/server-ui/`. Relative, so a
  * proxy prefix in front of the server keeps working. */
 export const ROOT = new URL('../', import.meta.url);
@@ -86,6 +105,7 @@ export const noticeClass = (n) => (n.tone === 'ok' ? 'info' : n.tone === 'warn' 
  */
 export const list = reactive({
   rows: [], aliases: [], aliasesRevision: '', problems: [], skipped: 0, error: null, loading: false, loaded: false, version: 0,
+  newDatabases: { autoLoad: false, readOnly: false, mcp: false },
 });
 
 let timer = null;
@@ -103,6 +123,7 @@ export function reload() {
       list.aliasesRevision = answer.aliasesRevision;
       list.problems = answer.problems;
       list.skipped = answer.skipped;
+      if (answer.newDatabases) list.newDatabases = answer.newDatabases;
       list.error = null;
     } catch (err) {
       list.error = errorNotice(err);

@@ -14,6 +14,8 @@ command goes through the server's admin API. Without one it works on the directo
 ```bash
 graphersal-server init ./srv                               # create a server directory, print the first admin token
 graphersal-server init ./srv                               # on an existing directory: add missing parts, tighten modes
+graphersal-server init ./srv --config my-server.toml       # a new directory with your server.toml (checked first)
+graphersal-server init ./srv --set listen=127.0.0.1:9000 --set limits.query.timeout_ms=30000
 graphersal-server start --dir ./srv                        # serve in the background, wait until ready
 graphersal-server start --dir ./srv --listen 127.0.0.1:0   # on a free port
 graphersal-server start --dir ./srv --timeout 120          # wait up to 120 s for readiness
@@ -28,6 +30,19 @@ graphersal-server --version
 graphersal-server --help
 ```
 
+## Server settings (server.toml)
+
+```bash
+graphersal-server config get --dir ./srv                               # every key: value, default, when it applies, restart pending
+graphersal-server config get limits.upload_bytes --dir ./srv           # one key
+graphersal-server config set limits.upload_bytes 1073741824 --dir ./srv  # through a running server: applied at once
+graphersal-server config set limits.query.timeout_ms 30000 --dir ./srv # every database without its own value, at its next load
+graphersal-server config set defaults.auto_load true --dir ./srv       # what new databases start with
+graphersal-server config set http.allowed_hosts db.example.com --dir ./srv   # after a restart (restart pending)
+graphersal-server config unset sessions.lifetime_secs --dir ./srv      # back to the default
+graphersal-server config check ./my-server.toml                        # check a file, no server needed
+```
+
 ## Databases
 
 ```bash
@@ -35,6 +50,7 @@ graphersal-server db list --dir ./srv                                  # databas
 graphersal-server db info acme --dir ./srv                             # everything about one database
 graphersal-server db create acme --description "Acme" --dir ./srv      # a new empty database
 graphersal-server db create acme --auto-load --dir ./srv               # ... loaded at every start
+graphersal-server db create acme --no-read-only --dir ./srv            # ... writable even when defaults.read_only is on
 graphersal-server db create acme --schema schema.json --dir ./srv      # ... with a schema
 graphersal-server db create acme --mcp --dir ./srv                     # ... offered to MCP at once (also clone, alias set, restore, import)
 graphersal-server db load acme --dir ./srv                             # load (running server only), waits

@@ -138,6 +138,7 @@ export function limitRows(answer = {}) {
       effective,
       source,
       sourceText: SOURCE_TEXT[source],
+      inherited: source !== 'database',
       inEffect,
       loaded,
       differs: loaded && inEffect !== effective,

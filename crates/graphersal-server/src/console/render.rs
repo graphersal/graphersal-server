@@ -306,6 +306,10 @@ fn render_with(command: &DbCommand, answer: &Value, dir: &Path, server: Option<&
         .detail("size", size(answer))
         .text(),
         DbCommand::UserList => render_users(answer, &dir_arg),
+        DbCommand::ConfigGet { key } => {
+            super::settings::render_get(key.as_deref(), answer, &dir_arg)
+        }
+        DbCommand::ConfigSet { .. } => super::settings::render_set(answer, &dir_arg),
         DbCommand::McpStatus => render_mcp(answer, &dir_arg),
         DbCommand::McpExposeNew { .. } => {
             let on = answer["exposeNew"] == Value::Bool(true);
@@ -1913,12 +1917,17 @@ fn render_models_add(answer: &Value, dir_arg: &str) -> String {
 /// The result of `init DIR` (`dir` as the user named it).
 pub fn init_text(report: &InitReport, dir: &Path) -> String {
     let dir_arg = shell_word(dir);
+    // The listen address of the server.toml written (init --config/--set may set another).
+    let listen = report
+        .dir
+        .load_config()
+        .map_or_else(|_| DEFAULT_LISTEN.to_string(), |config| config.listen);
     let note = if !report.existed {
         Note::new(format!("Created the server directory {}", dir.display()))
             .detail(
                 "config",
                 format!(
-                    "{} (listen {DEFAULT_LISTEN}: edit it before serving)",
+                    "{} (listen {listen}: edit it before serving)",
                     below(dir, "server.toml")
                 ),
             )

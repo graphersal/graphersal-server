@@ -3,7 +3,7 @@
 //!
 //! | Method | Path | Body | Answer |
 //! |---|---|---|---|
-//! | GET | `databases` | | `200 {"databases": [entry...], "aliases": {alias: database}, "aliasesRevision", "problems": [text...]}` |
+//! | GET | `databases` | | `200 {"databases": [entry...], "aliases": {alias: database}, "aliasesRevision", "problems": [text...], "newDatabases": {"autoLoad", "readOnly", "mcp"}}` (`newDatabases`: what a create or import gets when it does not say) |
 //! | POST | `databases` | `{"name", "kind"?, "role"?, "base"?, "schema"?, "description"?, "autoLoad"?, "readOnly"?, "mcp"?}` | `201` entry |
 //! | GET | `databases/<name>` | | `200` entry (`<name>` may be an alias); `ETag` = its `revision` |
 //! | DELETE | `databases/<name>` | | `200 {"name", "trash", "grantsRemoved"}` (its grants go with it) |
@@ -34,6 +34,7 @@
 //! | POST | `aliases/<alias>/rename` | `{"name", "revision"?}` | `200 {"alias", "renamedFrom", "target", "mcpSessionsMoved", "grantsMoved"}` |
 //! | GET, POST, PUT, DELETE | `users...`, `grants...` | | the users and grants of `access.toml` (the `admin_api_users.rs` table) |
 //! | GET, PUT | `mcp`, `mcp/databases/<name>` | | the MCP switches of `mcp.toml` and the usage statistics (the `admin_api_mcp.rs` table) |
+//! | GET, PUT | `config` | `{"set": {key: value \| null}, "revision"?}` | every key of `server.toml` and its change at runtime (the `admin_api_config.rs` table) |
 //! | POST | `databases/<name>/verify`, `verify` | | verify one database's Store, or every database's (the `admin_api_damage.rs` table) |
 //! | POST | `databases/<name>/repair`, `databases/<name>/swap` | `{"name"?}`, `{"with", "confirm"}` | repair into a new database; let one database take another's name (the `admin_api_damage.rs` table) |
 //! | GET | `recovery` | | `200 {"uncleanShutdown"}`: the last unclean shutdown and its check |
@@ -194,6 +195,9 @@ pub(crate) fn route(
     if segments.first() == Some(&"mcp")
         && let Some(answer) = mcp::route(admin, method, &segments, request, &expecting)
     {
+        return answer;
+    }
+    if let Some(answer) = server_config::route(admin, method, &segments, request, &expecting) {
         return answer;
     }
     if let Some(answer) = settings::route(admin, method, &segments, request, &expecting) {
@@ -891,10 +895,12 @@ struct CreateBody {
     schema: Option<Value>,
     #[serde(default)]
     description: Option<String>,
+    /// `None`: `server.toml`'s `[defaults] auto_load`.
     #[serde(default)]
-    auto_load: bool,
+    auto_load: Option<bool>,
+    /// `None`: `server.toml`'s `[defaults] read_only`.
     #[serde(default)]
-    read_only: bool,
+    read_only: Option<bool>,
     /// Offer the new database to MCP (`None`: the server's default).
     #[serde(default)]
     mcp: Option<bool>,
@@ -919,8 +925,8 @@ impl CreateBody {
         }
         .with_role(self.role.unwrap_or_default())
         .with_description(self.description.unwrap_or_default())
-        .with_auto_load(self.auto_load)
-        .with_read_only(self.read_only)
+        .with_auto_load_opt(self.auto_load)
+        .with_read_only_opt(self.read_only)
         .with_mcp(self.mcp);
         spec.schema = self.schema.filter(|schema| !schema.is_null());
         spec
@@ -1526,6 +1532,24 @@ fn list(admin: &Admin) -> Value {
         "aliases": aliases,
         "aliasesRevision": aliases_revision,
         "problems": registry.problems(),
+        "newDatabases": new_database_defaults(admin),
+    })
+}
+
+/// What a new database gets when its creator does not say (round 4 B-SETTINGS: the create
+/// form starts from it): `autoLoad`, `readOnly` (`server.toml [defaults]`) and `mcp`
+/// (`mcp.toml` `expose_new`); `null` for a file that cannot be read.
+fn new_database_defaults(admin: &Admin) -> Value {
+    let defaults = admin
+        .registry()
+        .dir()
+        .load_config()
+        .ok()
+        .map(|c| c.defaults);
+    json!({
+        "autoLoad": defaults.as_ref().map(|d| d.auto_load),
+        "readOnly": defaults.as_ref().map(|d| d.read_only),
+        "mcp": admin.mcp_control().ok().map(|c| c.settings().expose_new),
     })
 }
 
@@ -1856,6 +1880,9 @@ mod mcp;
 
 #[path = "admin_api_settings.rs"]
 mod settings;
+
+#[path = "admin_api_config.rs"]
+mod server_config;
 
 #[path = "admin_api_damage.rs"]
 mod damage;

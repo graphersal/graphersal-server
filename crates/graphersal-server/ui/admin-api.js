@@ -334,9 +334,12 @@ export function renameProblem(alias, newName) {
  * The create body from the create form, or the problems: `{body}` | `{problems: [text]}`.
  * Form: `{name, kind: 'plain'|'layer', role: 'normal'|'base', base, description, schema (JSON
  * text, optional), readOnly, autoLoad, mcp (offer it to MCP)}`. Only the documented fields are sent, and only the ones
- * that differ from the server's defaults (a layer sends `kind` + `base`, no `role`).
+ * that differ from the server's defaults (a layer sends `kind` + `base`, no `role`). `defaults`: what the server
+ * gives a new database when the request does not say (the listing's `newDatabases`, ./databases.js
+ * `newDatabaseDefaults`): an unchecked box whose default is on sends `false`.
  */
-export function createBody(form) {
+export function createBody(form, defaults = {}) {
+  const d = defaults || {};
   const problems = [];
   const f = form || {};
   const name = typeof f.name === 'string' ? f.name.trim().toLowerCase() : '';
@@ -367,10 +370,13 @@ export function createBody(form) {
     }
   }
   if (f.autoLoad === true) body.autoLoad = true;
+  else if (d.autoLoad === true) body.autoLoad = false;
   // Offered to MCP at birth only when asked (otherwise the server's default: hidden).
   if (f.mcp === true) body.mcp = true;
+  else if (d.mcp === true) body.mcp = false;
   // A base is always read-only on the server; the flag is sent only for a normal database.
   if (f.readOnly === true && body.role !== 'base') body.readOnly = true;
+  else if (f.readOnly !== true && d.readOnly === true && body.role !== 'base') body.readOnly = false;
   return problems.length ? { problems } : { body };
 }
 

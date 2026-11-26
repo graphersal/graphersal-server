@@ -247,7 +247,7 @@ Stores open. Nothing has to be repaired by hand first:
 4. **Damage.** A Store the engine finds damaged at the open opens in maintenance mode, and one
    whose verify finds damage under the damage policy `maintenance` (the default) is frozen by
    the engine: the database is served **read-only** in the state `maintenance` with its damage
-   report (`db list`, `db info`, `status`, the Databases tab, the Database settings). Queries read
+   report (`db list`, `db info`, `status`, the Databases tab, the Settings tab). Queries read
    the intact data; writes are refused.
 5. **Per database:** `db verify NAME` (or `--all`) scrubs a Store again at any time (exit 1 on
    damage). `db repair NAME [--name NEW]` builds a repaired copy as a NEW database (default

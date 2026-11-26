@@ -25,7 +25,7 @@ What this version does not do, or does differently than you might expect.
   `materialize=true` (`--materialize`) for a standalone snapshot with the models.
 - **A query limit change applies at the database's next load** (unload + load, or a restart):
   the engine fixes a loaded database's session limits when it loads it. The settings
-  (`db info`, the Database settings tab) show both the limits in effect now and those of the
+  (`db info`, the Settings tab) show both the limits in effect now and those of the
   next load. The Store's creation parameters are shown read-only; the server creates every
   database with the engine's defaults, and a backend's container version is not reported by the
   engine (0.8.0).

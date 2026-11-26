@@ -274,6 +274,20 @@ impl Router {
         self
     }
 
+    /// The modes the router answers in now: access control as at start, the login cookie's
+    /// `Secure` and `Max-Age` as the running server applies them (changed at runtime by the
+    /// admin API, round 4 B-SETTINGS).
+    fn modes(&self) -> Modes {
+        match self.loader.get().and_then(|loader| loader.live_config()) {
+            Some(live) => Modes {
+                access_enabled: self.modes.access_enabled,
+                secure_cookies: live.secure_cookies(),
+                cookie_max_age_secs: live.cookie_max_age_secs(),
+            },
+            None => self.modes,
+        }
+    }
+
     /// The server serves its routes and the databases of `loader`, each request refused or
     /// let through by `access`.
     pub(crate) fn ready(&self, loader: Arc<Loader>, access: Arc<Access>) -> Result<(), ServeError> {
@@ -286,9 +300,14 @@ impl Router {
         self.lifecycle.ready_with(Arc::new(Databases { loader }))
     }
 
-    /// The largest import upload: `server.toml`'s `[limits] upload_bytes` (read per request;
-    /// the default while the server is not ready or the file does not read).
+    /// The largest import upload: `server.toml`'s `[limits] upload_bytes` as the running server
+    /// applies it (round 4 B-SETTINGS: changed at runtime by the admin API), else read from
+    /// the file per request (the default while the server is not ready or the file does not
+    /// read).
     pub(crate) fn upload_limit(&self) -> u64 {
+        if let Some(live) = self.loader.get().and_then(|loader| loader.live_config()) {
+            return live.upload_bytes();
+        }
         self.loader
             .get()
             .and_then(|loader| loader.registry().dir().load_config().ok())
@@ -354,18 +373,18 @@ impl Router {
             let answer = if method != Method::Post {
                 Err(not_allowed(&method, path))
             } else if path == LOGIN {
-                login(access, &self.modes, &mut request)
+                login(access, &self.modes(), &mut request)
             } else {
-                logout(access, &self.modes, &request)
+                logout(access, &self.modes(), &request)
             };
             return Answer::Response(answer.unwrap_or_else(error_response));
         }
         let principal = match access.authenticate(&request) {
-            authenticated if !self.modes.access_enabled => open_principal(authenticated),
+            authenticated if !self.modes().access_enabled => open_principal(authenticated),
             Ok(principal) => principal,
             Err(err) => {
                 return Answer::Response(refused_credentials(
-                    &self.modes,
+                    &self.modes(),
                     &err,
                     &method,
                     path,
@@ -587,7 +606,7 @@ impl Router {
     /// The base URL of `request` for the API descriptions: `[http] public_scheme` and its
     /// `Host` (checked before); `400` without one.
     fn base_url(&self, request: &Request<'_>) -> Result<String, HttpError> {
-        crate::openapi::request_base_url(self.modes.secure_cookies, request.header("Host"))
+        crate::openapi::request_base_url(self.modes().secure_cookies, request.header("Host"))
             .ok_or_else(|| HttpError::bad_request("the request names no Host"))
     }
 
@@ -615,7 +634,7 @@ impl Router {
             tracing::error!(target: "graphersal_server", "{err}");
             HttpError::new(500, err.to_string())
         })?;
-        let anonymous = !self.modes.access_enabled
+        let anonymous = !self.modes().access_enabled
             || access
                 .reach(loader.registry(), &Principal::anonymous(), name)
                 .is_some();

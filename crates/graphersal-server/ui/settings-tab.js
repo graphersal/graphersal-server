@@ -11,6 +11,13 @@
 // again. The view is read on every visit of the tab and when the window gets the focus back
 // (./shared.js `useFreshData`; an open edit keeps its input); every table sorts by any column.
 // Requests, rules and rows: ./settings-api.js.
+//
+// Round 4 B-SETTINGS: the picker's first two entries are the server's own: "Server defaults"
+// (address `db=:defaults`: what every database inherits or starts with) and "Server
+// (server.toml)" (`db=:server`: every key of server.toml), both ./server-settings-view.js. A
+// database's query limits say per key whether the value is inherited from the server or its
+// own override ("Reset to inherited" removes the override), and its flags, MCP and Store
+// sections name what a new database gets from the server defaults.
 
 import { reactive, computed, watch } from 'vue';
 import {
@@ -19,6 +26,8 @@ import {
   backupsText, changedText, readOnlyLocked, recoveryView, verifyView, MAX_DESCRIPTION_CHARS,
 } from './settings-api.js';
 import { realRows, BASE_IS_FROZEN } from './admin-api.js';
+import ServerSettings from './server-settings-view.js';
+import { newDatabaseText } from './server-settings-api.js';
 import {
   admin, list, reload, requestOptions, errorNotice, notify, noticeClass, useFreshData, useSort, SortTh, FormError,
 } from './shared.js';
@@ -53,14 +62,19 @@ const MCP_COLUMNS = Object.freeze({
   calls: { type: 'number' },
 });
 
+/** The picker values of the server's own entries (no database name starts with ':'). */
+const SPECIAL = Object.freeze({ ':defaults': 'defaults', ':server': 'server' });
+
 export default {
-  components: { SortTh, FormError },
+  components: { SortTh, FormError, ServerSettings },
   props: { api: { type: Object, required: true }, params: { type: Object, default: () => ({}) } },
   setup(props) {
     const s = reactive({
       name: '', picked: '', answer: null, revision: '', read: false, error: null, busy: '',
-      description: '', editingDescription: false, edits: {}, formErrors: {},
+      description: '', editingDescription: false, edits: {}, formErrors: {}, tick: 0,
     });
+    /** `defaults` / `server` while a server entry is shown, else ''. */
+    const special = computed(() => SPECIAL[s.name] || '');
 
     const names = computed(() => realRows(list.rows).map((r) => r.name));
     const limitSort = useSort('settings-limits', LIMIT_COLUMNS);
@@ -74,6 +88,11 @@ export default {
 
     async function refresh() {
       if (!s.name) return;
+      if (special.value) {
+        s.tick += 1;
+        s.read = true;
+        return;
+      }
       try {
         const answer = await settings.view(s.name);
         s.answer = answer;
@@ -97,7 +116,8 @@ export default {
       await refresh();
     }
     function pick() {
-      const name = String(s.picked || '').trim().toLowerCase();
+      const raw = String(s.picked || '').trim();
+      const name = SPECIAL[raw] ? raw : raw.toLowerCase();
       if (name === (props.params.db || '')) choose(name);
       else props.api.navigate('settings', name ? { db: name } : {});
     }
@@ -191,11 +211,12 @@ export default {
     });
 
     return {
-      s, db, names, limits, grants, mcpNames, loaded, limitSort, grantSort, mcpSort,
+      s, db, names, special, newDatabaseText, limits, grants, mcpNames, loaded, limitSort, grantSort, mcpSort,
       identityRows, stateRows, storeRows, recoveryView, verifyView, limitsNote, limitText, mcpText, backupsText, readOnlyLocked, noticeClass,
       maxDescription: MAX_DESCRIPTION_CHARS, baseFrozen: BASE_IS_FROZEN,
       refresh, pick, saveDescription, setFlag, setLimit, clearLimit, reloadNow,
       openMcp: () => props.api.navigate('mcp'),
+      openDefaults: () => props.api.navigate('settings', { db: ':defaults' }),
       openUsers: () => props.api.navigate('users'),
       openModels: () => props.api.navigate('models'),
       openBackups: () => props.api.navigate('backups', { db: s.answer ? s.answer.name : s.name }),
@@ -203,25 +224,30 @@ export default {
   },
   template: `
   <div class="srv-tab srv-settings">
-    <div class="srv-head"><h1>{{ s.answer ? 'Settings of "' + s.answer.name + '"' : 'Database settings' }}</h1>
+    <div class="srv-head"><h1>{{ s.answer && !special ? 'Settings of "' + s.answer.name + '"' : 'Settings' }}</h1>
       <span class="spacer"></span>
-      <button v-if="s.name" type="button" class="btn small" :disabled="!!s.busy" @click="refresh">Refresh</button>
+      <button v-if="s.name && !special" type="button" class="btn small" :disabled="!!s.busy" @click="refresh">Refresh</button>
     </div>
     <form class="srv-inline-form srv-form" @submit.prevent="pick">
-      <label>Database
+      <label>Settings of
         <select v-model="s.picked" name="database" data-settings-pick @change="pick">
           <option value="">— choose —</option>
-          <option v-for="n in names" :key="n" :value="n">{{ n }}</option>
-          <option v-if="s.picked && !names.includes(s.picked)" :value="s.picked">{{ s.picked }}</option>
+          <option value=":defaults">Server defaults (every database)</option>
+          <option value=":server">Server (server.toml)</option>
+          <optgroup label="Databases">
+            <option v-for="n in names" :key="n" :value="n">{{ n }}</option>
+            <option v-if="s.picked && !names.includes(s.picked) && !special" :value="s.picked">{{ s.picked }}</option>
+          </optgroup>
         </select></label>
     </form>
+    <server-settings v-if="special" :mode="special" :tick="s.tick"></server-settings>
     <div v-if="s.error" class="notice srv-notice srv-error" role="alert">
       <div class="srv-notice-text"><span>{{ s.error.text }}</span>
         <p v-if="s.error.help" class="srv-help">{{ s.error.help }}</p></div>
     </div>
-    <p v-if="!s.name" class="muted">Choose a database to see and change its settings.</p>
+    <p v-if="!s.name" class="muted">Choose the server defaults (what every database inherits or starts with), the server's own settings (server.toml) or a database to see and change its settings.</p>
 
-    <template v-if="s.answer">
+    <template v-if="s.answer && !special">
     <p v-if="s.answer.requested" class="muted">"{{ s.answer.requested }}" is an alias of "{{ s.answer.name }}": these are the settings of the database itself.</p>
 
     <div class="srv-head"><h2>Identity</h2></div>
@@ -249,9 +275,10 @@ export default {
       <label class="inline" title="Loaded when the server starts.">
         <input type="checkbox" :checked="db.autoLoad" :disabled="!!s.busy" data-settings-auto-load @change="setFlag('autoLoad', $event)"> Load at server start</label>
     </div>
+    <p class="muted" data-settings-new-defaults>These two are this database's own settings. {{ newDatabaseText(s.answer.serverDefaults) }} <a href="#settings" @click.prevent="openDefaults">Server defaults…</a></p>
 
     <div class="srv-head"><h2>Query limits</h2></div>
-    <p class="muted">Each limit of this database overrides the server's default (server.toml [limits.query]); clearing an override lets the default apply again. A set limit is a ceiling: a query may lower it for itself, never raise it.</p>
+    <p class="muted">Each limit is inherited from the server's default (server.toml [limits.query], <a href="#settings" @click.prevent="openDefaults">Server defaults…</a>) unless this database overrides it; "Inherit" (reset to inherited) removes the override. A set limit is a ceiling: a query may lower it for itself, never raise it.</p>
     <div class="notice srv-notice" :class="noticeClass(limitsNote(s.answer))" data-settings-limits-note>
       <div class="srv-notice-text"><span>{{ limitsNote(s.answer).text }}</span>
         <p v-if="limitsNote(s.answer).help" class="srv-help">{{ limitsNote(s.answer).help }}</p></div>
@@ -267,13 +294,13 @@ export default {
           <td class="num">{{ limitText(r.key, r.override) }}</td>
           <td class="num">{{ limitText(r.key, r.server) }}</td>
           <td class="num">{{ limitText(r.key, r.effective) }}</td>
-          <td>{{ r.sourceText }}</td>
+          <td><span class="badge" :class="r.inherited ? '' : 'accent'" :title="r.inherited ? 'No override here: the server default applies' : 'This database overrides the server default'">{{ r.inherited ? 'inherited' : 'override' }}</span> <span class="muted srv-sub">{{ r.sourceText }}</span></td>
           <td v-if="loaded" class="num" :title="r.differs ? 'Differs from the next load: unload and load the database to apply' : null">{{ limitText(r.key, r.inEffect) }}</td>
           <td class="srv-actions srv-limit-edit-cell">
             <form class="srv-limit-edit" @submit.prevent="setLimit(r)">
               <input v-model="s.edits[r.key]" class="mono" inputmode="numeric" :placeholder="r.override === null ? 'value' : String(r.override)" :aria-label="'New value of ' + r.key" autocomplete="off">
               <button type="submit" class="btn small" :disabled="!!s.busy || s.edits[r.key] === undefined || s.edits[r.key] === ''">Set</button>
-              <button type="button" class="btn small" :disabled="!!s.busy || r.override === null" title="Remove this database's override: the server's default applies" @click="clearLimit(r)">Clear</button>
+              <button type="button" class="btn small" :disabled="!!s.busy || r.override === null" title="Reset to inherited: remove this database's override, the server's default applies" @click="clearLimit(r)">Inherit</button>
             </form>
             <form-error :error="s.formErrors['limit:' + r.key] || null"></form-error>
           </td>
@@ -327,12 +354,12 @@ export default {
     </div>
 
     <div class="srv-head"><h2>Store</h2></div>
-    <p class="muted">Creation parameters: fixed when the Store was created, shown read-only.</p>
+    <p class="muted">Creation parameters: fixed when the Store was created, shown read-only. {{ newDatabaseText(s.answer.serverDefaults, 'store') }}</p>
     <dl class="srv-facts" data-settings-store>
       <template v-for="r in storeRows(s.answer)" :key="r[0]"><dt>{{ r[0] }}</dt><dd :title="r[2] || null" class="mono">{{ r[1] }}</dd></template>
     </dl>
     </template>
-    <p v-else-if="s.read && s.name && !s.error" class="muted">No answer.</p>
+    <p v-else-if="s.read && s.name && !s.error && !special" class="muted">No answer.</p>
   </div>
   `,
 };

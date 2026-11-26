@@ -188,6 +188,11 @@ grep -q "^  graphersal-server serve --dir " "$WORK/init.out" ||
 # as that admin unless it says otherwise.
 AUTH=$(sed -n 's/^| token: *\([0-9a-f]\{64\}\) .*$/\1/p' "$WORK/init.err")
 [ -n "$AUTH" ] || fail "init printed no first admin token: $(cat "$WORK/init.err")"
+# A new server has MCP off and hides new names from it (round 4 B-MCPDEF): the MCP steps below
+# need it on, with the databases created later offered.
+"$BIN" mcp on --dir "$DIR" >/dev/null 2>"$WORK/mcp.err" || fail "mcp on: $(cat "$WORK/mcp.err")"
+"$BIN" mcp expose-new on --dir "$DIR" >/dev/null 2>"$WORK/mcp.err" ||
+  fail "mcp expose-new on: $(cat "$WORK/mcp.err")"
 ok
 
 STEP="serve"
@@ -298,6 +303,25 @@ expect_status 200
 ok
 
 # --- databases ----------------------------------------------------------------------------
+
+STEP="server settings: a live key applies at once, a restart key is pending"
+req GET /api/admin/config
+expect_status 200
+REV=$(jget revision)
+jreq PUT /api/admin/config "{\"set\": {\"limits.upload_bytes\": 3221225472, \"limits.max_connections\": 300}, \"revision\": \"$REV\"}"
+expect_status 200
+expect_json applied '["limits.upload_bytes"]'
+expect_json restartPending '["limits.max_connections"]'
+req GET /api/info
+expect_json uploadBytes 3221225472
+"$BIN" config get limits.max_connections --dir "$DIR" >"$WORK/config.out" 2>&1 ||
+  fail "config get: $(cat "$WORK/config.out")"
+grep -q "restart pending" "$WORK/config.out" || fail "config get: $(cat "$WORK/config.out")"
+"$BIN" config unset limits.max_connections --dir "$DIR" >"$WORK/config.out" 2>&1 ||
+  fail "config unset: $(cat "$WORK/config.out")"
+req GET /api/admin/config
+expect_json restartPending '[]'
+ok
 
 STEP="create plain, base and layer"
 jreq POST /api/admin/databases '{"name": "acme", "description": "smoke"}'

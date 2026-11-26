@@ -169,3 +169,18 @@ p.srv-problems { padding-left: 0; }
 .srv-verify-error { border-left-color: var(--danger); background: var(--danger-soft); }
 .srv-verify .srv-problems { margin-top: 4px; }
 .srv-verify-warn .srv-problems { color: var(--warn); }
+/* B-SETTINGS: the server settings views (Settings tab: Server defaults, Server) and the top bar's
+   restart-pending badge. */
+.srv-server-settings h3 { margin: 14px 0 4px; font-size: 14px; }
+.srv-config-table { table-layout: fixed; width: 100%; }
+.srv-config-table th:nth-child(1) { width: 36%; }
+.srv-config-table th:nth-child(2) { width: 17%; }
+.srv-config-table th:nth-child(3) { width: 15%; }
+.srv-config-table .badge { max-width: none; overflow: visible; white-space: nowrap; }
+.srv-config-table td { white-space: normal; overflow-wrap: anywhere; }
+.srv-config-table .srv-sub { white-space: normal; overflow: visible; text-overflow: clip; }
+.srv-config-edit { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.srv-config-edit .srv-limit-edit { justify-content: flex-start; }
+.srv-config-edit .srv-limit-edit input { width: 10em; }
+.srv-restart-badge { cursor: pointer; border: 0; font: inherit; font-size: 11.5px; }
+.srv-restart-badge:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }

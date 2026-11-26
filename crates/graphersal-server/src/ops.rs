@@ -99,10 +99,12 @@ pub struct CreateSpec {
     pub schema: Option<serde_json::Value>,
     /// A free text shown in listings.
     pub description: String,
-    /// Whether the server loads it at start.
-    pub auto_load: bool,
-    /// Whether it is served read-only.
-    pub read_only: bool,
+    /// Whether the server loads it at start (`None`: `server.toml`'s `[defaults] auto_load`,
+    /// read at the create).
+    pub auto_load: Option<bool>,
+    /// Whether it is served read-only (`None`: `server.toml`'s `[defaults] read_only`; a base
+    /// is read-only whatever this says).
+    pub read_only: Option<bool>,
     /// Whether MCP offers it (`None`: `mcp.toml`'s `expose_new`, default off; an
     /// [`Admin::exposing`] choice wins over this one).
     pub mcp: Option<bool>,
@@ -143,12 +145,24 @@ impl CreateSpec {
 
     /// The spec with `auto_load`.
     pub fn with_auto_load(mut self, auto_load: bool) -> Self {
-        self.auto_load = auto_load;
+        self.auto_load = Some(auto_load);
         self
     }
 
     /// The spec with `read_only`.
     pub fn with_read_only(mut self, read_only: bool) -> Self {
+        self.read_only = Some(read_only);
+        self
+    }
+
+    /// The spec with `auto_load` given or left to the server's default (`None`).
+    pub fn with_auto_load_opt(mut self, auto_load: Option<bool>) -> Self {
+        self.auto_load = auto_load;
+        self
+    }
+
+    /// The spec with `read_only` given or left to the server's default (`None`).
+    pub fn with_read_only_opt(mut self, read_only: Option<bool>) -> Self {
         self.read_only = read_only;
         self
     }
@@ -160,8 +174,9 @@ impl CreateSpec {
         self
     }
 
-    /// The `database.toml` of the new database.
-    fn config(&self) -> DatabaseConfig {
+    /// The `database.toml` of the new database; `defaults` (`server.toml`'s `[defaults]`) fill
+    /// the flags the spec leaves open.
+    fn config(&self, defaults: &crate::config::DatabaseDefaults) -> DatabaseConfig {
         let config = match (self.kind, &self.base) {
             (DatabaseKind::Layer, Some(base)) => DatabaseConfig::layer(base.clone()),
             (kind, base) => {
@@ -173,10 +188,18 @@ impl CreateSpec {
         };
         config
             .with_role(self.role)
-            .with_auto_load(self.auto_load)
-            .with_read_only(self.read_only)
+            .with_auto_load(self.auto_load.unwrap_or(defaults.auto_load))
+            .with_read_only(self.read_only.unwrap_or(defaults.read_only))
             .with_description(self.description.clone())
     }
+}
+
+/// The Store options of a new database under the server configuration `config` (its
+/// `[defaults]`).
+fn store_options_of(config: &crate::config::ServerConfig) -> Result<StoreOptions, ServerError> {
+    Ok(StoreOptions::new()
+        .with_chunk_bytes(config.defaults.chunk_bytes)
+        .with_damage_policy(config.damage_policy()?))
 }
 
 /// What [`Admin::delete`] did.
@@ -376,8 +399,11 @@ impl Admin {
             })?),
             None => None,
         };
-        let options = self.store_options()?;
-        let build = self.registry.prepare_tmp(name, spec.config())?;
+        let server = self.registry.dir().load_config()?;
+        let options = store_options_of(&server)?;
+        let build = self
+            .registry
+            .prepare_tmp(name, spec.config(&server.defaults))?;
         let store_dir = build.store_dir();
         let built = match build.config().kind {
             DatabaseKind::Plain => create_plain(&store_dir, schema, options),
@@ -744,11 +770,8 @@ impl Admin {
     }
 
     /// The Store options of a new database: `server.toml`'s `[defaults]`.
-    fn store_options(&self) -> Result<StoreOptions, ServerError> {
-        let config = self.registry.dir().load_config()?;
-        Ok(StoreOptions::new()
-            .with_chunk_bytes(config.defaults.chunk_bytes)
-            .with_damage_policy(config.damage_policy()?))
+    pub(crate) fn store_options(&self) -> Result<StoreOptions, ServerError> {
+        store_options_of(&self.registry.dir().load_config()?)
     }
 
     /// The base database `base` as a [`LayerBase`]: the loader's pooled one when a loaded layer

@@ -118,7 +118,7 @@ graphersal-server start --dir ./srv --listen 127.0.0.1:0
 
 Open <http://127.0.0.1:8484/>. The "Sign in" page asks for a token: paste the first admin's.
 You see the admin tabs: Databases, Backups, Import, Export, Models, Runs, Users, MCP and
-Database settings ([The Web UI](../guide/web_ui.md)).
+Settings ([The Web UI](../guide/web_ui.md)).
 
 ## 6. Create and load the first database
 

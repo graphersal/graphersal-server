@@ -477,6 +477,43 @@ from published files). When this file disagrees with the code, the code wins: sa
   `name_models_by_catalog_elimination_and_leaves_other_blobs_as_damage`,
   `a_loaded_database_names_a_vanished_model_blob_from_its_catalog_and_stays_loaded`, console
   `db_verify_names_a_missing_model_and_the_command_that_adds_it`, `ui/tests/verify.test.mjs`.
+- `server_settings` (round 4 B-SETTINGS, public): `server.toml` edited at runtime. `KEYS` (every
+  key by dotted name, file order, `Kind` bool/count/text/memory/hosts, `Applies` now|load|create|
+  restart, help), `value_of(config, key)` (JSON), `toml_of_json`/`toml_of_text` (API / console
+  values), `edit(text, path, changes)` -> `Edited {text, config, changed, rewritten}`: the change on
+  the TOML table, checked by `ServerConfig::parse`, then a LINE PATCH of the file's own text
+  (key line replaced, a `# key = ...` example taken over, a reset key commented out, a missing
+  section appended) kept only when it parses to the same config, else the whole file rewritten
+  from the table with a header (`rewritten`); no `toml_edit` (not in the tree). `LiveConfig`
+  (on the loader: `Loader::set_live_config` by `serve`; `None` in unit tests): `applied` config
+  (the start config + the `now` keys applied since), the writer mutex (a LEAF lock), `apply(file)`
+  (upload limit -> `Router::upload_limit`; memory -> `limits::apply_memory_live` (engine setters,
+  runtime-safe); sessions -> `Access::set_session_limits` (shared `Arc<RwLock<SessionLimits>>`
+  with `SessionCookie`, prunes); public scheme -> `Router::modes()` cookie `Secure`/`Max-Age`,
+  openapi URLs), `pending(file)` = now/restart keys whose file value differs from `applied`
+  (derived, never stored: hand edits show too). Admin: `ops_settings.rs` `server_settings` /
+  `change_server_settings` (revision of the file text, `write_atomic`, apply, audit
+  `ConfigSet {key, value}` per changed key). Route `admin_api_config.rs` (`GET|PUT config`,
+  `{"set": {key: value|null}, "revision"?}`, answer + `changed`/`applied`/`rewritten`,
+  `mcpExposeNew` from `mcp.toml`); `GET /api/admin/server` `restartPending`; console `config
+  get [KEY]|set KEY VALUE|unset KEY` (`DbCommand::ConfigGet/ConfigSet`, text in
+  `console/settings.rs`) and `config check [FILE]` (local parse), `status` row "restart
+  pending"; `init --config FILE --set KEY=VALUE` (`ServerDir::init_configured`, refused on an
+  existing directory). `[defaults] auto_load`/`read_only` (new): copied at create and import
+  (`CreateSpec::auto_load/read_only` are `Option`: `None` = the default; console
+  `--no-auto-load`/`--no-read-only`; listing `newDatabases`; settings view `serverDefaults`).
+  UI: the tab is now "Settings" (`settings-tab.js`): picker entries `:defaults` / `:server` first
+  (no database name starts with `:`) mount `server-settings-view.js` (model
+  `server-settings-api.js`); limits rows `inherited` (badge inherited/override, button
+  "Inherit"); `shared.js` `serverState` + `readServerState` feed the header's "restart pending"
+  badge; create form starts from `list.newDatabases` (`createBody(form, defaults)`). Tests:
+  `server_settings::tests`, `router_access_tests.rs`
+  `server_settings_are_for_admins_audited_and_based_on_the_files_revision`, `server_tests.rs`
+  `server_settings_apply_at_once_or_after_a_restart_over_http`,
+  `server_defaults_are_inherited_by_databases_key_by_key_and_new_databases_start_with_them`,
+  `config_commands_offline_and_through_a_server`, `init_takes_server_toml_from_a_file_and_set_values`,
+  `ui/tests/server-settings.test.mjs`. Docs: `book/src/reference/configuration.md` (Read column
+  live/load/create/restart, "Changing server.toml at runtime", "Server defaults and inheritance").
 - `server_backup` (round 3 B-CONF, public): the backup of the whole server in ONE ZIP and its
   restore into a NEW directory. Container `archive` (private: stored entries, zip64 always,
   CRC-32 + SHA-256 (`ring`) per entry; `ZipWriter::add_bytes/add_file/finish`, one-pass
@@ -659,8 +696,8 @@ from published files). When this file disagrees with the code, the code wins: sa
 - `crates/graphersal-server/ui/`: the server's web UI, the playground UI profile `server`
   (the graphersal-memory `memory` profile's pattern; the engine's playground mechanism: its
   `playground/CLAUDE.md` "UI profiles"): `profile.json` (the admin's: module tabs Databases, Backups, Import,
-  Export, Models, Runs, Users, MCP (`mcp-tab.js` over `mcp-api.js`, B6), Database settings
-  (`settings-tab.js` over `settings-api.js`, B7; id `settings`, address parameter `db`, opened by
+  Export, Models, Runs, Users, MCP (`mcp-tab.js` over `mcp-api.js`, B6), Settings (round 4: was
+  "Database settings"; `settings-tab.js` over `settings-api.js`, B7; id `settings`, address parameter `db`, opened by
   a Databases row's "Settings…"), `header` = `header.js`; no workspace: the root has no graph; `files` = `server-ui/` relative to `/`),
   `profile-views.json` (the keys a user's view (`mine-tab.js`, "My databases" over `GET
   api/databases`) and anonymous's (`login-tab.js`, "Sign in": paste a token, `POST api/login`,

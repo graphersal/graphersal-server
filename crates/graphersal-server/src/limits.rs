@@ -297,6 +297,19 @@ pub(crate) fn apply_memory_ceiling(
     Ok(())
 }
 
+/// Sets the process memory ceiling of a running server to `server.toml`'s `[limits]` after a
+/// settings change (round 4 B-SETTINGS; the engine's setters apply from now on: an execution
+/// that already runs keeps its ceiling): `limit` (`None`: the library's default `auto`) and
+/// `headroom` (`None`: the default). `Err` carries the reason.
+pub(crate) fn apply_memory_live(
+    limit: Option<MemoryLimit>,
+    headroom: Option<u64>,
+) -> Result<(), String> {
+    set_memory_limit(limit.unwrap_or(MemoryLimit::Auto))
+        .map_err(|err| format!("limits.memory_limit: {err}"))?;
+    set_memory_headroom(headroom).map_err(|err| format!("limits.memory_headroom: {err}"))
+}
+
 /// Deserializes `[limits] memory_limit`: a number of bytes (`0` is `"none"`, as the command
 /// line's `--memory-limit 0`), `"auto"` or `"none"`.
 pub(crate) fn memory_limit<'de, D>(deserializer: D) -> Result<Option<MemoryLimit>, D::Error>

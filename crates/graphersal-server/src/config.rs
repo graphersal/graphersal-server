@@ -8,9 +8,11 @@
 //!                             # is mcp.toml's `enabled`, written off by init)
 //! max_sessions = 256          # MCP sessions remembered (the oldest forgotten first)
 //!
-//! [defaults]                  # the creation parameters of new databases
-//! chunk_bytes = 1048576
+//! [defaults]                  # what a new database starts with (create, import)
+//! chunk_bytes = 1048576       # creation parameters: fixed for the database's life
 //! damage_policy = "maintenance"
+//! auto_load = false           # its first auto-load and read-only flags (changeable later)
+//! read_only = false
 //!
 //! [limits]
 //! upload_bytes = 4294967296   # the largest import upload (POST /api/admin/import), 4 GiB
@@ -335,7 +337,11 @@ fn default_mcp_sessions() -> usize {
     DEFAULT_MCP_SESSIONS
 }
 
-/// The creation parameters of new databases (`[defaults]` of `server.toml`).
+/// What a new database starts with (`[defaults]` of `server.toml`), read at every create and
+/// import (round 4 B-SETTINGS): the Store's creation parameters (fixed for the database's life)
+/// and the first value of its own `auto_load` and `read_only` flags (copied into its
+/// `database.toml`, changeable per database afterwards; a change here never touches an
+/// existing database).
 ///
 /// `#[non_exhaustive]`: further parameters will be added.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -349,6 +355,15 @@ pub struct DatabaseDefaults {
     /// The damage policy of a new Store: `"maintenance"` (default) or `"continue"`.
     #[serde(default = "default_damage_policy")]
     pub damage_policy: String,
+    /// Whether a new database (create, import) loads when the server starts (default
+    /// `false`); a create request or `db create --auto-load`/`--no-auto-load` wins.
+    #[serde(default)]
+    pub auto_load: bool,
+    /// Whether a new database (create, import) is served read-only (default `false`); a
+    /// create request or `db create --read-only`/`--no-read-only` wins. A base is read-only
+    /// whatever this says.
+    #[serde(default)]
+    pub read_only: bool,
 }
 
 fn default_listen() -> String {
@@ -396,6 +411,8 @@ impl Default for DatabaseDefaults {
         Self {
             chunk_bytes: default_chunk_bytes(),
             damage_policy: default_damage_policy(),
+            auto_load: false,
+            read_only: false,
         }
     }
 }
@@ -625,11 +642,18 @@ pub fn default_config_text() -> String {
          max_sessions = {}\n\
          \n\
          [defaults]\n\
-         # The creation parameters of new databases (fixed for each database's life).\n\
+         # What a new database (create, import) starts with; read at every create, so a\n\
+         # change applies to the next new database and never to an existing one.\n\
+         # Creation parameters (fixed for each database's life):\n\
          # Uncompressed snapshot chunk size in bytes.\n\
          chunk_bytes = {}\n\
          # What a Store does on damage: \"maintenance\" (read-only until repaired) or \"continue\".\n\
          damage_policy = \"{}\"\n\
+         # The first value of its own flags (changeable per database afterwards):\n\
+         # loaded when the server starts:\n\
+         auto_load = false\n\
+         # served read-only (every write refused):\n\
+         read_only = false\n\
          \n\
          [limits]\n\
          # The largest import upload (POST /api/admin/import, the file as the body) in bytes;\n\

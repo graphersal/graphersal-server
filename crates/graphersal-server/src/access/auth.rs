@@ -308,7 +308,9 @@ impl SessionTable for MemorySessions {
 pub struct SessionCookie {
     file: Arc<RwLock<AccessFile>>,
     sessions: Arc<dyn SessionTable>,
-    limits: SessionLimits,
+    /// Shared with the access state, so a settings change applies at once (round 4
+    /// B-SETTINGS: [`crate::access::Access::set_session_limits`]).
+    limits: Arc<RwLock<SessionLimits>>,
 }
 
 impl SessionCookie {
@@ -317,14 +319,25 @@ impl SessionCookie {
         Self {
             file,
             sessions,
-            limits: SessionLimits::unlimited(),
+            limits: Arc::new(RwLock::new(SessionLimits::unlimited())),
         }
     }
 
     /// With the session limits `limits`: an expired session is removed and refused.
     pub fn with_limits(mut self, limits: SessionLimits) -> Self {
+        self.limits = Arc::new(RwLock::new(limits));
+        self
+    }
+
+    /// With the session limits `limits`, shared with their owner (who may change them).
+    pub(crate) fn with_shared_limits(mut self, limits: Arc<RwLock<SessionLimits>>) -> Self {
         self.limits = limits;
         self
+    }
+
+    /// The session limits now.
+    fn limits(&self) -> SessionLimits {
+        *self.limits.read().unwrap_or_else(|p| p.into_inner())
     }
 }
 
@@ -346,7 +359,8 @@ impl Authenticator for SessionCookie {
             return AuthStep::Rejected(AuthError::InvalidSession);
         };
         let now = SystemTime::now();
-        if self.limits.expired(&session, now) {
+        let limits = self.limits();
+        if limits.expired(&session, now) {
             if let Err(err) = self.sessions.remove(&id) {
                 tracing::warn!(target: "graphersal_server", "browser sessions: {err}");
             }
@@ -363,7 +377,7 @@ impl Authenticator for SessionCookie {
         };
         let stale = now
             .duration_since(session.last_seen)
-            .is_ok_and(|age| age >= self.limits.touch_step());
+            .is_ok_and(|age| age >= limits.touch_step());
         if stale && let Err(err) = self.sessions.touch(&id, now) {
             tracing::warn!(target: "graphersal_server", "browser sessions: {err}");
         }

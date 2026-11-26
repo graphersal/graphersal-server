@@ -6,7 +6,7 @@ the server (or fails the database) instead of being ignored.
 
 | File | Written by | Read |
 |---|---|---|
-| `server.toml` | you (`init` writes a commented file with the defaults) | at start, some keys at every create, upload or load |
+| `server.toml` | you (`init` writes a commented file with the defaults, or yours: `init --config FILE --set KEY=VALUE`), and the server (`config set`, the web UI's Settings, `PUT /api/admin/config`) | at start, some keys at every create, upload or load; some changed at runtime |
 | `access.toml` | the server and the console (`user ...`, the Users tab, the admin API) | at start, then kept in memory |
 | `aliases.toml` | the server (`db alias ...`, the Databases tab, the admin API) | at start, then kept in memory |
 | `mcp.toml` | the server (`mcp ...`, the MCP tab, the admin API) | at start, then kept in memory |
@@ -29,9 +29,11 @@ enabled = true              # /mcp and /db/<name>/mcp exist (false: both answer 
                             # runtime switch is mcp.toml's enabled (init writes it off)
 max_sessions = 256          # MCP sessions remembered, the oldest forgotten first
 
-[defaults]                  # creation parameters of NEW databases
+[defaults]                  # what a NEW database (create, import) starts with
 chunk_bytes = 1048576       # uncompressed snapshot chunk size of a new Store (>= 1)
 damage_policy = "maintenance"   # or "continue": what a Store does on damage
+auto_load = false           # its first auto_load flag (changeable per database)
+read_only = false           # its first read_only flag (changeable per database)
 
 [limits]
 upload_bytes = 4294967296   # the largest import upload (POST /api/admin/import), 4 GiB
@@ -66,33 +68,84 @@ public_scheme = "http"      # "https" when a reverse proxy ends TLS (Secure logi
 # backup_root = "backups/jobs"   # the only directory backup jobs write into
 ```
 
+The **Read** column says when the server reads a key, and so when a change applies. A change
+made through the admin API (the web UI's Settings tab, `graphersal-server config set` with a
+running server, `PUT /api/admin/config`) is applied at once where the column says
+**live**; a **restart** key is saved and listed as *restart pending* (the Settings tab, the top
+bar's badge, `config get`, `status`, `GET /api/admin/server`) until the next start; **load**
+keys apply at each database's next load, **create** keys to the next new database. A hand edit
+of the file applies at the next start (or, for load and create keys, when they are read).
+
 | Key | Default | Read | Meaning |
 |---|---|---|---|
-| `listen` (top level) | `127.0.0.1:8484` | at start | the listen address; `serve --listen ADDR` overrides it. Any address that is not a loopback address gets a warning in the `serve` start block: tokens travel in clear text over plain HTTP |
-| `[mcp] enabled` | `true` | at start | serve the MCP endpoints (MCP) |
-| `[mcp] max_sessions` | `256` | at start | MCP sessions remembered (at least 1) |
-| `[defaults] chunk_bytes` | `1048576` | at every create | a new Store's chunk size (fixed for the database's life) |
-| `[defaults] damage_policy` | `"maintenance"` | at every create | a new Store's damage policy (fixed for the database's life) |
-| `[limits] upload_bytes` | `4294967296` | at every upload | the largest import upload body, announced as `uploadBytes` by `GET /api/info` |
-| `[limits] max_connections` | `256` | at start | open connections served at once (at least 1); one more is accepted, answered `503` (`Retry-After: 1`, JSON `error` and `help`, in its own protocol) and closed; beyond 64 such refusals at once a connection is closed unanswered. `serve --max-connections N` overrides it |
-| `[limits] header_timeout_secs` | `30` | at start | seconds a request's head may take to arrive, counted from the moment the connection waits for it (a new connection, or after the previous answer); a slower or silent client is disconnected. Never cuts a body. `serve --header-timeout SECS` overrides it |
-| `[limits] idle_timeout_secs` | `60` | at start | seconds a connection without a running request stays open (HTTP/1.1: at most the shorter of this and `header_timeout_secs`). `serve --idle-timeout SECS` overrides it |
-| `[limits] memory_limit` | none (the library's `auto`) | at start | the process memory ceiling, one setting for every database (`graphersal::exec::set_memory_limit`; the graphersal command line's `--memory-limit`): a number of bytes (`0` = none), `"auto"` (the cgroup limit minus the headroom, else 80 % of the physical memory) or `"none"`. A query, import or write that would take the process over it fails with a `memory.limit` diagnostic and rolls back. Only in `server.toml` (a `database.toml` refuses it). The start block shows the ceiling in effect when it is set |
-| `[limits] memory_headroom` | none (a tenth of the cgroup limit, at least 64 MiB) | at start | what `memory_limit = "auto"` keeps free below a cgroup memory limit, in bytes (at least 1; `--memory-headroom`) |
-| `[limits.query] timeout_ms` | none | at every load | the default `evaluationTimeout` of every traversal and the budget of a whole run (the Rhai code between traversals), in milliseconds (`--timeout`); `0` = no timeout |
-| `[limits.query] max_operations` | none | at every load | Rhai operations one script may run (`--max-operations`); `0` = unlimited |
-| `[limits.query] max_string_size` | none | at every load | the longest string a script or a step may build, in bytes: the script limit and the `traversal.max_string_bytes` default (`--max-string-size`); `0` = unlimited |
-| `[limits.query] max_array_size` | none | at every load | the largest array a script may build, in items (`--max-array-size`); `0` = unlimited |
-| `[limits.query] max_map_size` | none | at every load | the largest map a script may build, in entries (`--max-map-size`); `0` = unlimited |
-| `[limits.query] max_traversers` | none (engine default 10M) | at every load | the `traversal.max_traversers` default: traversers one step may leave alive (`--max-traversers`); `0` = unlimited |
-| `[limits.query] max_materialized_bytes` | none (engine default 1 GiB) | at every load | the `traversal.max_materialized_bytes` default: the memory one query holds at once (`--max-materialized-bytes`); `0` = unlimited |
-| `[limits.query] max_value_depth` | none (128) | at every load | the deepest nesting of arrays and maps in one value, script and engine values (`--max-value-depth`); `0` = the default, never unlimited |
-| `[sessions] lifetime_secs` | none (no limit) | at start | the longest a browser session lasts after its login, in seconds (at least 1); the browser logs in again afterwards |
-| `[sessions] idle_timeout_secs` | none (no limit) | at start | the longest a browser session lasts after its last request, in seconds (at least 1); counted coarsely (the last request is recorded at most every minute, every quarter of a shorter timeout) |
-| `[access] enabled` | `true` | at start | `false` turns access control off: nothing is refused, every request is an admin. Valid admin credentials keep their identity (the console's operator, an admin user); every other request (none, a user without the admin role, wrong credentials) runs as the admin principal `everyone`, which the audit names. Login still works but is not needed. The `serve` start block warns loudly, and louder (in the banner too) when the address is not a loopback address. `access.toml` is still read and its first admin created, so turning access back on needs no other change |
-| `[http] public_scheme` | `"http"` | at start | how clients reach the server: `"http"`, or `"https"` when a reverse proxy ends TLS. `https` gives the `gs_session` login cookie `Secure` (a browser drops a `Secure` cookie over plain HTTP, except on localhost). On `http` with an address that is not a loopback address, the start block warns that tokens travel in clear text; on `https` it warns to let only the proxy reach the address |
-| `[http] allowed_hosts` | `[]` | at start | further names a request's `Host` (and an `http://`/`https://` `Origin`) may name besides this machine's loopback names and the listen address: the public names behind a reverse proxy. Each a host name or IP address with an optional port (`"db.example.com"`, `"db.example.com:443"`); the port is not checked (a name is admitted on any port); lower case, no scheme or path. Other names are refused with `403` as before (DNS rebinding) |
-| `[jobs] backup_root` | `"backups/jobs"` | at start | the backup root: the only directory backup jobs, and the Store panel's fork, attic fork and backup `dir`, may write into ("Backup jobs" under `backups/`). A relative path is relative to the server directory; an absolute one may name a mounted storage. Created (with its parents) by `serve` and `init`; must not be empty |
+| `listen` (top level) | `127.0.0.1:8484` | restart | the listen address; `serve --listen ADDR` overrides it. Any address that is not a loopback address gets a warning in the `serve` start block: tokens travel in clear text over plain HTTP |
+| `[mcp] enabled` | `true` | restart (the MCP tab's runtime switch is `mcp.toml`) | serve the MCP endpoints (MCP) |
+| `[mcp] max_sessions` | `256` | restart | MCP sessions remembered (at least 1) |
+| `[defaults] chunk_bytes` | `1048576` | create | a new Store's chunk size (fixed for the database's life) |
+| `[defaults] damage_policy` | `"maintenance"` | create | a new Store's damage policy (fixed for the database's life) |
+| `[defaults] auto_load` | `false` | create | whether a new database (create, import) loads at server start: copied into its `database.toml`, changeable per database afterwards; a create request or `db create --auto-load`/`--no-auto-load` wins |
+| `[defaults] read_only` | `false` | create | whether a new database (create, import) is served read-only: copied into its `database.toml`, changeable per database afterwards; a create request or `db create --read-only`/`--no-read-only` wins (a base is read-only anyway) |
+| `[limits] upload_bytes` | `4294967296` | live | the largest import upload body, announced as `uploadBytes` by `GET /api/info` |
+| `[limits] max_connections` | `256` | restart | open connections served at once (at least 1); one more is accepted, answered `503` (`Retry-After: 1`, JSON `error` and `help`, in its own protocol) and closed; beyond 64 such refusals at once a connection is closed unanswered. `serve --max-connections N` overrides it |
+| `[limits] header_timeout_secs` | `30` | restart | seconds a request's head may take to arrive, counted from the moment the connection waits for it (a new connection, or after the previous answer); a slower or silent client is disconnected. Never cuts a body. `serve --header-timeout SECS` overrides it |
+| `[limits] idle_timeout_secs` | `60` | restart | seconds a connection without a running request stays open (HTTP/1.1: at most the shorter of this and `header_timeout_secs`). `serve --idle-timeout SECS` overrides it |
+| `[limits] memory_limit` | none (the library's `auto`) | live (the engine's setter applies from then on; a running execution keeps its ceiling) | the process memory ceiling, one setting for every database (`graphersal::exec::set_memory_limit`; the graphersal command line's `--memory-limit`): a number of bytes (`0` = none), `"auto"` (the cgroup limit minus the headroom, else 80 % of the physical memory) or `"none"`. A query, import or write that would take the process over it fails with a `memory.limit` diagnostic and rolls back. Only in `server.toml` (a `database.toml` refuses it). The start block shows the ceiling in effect when it is set |
+| `[limits] memory_headroom` | none (a tenth of the cgroup limit, at least 64 MiB) | live | what `memory_limit = "auto"` keeps free below a cgroup memory limit, in bytes (at least 1; `--memory-headroom`) |
+| `[limits.query] timeout_ms` | none | load | the default `evaluationTimeout` of every traversal and the budget of a whole run (the Rhai code between traversals), in milliseconds (`--timeout`); `0` = no timeout |
+| `[limits.query] max_operations` | none | load | Rhai operations one script may run (`--max-operations`); `0` = unlimited |
+| `[limits.query] max_string_size` | none | load | the longest string a script or a step may build, in bytes: the script limit and the `traversal.max_string_bytes` default (`--max-string-size`); `0` = unlimited |
+| `[limits.query] max_array_size` | none | load | the largest array a script may build, in items (`--max-array-size`); `0` = unlimited |
+| `[limits.query] max_map_size` | none | load | the largest map a script may build, in entries (`--max-map-size`); `0` = unlimited |
+| `[limits.query] max_traversers` | none (engine default 10M) | load | the `traversal.max_traversers` default: traversers one step may leave alive (`--max-traversers`); `0` = unlimited |
+| `[limits.query] max_materialized_bytes` | none (engine default 1 GiB) | load | the `traversal.max_materialized_bytes` default: the memory one query holds at once (`--max-materialized-bytes`); `0` = unlimited |
+| `[limits.query] max_value_depth` | none (128) | load | the deepest nesting of arrays and maps in one value, script and engine values (`--max-value-depth`); `0` = the default, never unlimited |
+| `[sessions] lifetime_secs` | none (no limit) | live (existing sessions too; the login cookie's `Max-Age` of new logins) | the longest a browser session lasts after its login, in seconds (at least 1); the browser logs in again afterwards |
+| `[sessions] idle_timeout_secs` | none (no limit) | live | the longest a browser session lasts after its last request, in seconds (at least 1); counted coarsely (the last request is recorded at most every minute, every quarter of a shorter timeout) |
+| `[access] enabled` | `true` | restart | `false` turns access control off: nothing is refused, every request is an admin. Valid admin credentials keep their identity (the console's operator, an admin user); every other request (none, a user without the admin role, wrong credentials) runs as the admin principal `everyone`, which the audit names. Login still works but is not needed. The `serve` start block warns loudly, and louder (in the banner too) when the address is not a loopback address. `access.toml` is still read and its first admin created, so turning access back on needs no other change |
+| `[http] public_scheme` | `"http"` | live (the cookie of new logins, the API descriptions' URLs; the start block's warnings at the next start) | how clients reach the server: `"http"`, or `"https"` when a reverse proxy ends TLS. `https` gives the `gs_session` login cookie `Secure` (a browser drops a `Secure` cookie over plain HTTP, except on localhost). On `http` with an address that is not a loopback address, the start block warns that tokens travel in clear text; on `https` it warns to let only the proxy reach the address |
+| `[http] allowed_hosts` | `[]` | restart (every database context checks `Host` with the list it was built with) | further names a request's `Host` (and an `http://`/`https://` `Origin`) may name besides this machine's loopback names and the listen address: the public names behind a reverse proxy. Each a host name or IP address with an optional port (`"db.example.com"`, `"db.example.com:443"`); the port is not checked (a name is admitted on any port); lower case, no scheme or path. Other names are refused with `403` as before (DNS rebinding) |
+| `[jobs] backup_root` | `"backups/jobs"` | restart | the backup root: the only directory backup jobs, and the Store panel's fork, attic fork and backup `dir`, may write into ("Backup jobs" under `backups/`). A relative path is relative to the server directory; an absolute one may name a mounted storage. Created (with its parents) by `serve` and `init`; must not be empty |
+
+### Changing `server.toml` at runtime
+
+Every key can be changed without editing the file by hand: the web UI's Settings tab ("Server
+(server.toml)" in its picker; "Server defaults" for the `[defaults]` and `[limits.query]`
+every database inherits), `graphersal-server config set KEY VALUE --dir DIR` (offline on the
+directory, or through its running server like the `db` commands; `config unset KEY` back to
+the default, `config get [KEY]`, `config check [FILE]`) and `PUT /api/admin/config`. Keys are
+named with dots (`limits.upload_bytes`, `limits.query.timeout_ms`, `http.allowed_hosts`). A
+change is:
+
+- checked by the same parser the server starts with (a refused value names the key);
+- based on the file's revision: a change made from a stale page is refused (`409`) and the page
+  reads the file again;
+- written atomically, keeping the file's comments: only the key's line changes (a commented
+  `# key = ...` example is taken over, a key reset to its default is commented out). A layout
+  the line patch does not know (dotted keys, inline tables, arrays over several lines) makes the
+  server rewrite the file from its keys with a header comment, which the answer says
+  (`rewritten`); your own comments are lost then;
+- audited key by key (`server.toml: KEY = VALUE`);
+- applied at once for the **live** keys; the **restart** keys are listed as *restart pending*
+  until the server starts again.
+
+`init --config FILE` starts a new server directory from your own `server.toml` (checked like
+`config check`, refused when it does not parse; keys it leaves out keep their defaults), and
+each `--set KEY=VALUE` is applied after it. `server.toml` holds no secret: the first admin's
+token is generated by `init` as always.
+
+### Server defaults and inheritance
+
+What every database gets from the server:
+
+| Setting | Kept in | How a database gets it |
+|---|---|---|
+| query limits | `server.toml [limits.query]` | inherited live, key by key: a database without its own key uses the server's at its next load; its own key wins ("override"); removing it ("reset to inherited", `db set NAME limit KEY --clear`) inherits again |
+| auto-load, read-only | `server.toml [defaults]` | copied at create and import (the database's own flags afterwards) |
+| chunk size, damage policy | `server.toml [defaults]` | creation parameters: fixed at create, never changed afterwards |
+| MCP exposure of new names | `mcp.toml expose_new` | copied at birth into the name's MCP settings (the MCP tab and the Settings tab's "Server defaults" show the same switch) |
+
+The Settings tab shows per database whether each query limit is inherited or overridden, and
+what a new database would get.
 
 ### The login cookie
 
@@ -105,7 +158,7 @@ server still ends the session by its own limits. The logout clears it with `Max-
 `[limits.query]` here applies to every database; a database's `database.toml`
 may carry its own `[limits.query]`, whose keys win one by one (`0` there lifts a global limit
 for that database; set or cleared at runtime with `graphersal-server db set NAME limit KEY
-VALUE|--clear`, `PUT /api/admin/databases/<name>/settings` or the web UI's Database settings
+VALUE|--clear`, `PUT /api/admin/databases/<name>/settings` or the web UI's Settings
 tab). Both files are read again whenever a database is loaded, so a change
 applies at the database's next load (unload + load; a server restart loads the `auto_load`
 ones again; `db info NAME` and the settings show the limits a loaded database runs under now
@@ -121,9 +174,11 @@ sets them.
 
 ### Creation defaults
 
-The `[defaults]` apply to databases created empty (`db create`) and to snapshot (`.gsnap`),
-GraphSON and GraphML imports. A clone, a restore and a Store (`.gstore`, Store directory) import
-carry the creation parameters of their source.
+The `[defaults]` chunk size and damage policy apply to databases created empty (`db create`)
+and to snapshot (`.gsnap`), GraphSON and GraphML imports. A clone, a restore and a Store
+(`.gstore`, Store directory) import carry the creation parameters of their source. The
+`auto_load` and `read_only` defaults apply to every create and import; a clone copies its
+source's read-only flag (auto-load off), a restore and a repair keep the database's own.
 
 ## `access.toml`
 
@@ -214,14 +269,14 @@ max_traversers = 0               # 0: no limit here, whatever server.toml says
 | `read_only` | `false` | writes through the database's API and MCP endpoint are refused; a base is always read-only |
 | `created` | none | the creation time (UTC, RFC 3339) |
 | `description` | `""` | free text, one line (the settings change refuses line breaks and control characters, at most 1000 characters) |
-| `[limits.query] ...` | none (`server.toml`'s) | the database's own query limits, the same keys as `server.toml`'s `[limits.query]`; each key set here wins over the global one. Read at every load, so a change applies at the next load. Set or cleared at runtime by the settings change (`db set NAME limit KEY VALUE\|--clear`, `PUT /api/admin/databases/<name>/settings`, the Database settings tab; validated like this file); may also be edited by hand while the server runs (every other rewrite of the file keeps the file's limits). `[limits]` holds only `query`: the memory ceiling is server-wide |
+| `[limits.query] ...` | none (`server.toml`'s) | the database's own query limits, the same keys as `server.toml`'s `[limits.query]`; each key set here wins over the global one. Read at every load, so a change applies at the next load. Set or cleared at runtime by the settings change (`db set NAME limit KEY VALUE\|--clear`, `PUT /api/admin/databases/<name>/settings`, the Settings tab; validated like this file); may also be edited by hand while the server runs (every other rewrite of the file keeps the file's limits). `[limits]` holds only `query`: the memory ceiling is server-wide |
 | `needs_model` | none | the repository of an embedding model the database's Store names but does not hold, set by an import whose source names a model that `models/` lacks too (one `models/` holds is taken from there at the import): the database is listed as `needs-model` and cannot load until `models add <repo>` (the marker is removed then, or by the first successful load) |
 
 Unknown keys are an error (the database is listed `failed`). The server writes the file
 atomically (temporary file + rename); edit it by hand only while no server runs, except its
 `[limits.query]` (read again at every load). While the server runs, change the description,
 the flags and the limits through the settings change instead (`graphersal-server db set`,
-the admin API, the web UI's Database settings tab): it is based on the file's revision, so a
+the admin API, the web UI's Settings tab): it is based on the file's revision, so a
 change someone else made meanwhile is refused (`409`) instead of being overwritten.
 
 The base pool: loading a layer loads its base once into memory, shared by every loaded layer

@@ -80,7 +80,7 @@ server directory, over HTTP. Users and grants in access.toml; tokens travel in c
 over plain HTTP: keep it on a loopback address or behind a TLS proxy.
 
 Usage:
-  graphersal-server init DIR
+  graphersal-server init DIR [--config FILE] [--set KEY=VALUE]...
       Create a server directory (server.toml, databases/, models/blobs/, backups/, trash/,
       tmp/). DIR must be missing, empty, or a server directory (then only missing
       parts are created; server.toml is kept). A directory without access.toml gets its
@@ -88,7 +88,11 @@ Usage:
       such a directory does the same). A new server has MCP switched off and offers no
       database to it (mcp.toml: enabled = false, expose_new = false; see mcp). DIR becomes private to its owner (mode 0700; the
       secrets access.toml, server.run, sessions/ owner only); on an existing directory
-      init tightens the modes it finds too open.
+      init tightens the modes it finds too open. --config FILE takes server.toml from
+      FILE (checked like config check; refused if invalid; keys it leaves out keep their
+      defaults); each --set KEY=VALUE (as config set) is applied after it. Secrets are
+      never in server.toml: the first admin's token is generated as always. Both only for
+      a new directory.
   graphersal-server serve --dir DIR [--listen ADDR] [--max-connections N]
                          [--header-timeout SECS] [--idle-timeout SECS]
       Serve the server directory DIR (HTTP/1.1 and h2c). ADDR (IP:PORT, port 0 = a free
@@ -116,9 +120,11 @@ Usage:
       its admin API (address from DIR/server.run), otherwise it acts on DIR directly.
         db list
         db create NAME [--base BASE] [--kind plain|layer] [--role normal|base]
-                  [--schema FILE.json] [--description TEXT] [--auto-load] [--read-only]
-                  [--mcp|--no-mcp]
+                  [--schema FILE.json] [--description TEXT] [--auto-load|--no-auto-load]
+                  [--read-only|--no-read-only] [--mcp|--no-mcp]
             A new empty database; --base makes a layer over a role=base database.
+            Without the auto-load/read-only flags it takes server.toml's [defaults]
+            auto_load and read_only (so does an import).
             --mcp offers it to MCP (a new database or alias is hidden from MCP unless
             mcp expose-new is on; --no-mcp hides it then); also on clone, alias set,
             restore and import.
@@ -233,6 +239,18 @@ Usage:
         mcp db NAME on|off       offer a database or alias to MCP, or hide it
         mcp db NAME read-only on|off
             MCP sessions only read NAME, whatever their grant.
+  graphersal-server config COMMAND ... --dir DIR [--json] [--token TOKEN --server ADDR]
+      The keys of DIR/server.toml (dotted: listen, limits.upload_bytes, limits.query.timeout_ms,
+      defaults.auto_load, ...). Through a running server (like db) the keys that can apply
+      at once do (upload limit, memory ceiling, session lifetimes, public scheme); query
+      limits apply at each database's next load, [defaults] to new databases, the rest
+      after a restart (listed as restart pending until then).
+        config get [KEY]         every key (value, default, when it applies), or one
+        config set KEY VALUE     one key (true/false, a number, a text; allowed_hosts:
+                                 names separated by commas; memory_limit: bytes, auto, none)
+        config unset KEY         back to its default
+        config check [FILE]      check a server.toml (default DIR/server.toml) without a
+                                 server: exit 0 valid, 1 with the parser's error
   graphersal-server backup --dir DIR [--out FILE] [--with-databases] [--json]
       One ZIP archive (mode 0600) of the server itself: server.toml, aliases.toml,
       access.toml, mcp.toml, every database's database.toml (its settings, not its
@@ -262,12 +280,12 @@ Usage:
       listen address. FILE: written there, else printed on stdout.
   graphersal-server --help | --version
 
-The OS user owning DIR is its operator: serve and the db, import, models, user and mcp commands
+The OS user owning DIR is its operator: serve and the db, import, models, user, mcp and config commands
 refuse a DIR (or access.toml, server.run, sessions/) owned by another user or open to group
 or others, naming the chmod/chown that fixes it (unix; on Windows DIR's ACL is the boundary).
 Other administrators send an admin token instead:
   ... --token TOKEN [--server ADDRESS]
-      db, import, models, user, mcp, backup, stop and status go to the running server with this user's admin token
+      db, import, models, user, mcp, config, backup, stop and status go to the running server with this user's admin token
       (or the environment variable GRAPHERSAL_SERVER_TOKEN), at ADDRESS (IP:PORT) or the
       address in DIR/server.run; no file of DIR is written and its permissions are not
       checked. Refused when no server runs.
@@ -298,6 +316,7 @@ fn main() -> ExitCode {
         Some("models") => models_command(&args[1..]),
         Some("user") => user_command(&args[1..]),
         Some("mcp") => mcp_command(&args[1..]),
+        Some("config") => config_command(&args[1..]),
         Some("backup") => backup_command(&args[1..]),
         Some("restore") => restore_command(&args[1..]),
         Some("openapi") => openapi_command(&args[1..]),
@@ -334,11 +353,56 @@ fn init_logging() {
 }
 
 fn init(args: &[String]) -> ExitCode {
-    let dir = match args {
-        [dir] if !dir.starts_with('-') => PathBuf::from(dir),
-        _ => return usage_error("init takes exactly one argument: the directory"),
+    let mut dir: Option<PathBuf> = None;
+    let mut config_file: Option<PathBuf> = None;
+    let mut sets: Vec<(String, String)> = Vec::new();
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        if !arg.starts_with('-') {
+            if dir.replace(PathBuf::from(arg)).is_some() {
+                return usage_error("init takes exactly one directory");
+            }
+            continue;
+        }
+        let (flag, inline) = match arg.split_once('=') {
+            Some((flag, value)) if flag.starts_with("--") => (flag, Some(value.to_string())),
+            _ => (arg.as_str(), None),
+        };
+        match flag {
+            "--config" | "--set" => {
+                let Some(value) = inline.or_else(|| rest.next().cloned()) else {
+                    return usage_error(&format!("init: {flag} needs a value"));
+                };
+                if flag == "--config" {
+                    if config_file.replace(PathBuf::from(value)).is_some() {
+                        return usage_error("init: --config given twice");
+                    }
+                } else {
+                    let Some((key, value)) = value.split_once('=') else {
+                        return usage_error(&format!(
+                            "init: --set takes KEY=VALUE (such as limits.upload_bytes=1073741824), \
+                             not {value:?}"
+                        ));
+                    };
+                    sets.push((key.trim().to_string(), value.to_string()));
+                }
+            }
+            _ => return usage_error(&format!("init: unknown argument {arg:?}")),
+        }
+    }
+    let Some(dir) = dir else {
+        return usage_error("init takes exactly one argument: the directory");
     };
-    match ServerDir::init(&dir) {
+    let initialized = if config_file.is_none() && sets.is_empty() {
+        ServerDir::init(&dir)
+    } else {
+        match init_config_text(config_file.as_deref(), &sets) {
+            Ok(text) => ServerDir::init_configured(&dir, &text),
+            Err(InitConfig::Usage(message)) => return usage_error(&message),
+            Err(InitConfig::Failed(error)) => return failure(&error),
+        }
+    };
+    match initialized {
         Ok(report) => {
             out(&console::init_text(&report, &dir));
             if let Some(first) = &report.first_admin {
@@ -348,6 +412,46 @@ fn init(args: &[String]) -> ExitCode {
         }
         Err(error) => failure(&error),
     }
+}
+
+/// Why `init --config`/`--set` was refused.
+enum InitConfig {
+    /// A `--set` naming an unknown key or a value of the wrong type (exit code 2).
+    Usage(String),
+    /// The file cannot be read, or the parser refuses it or a value (exit code 1).
+    Failed(graphersal_server::ServerError),
+}
+
+/// The `server.toml` text of `init --config FILE --set KEY=VALUE...`: the file's text (else
+/// the default text), checked with the server's parser, then each `--set` applied in order.
+fn init_config_text(
+    file: Option<&std::path::Path>,
+    sets: &[(String, String)],
+) -> Result<String, InitConfig> {
+    use graphersal_server::server_settings;
+    let (text, path) = match file {
+        Some(path) => (
+            server_settings::read_text(path).map_err(InitConfig::Failed)?,
+            path.to_path_buf(),
+        ),
+        None => (
+            graphersal_server::config::default_config_text(),
+            PathBuf::from(graphersal_server::layout::CONFIG_FILE),
+        ),
+    };
+    server_settings::check_text(&text, &path).map_err(InitConfig::Failed)?;
+    let mut changes = Vec::new();
+    for (key, value) in sets {
+        let value = server_settings::toml_of_text(key, value)
+            .map_err(|err| InitConfig::Usage(format!("init --set: {err}")))?;
+        changes.push((key.clone(), Some(value)));
+    }
+    if changes.is_empty() {
+        return Ok(text);
+    }
+    server_settings::edit(&text, &path, &changes)
+        .map(|edited| edited.text)
+        .map_err(InitConfig::Failed)
 }
 
 /// The first admin's token, ONCE, in a framed block on stderr (styled on a terminal).
@@ -695,8 +799,9 @@ fn db_command(args: &[String]) -> ExitCode {
                 }
                 values.push((flag, value));
             }
-            "--json" | "--auto-load" | "--read-only" | "--no-wait" | "--no-models"
-            | "--materialize" | "--clear" | "--all" | "--yes" | "--mcp" | "--no-mcp"
+            "--json" | "--auto-load" | "--read-only" | "--no-auto-load" | "--no-read-only"
+            | "--no-wait" | "--no-models" | "--materialize" | "--clear" | "--all" | "--yes"
+            | "--mcp" | "--no-mcp"
                 if inline.is_none() =>
             {
                 switches.push(flag);
@@ -1187,6 +1292,123 @@ fn mcp_command(args: &[String]) -> ExitCode {
     print_outcome(&dir, &command, json, remote)
 }
 
+/// `config get [KEY] | set KEY VALUE | unset KEY | check [FILE]` (round 4 B-SETTINGS): the
+/// keys of `server.toml`, offline on the directory or through its running server (which
+/// applies the `now` keys at once); `check` only parses a file.
+fn config_command(args: &[String]) -> ExitCode {
+    let mut positional: Vec<&str> = Vec::new();
+    let mut dir: Option<String> = None;
+    let mut token: Option<String> = None;
+    let mut server: Option<String> = None;
+    let mut json = false;
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        if !arg.starts_with("--") {
+            positional.push(arg);
+            continue;
+        }
+        let (flag, inline) = match arg.split_once('=') {
+            Some((flag, value)) => (flag, Some(value.to_string())),
+            None => (arg.as_str(), None),
+        };
+        match flag {
+            "--dir" | "--token" | "--server" => {
+                let Some(value) = inline.or_else(|| rest.next().cloned()) else {
+                    return usage_error(&format!("config: {flag} needs a value"));
+                };
+                let slot = match flag {
+                    "--dir" => &mut dir,
+                    "--token" => &mut token,
+                    _ => &mut server,
+                };
+                if slot.replace(value).is_some() {
+                    return usage_error(&format!("config: {flag} given twice"));
+                }
+            }
+            "--json" if inline.is_none() => json = true,
+            _ => return usage_error(&format!("config: unknown argument {arg:?}")),
+        }
+    }
+    if let ["check", rest @ ..] = positional.as_slice() {
+        let path = match (rest, &dir) {
+            ([file], _) => PathBuf::from(file),
+            ([], Some(dir)) => PathBuf::from(dir).join(graphersal_server::layout::CONFIG_FILE),
+            ([], None) => return usage_error("config check needs FILE or --dir DIR"),
+            _ => return usage_error("config check takes at most one FILE"),
+        };
+        return match console::config_check_file(&path) {
+            Ok(_) => {
+                out(&console::config_check_text(&path));
+                exit(0)
+            }
+            Err(error) => failure(&error),
+        };
+    }
+    let Some(dir) = dir else {
+        return usage_error("config needs --dir DIR");
+    };
+    let text_value = |key: &str, text: &str| {
+        graphersal_server::server_settings::toml_of_text(key, text)
+            .map(|value| json_of_toml(&value))
+            .map_err(|error| error.to_string())
+    };
+    let command = match positional.as_slice() {
+        ["get"] => DbCommand::ConfigGet { key: None },
+        ["get", key] => {
+            if graphersal_server::server_settings::key_of(key).is_none() {
+                return usage_error(&format!(
+                    "config: unknown setting '{key}' (config get lists them)"
+                ));
+            }
+            DbCommand::ConfigGet {
+                key: Some(key.to_string()),
+            }
+        }
+        ["set", key, value] => match text_value(key, value) {
+            Ok(value) => DbCommand::ConfigSet {
+                changes: vec![(key.to_string(), value)],
+            },
+            Err(message) => return usage_error(&format!("config set: {message}")),
+        },
+        ["unset", key] => {
+            if graphersal_server::server_settings::key_of(key).is_none() {
+                return usage_error(&format!(
+                    "config: unknown setting '{key}' (config get lists them)"
+                ));
+            }
+            DbCommand::ConfigSet {
+                changes: vec![(key.to_string(), serde_json::Value::Null)],
+            }
+        }
+        [] => return usage_error("no config command given"),
+        _ => {
+            return usage_error(&format!(
+                "unknown command or wrong arguments: config {} (get [KEY], set KEY VALUE, unset \
+                 KEY, check [FILE])",
+                positional.join(" ")
+            ));
+        }
+    };
+    let remote = match Remote::of(token, server) {
+        Ok(remote) => remote,
+        Err(code) => return code,
+    };
+    print_outcome(&dir, &command, json, remote)
+}
+
+/// A TOML value of a `config set` as the JSON the admin API takes.
+fn json_of_toml(value: &toml::Value) -> serde_json::Value {
+    match value {
+        toml::Value::Boolean(b) => serde_json::Value::Bool(*b),
+        toml::Value::Integer(n) => serde_json::Value::from(*n),
+        toml::Value::String(s) => serde_json::Value::String(s.clone()),
+        toml::Value::Array(items) => {
+            serde_json::Value::Array(items.iter().map(json_of_toml).collect())
+        }
+        other => serde_json::Value::String(other.to_string()),
+    }
+}
+
 /// Why a `db` command line was refused.
 enum Problem {
     /// An invalid invocation (exit code 2).
@@ -1223,7 +1445,12 @@ fn parse_db(
                 return Err(Problem::Usage(format!("{flag} belongs to db create")));
             }
         }
-        for flag in ["--auto-load", "--read-only"] {
+        for flag in [
+            "--auto-load",
+            "--read-only",
+            "--no-auto-load",
+            "--no-read-only",
+        ] {
             if switch(flag) {
                 return Err(Problem::Usage(format!("{flag} belongs to db create")));
             }
@@ -1409,6 +1636,16 @@ fn create_command(
     if switch("--no-wait") {
         return Err(Problem::Usage("--no-wait belongs to db load".to_string()));
     }
+    // `--auto-load` / `--no-auto-load` (and the read-only pair): given, or left to server.toml's
+    // [defaults].
+    let yes_no = |yes: &str, no: &str| match (switch(yes), switch(no)) {
+        (true, true) => Err(Problem::Usage(format!(
+            "give either {yes} or {no}, not both"
+        ))),
+        (true, false) => Ok(Some(true)),
+        (false, true) => Ok(Some(false)),
+        (false, false) => Ok(None),
+    };
     for flag in ["--no-models", "--materialize"] {
         if switch(flag) {
             return Err(Problem::Usage(format!("{flag} belongs to db export")));
@@ -1456,8 +1693,8 @@ fn create_command(
         (_, None) => CreateSpec::plain(),
     }
     .with_role(role)
-    .with_auto_load(switch("--auto-load"))
-    .with_read_only(switch("--read-only"));
+    .with_auto_load_opt(yes_no("--auto-load", "--no-auto-load")?)
+    .with_read_only_opt(yes_no("--read-only", "--no-read-only")?);
     if let Some(description) = value("--description") {
         spec = spec.with_description(description);
     }

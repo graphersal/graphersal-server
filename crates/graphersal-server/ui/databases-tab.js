@@ -61,6 +61,11 @@ const BUSY_TEXT = Object.freeze({
 const ALIAS_COLUMNS = Object.freeze({ alias: { type: 'text' }, target: { type: 'text' } });
 
 const emptyCreate = () => ({ name: '', kind: 'plain', role: 'normal', base: '', description: '', schema: '', readOnly: false, autoLoad: false, mcp: false });
+/** The create form's flags from the server's defaults for new databases. */
+const newDefaults = () => {
+  const d = list.newDatabases || {};
+  return { readOnly: d.readOnly === true, autoLoad: d.autoLoad === true, mcp: d.mcp === true };
+};
 const freshDialog = () => ({ mode: null, source: '', form: emptyCreate(), alias: '', target: '', newName: '', existing: false, mcp: false, problems: [], error: null, busy: false, repaired: null });
 
 export default {
@@ -223,7 +228,11 @@ export default {
       dialog.mode = null;
       if (dlg.value && dlg.value.open) dlg.value.close();
     }
-    const openCreate = () => openDialog('create', { form: { ...emptyCreate(), base: bases.value[0] || '' } });
+    // The create form starts from what the server gives a new database (server.toml [defaults],
+    // mcp.toml expose_new: the listing's `newDatabases`).
+    const openCreate = () => openDialog('create', {
+      form: { ...emptyCreate(), ...newDefaults(), base: bases.value[0] || '' },
+    });
     const openClone = (row) => openDialog('clone', { source: row.name, form: { ...emptyCreate(), name: `${row.name}-copy` } });
     const openAlias = (alias) => openDialog('alias', alias
       ? { alias: alias.alias, target: alias.target, existing: true }
@@ -233,7 +242,7 @@ export default {
     /** The request of the open dialog, or `{problems}` (shown in the dialog, nothing sent). */
     function dialogRequest() {
       if (dialog.mode === 'create') {
-        const built = createBody(dialog.form);
+        const built = createBody(dialog.form, list.newDatabases);
         if (built.problems) return { problems: built.problems };
         return { subject: built.body.name, action: 'create', send: () => admin.create(built.body) };
       }
