@@ -229,9 +229,22 @@ impl Registry {
     /// removes everything in `tmp/`. `Err` only when `databases/` itself cannot be read; a
     /// broken database or alias never makes it fail.
     pub fn scan(dir: &ServerDir) -> Result<Arc<Registry>, ServerError> {
+        Self::scan_with(dir, true)
+    }
+
+    /// [`Self::scan`] without its cleaning (`tmp/`, stale temporary files): a look at the
+    /// directory that is safe while a server runs on it (`graphersal-server openapi`). Never
+    /// writes.
+    pub fn peek(dir: &ServerDir) -> Result<Arc<Registry>, ServerError> {
+        Self::scan_with(dir, false)
+    }
+
+    fn scan_with(dir: &ServerDir, clean: bool) -> Result<Arc<Registry>, ServerError> {
         let mut inner = Inner::default();
-        clean_tmp(&dir.tmp(), &mut inner.problems);
-        dir.remove_stale_temps();
+        if clean {
+            clean_tmp(&dir.tmp(), &mut inner.problems);
+            dir.remove_stale_temps();
+        }
         scan_databases(&dir.databases(), &mut inner)?;
         scan_aliases(&dir.aliases_path(), &mut inner);
         for problem in &inner.problems {

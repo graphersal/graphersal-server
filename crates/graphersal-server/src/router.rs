@@ -24,7 +24,12 @@
 //!   loaded.
 //! - `GET /api/info`: the server's identity, its UI profile (`uiProfile`) and the principal
 //!   (`principal {id, kind, admin}`); for anonymous only what the login page needs (`server`,
-//!   `protocol`, `dev`, `experimental`, `uiProfile`, `principal`, `login: "/"`).
+//!   `protocol`, `dev`, `experimental`, `uiProfile`, `principal`, `login: "/"`); everyone gets
+//!   `openapi` (`/openapi.json`) and `databaseOpenapi` (`/db/{name}/openapi.json`).
+//! - `GET /openapi.json`: the server's own OpenAPI description, public (before
+//!   authentication, like the UI files); `GET /db/<name>/openapi.json` (and
+//!   `/db/<name>/api/openapi.json`): the database's, behind the grant check of the mount but
+//!   also while it is not loaded ([`crate::openapi`]).
 //! - `GET /api/databases`: the databases and aliases the principal may reach, with its level
 //!   and the playground path of each ([`crate::user_api`]; anonymous: the ones its anonymous
 //!   grants open, often none), the web UI's "my databases" page.
@@ -119,7 +124,8 @@ pub(crate) const DEFAULT_COOKIE_MAX_AGE_SECS: u64 = 400 * 24 * 60 * 60;
 pub(crate) struct Modes {
     /// `[access] enabled`: `false` = every request runs as an admin ([`open_principal`]).
     pub(crate) access_enabled: bool,
-    /// `[http] public_scheme = "https"`: the login cookie gets `Secure`.
+    /// `[http] public_scheme = "https"`: the login cookie gets `Secure`, and the API
+    /// descriptions name `https://` URLs ([`crate::openapi`]).
     pub(crate) secure_cookies: bool,
     /// The login cookie's `Max-Age` in seconds: `[sessions] lifetime_secs`, else
     /// [`DEFAULT_COOKIE_MAX_AGE_SECS`] (a browser restart keeps the login).
@@ -335,6 +341,15 @@ impl Router {
             None => (url.as_str(), None),
         };
         let method = request.method().clone();
+        // The server's own API description: public (it carries no data), like the UI files.
+        if path == crate::openapi::SERVER_SPEC_PATH {
+            let answer = if matches!(method, Method::Get | Method::Head) {
+                self.server_spec(&request)
+            } else {
+                Err(not_allowed(&method, path))
+            };
+            return Answer::Response(answer.unwrap_or_else(error_response));
+        }
         if path == LOGIN || path == LOGOUT {
             let answer = if method != Method::Post {
                 Err(not_allowed(&method, path))
@@ -488,6 +503,16 @@ impl Router {
         let Some(rest) = rest else {
             return mounts::redirect_to_slash(path, query);
         };
+        // The database's API description: the server's patch of the engine's, answered also
+        // while the database is not loaded (crate::openapi).
+        if crate::openapi::DATABASE_SPEC_PATHS.contains(&rest) {
+            if !matches!(request.method(), Method::Get | Method::Head) {
+                return error_response(not_allowed(request.method(), path));
+            }
+            return self
+                .database_spec(loader, access, request, name)
+                .unwrap_or_else(error_response);
+        }
         // Only a check: the resolver takes the context again and holds it for the request.
         if loader.context(&entry.name).is_none() {
             return mounts::not_loaded(&entry);
@@ -559,6 +584,48 @@ impl Router {
         answer
     }
 
+    /// The base URL of `request` for the API descriptions: `[http] public_scheme` and its
+    /// `Host` (checked before); `400` without one.
+    fn base_url(&self, request: &Request<'_>) -> Result<String, HttpError> {
+        crate::openapi::request_base_url(self.modes.secure_cookies, request.header("Host"))
+            .ok_or_else(|| HttpError::bad_request("the request names no Host"))
+    }
+
+    /// `GET /openapi.json`: the server's own API description ([`crate::openapi`]).
+    fn server_spec(&self, request: &Request<'_>) -> Result<Response, HttpError> {
+        let spec = crate::openapi::server_spec(&self.base_url(request)?).map_err(|err| {
+            tracing::error!(target: "graphersal_server", "{err}");
+            HttpError::new(500, err.to_string())
+        })?;
+        Ok(Response::json(200, &spec))
+    }
+
+    /// `GET /db/<name>/openapi.json` (the principal reaches `name`, checked before): the
+    /// database's API description ([`crate::openapi::database_spec`]); it names the
+    /// anonymous alternative when anonymous reaches `name` too (or access control is off).
+    fn database_spec(
+        &self,
+        loader: &Loader,
+        access: &Access,
+        request: &Request<'_>,
+        name: &str,
+    ) -> Result<Response, HttpError> {
+        let base = self.base_url(request)?;
+        let engine = crate::openapi::engine_spec().map_err(|err| {
+            tracing::error!(target: "graphersal_server", "{err}");
+            HttpError::new(500, err.to_string())
+        })?;
+        let anonymous = !self.modes.access_enabled
+            || access
+                .reach(loader.registry(), &Principal::anonymous(), name)
+                .is_some();
+        let name = crate::names::fold(name);
+        Ok(Response::json(
+            200,
+            &crate::openapi::database_spec(&engine, &base, &name, anonymous),
+        ))
+    }
+
     /// `GET /api/info` for `principal` (module docs).
     fn info_for(&self, loader: &Loader, principal: &Principal) -> Result<Response, HttpError> {
         let view = crate::ui_assets::View::of(principal);
@@ -606,7 +673,8 @@ fn profile_file(path: &str, name: &str) -> Result<Response, HttpError> {
 }
 
 /// Whether `method path` asks for a page or a static file a browser navigates to (a `GET`
-/// outside `/api` and the MCP endpoints, at the root or under `/db/<name>/`).
+/// outside `/api`, the MCP endpoints and the API descriptions (`openapi.json`: a client's
+/// document, answered `401`), at the root or under `/db/<name>/`).
 fn is_page_request(method: &Method, path: &str) -> bool {
     if !matches!(method, Method::Get | Method::Head) {
         return false;
@@ -616,7 +684,10 @@ fn is_page_request(method: &Method, path: &str) -> bool {
         Some((_, None)) => return true,
         None => path.trim_start_matches('/'),
     };
-    !(rest == "api" || rest.starts_with("api/") || rest == "mcp")
+    !(rest == "api"
+        || rest.starts_with("api/")
+        || rest == "mcp"
+        || crate::openapi::DATABASE_SPEC_PATHS.contains(&rest))
 }
 
 /// `401 {"error": message, "login": "/"}` with `WWW-Authenticate: Bearer`; `clear`: the
@@ -795,6 +866,8 @@ fn info_value(
             "uploadBytes": upload_bytes,
             "mcp": mcp,
             "uiProfile": profile,
+            "openapi": crate::openapi::SERVER_SPEC_PATH,
+            "databaseOpenapi": crate::openapi::DATABASE_SPEC_TEMPLATE,
     }))
 }
 
@@ -809,6 +882,8 @@ fn anonymous_info() -> Result<serde_json::Value, HttpError> {
         "experimental": true,
         "uiProfile": ui_profile(crate::ui_assets::View::Anonymous)?,
         "login": LOGIN_PAGE,
+        "openapi": crate::openapi::SERVER_SPEC_PATH,
+        "databaseOpenapi": crate::openapi::DATABASE_SPEC_TEMPLATE,
     }))
 }
 

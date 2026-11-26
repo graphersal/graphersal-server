@@ -183,10 +183,26 @@ from published files). When this file disagrees with the code, the code wins: sa
   ("graphersal/1", the only thing the playground's `isEngineInfo` checks; every mount answers it
   too), `dev: false`, no `product`, no `admin`; `ui/tests/root-info.json` = its fixed fields for
   the node test, checked by `router::tests::the_node_tests_root_info_is_the_answer`, `uiProfile` = `ui_assets::profile_for(View::of(principal))`, `uploadBytes` = the upload limit, `mcp` =
-  `Mcp::status()` or null), `/mcp` (every method) via `mcp::route` (404 when MCP is off),
+  `Mcp::status()` or null; `openapi`/`databaseOpenapi` for every principal), `/mcp` (every method) via `mcp::route` (404 when MCP is off),
+  `GET /openapi.json` (public, before authentication) and `GET /db/<name>/openapi.json` (+
+  `/db/<name>/api/openapi.json`; after the grant check, before the loaded check; anonymous `401`,
+  not a page) via `openapi` (B-OPENAPI: the server's hand-written `openapi/server.json`; a
+  database's = graphersal-serve's description asked once from a throwaway context
+  (`engine_spec`), `openapi/engine-patch.json` (what serve's description gained after 0.8.0;
+  `the_engine_patch_is_still_needed_and_applies` fails when the pin carries an entry: drop it),
+  then `database_spec`: servers = `<public_scheme>://<Host>/db/<name>`, security schemes
+  `bearerAuth`/`sessionCookie` (+ `{}` when anonymous reaches the name or access is off), the
+  access layer's 401/404/409 on every operation, `x-graphersal-access` read|query|write (a
+  write = the engine's `E409ReadOnlyRequest`/`E409Write`), no filtering by level, the
+  not-mounted paths (probes, `api/admin/runs*`, `api/ai/*`) removed; console `openapi
+  --dir DIR [--db NAME] [--out FILE] [--server URL]` = `offline_spec` over `Registry::peek`
+  (a scan that never cleans `tmp/`, safe beside a running server); a NEW route of the router or
+  the admin API must be added to `openapi/server.json`:
+  `router_access_tests.rs` `every_route_of_the_router_and_the_admin_api_is_described` scans the
+  route tables (segment lists, one-word literals, root path literals) and asks the router),
   `GET /api/databases` via `user_api` (B4: "my databases" for every principal, anonymous
   included: only the databases/aliases with a grant (an alias also by its own grant), effective
-  `level`, `playground` path, `kind` database|alias;
+  `level`, `playground` path, `openapi` path, `kind` database|alias;
   tests `router_access_tests.rs` `my_databases_*`), `/api/admin/...` via `admin_api`, other
   `/api/*` 404, `GET /server-ui/<file>` the profile's
   files (`ui_assets::file`), every other GET a file of the embedded playground at the root (`/` =

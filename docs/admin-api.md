@@ -5,6 +5,10 @@ The admin HTTP API of `graphersal-server`, below `/api/admin/`. The server's web
 clients. Both the API and the console's offline mode call the same admin core, so the answers
 below are also what `graphersal-server db ... --json` (and `user ... --json`) prints.
 
+Machine-readable: `GET /openapi.json` (public) is the OpenAPI 3.1 description of these routes
+(and of login, `/api/info` and `/api/databases`), `graphersal-server openapi --dir DIR` writes
+it offline; how to generate a client from it: [`http-clients.md`](http-clients.md).
+
 The MCP endpoints (`/mcp`, `/db/<name>/mcp`) are documented in [`mcp.md`](mcp.md), the server
 directory and its files (`server.toml`, `database.toml`, `models/`, `backups/`) in
 [`server-dir.md`](server-dir.md), the access model (principals, grants, levels, tokens, the
@@ -27,7 +31,9 @@ server restart (kept in `sessions/browser.json`, hashes only) and last until the
 change of the user's token, the user's removal, or the `[sessions]` limits of `server.toml`
 (none by default; `server-dir.md`); an ended session's cookie answers `401` and is cleared. `GET /api/info` names the
 request's `principal` (`{id, kind, admin}`); for anonymous it answers only `server`,
-`protocol`, `dev`, `experimental`, `uiProfile`, `principal` and `login: "/"`. Its `uiProfile`
+`protocol`, `dev`, `experimental`, `uiProfile`, `principal`, `login: "/"`, `openapi` and
+`databaseOpenapi` (every principal gets these two: `/openapi.json`, the server's API
+description, and `/db/{name}/openapi.json`, a database's). Its `uiProfile`
 follows the principal: an admin gets the management tabs and Users, a user without the admin
 role only "My databases" (`mine`), anonymous only "Sign in" (`login`). The login page follows
 the `next` of its address after a login only when it is a path from the server root (starts
@@ -40,15 +46,18 @@ the databases and aliases the caller may reach, sorted by name:
 
 ```json
 {"databases": [{"name": "acme", "state": "loaded", "level": "write", "readOnly": false,
-  "description": "", "playground": "/db/acme/", "kind": "database"},
+  "description": "", "playground": "/db/acme/", "openapi": "/db/acme/openapi.json",
+  "kind": "database"},
   {"name": "cur", "state": "loaded", "level": "read", "readOnly": true, "description": "",
-  "playground": "/db/cur/", "kind": "alias", "aliasOf": "acme-2026"}]}
+  "playground": "/db/cur/", "openapi": "/db/cur/openapi.json", "kind": "alias",
+  "aliasOf": "acme-2026"}]}
 ```
 
 `level` is the caller's effective level (its highest grant, capped by the database's mode: a
 read-only database or a base is `read`; an admin: `write`), `readOnly` is `level == "read"`,
 `state` is the entry's state without the admin's `reason`, `playground` the path of its
-playground from the server root, `kind` `database` or `alias`, `aliasOf` (alias rows) the
+playground from the server root, `openapi` the path of its HTTP API's OpenAPI description
+([`http-clients.md`](http-clients.md)), `kind` `database` or `alias`, `aliasOf` (alias rows) the
 database the alias names now. A database the caller has no grant on is never listed; an alias is
 listed when the caller has a grant on its database or on the alias itself (a grant on an alias
 reaches the alias's current database only through the alias, see `docs/access.md` "Grants on

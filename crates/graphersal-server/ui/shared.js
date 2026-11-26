@@ -17,6 +17,7 @@ import {
 } from './access-api.js';
 import {
   fetchDatabases, anyLoading, databaseRows, hostHeaders, LANDING_POLL_MS,
+  databaseOpenapiHref, SERVER_OPENAPI_HREF,
 } from './databases.js';
 
 /** The server root: the profile's files are served under `<root>/server-ui/`. Relative, so a
@@ -127,6 +128,12 @@ export function patchRow(entry) {
 
 /** The link to the playground of a list row (`db/<name>/` on the server root). */
 export const pageHref = (row) => new URL(row.href, ROOT).href;
+
+/** The link to the OpenAPI description of a list row's database or alias (its HTTP API). */
+export const openapiHref = (row) => new URL(databaseOpenapiHref(row.name), ROOT).href;
+
+/** The link to the OpenAPI description of the server's own HTTP API. */
+export const serverOpenapiHref = () => new URL(SERVER_OPENAPI_HREF, ROOT).href;
 
 /**
  * Makes the calling tab component (in `setup`) read its data with `refresh` when it is set up,

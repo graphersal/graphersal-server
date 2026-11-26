@@ -10,7 +10,7 @@
 // root again, so the server's answer picks the tabs; the page never decides them itself.
 
 import { sendAdmin, isOpenState } from './admin-api.js';
-import { databaseHref, DATABASE_STATES, STATE_TONES } from './databases.js';
+import { databaseHref, databaseOpenapiHref, DATABASE_STATES, STATE_TONES } from './databases.js';
 
 /** The routes of this model, relative to the server root. */
 export const accessRequest = Object.freeze({
@@ -129,7 +129,7 @@ export function headerModel(principal) {
 export const LEVEL_TEXTS = Object.freeze({ read: 'read only', write: 'read and write' });
 
 /**
- * The rows of "my databases" from a `GET api/databases` answer: `[{name, href, state,
+ * The rows of "my databases" from a `GET api/databases` answer: `[{name, href, openapiHref, state,
  * stateText, tone, level, levelText, readOnly, description, aliasOf, open, kind, kindText}]`,
  * sorted by name; `kind` `alias` (with `aliasOf`, its current database) or `database`;
  * `open` = loaded (its playground answers). A malformed entry is skipped. Throws an Error when
@@ -147,6 +147,7 @@ export function mineRows(answer) {
     rows.push({
       name: d.name,
       href: databaseHref(d.name),
+      openapiHref: databaseOpenapiHref(d.name),
       state: d.state,
       stateText: has(DATABASE_STATES, d.state) ? DATABASE_STATES[d.state] : d.state,
       tone: has(STATE_TONES, d.state) ? STATE_TONES[d.state] : '',

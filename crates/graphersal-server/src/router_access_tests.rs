@@ -3,6 +3,7 @@
 //! `/api/info`, for the operator, an admin, a writer/reader, a user without grants and
 //! anonymous. In process: a [`Router`] over a server directory with loaded databases.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -3248,4 +3249,414 @@ fn the_server_backup_download_is_for_admins_only_and_audited() {
         get(&open, Who::Bearer(&open.alice), "/api/admin/server-backup").status(),
         200
     );
+}
+
+// B-OPENAPI: the API descriptions over the router (crate::openapi): the server's own, each
+// database's, the route coverage of the server's description, and the console's export.
+
+/// `GET url` with the `Host` header `host` as `who`.
+fn get_at(fx: &Fixture, who: Who<'_>, url: &str, host: &str) -> Response {
+    let mut request = Request::new(Method::Get, url, std::io::empty()).with_header("Host", host);
+    if let Who::Bearer(token) = who {
+        request = request.with_header("Authorization", &format!("Bearer {token}"));
+    }
+    fx.router.route(request)
+}
+
+#[test]
+fn the_server_description_is_public_and_names_the_request_url() {
+    let fx = fixture_with(
+        "openapi-server",
+        vec!["db.example.com".to_string()],
+        Modes::default(),
+    );
+    // No credentials needed; a wrong token is not even read.
+    for who in [
+        Who::Anonymous,
+        Who::Bearer("not-a-token"),
+        Who::Bearer(&fx.bob),
+    ] {
+        let answer = get(&fx, who, "/openapi.json");
+        assert_eq!(answer.status(), 200);
+        let spec = json_of(&answer);
+        crate::openapi::tests::check_structure(&spec, "served server description");
+        assert_eq!(spec["servers"][0]["url"], format!("http://{HOST}"));
+    }
+    let spec = json_of(&get_at(
+        &fx,
+        Who::Anonymous,
+        "/openapi.json",
+        "db.example.com",
+    ));
+    assert_eq!(spec["servers"][0]["url"], "http://db.example.com");
+    assert_eq!(
+        get_at(&fx, Who::Anonymous, "/openapi.json", "evil.example").status(),
+        403,
+        "the Host check runs first"
+    );
+    assert_eq!(
+        send(
+            &fx,
+            Who::Anonymous,
+            Method::Post,
+            "/openapi.json",
+            None,
+            &[]
+        )
+        .status(),
+        405
+    );
+    // /api/info names both descriptions, for anonymous too.
+    for who in [Who::Anonymous, Who::Bearer(&fx.bob), Who::Bearer(OPERATOR)] {
+        let info = json_of(&get(&fx, who, "/api/info"));
+        assert_eq!(info["openapi"], "/openapi.json");
+        assert_eq!(info["databaseOpenapi"], "/db/{name}/openapi.json");
+    }
+    // My databases names each database's description.
+    let mine = json_of(&get(&fx, Who::Bearer(&fx.bob), "/api/databases"));
+    let rows = mine["databases"].as_array().unwrap();
+    assert!(!rows.is_empty());
+    for row in rows {
+        assert_eq!(
+            row["openapi"],
+            format!("/db/{}/openapi.json", row["name"].as_str().unwrap())
+        );
+    }
+}
+
+#[test]
+fn a_database_description_follows_the_grant_and_the_url() {
+    let fx = fixture("openapi-database");
+    let bob = Who::Bearer(&fx.bob);
+    let spec = json_of(&get(&fx, bob, "/db/w/openapi.json"));
+    crate::openapi::tests::check_structure(&spec, "served database description");
+    assert_eq!(spec["servers"][0]["url"], format!("http://{HOST}/db/w"));
+    assert_eq!(
+        spec["security"],
+        json!([{"bearerAuth": []}, {"sessionCookie": []}])
+    );
+    // A reader gets the same document as a writer (no filtering; writes are marked).
+    let reader = json_of(&get(&fx, bob, "/db/r/openapi.json"));
+    let mut a = spec.clone();
+    let mut b = reader.clone();
+    for doc in [&mut a, &mut b] {
+        doc["servers"] = Value::Null;
+        doc["info"] = Value::Null;
+    }
+    assert_eq!(a, b);
+    assert_eq!(
+        reader["paths"]["/api/schema/set"]["post"]["x-graphersal-access"],
+        "write"
+    );
+    // The alias's name stays in the URL; the other path answers the same.
+    let alias = json_of(&get(&fx, bob, "/db/cur/api/openapi.json"));
+    assert_eq!(alias["servers"][0]["url"], format!("http://{HOST}/db/cur"));
+    assert_eq!(alias["info"]["x-graphersal-database"], "cur");
+    // The access layer answers as on every database route.
+    assert_unauthorized(&get(&fx, Who::Anonymous, "/db/w/openapi.json"), "anonymous");
+    assert_eq!(
+        get(&fx, Who::Bearer(&fx.carol), "/db/w/openapi.json").status(),
+        404
+    );
+    assert_eq!(get(&fx, bob, "/db/h/openapi.json").status(), 404);
+    assert_eq!(get(&fx, bob, "/db/nope/openapi.json").status(), 404);
+    assert_eq!(
+        send(&fx, bob, Method::Post, "/db/w/openapi.json", None, &[]).status(),
+        405
+    );
+    // Answered also while the database is not loaded (its other routes are 409).
+    fx.loader.unload("h").unwrap();
+    assert_eq!(
+        get(&fx, Who::Bearer(OPERATOR), "/db/h/api/info").status(),
+        409
+    );
+    assert_eq!(
+        get(&fx, Who::Bearer(OPERATOR), "/db/h/openapi.json").status(),
+        200
+    );
+    // An anonymous grant makes the anonymous alternative part of the document.
+    let grant = Grant::new(Subject::Anonymous, "r", Level::Read).unwrap();
+    fx.access.grant(&Principal::operator(), grant).unwrap();
+    let open = json_of(&get(&fx, Who::Anonymous, "/db/r/openapi.json"));
+    assert_eq!(
+        open["security"],
+        json!([{"bearerAuth": []}, {"sessionCookie": []}, {}])
+    );
+    assert_eq!(
+        json_of(&get(&fx, bob, "/db/w/openapi.json"))["security"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2,
+        "w has no anonymous grant"
+    );
+}
+
+#[test]
+fn the_descriptions_name_https_with_public_scheme_https() {
+    let fx = fixture_with(
+        "openapi-https",
+        vec!["db.example.com".to_string()],
+        modes(true, true, super::DEFAULT_COOKIE_MAX_AGE_SECS),
+    );
+    let server = json_of(&get_at(
+        &fx,
+        Who::Anonymous,
+        "/openapi.json",
+        "db.example.com",
+    ));
+    assert_eq!(server["servers"][0]["url"], "https://db.example.com");
+    let db = json_of(&get_at(
+        &fx,
+        Who::Bearer(&fx.bob),
+        "/db/cur/openapi.json",
+        "db.example.com",
+    ));
+    assert_eq!(db["servers"][0]["url"], "https://db.example.com/db/cur");
+}
+
+#[test]
+fn the_console_export_equals_the_served_descriptions() {
+    let fx = fixture("openapi-console");
+    let dir = fx.loader.registry().dir().clone();
+    let base = format!("http://{HOST}");
+    let offline = crate::openapi::offline_spec(&dir, None, Some(&base)).unwrap();
+    let served = json_of(&get(&fx, Who::Anonymous, "/openapi.json"));
+    assert_eq!(offline, served);
+    for name in ["w", "cur"] {
+        let offline = crate::openapi::offline_spec(&dir, Some(name), Some(&base)).unwrap();
+        let served = json_of(&get(
+            &fx,
+            Who::Bearer(&fx.bob),
+            &format!("/db/{name}/openapi.json"),
+        ));
+        assert_eq!(offline, served, "{name}");
+        // Another base URL changes only `servers`.
+        let mut elsewhere =
+            crate::openapi::offline_spec(&dir, Some(name), Some("https://x.example")).unwrap();
+        assert_eq!(
+            elsewhere["servers"][0]["url"],
+            format!("https://x.example/db/{name}")
+        );
+        elsewhere["servers"] = served["servers"].clone();
+        assert_eq!(elsewhere, served, "{name}");
+    }
+    let unknown = crate::openapi::offline_spec(&dir, Some("nope"), None).unwrap_err();
+    assert!(unknown.to_string().contains("nope"), "{unknown}");
+    // Without --server: server.toml's listen address.
+    let default = crate::openapi::offline_spec(&dir, None, None).unwrap();
+    assert!(
+        default["servers"][0]["url"]
+            .as_str()
+            .unwrap()
+            .starts_with("http://")
+    );
+}
+
+/// `source` up to its first test module (`#[cfg(test)]` before `mod` or `#[path]`; a
+/// `#[cfg(test)]` function before the routes is kept).
+fn without_test_modules(source: &str) -> &str {
+    let end = source
+        .match_indices("#[cfg(test)]")
+        .map(|(at, _)| at)
+        .find(|at| {
+            let next = source[at + "#[cfg(test)]".len()..].trim_start();
+            next.starts_with("mod ") || next.starts_with("#[path")
+        })
+        .unwrap_or(source.len());
+    &source[..end]
+}
+
+/// The segment lists of the route arms of a route-table source (`["databases", name,
+/// "clone"]`, alternatives `"a" | "b"` expanded, a binding or `..` as one `{}` segment), and
+/// its one-word string literals and constants (`"server"`, `endpoint == "server-backup"`) as
+/// one-segment candidates. Test modules are left out. Candidates
+/// that are no route are filtered by asking the router.
+fn route_candidates(source: &str) -> BTreeSet<String> {
+    let source = without_test_modules(source);
+    let flat: String = source.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut out = BTreeSet::new();
+    let mut i = 0;
+    while let Some(at) = flat[i..].find('[') {
+        let start = i + at;
+        i = start + 1;
+        if !flat[start + 1..].trim_start().starts_with('"') {
+            continue;
+        }
+        let Some(len) = flat[start..].find(']') else {
+            break;
+        };
+        let list = &flat[start + 1..start + len];
+        let mut paths = vec![String::new()];
+        let mut ok = true;
+        for element in list.split(',') {
+            let element = element.trim();
+            if element.is_empty() {
+                continue;
+            }
+            let options: Vec<String> = if element.starts_with('"') {
+                element
+                    .split('|')
+                    .map(|o| o.trim().trim_matches('"').to_string())
+                    .collect()
+            } else {
+                vec!["{}".to_string()]
+            };
+            if options
+                .iter()
+                .any(|o| o != "{}" && !o.chars().all(|c| c.is_ascii_lowercase() || c == '-'))
+            {
+                ok = false;
+                break;
+            }
+            paths = paths
+                .iter()
+                .flat_map(|p| {
+                    options.iter().map(move |o| {
+                        if p.is_empty() {
+                            o.clone()
+                        } else {
+                            format!("{p}/{o}")
+                        }
+                    })
+                })
+                .collect();
+        }
+        if ok {
+            out.extend(paths.into_iter().filter(|p| !p.is_empty()));
+        }
+    }
+    // One-word literals: `"server"`, `endpoint == "server-backup"` (each quote tried as an
+    // opening one: a quote inside a comment never hides the next literal).
+    for (at, _) in flat.match_indices('"') {
+        let word: String = flat[at + 1..]
+            .chars()
+            .take_while(|c| c.is_ascii_lowercase() || *c == '-')
+            .collect();
+        if !word.is_empty() && flat[at + 1 + word.len()..].starts_with('"') {
+            out.insert(word);
+        }
+    }
+    out
+}
+
+/// The root paths a route-table source compares with (`"/api/info"`, constants such as
+/// `LOGIN`), as candidates.
+fn root_candidates(source: &str) -> BTreeSet<String> {
+    let source = without_test_modules(source);
+    let mut out = BTreeSet::new();
+    for (at, _) in source.match_indices("\"/") {
+        let path: String = source[at + 1..]
+            .chars()
+            .take_while(|c| c.is_ascii_lowercase() || matches!(c, '/' | '-' | '.' | '_'))
+            .collect();
+        if source[at + 1 + path.len()..].starts_with('"') {
+            out.insert(path);
+        }
+    }
+    out
+}
+
+/// Whether the router handles `method url` as a route (not `405`, not an unknown endpoint, a
+/// JSON or download answer rather than a UI file).
+fn handles(fx: &Fixture, method: &Method, url: &str) -> bool {
+    let answer = send(fx, Who::Bearer(OPERATOR), method.clone(), url, None, &[]);
+    if answer.status() == 405 {
+        return false;
+    }
+    let kind = header(&answer, "Content-Type")
+        .unwrap_or_default()
+        .to_string();
+    if answer.status() == 404 {
+        let error = serde_json::from_slice::<Value>(answer.body())
+            .ok()
+            .and_then(|v| v["error"].as_str().map(str::to_string))
+            .unwrap_or_default();
+        if error.starts_with("unknown") || error.starts_with("not found") || error.is_empty() {
+            return false;
+        }
+    }
+    kind.starts_with("application/json") || kind.starts_with("application/octet-stream")
+}
+
+/// `{x}` segments as `{}`.
+fn normalized(path: &str) -> String {
+    path.split('/')
+        .map(|s| {
+            if s.starts_with('{') && s.ends_with('}') {
+                "{}"
+            } else {
+                s
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+#[test]
+fn every_route_of_the_router_and_the_admin_api_is_described() {
+    let fx = fixture("openapi-routes");
+    let admin_sources = [
+        include_str!("admin_api.rs"),
+        include_str!("admin_api_users.rs"),
+        include_str!("admin_api_mcp.rs"),
+        include_str!("admin_api_settings.rs"),
+        include_str!("admin_api_damage.rs"),
+        include_str!("control.rs"),
+    ];
+    let root_sources = [
+        include_str!("router.rs"),
+        include_str!("user_api.rs"),
+        include_str!("mcp.rs"),
+        include_str!("openapi.rs"),
+    ];
+    let mut candidates = BTreeSet::new();
+    for source in admin_sources {
+        for path in route_candidates(source) {
+            candidates.insert(format!("/api/admin/{path}"));
+        }
+    }
+    for source in root_sources {
+        candidates.extend(root_candidates(source));
+    }
+    // The lifecycle's probes (graphersal_serve::Server::probe).
+    candidates.extend(["/healthz".to_string(), "/readyz".to_string()]);
+    let methods = [Method::Get, Method::Post, Method::Put, Method::Delete];
+    let mut handled = BTreeSet::new();
+    for path in &candidates {
+        // Not REST (MCP), or a database's mount (its own description, tested above).
+        if path == "/mcp" || path.starts_with("/db/") || path == "/" {
+            continue;
+        }
+        let url = path.replace("{}", "zz-none");
+        for method in &methods {
+            if handles(&fx, method, &url) {
+                handled.insert(format!("{} {}", method.as_str(), normalized(path)));
+            }
+        }
+    }
+    let spec = crate::openapi::server_spec("http://127.0.0.1:8484").unwrap();
+    let described: BTreeSet<String> = crate::openapi::tests::operations(&spec)
+        .into_iter()
+        .filter(|(_, path, _)| !path.starts_with("/db/"))
+        .map(|(method, path, _)| format!("{} {}", method.to_ascii_uppercase(), normalized(&path)))
+        .collect();
+    let undescribed: Vec<&String> = handled.difference(&described).collect();
+    let unrouted: Vec<&String> = described.difference(&handled).collect();
+    assert!(
+        undescribed.is_empty(),
+        "routes missing in openapi/server.json: {undescribed:#?}"
+    );
+    assert!(
+        unrouted.is_empty(),
+        "described in openapi/server.json but not routed (or not found by the scan): \
+         {unrouted:#?}"
+    );
+    assert!(
+        handled.len() > 50,
+        "the scan found {} routes",
+        handled.len()
+    );
+    // The database description's route is answered (the mount's own test checks it fully).
+    assert!(spec["paths"]["/db/{name}/openapi.json"]["get"].is_object());
 }

@@ -1,0 +1,5076 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "graphersal-server HTTP API (EXPERIMENTAL)",
+    "version": "0.0.0",
+    "summary": "The server's own routes: login, the caller's databases and the admin API.",
+    "description": "**EXPERIMENTAL.** The HTTP API of graphersal-server itself: the probes, the browser login, the caller's databases and the admin API below `/api/admin/` (admins only). `info.version` is the server's version.\n\n**The databases.** Each database (or alias) `<name>` serves its own HTTP API below `/db/<name>/` (queries, schema, saved queries, indexes, jobs, Store, ...), described by its own document at `GET /db/<name>/openapi.json` (`/api/info` names the path template as `databaseOpenapi`, `GET /api/databases` the path of each database as `openapi`); generate a client from that one for data access.\n\n**MCP.** `/mcp` (every database the caller may see) and `/db/<name>/mcp` (one database) are MCP endpoints (Streamable HTTP, JSON-RPC), not REST routes: point an MCP client at them with the same Bearer token. `404` when `server.toml [mcp] enabled = false`, `503` while `mcp.toml` switches MCP off. See the repository's `docs/mcp.md`.\n\n**Security.** Send a user token as `Authorization: Bearer <64 hex digits>` (`bearerAuth`); a browser uses the `gs_session` cookie set by `POST /api/login` (`sessionCookie`). Wrong credentials are `401`, never anonymous. The admin API needs the admin role: anonymous gets `401`, a user without the role `404` as if the API did not exist. With `server.toml [access] enabled = false` every request runs as the admin `everyone`.\n\n**Every request** but the probes is checked by `Host` (the listen address's names and `server.toml [http] allowed_hosts`) and `Origin` (a browser page of another origin): `403`. While the server starts or stops it answers `503` with `Retry-After: 1`.\n\n**Conventions.** Request bodies are JSON (`Content-Type: application/json`, at most 16 MiB; unknown fields `400`), except the uploads of import and models. An error is `{\"error\", \"help\"?}`. Every answer carries `Cache-Control: no-store`. Shared objects carry a `revision` (users and grants, aliases, each database's settings, the MCP settings): a change may name the revision it was based on (the body's `revision`, else `If-Match: \"<revision>\"`) and is refused with `409 {error, help, revision}` when someone else changed the object since; nothing changes. Every `GET` but the downloads also answers `HEAD`. The admin actions take real database names; names are case-insensitive. The repository's `docs/admin-api.md` documents every answer in full; this description is deliberately looser.",
+    "license": {
+      "name": "Apache-2.0",
+      "identifier": "Apache-2.0"
+    },
+    "x-experimental": true
+  },
+  "servers": [
+    {
+      "url": "http://127.0.0.1:8484",
+      "description": "Replaced by the URL the request came to (or the one `graphersal-server openapi` was given)."
+    }
+  ],
+  "tags": [
+    {
+      "name": "probes",
+      "description": "Liveness and readiness (no credentials, no Host check)."
+    },
+    {
+      "name": "meta",
+      "description": "The API descriptions."
+    },
+    {
+      "name": "session",
+      "description": "Login, logout, the caller and its databases."
+    },
+    {
+      "name": "databases",
+      "description": "Admin: create, list, load, settings."
+    },
+    {
+      "name": "backups",
+      "description": "Admin: backups, restore, export, server backup."
+    },
+    {
+      "name": "import",
+      "description": "Admin: imports and the import inbox."
+    },
+    {
+      "name": "models",
+      "description": "Admin: the shared embedding models."
+    },
+    {
+      "name": "runs",
+      "description": "Admin: queued and running runs."
+    },
+    {
+      "name": "aliases",
+      "description": "Admin: aliases."
+    },
+    {
+      "name": "users",
+      "description": "Admin: users, tokens and grants."
+    },
+    {
+      "name": "mcp",
+      "description": "Admin: the MCP switches and usage."
+    },
+    {
+      "name": "maintenance",
+      "description": "Admin: verify, repair, swap, recovery."
+    },
+    {
+      "name": "server",
+      "description": "Admin: the server itself."
+    }
+  ],
+  "security": [
+    {
+      "bearerAuth": []
+    },
+    {
+      "sessionCookie": []
+    }
+  ],
+  "paths": {
+    "/healthz": {
+      "get": {
+        "operationId": "getHealthz",
+        "summary": "Liveness probe",
+        "description": "Always `200 {\"status\": \"ok\"}` while the process answers. No `Host`/`Origin` check (a probe names the pod IP), no credentials.",
+        "tags": [
+          "probes"
+        ],
+        "x-graphersal-access": "probe",
+        "security": [
+          {}
+        ],
+        "responses": {
+          "200": {
+            "description": "Alive.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "const": "ok"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/readyz": {
+      "get": {
+        "operationId": "getReadyz",
+        "summary": "Readiness probe",
+        "description": "`200 {\"status\": \"ready\"}` once the server serves requests, `503 {\"status\": \"loading\" | \"stopping\"}` before and while it stops. No `Host`/`Origin` check, no credentials.",
+        "tags": [
+          "probes"
+        ],
+        "x-graphersal-access": "probe",
+        "security": [
+          {}
+        ],
+        "responses": {
+          "200": {
+            "description": "Ready.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "const": "ready"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Loading or stopping.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "enum": [
+                        "loading",
+                        "stopping"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/openapi.json": {
+      "get": {
+        "operationId": "getServerOpenapi",
+        "summary": "This description",
+        "description": "The server's own OpenAPI description (this document), `servers` set to the URL the request came to (`server.toml [http] public_scheme` and the request's `Host`). Public: it carries no data. `graphersal-server openapi --dir DIR` writes the same file offline.",
+        "tags": [
+          "meta"
+        ],
+        "x-graphersal-access": "public",
+        "security": [
+          {}
+        ],
+        "responses": {
+          "200": {
+            "description": "The OpenAPI 3.1 document.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/HostRefused"
+          }
+        }
+      }
+    },
+    "/db/{name}/openapi.json": {
+      "get": {
+        "operationId": "getDatabaseOpenapi",
+        "summary": "A database's HTTP API description",
+        "description": "The OpenAPI description of the database's own HTTP API (the engine's: queries, schema, saved queries, indexes, jobs, Store, ...), with `servers` = `<this server>/db/<name>`, the same security schemes as this document, and the access layer's answers (401, 404, 409) on every operation; every writing operation carries `x-graphersal-access: write`. `<name>` may be an alias. Needs at least a read grant on the name (anonymous: an anonymous grant), like every route below `/db/<name>/`; answered also while the database is not loaded. `graphersal-server openapi --dir DIR --db NAME` writes the same file offline. Also at `/db/{name}/api/openapi.json`.",
+        "tags": [
+          "meta"
+        ],
+        "x-graphersal-access": "any",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "A database's name or an alias (an alias answers its database's row)."
+          }
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionCookie": []
+          },
+          {}
+        ],
+        "responses": {
+          "200": {
+            "description": "The database's OpenAPI 3.1 document.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/DatabaseUnauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/HostRefused"
+          },
+          "404": {
+            "$ref": "#/components/responses/DatabaseNotFound"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/api/login": {
+      "post": {
+        "operationId": "postLogin",
+        "summary": "Browser login",
+        "description": "Starts a browser session for a user token: the answer sets the cookie `gs_session` (`HttpOnly; SameSite=Strict; Path=/`, `Max-Age` = `[sessions] lifetime_secs`, else 400 days; `Secure` with `public_scheme = \"https\"`). Clients that are not browsers send `Authorization: Bearer <token>` instead and never need this. Runs before authentication: a stale cookie does not block it.",
+        "tags": [
+          "session"
+        ],
+        "x-graphersal-access": "public",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "token": {
+                    "type": "string",
+                    "description": "The user token (64 hex digits)."
+                  }
+                },
+                "required": [
+                  "token"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "security": [
+          {}
+        ],
+        "responses": {
+          "200": {
+            "description": "Logged in; `Set-Cookie: gs_session=...`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "principal": {
+                      "$ref": "#/components/schemas/Principal"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/BadCredentials"
+          },
+          "403": {
+            "$ref": "#/components/responses/HostRefused"
+          },
+          "405": {
+            "$ref": "#/components/responses/NotAllowed"
+          },
+          "500": {
+            "$ref": "#/components/responses/Failure"
+          }
+        }
+      }
+    },
+    "/api/logout": {
+      "post": {
+        "operationId": "postLogout",
+        "summary": "Browser logout",
+        "description": "Ends the browser session of the request's `gs_session` cookie (if any) and clears the cookie (`Max-Age=0`). `loggedOut: false`: there was no live session.",
+        "tags": [
+          "session"
+        ],
+        "x-graphersal-access": "public",
+        "security": [
+          {}
+        ],
+        "responses": {
+          "200": {
+            "description": "Logged out.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "loggedOut": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/HostRefused"
+          },
+          "405": {
+            "$ref": "#/components/responses/NotAllowed"
+          },
+          "500": {
+            "$ref": "#/components/responses/Failure"
+          }
+        }
+      }
+    },
+    "/api/info": {
+      "get": {
+        "operationId": "getInfo",
+        "summary": "Server identity and the caller",
+        "description": "The server's identity, its UI profile for the caller and the caller (`principal`). Anonymous gets only what the login page needs: `server`, `protocol`, `dev`, `experimental`, `uiProfile`, `principal`, `login`, `openapi`, `databaseOpenapi`. `openapi` is the path of this description, `databaseOpenapi` the path template of a database's (`/db/{name}/openapi.json`).",
+        "tags": [
+          "session"
+        ],
+        "x-graphersal-access": "any",
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionCookie": []
+          },
+          {}
+        ],
+        "responses": {
+          "200": {
+            "description": "The server and the caller.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Info"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/BadCredentials"
+          },
+          "403": {
+            "$ref": "#/components/responses/HostRefused"
+          },
+          "405": {
+            "$ref": "#/components/responses/NotAllowed"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/api/databases": {
+      "get": {
+        "operationId": "getMyDatabases",
+        "summary": "The databases the caller may reach",
+        "description": "The databases and aliases the caller may reach (a grant on the name or on `*`; an alias also through a grant on the alias itself), sorted by name, with the caller's effective level, the playground path and the path of each database's OpenAPI description. Anonymous: the ones its anonymous grants open (often none: an empty list).",
+        "tags": [
+          "session"
+        ],
+        "x-graphersal-access": "any",
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionCookie": []
+          },
+          {}
+        ],
+        "responses": {
+          "200": {
+            "description": "The caller's databases.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "databases": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/MyDatabase"
+                      }
+                    }
+                  },
+                  "required": [
+                    "databases"
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/BadCredentials"
+          },
+          "403": {
+            "$ref": "#/components/responses/HostRefused"
+          },
+          "405": {
+            "$ref": "#/components/responses/NotAllowed"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/api/admin/databases": {
+      "get": {
+        "operationId": "listDatabases",
+        "summary": "List the databases",
+        "description": "Every database (rows sorted by name, alias rows included), the aliases, the aliases' revision and the problems of the server directory.",
+        "tags": [
+          "databases"
+        ],
+        "x-graphersal-access": "admin",
+        "responses": {
+          "200": {
+            "description": "The databases.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "databases": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Entry"
+                      }
+                    },
+                    "aliases": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "aliasesRevision": {
+                      "type": "string"
+                    },
+                    "problems": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/HostRefused"
+          },
+          "404": {
+            "$ref": "#/components/responses/AdminNotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/Failure"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      },
+      "post": {
+        "operationId": "createDatabase",
+        "summary": "Create a database",
+        "description": "A new empty database (state `unloaded`). A layer (`kind: layer` or `base` given) is made over a `role = base` database. A new name never inherits grants left on it (`leftoverGrantsRemoved`).",
+        "tags": [
+          "databases"
+        ],
+        "x-graphersal-access": "admin",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "kind": {
+                    "enum": [
+                      "plain",
+                      "layer"
+                    ]
+                  },
+                  "role": {
+                    "enum": [
+                      "normal",
+                      "base"
+                    ]
+                  },
+                  "base": {
+                    "type": "string",
+                    "description": "The base database of a layer."
+                  },
+                  "schema": {
+                    "description": "A Graphersal schema (JSON)."
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "autoLoad": {
+                    "type": "boolean"
+                  },
+                  "readOnly": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "name"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The new database.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Entry"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/HostRefused"
+          },
+          "404": {
+            "$ref": "#/components/responses/AdminNotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Refused"
+          },
+          "500": {
+            "$ref": "#/components/responses/Failure"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/api/admin/databases/{name}": {
+      "get": {
+        "operationId": "getDatabase",
+        "summary": "One database",
+        "description": "The database's listing row (`{name}` may be an alias: an alias row). `ETag`: its `revision`.",
+        "tags": [
+          "databases"
+        ],
+        "x-graphersal-access": "admin",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "A database's name or an alias (an alias answers its database's row)."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The row.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Entry"
+                }
+              }
+            },
+            "headers": {
+              "ETag": {
+                "$ref": "#/components/headers/ETag"
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/HostRefused"
+          },
+          "404": {
+            "$ref": "#/components/responses/AdminNotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/Failure"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "deleteDatabase",
+        "summary": "Delete a database",
+        "description": "Moves an unloaded database to `trash/`; every grant on it goes with it.",
+        "tags": [
+          "databases"
+        ],
+        "x-graphersal-access": "admin",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "A database's real name (case-insensitive; an alias is not followed unless the operation says so)."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Deleted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "trash": {
+                      "type": "string"
+                    },
+                    "grantsRemoved": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/HostRefused"
+          },
+          "404": {
+            "$ref": "#/components/responses/AdminNotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Refused"
+          },
+          "500": {
+            "$ref": "#/components/responses/Failure"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/api/admin/databases/{name}/clone": {
+      "post": {
+        "operationId": "cloneDatabase",
+        "summary": "Clone a database",
+        "description": "A fork of the database's latest state under a new name (it may be loaded); auto-load off.",
+        "tags": [
+          "databases"
+        ],
+        "x-graphersal-access": "admin",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "A database's real name (case-insensitive; an alias is not followed unless the operation says so)."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "name"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The clone.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Entry"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/HostRefused"
+          },
+          "404": {
+            "$ref": "#/components/responses/AdminNotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Refused"
+          },
+          "500": {
+            "$ref": "#/components/responses/Failure"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/api/admin/databases/{name}/load": {
+      "post": {
+        "operationId": "loadDatabase",
+        "summary": "Load a database",
+        "description": "Starts loading the database (`202`, `load: started | already-loading`; poll the row) or answers `200` with `load: already-loaded`. Offline: `409`.",
+        "tags": [
+          "databases"
+        ],
+        "x-graphersal-access": "admin",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "A database's real name (case-insensitive; an alias is not followed unless the operation says so)."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Already loaded.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Entry"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "load": {
+                          "const": "already-loaded"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Loading.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Entry"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "load": {
+                          "enum": [
+                            "started",
+                            "already-loading"
+                          ]
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/HostRefused"
+          },
+          "404": {
+            "$ref": "#/components/responses/AdminNotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Refused"
+          },
+          "500": {
+            "$ref": "#/components/responses/Failure"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/api/admin/databases/{name}/unload": {
+      "post": {
+        "operationId": "unloadDatabase",
+        "summary": "Unload a database",
+        "description": "Unloads the database (running requests finish first). `unloaded: false`: it was not loaded.",
+        "tags": [
+          "databases"
+        ],
+        "x-graphersal-access": "admin",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "A database's real name (case-insensitive; an alias is not followed unless the operation says so)."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Unloaded.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Entry"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "unloaded": {
+                          "type": "boolean"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/HostRefused"
+          },
+          "404": {
+            "$ref": "#/components/responses/AdminNotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Refused"
+          },
+          "500": {
+            "$ref": "#/components/responses/Failure"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/api/admin/databases/{name}/promote": {
+      "post": {
+        "operationId": "promoteDatabase",
+        "summary": "Promote to a base",
+        "description": "An UNLOADED plain database becomes a base (`role: base`, read-only) for good: layers are made over it. One way.",
+        "tags": [
+          "databases"
+        ],
+        "x-graphersal-access": "admin",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "A database's real name (case-insensitive; an alias is not followed unless the operation says so)."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Now a base.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Entry"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/HostRefused"
+          },
+          "404": {
+            "$ref": "#/components/responses/AdminNotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Refused"
+          },
+          "500": {
+            "$ref": "#/components/responses/Failure"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/api/admin/databases/{name}/read-only": {
+      "put": {
+        "operationId": "setReadOnly",
+        "summary": "Turn read-only on or off",
+        "description": "A loaded database is flipped at once. A base refuses `false`.",
+        "tags": [
+          "databases"
+        ],
+        "x-graphersal-access": "admin",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "A database's real name (case-insensitive; an alias is not followed unless the operation says so)."
+          },
+          {
+            "$ref": "#/components/parameters/IfMatch"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "readOnly": {
+                    "type": "boolean"
+                  },
+                  "revision": {
+                    "type": "string",
+                    "description": "The revision this change is based on (else the `If-Match` header; neither: no check). A stale one is `409 RevisionConflict`, nothing changed."
+                  }
+                },
+                "required": [
+                  "readOnly"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The row with its new revision.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Entry"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/HostRefused"
+          },
+          "404": {
+            "$ref": "#/components/responses/AdminNotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/RevisionConflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/Failure"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/api/admin/databases/{name}/auto-load": {
+      "put": {
+        "operationId": "setAutoLoad",
+        "summary": "Turn auto-load on or off",
+        "description": "Whether the database is loaded at server start.",
+        "tags": [
+          "databases"
+        ],
+        "x-graphersal-access": "admin",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "A database's real name (case-insensitive; an alias is not followed unless the operation says so)."
+          },
+          {
+            "$ref": "#/components/parameters/IfMatch"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "autoLoad": {
+                    "type": "boolean"
+                  },
+                  "revision": {
+                    "type": "string",
+                    "description": "The revision this change is based on (else the `If-Match` header; neither: no check). A stale one is `409 RevisionConflict`, nothing changed."
+                  }
+                },
+                "required": [
+                  "autoLoad"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The row with its new revision.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Entry"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/HostRefused"
+          },
+          "404": {
+            "$ref": "#/components/responses/AdminNotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/RevisionConflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/Failure"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/api/admin/databases/{name}/settings": {
+      "get": {
+        "operationId": "getSettings",
+        "summary": "Everything about a database",
+        "description": "The Database settings view: the row, aliases, layers, query limits (override, server default, effective, in effect), MCP rows, grants that reach it, admins, backups, the Store's creation parameters, recovery. `{name}` may be an alias (`requested`). `ETag`: its `revision`.",
+        "tags": [
+          "databases"
+        ],
+        "x-graphersal-access": "admin",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "A database's name or an alias (an alias answers its database's row)."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The settings.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Settings"
+                }
+              }
+            },
+            "headers": {
+              "ETag": {
+                "$ref": "#/components/headers/ETag"
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/HostRefused"
+          },
+          "404": {
+            "$ref": "#/components/responses/AdminNotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/Failure"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      },
+      "put": {
+        "operationId": "changeSettings",
+        "summary": "Change a database's settings",
+        "description": "All given fields in ONE atomic write of `database.toml`. `limits` apply at the database's next load (`limits.reloadNeeded`); the rest at once (`autoLoad` at the next start).",
+        "tags": [
+          "databases"
+        ],
+        "x-graphersal-access": "admin",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "A database's real name (case-insensitive; an alias is not followed unless the operation says so)."
+          },
+          {
+            "$ref": "#/components/parameters/IfMatch"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "description": {
+                    "type": "string",
+                    "description": "One line, at most 1000 characters; `\"\"` clears it."
+                  },
+                  "readOnly": {
+                    "type": "boolean"
+                  },
+                  "autoLoad": {
+                    "type": "boolean"
+                  },
+                  "limits": {
+                    "type": "object",
+                    "description": "Query limit overrides: `timeout_ms`, `max_operations`, `max_string_size`, `max_array_size`, `max_map_size`, `max_traversers`, `max_materialized_bytes`, `max_value_depth`; a whole number sets it (0 = no limit), `null` clears it.",
+                    "additionalProperties": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    }
+                  },
+                  "revision": {
+                    "type": "string",
+                    "description": "The revision this change is based on (else the `If-Match` header; neither: no check). A stale one is `409 RevisionConflict`, nothing changed."
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The settings plus `changed`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Settings"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "changed": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/HostRefused"
+          },
+          "404": {
+            "$ref": "#/components/responses/AdminNotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/RevisionConflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/Failure"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/api/admin/databases/{name}/backup": {
+      "post": {
+        "operationId": "backupDatabase",
+        "summary": "Back up a database",
+        "description": "A verified ZIP backup of the latest state into `backups/<name>/<UTC time>.zip` (it may be loaded).",
+        "tags": [
+          "backups"
+        ],
+        "x-graphersal-access": "admin",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "A database's real name (case-insensitive; an alias is not followed unless the operation says so)."
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "The backup.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Backup"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/HostRefused"
+          },
+          "404": {
+            "$ref": "#/components/responses/AdminNotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Refused"
+          },
+          "500": {
+            "$ref": "#/components/responses/Failure"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/api/admin/databases/{name}/backups": {
+      "get": {
+        "operationId": "listBackups",
+        "summary": "A database's backups",
+        "description": "Oldest first; also for the name of a deleted database.",
+        "tags": [
+          "backups"
+        ],
+        "x-graphersal-access": "admin",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "A database's real name (case-insensitive; an alias is not followed unless the operation says so)."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The backups.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "database": {
+                      "type": "string"
+                    },
+                    "backups": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Backup"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/HostRefused"
+          },
+          "404": {
+            "$ref": "#/components/responses/AdminNotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/Failure"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/api/admin/databases/{name}/restore": {
+      "post": {
+        "operationId": "restoreBackup",
+        "summary": "Restore a backup",
+        "description": "Restores the backup into the database itself (it must be unloaded; the old one moves to `trash/`) or into the new database `name`. A layer's backup needs its base (checked by identity). Never brings grants back.",
+        "tags": [
+          "backups"
+        ],
+        "x-graphersal-access": "admin",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "A database's real name (case-insensitive; an alias is not followed unless the operation says so)."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "backup": {
+                    "type": "string",
+                    "description": "A backup name from the listing."
+                  },
+                  "name": {
+                    "type": "string",
+                    "description": "A new database's name."
+                  }
+                },
+                "required": [
+                  "backup"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The restored database.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Entry"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "restoredFrom": {
+                          "type": "object",
+                          "properties": {
+                            "database": {
+                              "type": "string"
+                            },
+                            "backup": {
+                              "type": "string"
+                            }
+                          }
+                        },
+                        "replaced": {
+                          "type": "boolean"
+                        },
+                        "trash": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/HostRefused"
+          },
+          "404": {
+            "$ref": "#/components/responses/AdminNotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Refused"
+          },
+          "500": {
+            "$ref": "#/components/responses/Failure"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/api/admin/databases/{name}/export": {
+      "get": {
+        "operationId": "exportDatabase",
+        "summary": "Export a packed snapshot",
+        "description": "The database's latest state as a `.gsnap` download (`Content-Disposition: attachment`, `X-Graphersal-Snapshot: full | layer`, `X-Graphersal-Models: included | excluded`). A layer is a layer snapshot unless `materialize=true`.",
+        "tags": [
+          "backups"
+        ],
+        "x-graphersal-access": "admin",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "A database's real name (case-insensitive; an alias is not followed unless the operation says so)."
+          },
+          {
+            "name": "models",
+            "in": "query",
+            "schema": {
+              "type": "boolean",
+              "default": true
+            },
+            "description": "Carry the embedding models' blobs."
+          },
+          {
+            "name": "materialize",
+            "in": "query",
+            "schema": {
+              "type": "boolean",
+              "default": false
+            },
+            "description": "A layer: a standalone full snapshot instead of a layer snapshot."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The snapshot file.",
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/HostRefused"
+          },
+          "404": {
+            "$ref": "#/components/responses/AdminNotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Refused"
+          },
+          "500": {
+            "$ref": "#/components/responses/Failure"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/api/admin/server-backup": {
+      "get": {
+        "operationId": "serverBackup",
+        "summary": "Download a server backup",
+        "description": "ONE ZIP archive of the server's configuration (server.toml, aliases.toml, access.toml, mcp.toml, every database.toml, the models list, manifest.json); `withDatabases=1` adds a verified backup of every database and the model blobs. It holds the users' token HASHES: the operator token and admin users only (`everyone` of a server without access control: `403`).",
+        "tags": [
+          "backups"
+        ],
+        "x-graphersal-access": "admin",
+        "parameters": [
+          {
+            "name": "withDatabases",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "1",
+                "true",
+                "yes",
+                "0",
+                "false",
+                "no"
+              ]
+            },
+            "description": "Add every database's data."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The archive (`X-Graphersal-Server-Backup: config | with-databases`).",
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "description": "The principal `everyone` (access control off), or a refused Host/Origin.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/AdminNotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/Failure"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/api/admin/import": {
+      "post": {
+        "operationId": "importDatabase",
+        "summary": "Import a database",
+        "description": "A new database from a packed snapshot (`.gsnap`; a layer snapshot needs its base), a Store (directory or `.gstore`), GraphSON or GraphML. Either the file itself as the body (any content type but JSON; the options in the query; at most `server.toml [limits] upload_bytes`, else `413`), or JSON naming a file on the server's machine (`path`, absolute) or an entry of the import inbox (`inbox`). `role=base` makes a base of a plain source.",
+        "tags": [
+          "import"
+        ],
+        "x-graphersal-access": "admin",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Upload: the new database's name."
+          },
+          {
+            "name": "base",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Upload: the base database of a layer snapshot."
+          },
+          {
+            "name": "format",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "snapshot",
+                "store",
+                "graphson",
+                "graphml"
+              ]
+            },
+            "description": "Upload: overrides the detection."
+          },
+          {
+            "name": "description",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "role",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "normal",
+                "base"
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "path": {
+                    "type": "string",
+                    "description": "An absolute path on the server's machine."
+                  },
+                  "inbox": {
+                    "type": "string",
+                    "description": "One entry name of `imports/`."
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "base": {
+                    "type": "string"
+                  },
+                  "format": {
+                    "enum": [
+                      "snapshot",
+                      "store",
+                      "graphson",
+                      "graphml"
+                    ]
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "role": {
+                    "enum": [
+                      "normal",
+                      "base"
+                    ]
+                  }
+                },
+                "required": [
+                  "name"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "application/octet-stream": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The new database.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Entry"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "import": {
+                          "$ref": "#/components/schemas/ImportReport"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/HostRefused"
+          },
+          "404": {
+            "$ref": "#/components/responses/AdminNotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Refused"
+          },
+          "413": {
+            "$ref": "#/components/responses/TooLarge"
+          },
+          "415": {
+            "$ref": "#/components/responses/Unsupported"
+          },
+          "500": {
+            "$ref": "#/components/responses/Failure"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/api/admin/imports": {
+      "get": {
+        "operationId": "listInbox",
+        "summary": "The import inbox",
+        "description": "The entries of `imports/` (hidden entries and links leading outside it are left out).",
+        "tags": [
+          "import"
+        ],
+        "x-graphersal-access": "admin",
+        "responses": {
+          "200": {
+            "description": "The inbox.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "dir": {
+                      "type": "string"
+                    },
+                    "imports": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "name": {
+                            "type": "string"
+                          },
+                          "kind": {
+                            "type": [
+                              "string",
+                              "null"
+                            ],
+                            "enum": [
+                              "snapshot",
+                              "store",
+                              "graphson",
+                              "graphml",
+                              null
+                            ]
+                          },
+                          "directory": {
+                            "type": "boolean"
+                          },
+                          "bytes": {
+                            "type": "integer"
+                          },
+                          "modified": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/HostRefused"
+          },
+          "404": {
+            "$ref": "#/components/responses/AdminNotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/Failure"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/api/admin/models": {
+      "get": {
+        "operationId": "listModels",
+        "summary": "The shared embedding models",
+        "description": "Every model blob of `models/blobs/` and the databases waiting for a missing model (rebuilds `models/models.toml`).",
+        "tags": [
+          "models"
+        ],
+        "x-graphersal-access": "admin",
+        "responses": {
+          "200": {
+            "description": "The models.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "models": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Model"
+                      }
+                    },
+                    "missing": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "database": {
+                            "type": "string"
+                          },
+                          "model": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/HostRefused"
+          },
+          "404": {
+            "$ref": "#/components/responses/AdminNotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/Failure"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      },
+      "post": {
+        "operationId": "addModel",
+        "summary": "Add a model",
+        "description": "JSON: a Model2Vec directory or a `.gsnap` on the server's machine (`path`), or `repo` alone (a model `models/` holds). Or the file itself as the body (any content type but JSON): a `.gsnap` carrying models or a tar archive (`.tar`, `.tar.gz`) of a model directory; options in the query. Resolves the `needs-model` databases whose model it is.",
+        "tags": [
+          "models"
+        ],
+        "x-graphersal-access": "admin",
+        "parameters": [
+          {
+            "name": "repo",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "license",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "format",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "gsnap",
+                "tar"
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "path": {
+                    "type": "string"
+                  },
+                  "repo": {
+                    "type": "string"
+                  },
+                  "license": {
+                    "type": "string"
+                  }
+                },
+                "additionalProperties": false
+              }
+            },
+            "application/octet-stream": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "From a repository.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelsAdded"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "From a path or an upload.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelsAdded"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/HostRefused"
+          },
+          "404": {
+            "$ref": "#/components/responses/AdminNotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Refused"
+          },
+          "413": {
+            "$ref": "#/components/responses/TooLarge"
+          },
+          "500": {
+            "$ref": "#/components/responses/Failure"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/api/admin/models/{model}": {
+      "delete": {
+        "operationId": "removeModel",
+        "summary": "Remove a model",
+        "description": "Removes the model's blobs; `409` while a database uses it.",
+        "tags": [
+          "models"
+        ],
+        "x-graphersal-access": "admin",
+        "parameters": [
+          {
+            "name": "model",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "A model's repository (for example `minishlab/potion-base-8M`: the `/` is sent as it is, the path ends with the repository) or a blob's SHA-256 hex."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Removed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "model": {
+                      "type": "string"
+                    },
+                    "removed": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "bytes": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/HostRefused"
+          },
+          "404": {
+            "$ref": "#/components/responses/AdminNotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Refused"
+          },
+          "500": {
+            "$ref": "#/components/responses/Failure"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/api/admin/runs": {
+      "get": {
+        "operationId": "listRuns",
+        "summary": "Every loaded database's runs",
+        "description": "The queued and running runs (queries, layouts, MCP tool calls) of every loaded database, every client's.",
+        "tags": [
+          "runs"
+        ],
+        "x-graphersal-access": "admin",
+        "responses": {
+          "200": {
+            "description": "The runs.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "runs": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Run"
+                      }
+                    },
+                    "textHeadChars": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/HostRefused"
+          },
+          "404": {
+            "$ref": "#/components/responses/AdminNotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/Failure"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/api/admin/databases/{name}/runs": {
+      "get": {
+        "operationId": "listDatabaseRuns",
+        "summary": "One database's runs",
+        "description": "The runs of one database.",
+        "tags": [
+          "runs"
+        ],
+        "x-graphersal-access": "admin",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "A database's real name (case-insensitive; an alias is not followed unless the operation says so)."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The runs.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "database": {
+                      "type": "string"
+                    },
+                    "loaded": {
+                      "type": "boolean"
+                    },
+                    "runs": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Run"
+                      }
+                    },
+                    "textHeadChars": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/HostRefused"
+          },
+          "404": {
+            "$ref": "#/components/responses/AdminNotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/Failure"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/api/admin/databases/{name}/runs/cancel": {
+      "post": {
+        "operationId": "cancelRun",
+        "summary": "Cancel a run",
+        "description": "`cancelled: false`: no such run now.",
+        "tags": [
+          "runs"
+        ],
+        "x-graphersal-access": "admin",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "A database's real name (case-insensitive; an alias is not followed unless the operation says so)."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "id"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Cancelled or not.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "database": {
+                      "type": "string"
+                    },
+                    "id": {
+                      "type": "integer"
+                    },
+                    "cancelled": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/HostRefused"
+          },
+          "404": {
+            "$ref": "#/components/responses/AdminNotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/Failure"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/api/admin/aliases": {
+      "get": {
+        "operationId": "listAliases",
+        "summary": "The aliases",
+        "description": "Every alias and the database it names. `ETag`: the revision.",
+        "tags": [
+          "aliases"
+        ],
+        "x-graphersal-access": "admin",
+        "responses": {
+          "200": {
+            "description": "The aliases.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "aliases": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "revision": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            },
+            "headers": {
+              "ETag": {
+                "$ref": "#/components/headers/ETag"
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/HostRefused"
+          },
+          "404": {
+            "$ref": "#/components/responses/AdminNotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/Failure"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/api/admin/aliases/{alias}": {
+      "put": {
+        "operationId": "setAlias",
+        "summary": "Create or flip an alias",
+        "description": "`/db/<alias>/...`, MCP sessions on it and the grants on the alias follow at once.",
+        "tags": [
+          "aliases"
+        ],
+        "x-graphersal-access": "admin",
+        "parameters": [
+          {
+            "name": "alias",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "The alias."
+          },
+          {
+            "$ref": "#/components/parameters/IfMatch"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "target": {
+                    "type": "string"
+                  },
+                  "revision": {
+                    "type": "string",
+                    "description": "The revision this change is based on (else the `If-Match` header; neither: no check). A stale one is `409 RevisionConflict`, nothing changed."
+                  }
+                },
+                "required": [
+                  "target"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Set.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "alias": {
+                      "type": "string"
+                    },
+                    "target": {
+                      "type": "string"
+                    },
+                    "leftoverGrantsRemoved": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/HostRefused"
+          },
+          "404": {
+            "$ref": "#/components/responses/AdminNotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/RevisionConflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/Failure"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "removeAlias",
+        "summary": "Remove an alias",
+        "description": "The grants on the alias go with it.",
+        "tags": [
+          "aliases"
+        ],
+        "x-graphersal-access": "admin",
+        "parameters": [
+          {
+            "name": "alias",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "The alias."
+          },
+          {
+            "$ref": "#/components/parameters/IfMatch"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Removed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "alias": {
+                      "type": "string"
+                    },
+                    "removed": {
+                      "type": "boolean"
+                    },
+                    "grantsRemoved": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/HostRefused"
+          },
+          "404": {
+            "$ref": "#/components/responses/AdminNotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/RevisionConflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/Failure"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/api/admin/aliases/{alias}/rename": {
+      "post": {
+        "operationId": "renameAlias",
+        "summary": "Rename an alias",
+        "description": "Same database, new name; MCP sessions and grants move with it.",
+        "tags": [
+          "aliases"
+        ],
+        "x-graphersal-access": "admin",
+        "parameters": [
+          {
+            "name": "alias",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "The alias."
+          },
+          {
+            "$ref": "#/components/parameters/IfMatch"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "revision": {
+                    "type": "string",
+                    "description": "The revision this change is based on (else the `If-Match` header; neither: no check). A stale one is `409 RevisionConflict`, nothing changed."
+                  }
+                },
+                "required": [
+                  "name"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Renamed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "alias": {
+                      "type": "string"
+                    },
+                    "renamedFrom": {
+                      "type": "string"
+                    },
+                    "target": {
+                      "type": "string"
+                    },
+                    "mcpSessionsMoved": {
+                      "type": "integer"
+                    },
+                    "grantsMoved": {
+                      "type": "integer"
+                    },
+                    "leftoverGrantsRemoved": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/HostRefused"
+          },
+          "404": {
+            "$ref": "#/components/responses/AdminNotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/RevisionConflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/Failure"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/api/admin/users": {
+      "get": {
+        "operationId": "listUsers",
+        "summary": "Users and grants",
+        "description": "Every user, every grant (also of `anonymous`) and the revision of `access.toml`. `ETag`: the revision.",
+        "tags": [
+          "users"
+        ],
+        "x-graphersal-access": "admin",
+        "responses": {
+          "200": {
+            "description": "The users.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "users": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/User"
+                      }
+                    },
+                    "grants": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Grant"
+                      }
+                    },
+                    "revision": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            },
+            "headers": {
+              "ETag": {
+                "$ref": "#/components/headers/ETag"
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/HostRefused"
+          },
+          "404": {
+            "$ref": "#/components/responses/AdminNotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/Failure"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      },
+      "post": {
+        "operationId": "addUser",
+        "summary": "Add a user",
+        "description": "A new user with a new token (256 random bits, 64 hex digits), in this answer only.",
+        "tags": [
+          "users"
+        ],
+        "x-graphersal-access": "admin",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IfMatch"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "admin": {
+                    "type": "boolean"
+                  },
+                  "revision": {
+                    "type": "string",
+                    "description": "The revision this change is based on (else the `If-Match` header; neither: no check). A stale one is `409 RevisionConflict`, nothing changed."
+                  }
+                },
+                "required": [
+                  "name"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The user and its token.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/User"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "token": {
+                          "type": "string",
+                          "description": "Shown once."
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/HostRefused"
+          },
+          "404": {
+            "$ref": "#/components/responses/AdminNotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/RevisionConflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/Failure"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/api/admin/users/{user}": {
+      "get": {
+        "operationId": "getUser",
+        "summary": "One user",
+        "description": "The user.",
+        "tags": [
+          "users"
+        ],
+        "x-graphersal-access": "admin",
+        "parameters": [
+          {
+            "name": "user",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "The user's name."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The user.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/User"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/HostRefused"
+          },
+          "404": {
+            "$ref": "#/components/responses/AdminNotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/Failure"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "removeUser",
+        "summary": "Remove a user",
+        "description": "Removes the user and its grants; its browser and MCP sessions end. The last admin is refused (`409`).",
+        "tags": [
+          "users"
+        ],
+        "x-graphersal-access": "admin",
+        "parameters": [
+          {
+            "name": "user",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "The user's name."
+          },
+          {
+            "$ref": "#/components/parameters/IfMatch"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Removed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "removed": {
+                      "type": "boolean"
+                    },
+                    "grantsRemoved": {
+                      "type": "integer"
+                    },
+                    "mcpSessionsEnded": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/HostRefused"
+          },
+          "404": {
+            "$ref": "#/components/responses/AdminNotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/RevisionConflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/Failure"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/api/admin/users/{user}/token": {
+      "post": {
+        "operationId": "issueToken",
+        "summary": "Replace a user's token",
+        "description": "A new token (shown once); the old one stops working, its sessions end.",
+        "tags": [
+          "users"
+        ],
+        "x-graphersal-access": "admin",
+        "parameters": [
+          {
+            "name": "user",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "The user's name."
+          },
+          {
+            "$ref": "#/components/parameters/IfMatch"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The user, its new token.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/User"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "token": {
+                          "type": "string"
+                        },
+                        "mcpSessionsEnded": {
+                          "type": "integer"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/HostRefused"
+          },
+          "404": {
+            "$ref": "#/components/responses/AdminNotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/RevisionConflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/Failure"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "revokeToken",
+        "summary": "Take a user's token away",
+        "description": "The user keeps its grants but cannot authenticate (`hasToken: false`).",
+        "tags": [
+          "users"
+        ],
+        "x-graphersal-access": "admin",
+        "parameters": [
+          {
+            "name": "user",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "The user's name."
+          },
+          {
+            "$ref": "#/components/parameters/IfMatch"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The user.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/User"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "mcpSessionsEnded": {
+                          "type": "integer"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/HostRefused"
+          },
+          "404": {
+            "$ref": "#/components/responses/AdminNotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/RevisionConflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/Failure"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/api/admin/users/{user}/admin": {
+      "put": {
+        "operationId": "setAdmin",
+        "summary": "Give or take the admin role",
+        "description": "Keeps the other roles.",
+        "tags": [
+          "users"
+        ],
+        "x-graphersal-access": "admin",
+        "parameters": [
+          {
+            "name": "user",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "The user's name."
+          },
+          {
+            "$ref": "#/components/parameters/IfMatch"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "admin": {
+                    "type": "boolean"
+                  },
+                  "revision": {
+                    "type": "string",
+                    "description": "The revision this change is based on (else the `If-Match` header; neither: no check). A stale one is `409 RevisionConflict`, nothing changed."
+                  }
+                },
+                "required": [
+                  "admin"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The user.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/User"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/HostRefused"
+          },
+          "404": {
+            "$ref": "#/components/responses/AdminNotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/RevisionConflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/Failure"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/api/admin/users/{user}/roles": {
+      "put": {
+        "operationId": "setRoles",
+        "summary": "Set a user's roles",
+        "description": "Replaces every role.",
+        "tags": [
+          "users"
+        ],
+        "x-graphersal-access": "admin",
+        "parameters": [
+          {
+            "name": "user",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "The user's name."
+          },
+          {
+            "$ref": "#/components/parameters/IfMatch"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "roles": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "revision": {
+                    "type": "string",
+                    "description": "The revision this change is based on (else the `If-Match` header; neither: no check). A stale one is `409 RevisionConflict`, nothing changed."
+                  }
+                },
+                "required": [
+                  "roles"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The user.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/User"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/HostRefused"
+          },
+          "404": {
+            "$ref": "#/components/responses/AdminNotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/RevisionConflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/Failure"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/api/admin/grants": {
+      "get": {
+        "operationId": "listGrants",
+        "summary": "The grants",
+        "description": "Every grant. `ETag`: the revision of `access.toml`.",
+        "tags": [
+          "users"
+        ],
+        "x-graphersal-access": "admin",
+        "responses": {
+          "200": {
+            "description": "The grants.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "grants": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Grant"
+                      }
+                    },
+                    "revision": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            },
+            "headers": {
+              "ETag": {
+                "$ref": "#/components/headers/ETag"
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/HostRefused"
+          },
+          "404": {
+            "$ref": "#/components/responses/AdminNotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/Failure"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      },
+      "post": {
+        "operationId": "grant",
+        "summary": "Grant access",
+        "description": "A new grant, or the level of the existing one replaced. `subject` may be a bare user name.",
+        "tags": [
+          "users"
+        ],
+        "x-graphersal-access": "admin",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IfMatch"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "subject": {
+                    "type": "string"
+                  },
+                  "database": {
+                    "type": "string",
+                    "description": "A real name, an alias, or `*`."
+                  },
+                  "level": {
+                    "enum": [
+                      "read",
+                      "write"
+                    ]
+                  },
+                  "revision": {
+                    "type": "string",
+                    "description": "The revision this change is based on (else the `If-Match` header; neither: no check). A stale one is `409 RevisionConflict`, nothing changed."
+                  }
+                },
+                "required": [
+                  "subject",
+                  "database",
+                  "level"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The grant.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Grant"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/HostRefused"
+          },
+          "404": {
+            "$ref": "#/components/responses/AdminNotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/RevisionConflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/Failure"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/api/admin/grants/{subject}/{database}": {
+      "delete": {
+        "operationId": "revoke",
+        "summary": "Revoke a grant",
+        "description": "`revoked: false`: there was none.",
+        "tags": [
+          "users"
+        ],
+        "x-graphersal-access": "admin",
+        "parameters": [
+          {
+            "name": "subject",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "The grant's subject: `user:<name>` (or a bare user name), `anonymous`, `role:<r>`, `group:<g>`; percent-encode `:` as `%3A` if your client needs to."
+          },
+          {
+            "name": "database",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "The grant's database: a real name, an alias, or `*`."
+          },
+          {
+            "$ref": "#/components/parameters/IfMatch"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Revoked or not.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "subject": {
+                      "type": "string"
+                    },
+                    "database": {
+                      "type": "string"
+                    },
+                    "revoked": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/HostRefused"
+          },
+          "404": {
+            "$ref": "#/components/responses/AdminNotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/RevisionConflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/Failure"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/api/admin/mcp": {
+      "get": {
+        "operationId": "getMcp",
+        "summary": "MCP switches and usage",
+        "description": "The runtime switches of `mcp.toml`, every name's MCP settings and the usage statistics since the start. `ETag`: its revision.",
+        "tags": [
+          "mcp"
+        ],
+        "x-graphersal-access": "admin",
+        "responses": {
+          "200": {
+            "description": "The MCP state.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/McpState"
+                }
+              }
+            },
+            "headers": {
+              "ETag": {
+                "$ref": "#/components/headers/ETag"
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/HostRefused"
+          },
+          "404": {
+            "$ref": "#/components/responses/AdminNotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/Failure"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      },
+      "put": {
+        "operationId": "switchMcp",
+        "summary": "Turn MCP on or off",
+        "description": "Off: `/mcp` and `/db/<name>/mcp` answer `503`; open sessions are kept.",
+        "tags": [
+          "mcp"
+        ],
+        "x-graphersal-access": "admin",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IfMatch"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "enabled": {
+                    "type": "boolean"
+                  },
+                  "revision": {
+                    "type": "string",
+                    "description": "The revision this change is based on (else the `If-Match` header; neither: no check). A stale one is `409 RevisionConflict`, nothing changed."
+                  }
+                },
+                "required": [
+                  "enabled"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The MCP state.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/McpState"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/HostRefused"
+          },
+          "404": {
+            "$ref": "#/components/responses/AdminNotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/RevisionConflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/Failure"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/api/admin/mcp/databases/{name}": {
+      "put": {
+        "operationId": "setMcpDatabase",
+        "summary": "A name's MCP settings",
+        "description": "Offer a database or alias to MCP or hide it, and whether MCP only reads it. A missing value is kept; neither is `400`.",
+        "tags": [
+          "mcp"
+        ],
+        "x-graphersal-access": "admin",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "A database's or alias's name (also a name with MCP settings that names nothing now, to reset it)."
+          },
+          {
+            "$ref": "#/components/parameters/IfMatch"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "exposed": {
+                    "type": "boolean"
+                  },
+                  "readOnly": {
+                    "type": "boolean"
+                  },
+                  "revision": {
+                    "type": "string",
+                    "description": "The revision this change is based on (else the `If-Match` header; neither: no check). A stale one is `409 RevisionConflict`, nothing changed."
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The MCP state plus `changed`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/McpState"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "changed": {
+                          "type": "object",
+                          "properties": {
+                            "name": {
+                              "type": "string"
+                            },
+                            "exposed": {
+                              "type": "boolean"
+                            },
+                            "readOnly": {
+                              "type": "boolean"
+                            }
+                          }
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/HostRefused"
+          },
+          "404": {
+            "$ref": "#/components/responses/AdminNotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/RevisionConflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/Failure"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/api/admin/databases/{name}/verify": {
+      "post": {
+        "operationId": "verifyDatabase",
+        "summary": "Verify a database's Store",
+        "description": "The engine's scrub of the Store (every checksum, snapshot and WAL record). Damage found on a loaded database under the policy `maintenance` serves it read-only.",
+        "tags": [
+          "maintenance"
+        ],
+        "x-graphersal-access": "admin",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "A database's real name (case-insensitive; an alias is not followed unless the operation says so)."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The verify result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VerifyResult"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/HostRefused"
+          },
+          "404": {
+            "$ref": "#/components/responses/AdminNotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/Failure"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/api/admin/verify": {
+      "post": {
+        "operationId": "verifyAll",
+        "summary": "Verify every database",
+        "description": "One verify result per database (`{database, ok: false, error}` for a verify that failed).",
+        "tags": [
+          "maintenance"
+        ],
+        "x-graphersal-access": "admin",
+        "responses": {
+          "200": {
+            "description": "Every result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "results": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/VerifyResult"
+                      }
+                    },
+                    "ok": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/HostRefused"
+          },
+          "404": {
+            "$ref": "#/components/responses/AdminNotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/Failure"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/api/admin/databases/{name}/repair": {
+      "post": {
+        "operationId": "repairDatabase",
+        "summary": "Repair into a new database",
+        "description": "A repaired copy of the damaged plain database as a NEW database (default `<name>-repaired`), never in place; the answer reports what was lost. The body is optional.",
+        "tags": [
+          "maintenance"
+        ],
+        "x-graphersal-access": "admin",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "A database's real name (case-insensitive; an alias is not followed unless the operation says so)."
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The new database.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Entry"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "repairedFrom": {
+                          "type": "string"
+                        },
+                        "repair": {
+                          "type": "object"
+                        },
+                        "next": {
+                          "type": "object"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/HostRefused"
+          },
+          "404": {
+            "$ref": "#/components/responses/AdminNotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Refused"
+          },
+          "500": {
+            "$ref": "#/components/responses/Failure"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/api/admin/databases/{name}/swap": {
+      "post": {
+        "operationId": "swapDatabase",
+        "summary": "Let a database take another's name",
+        "description": "The database `with` (a repaired copy) takes the name `{name}`; the old one moves to `trash/`. Grants, aliases and settings stay with the name. Needs `confirm: true`.",
+        "tags": [
+          "maintenance"
+        ],
+        "x-graphersal-access": "admin",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "A database's real name (case-insensitive; an alias is not followed unless the operation says so)."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "with": {
+                    "type": "string"
+                  },
+                  "confirm": {
+                    "const": true
+                  }
+                },
+                "required": [
+                  "with",
+                  "confirm"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Swapped.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Entry"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "swappedWith": {
+                          "type": "string"
+                        },
+                        "trash": {
+                          "type": "string"
+                        },
+                        "reloaded": {
+                          "type": "boolean"
+                        },
+                        "grantsRemoved": {
+                          "type": "integer"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/HostRefused"
+          },
+          "404": {
+            "$ref": "#/components/responses/AdminNotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Refused"
+          },
+          "500": {
+            "$ref": "#/components/responses/Failure"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/api/admin/recovery": {
+      "get": {
+        "operationId": "getRecovery",
+        "summary": "The last unclean shutdown",
+        "description": "`uncleanShutdown`: the report of the last unclean shutdown and its checks, or `null`.",
+        "tags": [
+          "maintenance"
+        ],
+        "x-graphersal-access": "admin",
+        "responses": {
+          "200": {
+            "description": "The report.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "uncleanShutdown": {
+                      "type": [
+                        "object",
+                        "null"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/HostRefused"
+          },
+          "404": {
+            "$ref": "#/components/responses/AdminNotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/Failure"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/api/admin/server": {
+      "get": {
+        "operationId": "getServer",
+        "summary": "The running server",
+        "description": "Version, pid, address, URL, directory, start time, uptime, databases (total, loaded, loading, maintenance), aliases, the last unclean shutdown and the memory summary. A figure the server cannot know is `null`.",
+        "tags": [
+          "server"
+        ],
+        "x-graphersal-access": "admin",
+        "responses": {
+          "200": {
+            "description": "The server.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServerState"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/HostRefused"
+          },
+          "404": {
+            "$ref": "#/components/responses/AdminNotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/Failure"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/api/admin/shutdown": {
+      "post": {
+        "operationId": "shutdown",
+        "summary": "Stop the server",
+        "description": "`202`, then the server stops as on SIGTERM. The operator or an admin user only (`everyone` of a server without access control: `403`); a server without a stop hook: `409`.",
+        "tags": [
+          "server"
+        ],
+        "x-graphersal-access": "admin",
+        "responses": {
+          "202": {
+            "description": "Stopping.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "stopping": {
+                      "type": "boolean"
+                    },
+                    "pid": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "description": "The principal `everyone`, or a refused Host/Origin.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/AdminNotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Refused"
+          },
+          "500": {
+            "$ref": "#/components/responses/Failure"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "A user token: 64 hex digits (256 random bits), shown once by `graphersal-server user add` / `user token` or the admin API. The console's operator token (`server.run`) works the same."
+      },
+      "sessionCookie": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "gs_session",
+        "description": "The browser session cookie `POST /api/login` sets (HttpOnly, SameSite=Strict)."
+      }
+    },
+    "parameters": {
+      "IfMatch": {
+        "name": "If-Match",
+        "in": "header",
+        "required": false,
+        "schema": {
+          "type": "string"
+        },
+        "description": "`\"<revision>\"`: the revision the change is based on, when the body has no `revision` (`*` checks nothing). Stale: `409`."
+      }
+    },
+    "headers": {
+      "ETag": {
+        "description": "`\"<revision>\"`: send it back as `If-Match`.",
+        "schema": {
+          "type": "string"
+        }
+      }
+    },
+    "responses": {
+      "BadRequest": {
+        "description": "An invalid name, body, query or schema.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "Unauthorized": {
+        "description": "No credentials (`{\"error\", \"login\": \"/\"}`, `WWW-Authenticate: Bearer`), or a token nobody holds.",
+        "headers": {
+          "WWW-Authenticate": {
+            "schema": {
+              "type": "string"
+            }
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Unauthorized"
+            }
+          }
+        }
+      },
+      "BadCredentials": {
+        "description": "A token nobody holds, or an ended session cookie (cleared with the answer). Never answered as anonymous.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Unauthorized"
+            }
+          }
+        }
+      },
+      "AdminNotFound": {
+        "description": "No such database, alias, user, model or backup; or the caller is logged in without the admin role (the admin API does not exist for it).",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "DatabaseUnauthorized": {
+        "description": "Anonymous without a grant on the name: `401` for EVERY name (nothing about existence leaks).",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Unauthorized"
+            }
+          }
+        }
+      },
+      "DatabaseNotFound": {
+        "description": "No such database or alias, or one the caller has no grant on (it does not exist for the caller).",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "NotAllowed": {
+        "description": "The method is not allowed on this path.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "RevisionConflict": {
+        "description": "Changed by someone else since the given revision (`help: \"changed by someone else: reload\"`, `revision`: the current one); nothing changed. Or another rule refuses it.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Conflict"
+            }
+          }
+        }
+      },
+      "Refused": {
+        "description": "A rule refuses it (name taken, loaded, named by an alias, base of layers, offline, a failed database, ...); `help` says what to do.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "TooLarge": {
+        "description": "The body is larger than allowed.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "Unsupported": {
+        "description": "An import source of no known format, or a JSON body without `Content-Type: application/json`.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "HostRefused": {
+        "description": "A `Host` the server does not answer to, or an `Origin` of another site.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "Failure": {
+        "description": "A Store or file operation failed.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "Unavailable": {
+        "description": "The server is starting or stopping; retry (`Retry-After: 1`).",
+        "headers": {
+          "Retry-After": {
+            "schema": {
+              "type": "string"
+            }
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "string",
+            "description": "What went wrong, in one sentence."
+          },
+          "help": {
+            "type": "string",
+            "description": "What to do."
+          }
+        },
+        "required": [
+          "error"
+        ]
+      },
+      "Conflict": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "string"
+          },
+          "help": {
+            "type": "string"
+          },
+          "revision": {
+            "type": "string",
+            "description": "The current revision."
+          }
+        },
+        "required": [
+          "error"
+        ]
+      },
+      "Unauthorized": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "string"
+          },
+          "login": {
+            "type": "string",
+            "description": "The login page (`/`)."
+          }
+        },
+        "required": [
+          "error"
+        ]
+      },
+      "Principal": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`user:<name>`, `operator`, `everyone`, or null (anonymous)."
+          },
+          "kind": {
+            "enum": [
+              "user",
+              "operator",
+              "everyone",
+              "anonymous"
+            ]
+          },
+          "admin": {
+            "type": "boolean"
+          }
+        }
+      },
+      "Info": {
+        "type": "object",
+        "properties": {
+          "server": {
+            "const": "graphersal-server"
+          },
+          "protocol": {
+            "type": "string"
+          },
+          "dev": {
+            "type": "boolean"
+          },
+          "version": {
+            "type": "string"
+          },
+          "experimental": {
+            "type": "boolean"
+          },
+          "uploadBytes": {
+            "type": "integer"
+          },
+          "mcp": {
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "uiProfile": {
+            "type": "object"
+          },
+          "principal": {
+            "$ref": "#/components/schemas/Principal"
+          },
+          "login": {
+            "type": "string",
+            "description": "Anonymous only."
+          },
+          "openapi": {
+            "type": "string",
+            "description": "The path of this description: `/openapi.json`."
+          },
+          "databaseOpenapi": {
+            "type": "string",
+            "description": "The path template of a database's description: `/db/{name}/openapi.json`."
+          }
+        }
+      },
+      "MyDatabase": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          },
+          "level": {
+            "enum": [
+              "read",
+              "write"
+            ]
+          },
+          "readOnly": {
+            "type": "boolean"
+          },
+          "description": {
+            "type": "string"
+          },
+          "playground": {
+            "type": "string",
+            "description": "`/db/<name>/`."
+          },
+          "openapi": {
+            "type": "string",
+            "description": "`/db/<name>/openapi.json`."
+          },
+          "kind": {
+            "enum": [
+              "database",
+              "alias"
+            ]
+          },
+          "aliasOf": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "state",
+          "level"
+        ]
+      },
+      "Entry": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "The database's name (an alias row: the alias)."
+          },
+          "state": {
+            "enum": [
+              "unloaded",
+              "loading",
+              "loaded",
+              "needs-model",
+              "failed",
+              "maintenance"
+            ]
+          },
+          "kind": {
+            "enum": [
+              "plain",
+              "layer"
+            ]
+          },
+          "role": {
+            "enum": [
+              "normal",
+              "base"
+            ]
+          },
+          "readOnly": {
+            "type": "boolean"
+          },
+          "autoLoad": {
+            "type": "boolean"
+          },
+          "description": {
+            "type": "string"
+          },
+          "base": {
+            "type": "string",
+            "description": "A layer's base."
+          },
+          "created": {
+            "type": "string",
+            "description": "UTC, RFC 3339."
+          },
+          "reason": {
+            "type": "string"
+          },
+          "damage": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "aliasOf": {
+            "type": "string"
+          },
+          "sizeBytes": {
+            "type": "integer"
+          },
+          "memoryBytes": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "sharedMemoryBytes": {
+            "type": "integer"
+          },
+          "pooled": {
+            "type": "boolean"
+          },
+          "pooledBy": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "linkWarning": {
+            "type": "string"
+          },
+          "revision": {
+            "type": "string",
+            "description": "Of its `database.toml`: send it with a settings change."
+          },
+          "leftoverGrantsRemoved": {
+            "type": "integer",
+            "description": "Grants left on a NEW name, removed first (absent when none)."
+          }
+        },
+        "required": [
+          "name",
+          "state"
+        ],
+        "description": "One database (listing rows and most actions' answers); see `docs/admin-api.md` \"Entry\"."
+      },
+      "Settings": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "requested": {
+            "type": "string"
+          },
+          "revision": {
+            "type": "string"
+          },
+          "database": {
+            "$ref": "#/components/schemas/Entry"
+          },
+          "aliases": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "layers": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "limits": {
+            "type": "object"
+          },
+          "mcp": {
+            "type": "object"
+          },
+          "grants": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "admins": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "backups": {
+            "type": "object"
+          },
+          "store": {
+            "type": "object"
+          },
+          "storeError": {
+            "type": "string"
+          },
+          "recovery": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "name",
+          "revision"
+        ]
+      },
+      "Backup": {
+        "type": "object",
+        "properties": {
+          "database": {
+            "type": "string"
+          },
+          "backup": {
+            "type": "string",
+            "description": "Its name (the UTC time with dashes): what restore takes."
+          },
+          "file": {
+            "type": "string"
+          },
+          "bytes": {
+            "type": "integer"
+          },
+          "created": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string"
+          },
+          "base": {
+            "type": "string"
+          },
+          "layerBase": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "database",
+          "backup",
+          "file",
+          "bytes"
+        ]
+      },
+      "ImportReport": {
+        "type": "object",
+        "properties": {
+          "format": {
+            "enum": [
+              "snapshot",
+              "store",
+              "graphson",
+              "graphml"
+            ]
+          },
+          "layerBase": {
+            "type": "string"
+          },
+          "modelsMissing": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "modelsResolved": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "skipped": {
+            "type": "integer"
+          },
+          "notes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "Model": {
+        "type": "object",
+        "properties": {
+          "repo": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "identity": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "license": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "blob": {
+            "type": "string",
+            "description": "SHA-256 hex."
+          },
+          "bytes": {
+            "type": "integer"
+          },
+          "users": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "waiting": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "copied": {
+            "type": "boolean"
+          },
+          "copiedIn": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "linkWarning": {
+            "type": "string"
+          },
+          "links": {
+            "type": "integer"
+          }
+        }
+      },
+      "ModelsAdded": {
+        "type": "object",
+        "properties": {
+          "added": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Model"
+            }
+          },
+          "resolved": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "stillMissing": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "database": {
+                  "type": "string"
+                },
+                "model": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "notes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "Run": {
+        "type": "object",
+        "properties": {
+          "database": {
+            "type": "string"
+          },
+          "id": {
+            "type": "integer"
+          },
+          "client": {
+            "type": "string"
+          },
+          "alias": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "kind": {
+            "enum": [
+              "query",
+              "layout",
+              "tool",
+              "other"
+            ]
+          },
+          "state": {
+            "enum": [
+              "queued",
+              "running"
+            ]
+          },
+          "cancelled": {
+            "type": "boolean"
+          },
+          "startedAtMs": {
+            "type": "integer"
+          },
+          "durationMs": {
+            "type": "integer"
+          },
+          "text": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "User": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "roles": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "admin": {
+            "type": "boolean"
+          },
+          "hasToken": {
+            "type": "boolean"
+          },
+          "tokenLast4": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "grants": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "database": {
+                  "type": "string"
+                },
+                "level": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string"
+                },
+                "target": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "required": [
+          "name"
+        ]
+      },
+      "Grant": {
+        "type": "object",
+        "properties": {
+          "subject": {
+            "type": "string",
+            "description": "`user:<name>`, `anonymous`, `role:<r>`, `group:<g>`."
+          },
+          "database": {
+            "type": "string",
+            "description": "A real name, an alias, or `*`."
+          },
+          "level": {
+            "enum": [
+              "read",
+              "write"
+            ]
+          },
+          "kind": {
+            "enum": [
+              "database",
+              "alias",
+              "all",
+              "missing"
+            ]
+          },
+          "target": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "An alias's current database."
+          }
+        },
+        "required": [
+          "subject",
+          "database",
+          "level"
+        ]
+      },
+      "McpState": {
+        "type": "object",
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "endpointBuilt": {
+            "type": "boolean"
+          },
+          "serving": {
+            "type": "boolean"
+          },
+          "online": {
+            "type": "boolean"
+          },
+          "endpoint": {
+            "type": "string"
+          },
+          "maxSessions": {
+            "type": "integer"
+          },
+          "revision": {
+            "type": "string"
+          },
+          "databases": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "usage": {
+            "type": [
+              "object",
+              "null"
+            ]
+          }
+        }
+      },
+      "VerifyResult": {
+        "type": "object",
+        "properties": {
+          "database": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          },
+          "ok": {
+            "type": "boolean"
+          },
+          "how": {
+            "enum": [
+              "open store",
+              "files"
+            ]
+          },
+          "problems": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string"
+                },
+                "offset": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "reason": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "notes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "damage": {
+            "type": "string"
+          },
+          "help": {
+            "type": "string"
+          },
+          "error": {
+            "type": "string",
+            "description": "A verify that failed (every-database answer)."
+          }
+        }
+      },
+      "ServerState": {
+        "type": "object",
+        "properties": {
+          "server": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          },
+          "pid": {
+            "type": "integer"
+          },
+          "address": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "directory": {
+            "type": "string"
+          },
+          "startedAtMs": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "uptimeSecs": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "databases": {
+            "type": "object",
+            "properties": {
+              "total": {
+                "type": "integer"
+              },
+              "loaded": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "loading": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "maintenance": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "aliases": {
+            "type": "integer"
+          },
+          "uncleanShutdown": {
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "memory": {
+            "type": "object"
+          }
+        }
+      }
+    }
+  }
+}

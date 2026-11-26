@@ -47,6 +47,19 @@ export function databaseHref(name) {
 }
 
 /**
+ * The OpenAPI description of database `name`'s HTTP API (queries, schema, saved queries, ...),
+ * relative to the server root: `db/<name>/openapi.json`. A client generator reads it; the
+ * server answers it to every principal that reaches the name, also while it is not loaded.
+ */
+export function databaseOpenapiHref(name) {
+  return `${databaseHref(name)}openapi.json`;
+}
+
+/** The OpenAPI description of the server's own HTTP API (login, the caller's databases, the
+ * admin API), relative to the server root. */
+export const SERVER_OPENAPI_HREF = 'openapi.json';
+
+/**
  * The list's rows from a `GET /api/admin/databases` answer:
  * `{rows: [{name, href, state, stateText, tone, kind, role, readOnly, autoLoad, description,
  * base, created, aliasOf, reason, model, sizeBytes, memoryBytes, memoryReported, sharedMemoryBytes,

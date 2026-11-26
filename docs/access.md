@@ -219,6 +219,8 @@ token.
 |---|---|---|
 | `/api/admin/...` (admin API, Runs, Users) | `401 {"error", "login": "/"}` | `404`, as if the API did not exist |
 | `/db/<name>/...` API without a grant | `401` for **every** name, existing or not, so nothing about existence leaks | `404`, the unknown-name answer |
+| `GET /db/<name>/openapi.json` (the database's API description) without a grant | `401` (a client's document, not a page: no redirect) | `404` |
+| `GET /openapi.json` (the server's API description) | served (public: it carries no data) | served |
 | `GET` of a `/db/<name>/` page or static file | `303` to the login page `/?next=/db/<name>/...` | `404` |
 | `/db/<name>/mcp` without a grant | `401` | `404` |
 | `/mcp` | served, over the anonymous grants (often none) | served, over the user's grants |

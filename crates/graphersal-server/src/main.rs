@@ -15,6 +15,7 @@
 //! graphersal-server mcp status|on|off | mcp db NAME [read-only] on|off --dir DIR [--json]
 //! graphersal-server backup --dir DIR [--out FILE] [--with-databases] [--json]
 //! graphersal-server restore FILE --dir NEWDIR [--force-version] [--json]
+//! graphersal-server openapi --dir DIR [--db NAME] [--out FILE] [--server URL]
 //!     (db, import, models, user, mcp, backup, stop, status also: [--token TOKEN [--server ADDRESS]])
 //! ```
 //!
@@ -238,6 +239,15 @@ Usage:
       a database's data skips it, reported), then the configuration. Users keep their
       tokens; sessions are not restored. --force-version tries an archive of a newer
       graphersal-server. Then: graphersal-server serve --dir NEWDIR.
+  graphersal-server openapi --dir DIR [--db NAME] [--out FILE] [--server URL]
+      The OpenAPI 3.1 description of the server's own HTTP API (login, the caller's
+      databases, the admin API), or with --db that of the database or alias NAME (its
+      queries, schema, saved queries, ... below /db/NAME/), to generate HTTP clients
+      from. The same documents a running server answers at /openapi.json and
+      /db/NAME/openapi.json; built from DIR alone (no server needed, nothing written in
+      DIR). Its servers URL: URL (http(s)://host:port; a bare host:port gets server.toml's
+      [http] public_scheme), else server.toml's first [http] allowed_hosts name, else its
+      listen address. FILE: written there, else printed on stdout.
   graphersal-server --help | --version
 
 The OS user owning DIR is its operator: serve and the db, import, models, user and mcp commands
@@ -278,6 +288,7 @@ fn main() -> ExitCode {
         Some("mcp") => mcp_command(&args[1..]),
         Some("backup") => backup_command(&args[1..]),
         Some("restore") => restore_command(&args[1..]),
+        Some("openapi") => openapi_command(&args[1..]),
         Some(other) => usage_error(&format!("unknown command {other:?}")),
     }
 }
@@ -1518,6 +1529,62 @@ fn backup_command(args: &[String]) -> ExitCode {
             exit(0)
         }
         Err(error) => failure(&error),
+    }
+}
+
+/// `openapi --dir DIR [--db NAME] [--out FILE] [--server URL]`: the OpenAPI description of the
+/// server, or of a database, built from DIR alone (`graphersal_server::openapi::offline_spec`).
+fn openapi_command(args: &[String]) -> ExitCode {
+    let (positional, values, _) = match parse_simple(
+        "openapi",
+        args,
+        &["--dir", "--db", "--out", "--server"],
+        &[],
+    ) {
+        Ok(parsed) => parsed,
+        Err(code) => return code,
+    };
+    if let Some(extra) = positional.first() {
+        return usage_error(&format!("openapi: unexpected argument {extra:?}"));
+    }
+    let value = |flag: &str| {
+        values
+            .iter()
+            .find(|(f, _)| f == flag)
+            .map(|(_, v)| v.clone())
+    };
+    let Some(dir) = value("--dir") else {
+        return usage_error("openapi needs --dir DIR");
+    };
+    init_console_logging();
+    let dir = match ServerDir::open(&dir) {
+        Ok(dir) => dir,
+        Err(error) => return failure(&error),
+    };
+    let spec = match graphersal_server::openapi::offline_spec(
+        &dir,
+        value("--db").as_deref(),
+        value("--server").as_deref(),
+    ) {
+        Ok(spec) => spec,
+        Err(error) => return failure(&error),
+    };
+    let text = match serde_json::to_string_pretty(&spec) {
+        Ok(text) => text,
+        Err(error) => return failure_text(&format!("cannot write the description: {error}")),
+    };
+    match value("--out") {
+        Some(file) => match std::fs::write(&file, format!("{text}\n")) {
+            Ok(()) => {
+                out(&format!("wrote {file}"));
+                exit(0)
+            }
+            Err(error) => failure_text(&format!("cannot write {file}: {error}")),
+        },
+        None => {
+            out(&text);
+            exit(0)
+        }
     }
 }
 
