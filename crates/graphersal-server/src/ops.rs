@@ -323,7 +323,7 @@ impl Admin {
     /// The admin whose new names (a database made by create, import, clone, a restore into a
     /// new name or repair; a new alias) are offered to MCP when `expose` is `Some(true)`,
     /// hidden from it when `Some(false)`; `None` (the default) follows `mcp.toml`'s
-    /// `expose_new` (default off; [`crate::mcp_control`]).
+    /// `expose_new` (default off; module `mcp_control`).
     pub fn exposing(mut self, expose: Option<bool>) -> Self {
         self.expose = expose;
         self

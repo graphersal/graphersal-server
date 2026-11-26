@@ -2035,6 +2035,44 @@ pub fn usage_error_text(message: &str) -> String {
         .text()
 }
 
+/// `db reset-layer`: what was discarded, kept, and where the old layer went.
+fn render_reset_layer(answer: &Value, dir: &Path, dir_arg: &str) -> String {
+    let s = |key: &str| answer[key].as_str().unwrap_or("").to_string();
+    let name = s("name");
+    let base = s("base");
+    let count = |part: &str, kind: &str| answer["discarded"][part][kind].as_u64().unwrap_or(0);
+    let pair = |part: &str| {
+        format!(
+            "{} vertices, {} edges",
+            count(part, "vertices"),
+            count(part, "edges")
+        )
+    };
+    let mut note = Note::new(format!(
+        "Layer database '{name}' was reset: it reads exactly its base '{base}' now"
+    ))
+    .detail("discarded added", pair("added"))
+    .detail("discarded changes of", pair("modified"))
+    .detail("discarded removals of", pair("removed"))
+    .detail("old layer", format!("moved to {}", below(dir, &s("trash"))))
+    .detail(
+        "kept",
+        format!(
+            "name, base, description, flags, query limits, grants, aliases, MCP settings and \
+             {} scheduled job(s)",
+            answer["jobsKept"].as_u64().unwrap_or(0)
+        ),
+    );
+    if answer["reloaded"] == Value::Bool(true) {
+        note = note.detail("loaded", "again (it was loaded)");
+    }
+    note.command(
+        "everything about it",
+        format!("{BIN} db info {name} --dir {dir_arg}"),
+    )
+    .text()
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -2265,42 +2303,4 @@ mod tests {
         assert_eq!(shell_word(Path::new("my srv")), "'my srv'");
         assert_eq!(shell_word(Path::new("it's")), r"'it'\''s'");
     }
-}
-
-/// `db reset-layer`: what was discarded, kept, and where the old layer went.
-fn render_reset_layer(answer: &Value, dir: &Path, dir_arg: &str) -> String {
-    let s = |key: &str| answer[key].as_str().unwrap_or("").to_string();
-    let name = s("name");
-    let base = s("base");
-    let count = |part: &str, kind: &str| answer["discarded"][part][kind].as_u64().unwrap_or(0);
-    let pair = |part: &str| {
-        format!(
-            "{} vertices, {} edges",
-            count(part, "vertices"),
-            count(part, "edges")
-        )
-    };
-    let mut note = Note::new(format!(
-        "Layer database '{name}' was reset: it reads exactly its base '{base}' now"
-    ))
-    .detail("discarded added", pair("added"))
-    .detail("discarded changes of", pair("modified"))
-    .detail("discarded removals of", pair("removed"))
-    .detail("old layer", format!("moved to {}", below(dir, &s("trash"))))
-    .detail(
-        "kept",
-        format!(
-            "name, base, description, flags, query limits, grants, aliases, MCP settings and \
-             {} scheduled job(s)",
-            answer["jobsKept"].as_u64().unwrap_or(0)
-        ),
-    );
-    if answer["reloaded"] == Value::Bool(true) {
-        note = note.detail("loaded", "again (it was loaded)");
-    }
-    note.command(
-        "everything about it",
-        format!("{BIN} db info {name} --dir {dir_arg}"),
-    )
-    .text()
 }

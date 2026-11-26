@@ -686,7 +686,7 @@ fn patch_text(text: &str, changes: &[(String, Option<toml::Value>)]) -> Option<S
 
 /// The settings a running server applies (module docs): what it started with, and the `now`
 /// keys changed through the admin API since. Set once on the loader by `serve`
-/// ([`crate::loader::Loader::set_live_config`]).
+/// (`Loader::set_live_config`).
 #[derive(Debug)]
 pub struct LiveConfig {
     applied: RwLock<ServerConfig>,
