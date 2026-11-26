@@ -32,20 +32,33 @@ mdbook serve book --open
 Start with [First Start](book/src/getting_started/first_start.md), the [Command Cheat
 Sheet](book/src/cheat_sheet.md) and [Troubleshooting](book/src/troubleshooting.md).
 
-## Download / build
+## Install
 
-**Windows x86_64:** each release on GitHub carries a prebuilt binary,
-`graphersal-server-v<version>-windows-x86_64.zip` (`graphersal-server.exe` with
-`LICENSE-APACHE`, `NOTICE`, this README and `THIRD-PARTY-LICENSES.html`), and `SHA256SUMS` to
-verify it. Unpack it and run `graphersal-server.exe` from a console; Ctrl+C stops it cleanly.
+Prebuilt binaries for Linux x86_64 and aarch64 (static), macOS on Apple silicon and Windows
+x86_64 are on every [GitHub Release](https://github.com/graphersal/graphersal-server/releases),
+from 0.3.0 on. The installers verify the release's `SHA256SUMS` and install the binary only.
 
-**Every other platform** builds from source, with Rust 1.88 or newer:
+Linux and macOS (into `~/.local/bin`):
 
 ```bash
-git clone https://github.com/graphersal/graphersal-server.git
-cd graphersal-server
-cargo build --release --locked          # target/release/graphersal-server
+curl -fsSL https://github.com/graphersal/graphersal-server/releases/latest/download/install.sh | sh
 ```
+
+Windows, in PowerShell (into `%LOCALAPPDATA%\Programs\graphersal-server`, added to your `PATH`):
+
+```powershell
+irm https://github.com/graphersal/graphersal-server/releases/latest/download/install.ps1 | iex
+```
+
+With Rust 1.88 or newer (macOS on Intel and other platforms build from source):
+
+```bash
+cargo install --locked graphersal-server     # from source
+cargo binstall graphersal-server             # the release binary, through cargo-binstall
+```
+
+Manual download, checksum and attestation checks, and building from a clone:
+[Installation](book/src/getting_started/installation.md).
 
 ## Quick start
 
@@ -73,10 +86,12 @@ Model](book/src/guide/security.md)).
 - `scripts/smoke.sh`: an end-to-end smoke test (build, init, serve, the admin API, the database
   pages, MCP, users, the import inbox, a restart keeping the sessions, a clean stop); needs only
   bash, curl and python3 (Unix).
-- `scripts/smoke.ps1`: the smoke test of a built binary in PowerShell 7 for Windows (CI and the
+- `scripts/smoke.ps1`: the same walk in PowerShell 7 for Windows, step by step (CI and the
   release build): `pwsh scripts/smoke.ps1 -Bin <path to graphersal-server.exe>`.
-- CI (`.github/workflows/ci.yml`) and the release build (`release.yml`) run on Windows only for
-  now. The release text is the book's page `book/src/release_notes/<version>.md`.
+- CI runs by hand before a release (`gh workflow run CI -f ref=<branch>`: Linux and Windows,
+  cargo-deny, the MSRV); the release workflow (`.github/workflows/release.yml`) builds, smoke-tests
+  and packs the four platforms, tests the installers and drafts the GitHub Release. The release
+  text is the book's page `book/src/release_notes/<version>.md`.
 
 ## Licence
 
