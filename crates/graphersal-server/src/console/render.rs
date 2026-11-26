@@ -303,8 +303,9 @@ fn render_with(command: &DbCommand, answer: &Value, dir: &Path, server: Option<&
             } else {
                 note.detail(
                     "endpoints",
-                    "/mcp and /db/<name>/mcp answer 503 until it is switched on; open MCP \
-                     sessions are kept and go on then",
+                    "/mcp and /db/<name>/mcp answer 503 to every request until it is switched \
+                     on, also to the agents connected now; their MCP sessions are kept (not \
+                     ended) and continue then with the same session id and selection",
                 )
             };
             let note = if answer["endpointBuilt"] == Value::Bool(false) {

@@ -39,6 +39,17 @@ const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
 const str = (v) => (typeof v === 'string' ? v : '');
 const arr = (v) => (Array.isArray(v) ? v : []);
 
+/**
+ * The question before MCP is switched off for the whole server (round 4: says exactly what the
+ * router does: every MCP request is answered 503, the session table is not touched).
+ */
+export const MCP_OFF_CONFIRM = 'Switch MCP off for the whole server?\n\n'
+  + 'While it is off, every MCP request is refused with 503, also the requests of agents that are connected now: '
+  + 'no agent can use a database through MCP.\n\n'
+  + 'Their sessions are not ended: when MCP is switched on again, connected agents continue with the same session id '
+  + 'and the same selected database, without connecting again.\n\n'
+  + 'The HTTP API and the web pages are not affected.';
+
 /** The status of the answer: `{tone, text, help}` (on, switched off, or no endpoint at all). */
 export function statusOf(answer = {}) {
   if (answer.endpointBuilt === false) {
@@ -52,7 +63,7 @@ export function statusOf(answer = {}) {
     return {
       tone: 'warn',
       text: 'MCP is switched off',
-      help: '/mcp and every /db/<name>/mcp answer 503. Open MCP sessions are kept and go on when it is switched on again.',
+      help: '/mcp and every /db/<name>/mcp answer 503 to every request, also to the agents connected before: none of them reaches a database through MCP now. Their sessions are kept (not ended): when MCP is switched on again they continue with the same session id and the same selected database, without connecting again.',
     };
   }
   return { tone: 'ok', text: 'MCP is on', help: '' };

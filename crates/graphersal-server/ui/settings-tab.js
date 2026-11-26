@@ -12,7 +12,7 @@
 // (./shared.js `useFreshData`; an open edit keeps its input); every table sorts by any column.
 // Requests, rules and rows: ./settings-api.js.
 
-import { reactive, ref, computed, watch } from 'vue';
+import { reactive, computed, watch } from 'vue';
 import {
   createSettings, limitRows, limitsNote, limitValueProblem, limitSetBody, limitClearBody, limitText,
   descriptionProblem, identityRows, stateRows, storeRows, settingsGrantRows, settingsMcpRows, mcpText,
@@ -20,7 +20,7 @@ import {
 } from './settings-api.js';
 import { realRows, BASE_IS_FROZEN } from './admin-api.js';
 import {
-  admin, list, reload, requestOptions, errorNotice, noticeClass, useFreshData, useSort, SortTh,
+  admin, list, reload, requestOptions, errorNotice, notify, noticeClass, useFreshData, useSort, SortTh, FormError,
 } from './shared.js';
 
 /** The settings client (model: ./settings-api.js). */
@@ -54,14 +54,13 @@ const MCP_COLUMNS = Object.freeze({
 });
 
 export default {
-  components: { SortTh },
+  components: { SortTh, FormError },
   props: { api: { type: Object, required: true }, params: { type: Object, default: () => ({}) } },
   setup(props) {
     const s = reactive({
       name: '', picked: '', answer: null, revision: '', read: false, error: null, busy: '',
-      description: '', editingDescription: false, edits: {},
+      description: '', editingDescription: false, edits: {}, formErrors: {},
     });
-    const notice = ref(null);
 
     const names = computed(() => realRows(list.rows).map((r) => r.name));
     const limitSort = useSort('settings-limits', LIMIT_COLUMNS);
@@ -93,9 +92,8 @@ export default {
     async function choose(name) {
       Object.assign(s, {
         name: name || '', picked: name || '', answer: null, revision: '', read: false, error: null, busy: '',
-        description: '', editingDescription: false, edits: {},
+        description: '', editingDescription: false, edits: {}, formErrors: {},
       });
-      notice.value = null;
       await refresh();
     }
     function pick() {
@@ -104,22 +102,29 @@ export default {
       else props.api.navigate('settings', name ? { db: name } : {});
     }
 
+    /** Shows the error of the form `key` ('description', 'limit:<key>') under its button, or as
+     * a toast for a change without a form of its own (a flag). */
+    function failed(key, notice) {
+      if (key === 'description' || key.startsWith('limit:')) s.formErrors[key] = notice;
+      else notify(notice);
+    }
+
     /** One change of the database's settings, based on the view's revision. */
     async function change(key, body, after = () => {}) {
       if (!s.answer) return;
       s.busy = key;
-      notice.value = null;
+      delete s.formErrors[key];
       const name = s.answer.name;
       try {
         const answer = await settings.change(name, body, s.revision);
         s.answer = answer;
         s.revision = typeof answer.revision === 'string' ? answer.revision : '';
-        notice.value = { tone: 'ok', text: changedText(name, answer), help: '' };
+        notify({ tone: 'ok', text: changedText(name, answer), help: '' });
         after();
         reload();
       } catch (err) {
         // A refused stale change says so; the view is read again either way.
-        notice.value = errorNotice(err);
+        failed(key, errorNotice(err));
         await refresh();
       } finally {
         s.busy = '';
@@ -129,7 +134,7 @@ export default {
     function saveDescription() {
       const problem = descriptionProblem(s.description);
       if (problem) {
-        notice.value = { tone: 'error', text: problem, help: '' };
+        failed('description', { tone: 'error', text: problem, help: '' });
         return;
       }
       change('description', { description: s.description }, () => { s.editingDescription = false; });
@@ -143,7 +148,7 @@ export default {
       const text = s.edits[row.key];
       const problem = limitValueProblem(row.key, text);
       if (problem) {
-        notice.value = { tone: 'error', text: problem, help: '' };
+        failed(`limit:${row.key}`, { tone: 'error', text: problem, help: '' });
         return;
       }
       change(`limit:${row.key}`, limitSetBody(row.key, text), () => { delete s.edits[row.key]; });
@@ -158,13 +163,12 @@ export default {
       if (!name) return;
       if (!window.confirm(`Unload and load "${name}" now? Its open requests finish first; it is unavailable while it loads.`)) return;
       s.busy = 'reload';
-      notice.value = null;
       try {
         await admin.unload(name);
         await admin.load(name);
-        notice.value = { tone: 'ok', text: `${name}: loading with the new limits.`, help: '' };
+        notify({ tone: 'ok', text: `${name}: loading with the new limits.`, help: '' });
       } catch (err) {
-        notice.value = errorNotice(err);
+        notify(errorNotice(err));
       } finally {
         s.busy = '';
         await reload();
@@ -187,7 +191,7 @@ export default {
     });
 
     return {
-      s, db, notice, names, limits, grants, mcpNames, loaded, limitSort, grantSort, mcpSort,
+      s, db, names, limits, grants, mcpNames, loaded, limitSort, grantSort, mcpSort,
       identityRows, stateRows, storeRows, recoveryView, limitsNote, limitText, mcpText, backupsText, readOnlyLocked, noticeClass,
       maxDescription: MAX_DESCRIPTION_CHARS, baseFrozen: BASE_IS_FROZEN,
       refresh, pick, saveDescription, setFlag, setLimit, clearLimit, reloadNow,
@@ -210,11 +214,6 @@ export default {
           <option v-if="s.picked && !names.includes(s.picked)" :value="s.picked">{{ s.picked }}</option>
         </select></label>
     </form>
-    <div v-if="notice" class="notice srv-notice" :class="noticeClass(notice)" role="status" data-settings-notice>
-      <div class="srv-notice-text"><span>{{ notice.text }}</span>
-        <p v-if="notice.help" class="srv-help">{{ notice.help }}</p></div>
-      <button type="button" class="icon-btn" @click="notice = null" aria-label="Dismiss">×</button>
-    </div>
     <div v-if="s.error" class="notice srv-notice srv-error" role="alert">
       <div class="srv-notice-text"><span>{{ s.error.text }}</span>
         <p v-if="s.error.help" class="srv-help">{{ s.error.help }}</p></div>
@@ -234,8 +233,9 @@ export default {
                @input="s.editingDescription = true"></label>
       <div class="store-dialog-buttons">
         <button type="submit" class="btn small primary" :disabled="!!s.busy || !s.editingDescription">{{ s.busy === 'description' ? 'Saving…' : 'Save description' }}</button>
-        <button v-if="s.editingDescription" type="button" class="btn small" @click="s.editingDescription = false; s.description = db.description || ''">Cancel</button>
+        <button v-if="s.editingDescription" type="button" class="btn small" @click="s.editingDescription = false; s.description = db.description || ''; s.formErrors.description = null">Cancel</button>
       </div>
+      <form-error :error="s.formErrors.description || null"></form-error>
     </form>
 
     <div class="srv-head"><h2>State and sizes</h2></div>
@@ -268,12 +268,13 @@ export default {
           <td class="num">{{ limitText(r.key, r.effective) }}</td>
           <td>{{ r.sourceText }}</td>
           <td v-if="loaded" class="num" :title="r.differs ? 'Differs from the next load: unload and load the database to apply' : null">{{ limitText(r.key, r.inEffect) }}</td>
-          <td class="srv-actions">
+          <td class="srv-actions srv-limit-edit-cell">
             <form class="srv-limit-edit" @submit.prevent="setLimit(r)">
               <input v-model="s.edits[r.key]" class="mono" inputmode="numeric" :placeholder="r.override === null ? 'value' : String(r.override)" :aria-label="'New value of ' + r.key" autocomplete="off">
               <button type="submit" class="btn small" :disabled="!!s.busy || s.edits[r.key] === undefined || s.edits[r.key] === ''">Set</button>
               <button type="button" class="btn small" :disabled="!!s.busy || r.override === null" title="Remove this database's override: the server's default applies" @click="clearLimit(r)">Clear</button>
             </form>
+            <form-error :error="s.formErrors['limit:' + r.key] || null"></form-error>
           </td>
         </tr>
       </tbody>

@@ -26,7 +26,16 @@ links back to the server's UI.
   dialog or form.
 - **Sortable tables.** Click a column header to sort, click again to reverse. Text sorts
   naturally (`db2` before `db10`), sizes and dates by value, missing values last. Each table
-  remembers its sort in the browser.
+  remembers its sort in the browser; until you pick one, the Databases, Aliases and MCP tables
+  sort by name.
+- **Notices.** The outcome of an action ("Loaded …", "… verifies: no problem found") and the
+  failure of an action started from a table row appear as small notices in the top-right
+  corner, over the page: the page never moves. An outcome hides itself after about 6 seconds, a
+  warning after about 12 seconds, an error stays until you close it (×); a notice stays while
+  the pointer is on it. Several stack; the same notice again counts up (×2) instead of
+  stacking. They stay when you switch tabs.
+- **Form errors** appear right under the form's own button ("Grant", "Create", "Restore",
+  "Save description", "Sign in", ...), where you just clicked, not at the top of the page.
 - **Conflicts.** Every change is based on what the tab showed. When someone else changed the
   same thing meanwhile, the server refuses with "changed by someone else: reload"; the tab
   reloads and you try again ([409: changed by someone
@@ -47,8 +56,15 @@ description.
 The list of databases and aliases with their state, kind, flags, size on disk and size in
 memory (hover for the exact bytes and a layer's shared base).
 
-- **Actions per row:** load, unload, clone, promote to base, delete, read-only, auto-load,
-  "Settings…" (opens the Database settings tab), "Runs…" (opens the Runs tab filtered), OpenAPI.
+- **Actions per row** sit behind the row's "…" button: Load or Unload…, Settings… (opens the
+  Database settings tab), Runs… (a loaded database: opens the Runs tab filtered), Clone…,
+  Backups…, Export…, Verify, Repair…, Promote to base…, "OpenAPI description" (the database's
+  HTTP API description, in a new browser tab) and Delete…; an alias row has Settings of its
+  database, Point to…, Rename…, its OpenAPI description and Remove…. An action that does not
+  apply to the row is greyed out, its tooltip says why. The menu works with the keyboard (Enter
+  or ↓ opens it, ↑/↓/Home/End move, Escape closes it), closes on a click outside, and opens
+  upward near the bottom of the window. Read-only and auto-load are the row's checkboxes. The
+  table fits the window without a horizontal scroll bar (long names and descriptions wrap).
 - **Create** a database: plain, base, or layer over a base.
 - **Aliases:** set, flip, rename, remove.
 - **Memory summary** above the table: the server process, the loaded databases (each graph
@@ -60,7 +76,8 @@ memory (hover for the exact bytes and a layer's shared base).
   it take the name…" (confirmed; the damaged one moves to `trash/`) or "Keep both", with the hint
   to restore a backup instead. Above the table: the last unclean shutdown and the check of each
   database ([A server killed by force](../troubleshooting.md#a-server-was-killed-by-force)).
-- A link to the server's own OpenAPI description.
+
+Programs talking to the server's HTTP API: [HTTP Clients and OpenAPI](http_clients.md).
 
 ## Backups
 
@@ -101,12 +118,17 @@ tab filtered to it.
 
 The users with their roles and `…last4` of their token. Add a user (its token shown once), give
 a new token, revoke it, give or take the admin role, remove the user. The grants, `anonymous`
-included, on databases and aliases; an alias is shown with its current database. The last
-usable admin cannot be removed, demoted or left without a token.
+included, on databases and aliases; an alias is shown with its current database. The grant
+form's Database list shows the aliases first (`cur → acme (alias)`), then the databases, each
+alphabetical, then "every database". The last usable admin cannot be removed, demoted or left
+without a token.
 
 ## MCP
 
-- MCP on or off for the whole server.
+- MCP on or off for the whole server. Off, every MCP request is refused with `503`, also those
+  of agents connected before; their sessions are not ended, and when MCP is switched on again
+  they continue with the same session and selected database, without connecting again. The
+  HTTP API and the web pages are not affected.
 - Per database or alias: offered to MCP or hidden, and read-only for MCP.
 - Usage since the start: open sessions and tool calls per database, tool calls per tool and per
   user, the recent errors.

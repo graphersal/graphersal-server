@@ -36,11 +36,13 @@ test('my databases: every row links its description, loaded or not, an alias by 
   assert.match(tab, /Bearer/);
 });
 
-test('the admin Databases tab links the server description and each row\'s', () => {
+test('the admin Databases tab links each row\'s description from the row\'s menu', () => {
+  // Round 4 B-UI: the line about the server's own API is gone (the book covers HTTP clients);
+  // the row's link moved from the Name column into its "…" menu.
   const tab = read('databases-tab.js');
-  assert.ok(tab.includes(':href="serverApiHref"') && tab.includes('data-server-openapi'));
-  assert.ok(/<a :href="apiHref\(row\)"[^>]*data-openapi[^>]*>OpenAPI<\/a>/.test(tab));
+  assert.ok(!tab.includes('serverApiHref') && !tab.includes('data-server-openapi'));
+  assert.ok(!/<a :href="apiHref\(row\)"/.test(tab), 'no link in the Name column');
+  assert.match(tab, /\{ key: 'openapi', text: 'OpenAPI description', href: openapiHref\(row\)/);
   const shared = read('shared.js');
   assert.match(shared, /export const openapiHref = \(row\) => new URL\(databaseOpenapiHref\(row\.name\), ROOT\)\.href/);
-  assert.match(shared, /export const serverOpenapiHref = \(\) => new URL\(SERVER_OPENAPI_HREF, ROOT\)\.href/);
 });
