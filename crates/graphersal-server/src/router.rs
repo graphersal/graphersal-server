@@ -53,6 +53,8 @@
 //!
 //! Every answer the server sends carries `Cache-Control: no-store` exactly once ([`no_store`]):
 //! the API answers (root, admin and each database's), the UI files, the errors and redirects.
+//! Every in-memory answer also carries `X-Frame-Options: DENY` and a `Content-Security-Policy`
+//! ([`framing_refused`], SEC L6).
 //! A browser never shows an answer it kept from an earlier visit (the web UI reads every tab's
 //! data again on each visit).
 //!
@@ -355,7 +357,7 @@ impl Router {
     /// it itself).
     pub(crate) fn answer(&self, request: Request<'_>) -> Answer {
         match self.answer_uncached(request) {
-            Answer::Response(response) => Answer::Response(no_store(response)),
+            Answer::Response(response) => Answer::Response(framing_refused(no_store(response))),
             download @ Answer::Download(_) => download,
         }
     }
@@ -926,6 +928,35 @@ fn logout(access: &Access, modes: &Modes, request: &Request<'_>) -> Result<Respo
     };
     Ok(Response::json(200, &json!({ "loggedOut": ended }))
         .with_header("Set-Cookie", &modes.cleared_session_cookie()))
+}
+
+/// The `Content-Security-Policy` of every answer (SEC L6): no page of this server may be framed
+/// (`frame-ancestors 'none'`), load plugins (`object-src 'none'`) or change its base URL
+/// (`base-uri 'none'`). Scripts are not restricted further: the embedded playground runs inline
+/// scripts, an import map and modules from its CDNs.
+pub(crate) const CONTENT_SECURITY_POLICY: &str =
+    "frame-ancestors 'none'; object-src 'none'; base-uri 'none'";
+
+/// `response` with `X-Frame-Options: DENY` and [`CONTENT_SECURITY_POLICY`] (SEC L6: the admin
+/// UI and every database's playground share one origin; no other site may frame them), each
+/// unless it names one already.
+pub(crate) fn framing_refused(response: Response) -> Response {
+    let named = |response: &Response, name: &str| {
+        response
+            .headers()
+            .iter()
+            .any(|(field, _)| field.eq_ignore_ascii_case(name))
+    };
+    let response = if named(&response, "X-Frame-Options") {
+        response
+    } else {
+        response.with_header("X-Frame-Options", "DENY")
+    };
+    if named(&response, "Content-Security-Policy") {
+        response
+    } else {
+        response.with_header("Content-Security-Policy", CONTENT_SECURITY_POLICY)
+    }
 }
 
 /// `response` with `Cache-Control: no-store`, unless it names a `Cache-Control` already (the

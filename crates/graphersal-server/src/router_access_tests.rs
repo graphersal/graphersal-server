@@ -4291,3 +4291,35 @@ fn anonymous_mcp_needs_a_grant_and_sends_small_bodies() {
     let answer = mcp(&fx, Who::Bearer(&fx.bob), "/mcp", None, big);
     assert_ne!(answer.status(), 413);
 }
+
+/// SEC L6: the admin UI, a database's playground and the API answers refuse framing, plugins and
+/// a changed base URL.
+#[test]
+fn every_page_refuses_framing() {
+    let fx = fixture("sec-l6-framing");
+    for (who, url) in [
+        (Who::Anonymous, "/"),
+        (Who::Anonymous, "/server-ui/databases-tab.js"),
+        (Who::Bearer(OPERATOR), "/db/w/"),
+        (Who::Bearer(OPERATOR), "/db/w/api/info"),
+        (Who::Bearer(OPERATOR), "/api/admin/databases"),
+        (Who::Anonymous, "/api/admin/databases"),
+    ] {
+        let answer = get(&fx, who, url);
+        assert_eq!(header(&answer, "X-Frame-Options"), Some("DENY"), "{url}");
+        let policy = header(&answer, "Content-Security-Policy").unwrap_or_default();
+        for directive in [
+            "frame-ancestors 'none'",
+            "object-src 'none'",
+            "base-uri 'none'",
+        ] {
+            assert!(policy.contains(directive), "{url}: {policy}");
+        }
+        let count = answer
+            .headers()
+            .iter()
+            .filter(|(n, _)| n.eq_ignore_ascii_case("X-Frame-Options"))
+            .count();
+        assert_eq!(count, 1, "{url}");
+    }
+}
