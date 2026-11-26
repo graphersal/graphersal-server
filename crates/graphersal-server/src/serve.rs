@@ -23,9 +23,18 @@
 //! request's head must arrive within `header_timeout_secs` (HTTP/1.1: hyper's header read
 //! timeout, counted from the moment the connection waits for a request; HTTP/2: the idle
 //! timeout below covers a connection that never completes a request); a connection without a
-//! running request is closed after `idle_timeout_secs`. A body is never cut by a whole-request
-//! timeout (a large upload streams for minutes): its reads wait at most 120 s for each next
-//! piece.
+//! running request is closed after `idle_timeout_secs`. The body of an authenticated request is
+//! never cut by a whole-request timeout (a large upload streams for minutes): its reads wait at
+//! most 120 s for each next piece. A request that may run without credentials (SEC M1: the
+//! login, and with access control on every request that names no credentials) gets
+//! [`UNAUTHENTICATED_BODY_DEADLINE`] for its whole body, and the unread rest drained after an
+//! answer gets [`DRAIN_DEADLINE`]; a body late past either fails its read and closes the
+//! connection, so slow clients without credentials cannot hold the connection cap.
+//!
+//! The probes `/healthz` and `/readyz` are answered on the connection's async task, never on
+//! the blocking pool, and also on a connection over the cap: a flood of slow requests never
+//! makes the probes fail. The blocking pool has at most [`blocking_threads`] threads (requests
+//! beyond wait for one).
 //!
 //! The router, the session jobs and every file I/O are blocking: each request is answered on
 //! the runtime's blocking pool (`spawn_blocking`), never on an async worker. The request body
@@ -114,6 +123,19 @@ const DRAIN_BYTES: u64 = 256 * 1024;
 /// How long a route reading the body waits for the client's next bytes before the read fails.
 const BODY_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// How long the whole body of a request that may run without credentials may take (SEC M1;
+/// module docs): the login, and with access control on a request naming no credentials.
+pub const UNAUTHENTICATED_BODY_DEADLINE: Duration = Duration::from_secs(10);
+
+/// How long draining a short unread rest of a body after the answer may take (module docs).
+const DRAIN_DEADLINE: Duration = Duration::from_secs(5);
+
+/// The most threads of the blocking pool for `max_connections`: one per connection plus a few
+/// for downloads, at least 32 and at most 512 (tokio's default); requests beyond wait.
+pub fn blocking_threads(max_connections: usize) -> usize {
+    max_connections.saturating_add(32).clamp(32, 512)
+}
+
 /// The chunk size of a download.
 const DOWNLOAD_CHUNK: usize = 64 * 1024;
 /// How many chunks of a download wait for the client.
@@ -183,6 +205,9 @@ pub struct ServeOptions {
     /// What `POST /api/admin/shutdown` calls to have this server stopped (`None`: the route
     /// answers `409`).
     pub stop_hook: Option<StopHook>,
+    /// The body deadline of requests without credentials (tests shorten it; `None`:
+    /// [`UNAUTHENTICATED_BODY_DEADLINE`]).
+    pub(crate) body_deadline: Option<Duration>,
 }
 
 /// How the admin route `POST /api/admin/shutdown` (`graphersal-server stop`) asks the process
@@ -259,6 +284,13 @@ impl ServeOptions {
         self.stop_hook = Some(hook);
         self
     }
+
+    /// The options with a shorter body deadline for requests without credentials (tests).
+    #[cfg(test)]
+    pub(crate) fn with_body_deadline(mut self, deadline: Duration) -> Self {
+        self.body_deadline = Some(deadline);
+        self
+    }
 }
 
 /// What the connections share.
@@ -268,6 +300,8 @@ struct Shared {
     in_flight: AtomicUsize,
     /// The connection limits.
     limits: ConnectionLimits,
+    /// The body deadline of requests that may run without credentials.
+    body_deadline: Duration,
     /// One permit per served connection (`max_connections`).
     connections: Arc<Semaphore>,
     /// One permit per connection being refused with `503` ([`OVERFLOW_CONNECTIONS`]).
@@ -368,6 +402,7 @@ pub fn start(
         .map_err(|err| bind_error(err.to_string()))?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .thread_name("graphersal-server-http")
+        .max_blocking_threads(blocking_threads(limits.max_connections))
         .enable_io()
         .enable_time()
         .build()
@@ -399,6 +434,9 @@ pub fn start(
             .with_control(facts.clone(), options.stop_hook.clone()),
         in_flight: AtomicUsize::new(0),
         limits,
+        body_deadline: options
+            .body_deadline
+            .unwrap_or(UNAUTHENTICATED_BODY_DEADLINE),
         connections: Arc::new(Semaphore::new(limits.max_connections)),
         overflow: Arc::new(Semaphore::new(OVERFLOW_CONNECTIONS)),
         saturated: AtomicBool::new(false),
@@ -733,7 +771,7 @@ fn admit(stream: tokio::net::TcpStream, shared: &Arc<Shared>, stop: &watch::Rece
             }
             match shared.overflow.clone().try_acquire_owned() {
                 Ok(permit) => {
-                    tokio::spawn(refuse_connection(stream, shared.limits, permit));
+                    tokio::spawn(refuse_connection(stream, shared.clone(), permit));
                 }
                 Err(_) => drop(stream),
             }
@@ -943,20 +981,27 @@ async fn sleep_until(deadline: Option<Instant>) {
     tokio::time::sleep_until(deadline.into()).await;
 }
 
-/// Answers an over-the-cap connection `503` with `Retry-After: 1` in its own protocol, then
-/// closes it (`_permit` is its place among [`OVERFLOW_CONNECTIONS`]).
+/// Answers an over-the-cap connection `503` with `Retry-After: 1` in its own protocol (a probe
+/// gets its real answer), then closes it (`_permit` is its place among
+/// [`OVERFLOW_CONNECTIONS`]).
 async fn refuse_connection(
     stream: tokio::net::TcpStream,
-    limits: ConnectionLimits,
+    shared: Arc<Shared>,
     _permit: OwnedSemaphorePermit,
 ) {
+    let limits = shared.limits;
     let refuse = async move {
         let protocol = sniff(&stream, OVERFLOW_TIMEOUT).await?;
         let service = service_fn(move |request: hyper::Request<Incoming>| {
-            std::future::ready(Ok::<_, Infallible>(over_capacity(
-                limits,
-                request.version(),
-            )))
+            let version = request.version();
+            let mut answer =
+                probe(&shared, &request).unwrap_or_else(|| over_capacity(limits, version));
+            if version != Version::HTTP_2 {
+                answer
+                    .headers_mut()
+                    .insert(CONNECTION, HeaderValue::from_static("close"));
+            }
+            std::future::ready(Ok::<_, Infallible>(answer))
         });
         match protocol {
             Protocol::Http1 => {
@@ -1055,12 +1100,36 @@ struct Reply {
     close: bool,
 }
 
-/// Answers one request: the router on the blocking pool, then the answer as hyper writes it.
+/// The answer to a probe (`/healthz`, `/readyz`), built on the async task without the
+/// blocking pool; `None` for any other request.
+fn probe(shared: &Shared, request: &hyper::Request<Incoming>) -> Option<hyper::Response<Outgoing>> {
+    let path = request.uri().path();
+    if path != "/healthz" && path != "/readyz" {
+        return None;
+    }
+    let method = Method::parse(request.method().as_str());
+    let answer = shared.router.lifecycle.probe(&method, path)?;
+    let (status, headers, body) = crate::router::no_store(answer).into_parts();
+    let mut response = build(status, &headers, Outgoing::full(body));
+    // A probe's body (none expected) is never read: the connection closes after it.
+    if !request.body().is_end_stream() && request.version() != Version::HTTP_2 {
+        response
+            .headers_mut()
+            .insert(CONNECTION, HeaderValue::from_static("close"));
+    }
+    Some(response)
+}
+
+/// Answers one request: the router on the blocking pool, then the answer as hyper writes it
+/// (a probe at once, [`probe`]).
 async fn respond(
     shared: Arc<Shared>,
     activity: Arc<Activity>,
     request: hyper::Request<Incoming>,
 ) -> Result<hyper::Response<Outgoing>, Infallible> {
+    if let Some(answer) = probe(&shared, &request) {
+        return Ok(answer);
+    }
     let in_flight = InFlight::new(&shared, &activity);
     let version = request.version();
     let handle = Handle::current();
@@ -1150,6 +1219,9 @@ fn answer(shared: &Shared, request: hyper::Request<Incoming>, handle: Handle) ->
         };
     }
     let mut reader = BodyReader::new(body, handle);
+    if shared.router.may_run_without_credentials(path, &headers) {
+        reader.deadline = Some(Instant::now() + shared.body_deadline);
+    }
     let answer = {
         let mut converted = graphersal_serve::Request::new(method, &url, &mut reader)
             .with_body_length(declared.and_then(|len| usize::try_from(len).ok()));
@@ -1163,6 +1235,8 @@ fn answer(shared: &Shared, request: hyper::Request<Incoming>, handle: Handle) ->
     if !reader.done && !expects_continue {
         let rest = declared.map(|len| len.saturating_sub(reader.read));
         if rest.is_some_and(|rest| rest <= DRAIN_BYTES) {
+            let drain = Instant::now() + DRAIN_DEADLINE;
+            reader.deadline = Some(reader.deadline.map_or(drain, |due| due.min(drain)));
             let _ = io::copy(&mut (&mut reader).take(DRAIN_BYTES + 1), &mut io::sink());
         }
     }
@@ -1286,6 +1360,9 @@ struct BodyReader {
     done: bool,
     /// The bytes handed to the route.
     read: u64,
+    /// When the whole body must have arrived (a request that may run without credentials, a
+    /// drain; module docs): a read after it fails.
+    deadline: Option<Instant>,
 }
 
 impl BodyReader {
@@ -1297,6 +1374,19 @@ impl BodyReader {
             chunk: Bytes::new(),
             done,
             read: 0,
+            deadline: None,
+        }
+    }
+
+    /// How long the next read may wait: [`BODY_IDLE_TIMEOUT`], or less before the deadline
+    /// (`None`: the deadline passed).
+    fn wait(&self) -> Option<Duration> {
+        match self.deadline {
+            None => Some(BODY_IDLE_TIMEOUT),
+            Some(deadline) => {
+                let left = deadline.checked_duration_since(Instant::now())?;
+                (!left.is_zero()).then(|| left.min(BODY_IDLE_TIMEOUT))
+            }
         }
     }
 }
@@ -1313,12 +1403,26 @@ impl Read for BodyReader {
             if self.done || out.is_empty() {
                 return Ok(0);
             }
+            let late = || {
+                io::Error::new(
+                    ErrorKind::TimedOut,
+                    "the client sent the body too slowly (a request without credentials has \
+                     a deadline for its whole body)",
+                )
+            };
+            let Some(wait) = self.wait() else {
+                return Err(late());
+            };
+            let deadline = self.deadline;
             let body = &mut self.body;
             let next = self.handle.block_on(tokio::time::timeout(
-                BODY_IDLE_TIMEOUT,
+                wait,
                 std::future::poll_fn(|cx| Pin::new(&mut *body).poll_frame(cx)),
             ));
             match next {
+                Err(_) if deadline.is_some_and(|due| Instant::now() >= due) => {
+                    return Err(late());
+                }
                 Err(_) => {
                     return Err(io::Error::new(
                         ErrorKind::TimedOut,

@@ -317,6 +317,30 @@ impl Router {
             })
     }
 
+    /// Whether a request to `path` with `headers` may run without credentials, so its body
+    /// gets a deadline (SEC M1, [`crate::serve`]): the login always; with access control on,
+    /// a request that names no credentials (no `Authorization`, no session cookie). A request
+    /// with wrong credentials is refused before its body is read.
+    pub(crate) fn may_run_without_credentials(
+        &self,
+        path: &str,
+        headers: &[(String, String)],
+    ) -> bool {
+        if path == LOGIN {
+            return true;
+        }
+        if !self.modes().access_enabled {
+            return false;
+        }
+        let named = |name: &str| headers.iter().any(|(n, _)| n.eq_ignore_ascii_case(name));
+        let cookie = headers.iter().any(|(n, v)| {
+            n.eq_ignore_ascii_case("cookie")
+                && v.split(';')
+                    .any(|pair| pair.trim().starts_with(&format!("{SESSION_COOKIE}=")))
+        });
+        !named("Authorization") && !cookie
+    }
+
     /// Answers one request, a download buffered into the answer (tests).
     #[cfg(test)]
     pub(crate) fn route(&self, request: Request<'_>) -> Response {
@@ -813,6 +837,46 @@ fn admin_refused(principal: &Principal, path: &str) -> Response {
     }
 }
 
+/// The largest body of `POST /api/login` (SEC M1): it carries one token; larger is `413`, read
+/// no further.
+pub(crate) const MAX_LOGIN_BODY: usize = 4 * 1024;
+
+/// The JSON object of a body of at most `max` bytes (`413` beyond it, declared or read; `415`
+/// without `Content-Type: application/json`).
+fn small_json_body(request: &mut Request<'_>, max: usize) -> Result<serde_json::Value, HttpError> {
+    use std::io::Read;
+    let json_type = request.header("Content-Type").is_some_and(|t| {
+        t.trim_start()
+            .to_ascii_lowercase()
+            .starts_with("application/json")
+    });
+    if !json_type {
+        return Err(HttpError::new(
+            415,
+            "send the body as Content-Type: application/json",
+        ));
+    }
+    let too_large = || HttpError::new(413, format!("the body is larger than {max} bytes"));
+    if request.body_length().is_some_and(|len| len > max) {
+        return Err(too_large());
+    }
+    let mut bytes = Vec::new();
+    request
+        .body()
+        .take(max as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|err| HttpError::bad_request(format!("cannot read the body: {err}")))?;
+    if bytes.len() > max {
+        return Err(too_large());
+    }
+    let body: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|err| HttpError::bad_request(format!("malformed JSON body: {err}")))?;
+    if !body.is_object() {
+        return Err(HttpError::bad_request("the body must be a JSON object"));
+    }
+    Ok(body)
+}
+
 /// The body of `POST /api/login`.
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -823,7 +887,7 @@ struct LoginBody {
 /// `POST /api/login {"token"}`: a browser session for the user token, its id in the
 /// `gs_session` cookie; `401` for a token no user holds.
 fn login(access: &Access, modes: &Modes, request: &mut Request<'_>) -> Result<Response, HttpError> {
-    let body = request.json_body()?;
+    let body = small_json_body(request, MAX_LOGIN_BODY)?;
     let body: LoginBody = serde_json::from_value(body)
         .map_err(|err| HttpError::bad_request(format!("the body must be {{\"token\"}}: {err}")))?;
     match access.login(body.token.trim()) {
