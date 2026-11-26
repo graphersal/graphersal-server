@@ -1,7 +1,9 @@
 // The notices of the server UI as toasts (pure, tested under Node by ui/tests/toasts.test.mjs):
-// one stack for every tab, fixed in the top-right corner below the top bar, so a notice never
-// moves the page (the playground's system journal notices are the model: a coloured left edge,
-// the close cross on hover and focus). An outcome (`tone` 'ok') hides itself after
+// one stack for every tab, fixed in the bottom-right corner, so a notice never moves the page
+// and never covers the top bar or the tab bar (the playground's system journal notices are the
+// model for the look: a coloured left edge, the close cross on hover and focus; they sit top
+// right in the playground, which has no tab bar under its top bar). A toast stays compact: its
+// width is capped and a long help (`isLongHelp`) shows its first lines with a "More" expander. An outcome (`tone` 'ok') hides itself after
 // `TOAST_LIFE_MS.ok`, a warning after `TOAST_LIFE_MS.warn`; an error stays until it is closed.
 // A timer is paused while the pointer or the keyboard focus is on its toast. At most
 // `TOAST_MAX` toasts at once: a new one pushes out the oldest. The same notice again (tone,
@@ -17,6 +19,15 @@ export const TOAST_LIFE_MS = Object.freeze({ ok: 6000, warn: 12000, error: null 
 
 /** The most toasts shown at once; a new one pushes out the oldest. */
 export const TOAST_MAX = 5;
+
+/** A help longer than this is clamped to `lines` lines until its toast's "More" is pressed. */
+export const HELP_CLAMP = Object.freeze({ lines: 3, chars: 160 });
+
+/** Whether `help` is long enough to be clamped (more lines or characters than `HELP_CLAMP`). */
+export function isLongHelp(help) {
+  const text = typeof help === 'string' ? help : '';
+  return text.split('\n').length > HELP_CLAMP.lines || text.length > HELP_CLAMP.chars;
+}
 
 /** A notice's tone as one the stack knows ('ok' for anything else). */
 export function toastTone(tone) {
@@ -43,7 +54,8 @@ export function isSticky(tone) {
  * notice (the id of its toast, or 0 for no notice), `close(id)`, `clear()`, `hover(id, on)`
  * (pauses or resumes its timer: whether anything changed), `expire()` (closes the toasts whose
  * time is up: whether any was), `nextDeadline()` (the earliest time a toast ends, or null) and
- * `view()` (the toasts to show, oldest first: `{id, tone, cls, role, text, help, links, count}`).
+ * `view()` (the toasts to show, oldest first: `{id, tone, cls, role, text, help, longHelp, links,
+ * count}`).
  */
 export function createToasts({ now = () => Date.now() } = {}) {
   let toasts = [];
@@ -115,6 +127,7 @@ export function createToasts({ now = () => Date.now() } = {}) {
         role: toastRole(t.tone),
         text: t.text,
         help: t.help,
+        longHelp: isLongHelp(t.help),
         links: t.links,
         count: t.count,
       }));

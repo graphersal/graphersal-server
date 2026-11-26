@@ -99,6 +99,7 @@ export function mcpRows(answer = {}) {
         readOnly: r.readOnly === true,
         effectiveExposed: r.effectiveExposed !== false,
         effectiveReadOnly: r.effectiveReadOnly === true,
+        readOnlyReason: Object.prototype.hasOwnProperty.call(READ_ONLY_REASONS, r.readOnlyReason) ? r.readOnlyReason : '',
         sessions: num(r.sessions),
         calls: num(r.calls),
         errors: num(r.errors),
@@ -113,8 +114,29 @@ export function exposedTitle(row) {
   return 'Offered to MCP agents granted access to it.';
 }
 
+/** Why a name is read-only for MCP whatever its own setting (`readOnlyReason` of the answer). */
+export const READ_ONLY_REASONS = Object.freeze({
+  base: 'A base is always read-only, so MCP only reads it too.',
+  flag: 'The database is read-only (its own Read-only flag), so MCP only reads it too.',
+  database: 'Its database is read-only for MCP, so this alias is too.',
+});
+
+/**
+ * The "Read-only" cell of a row: `{checked, disabled, text}`. The checkbox shows what MCP gets
+ * (checked whenever MCP only reads the name); it is locked when something else makes the name
+ * read-only and the name has no own setting to clear (a base, the database's flag, an alias's
+ * read-only database).
+ */
+export function readOnlyCell(row) {
+  const forced = !!row.readOnlyReason;
+  const checked = row.readOnly || row.effectiveReadOnly || forced;
+  return { checked, disabled: forced && !row.readOnly, text: checked ? 'yes' : 'no' };
+}
+
 /** The tooltip of a row's "Read-only" cell. */
 export function readOnlyTitle(row) {
+  if (row.readOnlyReason && !row.readOnly) return READ_ONLY_REASONS[row.readOnlyReason];
+  if (row.readOnly && row.readOnlyReason) return `MCP sessions only read it (its own setting). ${READ_ONLY_REASONS[row.readOnlyReason]}`;
   if (row.readOnly) return 'MCP sessions only read it, whatever their grant (the HTTP API still follows the grant).';
   if (row.effectiveReadOnly) return 'Read-only for MCP anyway: its database is read-only (a flag, a base, or MCP read-only on the database).';
   return 'MCP sessions write when their grant allows it.';

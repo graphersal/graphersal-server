@@ -3155,6 +3155,50 @@ fn a_base_keeps_read_only_and_shows_its_layers_in_the_settings() {
     assert!(layer["store"]["layerBase"].is_string(), "{layer}");
 }
 
+/// The MCP state names why a database is read-only for MCP whatever its own setting: a base,
+/// the database's read-only flag, an alias whose database is read-only for MCP.
+#[test]
+fn the_mcp_state_names_why_a_name_is_read_only_anyway() {
+    let fx = fixture("access-mcp-read-only-reason");
+    let alice = Who::Bearer(&fx.alice);
+    unload_as_admin(&fx, "h");
+    expect(
+        post(&fx, alice, "/api/admin/databases/h/promote", json!({})),
+        200,
+    );
+    expect(
+        put(
+            &fx,
+            alice,
+            "/api/admin/mcp/databases/r",
+            json!({"readOnly": true}),
+        ),
+        200,
+    );
+    let state = expect(get(&fx, alice, "/api/admin/mcp"), 200);
+    let row = |name: &str| {
+        state["databases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["name"] == name)
+            .unwrap()
+            .clone()
+    };
+    let h = row("h");
+    assert_eq!(h["readOnly"], false, "{h}");
+    assert_eq!(h["effectiveReadOnly"], true, "{h}");
+    assert_eq!(h["readOnlyReason"], "base", "{h}");
+    assert_eq!(row("hid")["readOnlyReason"], "base");
+    // r: its own MCP setting, nothing forces it; its alias cur is forced by it.
+    assert_eq!(row("r")["readOnlyReason"], Value::Null);
+    let cur = row("cur");
+    assert_eq!(cur["readOnly"], false, "{cur}");
+    assert_eq!(cur["readOnlyReason"], "database", "{cur}");
+    assert_eq!(row("w")["readOnlyReason"], Value::Null);
+    assert_eq!(row("w")["effectiveReadOnly"], false);
+}
+
 /// `GET /api/admin/server-backup`: the operator and admin users only (anonymous `401`, other
 /// users the unknown-endpoint `404`, `everyone` of a server without access control `403`: the
 /// archive holds the token hashes); a ZIP download, audited.

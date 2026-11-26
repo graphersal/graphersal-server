@@ -10,7 +10,7 @@ import http from 'node:http';
 import { readFileSync } from 'node:fs';
 import {
   mcpRequest, createMcp, statusOf, mcpRows, usageOf, usageText, connectInfo, exposedTitle,
-  readOnlyTitle, TOKEN_PLACEHOLDER, MCP_ROW_KINDS, MCP_OFF_CONFIRM,
+  readOnlyTitle, readOnlyCell, READ_ONLY_REASONS, TOKEN_PLACEHOLDER, MCP_ROW_KINDS, MCP_OFF_CONFIRM,
 } from '../mcp-api.js';
 import { isConflict, refusalNotice } from '../admin-api.js';
 
@@ -187,4 +187,33 @@ test('the switch-off question says exactly what happens to connected agents', ()
   assert.ok(src.includes('window.confirm(MCP_OFF_CONFIRM)'));
   const off = statusOf({ enabled: false, endpointBuilt: true });
   assert.match(off.help, /also to the agents connected before/);
+});
+
+test('read-only cell: a base (or a read-only database) shows checked and locked, with the reason', () => {
+  const [base, flagged, alias, own, plain, ownOnBase, odd] = mcpRows({ databases: [
+    { name: 'products', kind: 'database', readOnly: false, effectiveReadOnly: true, readOnlyReason: 'base' },
+    { name: 'frozen', kind: 'database', readOnly: false, effectiveReadOnly: true, readOnlyReason: 'flag' },
+    { name: 'cur', kind: 'alias', target: 'acme', readOnly: false, effectiveReadOnly: true, readOnlyReason: 'database' },
+    { name: 'acme', kind: 'database', readOnly: true, effectiveReadOnly: true, readOnlyReason: null },
+    { name: 'w', kind: 'database', readOnly: false, effectiveReadOnly: false, readOnlyReason: null },
+    { name: 'b2', kind: 'database', readOnly: true, effectiveReadOnly: true, readOnlyReason: 'base' },
+    { name: 'x', kind: 'database', readOnly: false, effectiveReadOnly: false, readOnlyReason: 'nonsense' },
+  ] });
+  assert.deepEqual(readOnlyCell(base), { checked: true, disabled: true, text: 'yes' });
+  assert.equal(readOnlyTitle(base), READ_ONLY_REASONS.base);
+  assert.match(readOnlyTitle(base), /a base is always read-only/i);
+  assert.deepEqual(readOnlyCell(flagged), { checked: true, disabled: true, text: 'yes' });
+  assert.match(readOnlyTitle(flagged), /Read-only flag/);
+  assert.deepEqual(readOnlyCell(alias), { checked: true, disabled: true, text: 'yes' });
+  assert.deepEqual(readOnlyCell(own), { checked: true, disabled: false, text: 'yes' });
+  assert.deepEqual(readOnlyCell(plain), { checked: false, disabled: false, text: 'no' });
+  // An own setting on a base can still be cleared; the title says both.
+  assert.deepEqual(readOnlyCell(ownOnBase), { checked: true, disabled: false, text: 'yes' });
+  assert.match(readOnlyTitle(ownOnBase), /own setting.*base is always/s);
+  assert.equal(odd.readOnlyReason, '', 'an unknown reason is ignored');
+  // Never "yes" beside an unchecked box.
+  for (const r of [base, flagged, alias, own, plain, ownOnBase, odd]) {
+    const c = readOnlyCell(r);
+    assert.equal(c.text === 'yes', c.checked, r.name);
+  }
 });

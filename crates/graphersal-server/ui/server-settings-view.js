@@ -12,7 +12,7 @@
 import { reactive, computed, watch, onMounted } from 'vue';
 import {
   createConfig, settingSections, isDefaultsKey, inputText, parseInput, changeSet, pendingKeys, pendingText,
-  savedNotice, valueText, DEFAULTS_HELP, SERVER_HELP,
+  savedNotice, valueText, runningNote, placeholderText, DEFAULTS_HELP, SERVER_HELP,
 } from './server-settings-api.js';
 import {
   requestOptions, errorNotice, notify, noticeClass, serverState, useSort, SortTh, FormError,
@@ -130,7 +130,7 @@ export default {
     });
 
     return {
-      s, sections, keySort, pending, pendingNote, noticeClass, valueText,
+      s, sections, keySort, pending, pendingNote, noticeClass, valueText, runningNote, placeholderText,
       help: computed(() => (props.mode === 'defaults' ? DEFAULTS_HELP : SERVER_HELP)),
       title: computed(() => (props.mode === 'defaults' ? 'Server defaults for databases' : 'Server settings (server.toml)')),
       refresh, save, setBool, setChoice, reset, boolOf, choiceOf, setExposeNew, editStart,
@@ -171,7 +171,7 @@ export default {
             <tr v-for="r in sec.rows" :key="r.key" :data-config-key="r.key">
               <td><span class="mono">{{ r.name }}</span><div class="muted srv-sub">{{ r.help }}</div></td>
               <td><span :class="{ muted: !r.set }">{{ r.text }}</span>
-                <div v-if="r.pending" class="srv-sub srv-warn" :title="'The running server applies ' + valueText(r.key, r.running) + ' until it restarts'">running: {{ valueText(r.key, r.running) }}</div></td>
+                <div v-if="runningNote(r)" class="srv-sub" :class="{ 'srv-warn': r.pending }" :title="runningNote(r).title" data-running>{{ runningNote(r).text }}</div></td>
               <td><span class="badge" :class="r.pending ? 'warn' : r.appliesTone" :title="r.pending ? 'Saved; the running server applies it at its next start' : r.appliesTitle">{{ r.pending ? 'restart pending' : (r.creation ? 'at create only' : r.appliesText) }}</span></td>
               <td class="srv-actions srv-config-edit-cell">
                 <div class="srv-config-edit">
@@ -180,7 +180,7 @@ export default {
                     <option v-for="c in r.choices" :key="c" :value="c">{{ c }}</option>
                   </select>
                   <form v-else class="srv-limit-edit" @submit.prevent="save(r)">
-                    <input v-model="s.edits[r.key]" class="mono" autocomplete="off" :placeholder="r.set ? valueText(r.key, r.value) : r.defaultText" :aria-label="'New value of ' + r.key" @focus="editStart(r)">
+                    <input v-model="s.edits[r.key]" class="mono" autocomplete="off" :placeholder="placeholderText(r)" :aria-label="'New value of ' + r.key" @focus="editStart(r)">
                     <button type="submit" class="btn small" :disabled="!!s.busy || s.edits[r.key] === undefined">{{ s.busy === r.key ? 'Saving…' : 'Set' }}</button>
                   </form>
                   <button v-if="r.set" type="button" class="btn small" :disabled="!!s.busy" title="Remove the key from server.toml: its default applies" @click="reset(r)">Reset to default</button>

@@ -71,6 +71,19 @@ export function unsetText(key) {
   return 'not set';
 }
 
+/** Short words for an unset key where `unsetText` is too long for an edit field's placeholder. */
+const SHORT_UNSET = Object.freeze({ 'limits.memory_limit': 'auto', 'limits.memory_headroom': 'a tenth' });
+
+/**
+ * The placeholder of a row's edit field: the file's value, else what not set means, in short
+ * words (the row's help explains them).
+ */
+export function placeholderText(row) {
+  if (!row) return '';
+  if (row.set) return valueText(row.key, row.value);
+  return SHORT_UNSET[row.key] || row.defaultText;
+}
+
 /** A value for people: `null` -> what not set means; a list -> names separated by commas. */
 export function valueText(key, value) {
   if (value === null || value === undefined) return unsetText(key);
@@ -81,7 +94,8 @@ export function valueText(key, value) {
 
 /**
  * The rows of a view answer: `{key, name, section, value, default, set, kind, choices, applies,
- * appliesText, appliesTone, appliesTitle, running, pending, help, text, defaultText, creation}`
+ * appliesText, appliesTone, appliesTitle, running, runningSource, pending, help, text, defaultText,
+ * creation}`
  * (`name`: the key without its section; `text`: the value in words, `(default)` marked when
  * the file does not set it). A malformed row is skipped.
  */
@@ -107,6 +121,7 @@ export function settingRows(answer = {}) {
         appliesTone: APPLIES[applies].tone,
         appliesTitle: APPLIES[applies].title,
         running: r.running === undefined ? null : r.running,
+        runningSource: str(r.runningSource),
         pending: r.pending === true,
         help: str(r.help),
         text: set ? valueText(r.key, value) : `${valueText(r.key, r.default === undefined ? null : r.default)} (default)`,
@@ -114,6 +129,27 @@ export function settingRows(answer = {}) {
         creation: CREATION_KEYS.includes(r.key),
       };
     });
+}
+
+/**
+ * The "running: ..." line under a row's value, or null: shown when a restart is pending (the
+ * running server still applies the old value) or when the server runs with another value than
+ * the file's without one pending (`listen` from the command line or a picked port 0):
+ * `{text, title}`.
+ */
+export function runningNote(row) {
+  if (!row || !(row.pending || row.runningSource)) return null;
+  const value = valueText(row.key, row.running);
+  if (row.pending) {
+    const why = row.runningSource ? ` (${row.runningSource})` : '';
+    return { text: `running: ${value}${why}`, title: `The running server applies ${value} until it restarts` };
+  }
+  return {
+    text: `running: ${value} (${row.runningSource})`,
+    title: row.runningSource === 'command line'
+      ? `The server was started with --listen ${value}, which overrides the file's value; no restart is pending`
+      : `The file's port 0 let the server pick ${value}; no restart is pending`,
+  };
 }
 
 /**

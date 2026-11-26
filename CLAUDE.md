@@ -734,8 +734,9 @@ from published files). When this file disagrees with the code, the code wins: sa
   every table header is a `<sort-th>`, checked by `ui/tests/sort.test.mjs`; `useSort(table,
   columns, defaultSort)`: Databases, Aliases, MCP default to name), `toasts.js` (round 4 B-UI:
   the ONE notice system of every tab: `shared.js` `notify(notice)` pushes a toast into a stack
-  mounted once on `document.body` (`ToastStack`, its own `createApp`), fixed top right below the
-  top bar (modelled on the playground's system journal notices), ok 6 s, warn 12 s, error until
+  mounted once on `document.body` (`ToastStack`, its own `createApp`), fixed bottom right (B-UIFIX:
+  never over the top bar or the tab bar; width capped at 340 px; a long help clamped to 3 lines
+  with a "More" expander, `isLongHelp`; looks like the playground's system journal notices), ok 6 s, warn 12 s, error until
   closed, paused on hover/focus, at most 5, repeats counted; NO tab renders a notice banner any
   more, checked by `ui/tests/toasts.test.mjs`; persistent states (a read error, the unclean
   shutdown, the MCP status, a token shown once) stay inline), `menu.js` (the row actions menu

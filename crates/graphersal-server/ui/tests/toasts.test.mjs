@@ -6,7 +6,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 import {
-  createToasts, TOAST_LIFE_MS, TOAST_MAX, toastTone, toastClass, toastRole, isSticky,
+  createToasts, TOAST_LIFE_MS, TOAST_MAX, toastTone, toastClass, toastRole, isSticky, isLongHelp, HELP_CLAMP,
 } from '../toasts.js';
 
 const clock = () => {
@@ -50,7 +50,7 @@ test('expiry: each toast by its own deadline; errors never expire', () => {
   assert.equal(m.expire(), false);
   const [shown] = m.view();
   assert.deepEqual({ ...shown, links: undefined }, {
-    id: err, tone: 'error', cls: 'srv-toast-error', role: 'alert', text: 'failed', help: 'why', links: undefined, count: 1,
+    id: err, tone: 'error', cls: 'srv-toast-error', role: 'alert', text: 'failed', help: 'why', longHelp: false, links: undefined, count: 1,
   });
   assert.equal(m.close(err), true);
   assert.equal(m.close(err), false);
@@ -144,4 +144,28 @@ test('every form shows its error under its own submit button', () => {
   // The grant form's error: inside the form, under the Grant button.
   const users = readFileSync(new URL('users-tab.js', dir), 'utf8');
   assert.match(users, /Grant<\/button>\s*<form-error :error="grant\.error" :problems="grant\.problems"><\/form-error>\s*<\/form>/);
+});
+
+test('compact toasts: a long help is clamped with a "More" expander; the stack sits bottom right', () => {
+  assert.equal(isLongHelp(''), false);
+  assert.equal(isLongHelp(undefined), false);
+  assert.equal(isLongHelp('one short line'), false);
+  assert.equal(isLongHelp('a\nb\nc'), false, 'exactly the clamp lines');
+  assert.equal(isLongHelp('a\nb\nc\nd'), true);
+  assert.equal(isLongHelp('x'.repeat(HELP_CLAMP.chars + 1)), true);
+  const m = createToasts({ now: clock().now });
+  m.push({ tone: 'error', text: 'Verify found problems', help: ['db-1: blob missing', 'db-2: blob missing', 'db-3: ok?', 'db-4: blob missing'].join('\n') });
+  m.push({ tone: 'ok', text: 'Saved.', help: 'short' });
+  assert.deepEqual(m.view().map((t) => t.longHelp), [true, false]);
+  const dir = new URL('../', import.meta.url);
+  const shared = readFileSync(new URL('shared.js', dir), 'utf8');
+  assert.match(shared, /srv-toast-clamped/, 'the view clamps a long help');
+  assert.match(shared, /class="srv-toast-more"[^>]*aria-expanded/, 'the expander says whether it is open');
+  const css = readFileSync(new URL('server-ui.css', dir), 'utf8');
+  const stack = css.match(/\.srv-toasts \{([^}]*)\}/)[1];
+  assert.match(stack, /bottom: 14px/, 'bottom right: never over the top bar or the tab bar');
+  assert.doesNotMatch(stack, /\btop:/);
+  const width = Number(stack.match(/width: min\((\d+)px/)[1]);
+  assert.ok(width <= 360, `a capped width (${width}px)`);
+  assert.match(css, /\.srv-toast-help\.srv-toast-clamped \{[^}]*line-clamp: 3/);
 });

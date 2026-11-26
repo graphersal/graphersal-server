@@ -1401,6 +1401,24 @@ export function kindHelp(row) {
 }
 
 /**
+ * The compact Kind cell of a row (a database, a backup): `{text, sub, title, sortKey}`. `text`
+ * is one word: `base` for a base, else the kind (`plain`, `layer`); `sub` is a layer's
+ * `over <base>` (its own line, cut with an ellipsis rather than broken inside a word); `title`
+ * says it all in full (`layer over products`) plus what the kind means.
+ */
+export function kindCell(row) {
+  if (!row || typeof row !== 'object') return { text: '', sub: '', title: '', sortKey: '' };
+  const kind = typeof row.kind === 'string' ? row.kind : '';
+  const text = row.role === 'base' ? 'base' : kind;
+  const base = typeof row.base === 'string' && row.base ? row.base : '';
+  const sub = base ? `over ${base}` : '';
+  const full = [text, sub].filter(Boolean).join(' ');
+  const help = kindHelp(row);
+  const title = [full, help].filter(Boolean).join('\n');
+  return { text, sub, title, sortKey: full };
+}
+
+/**
  * Whether a row may be promoted to a base (`POST .../promote`): `{enabled, title}`. Only an
  * UNLOADED plain normal database whose config is readable; every other row is disabled with the
  * reason (the server refuses the same cases with `409` and a help, shown verbatim when reached).
