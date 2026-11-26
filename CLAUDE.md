@@ -285,6 +285,20 @@ from published files). When this file disagrees with the code, the code wins: sa
   way (U11: a base is frozen forever, no demotion), under `Loader::while_idle`, `Store::inspect`
   refuses a layer store, `Registry::promote_to_base` / `admin::promote_refusal` hold the rules;
   a base's Store is never opened for writing afterwards, so its `BaseRef` stays fixed);
+  `reset_layer` in `ops_layer.rs` (round 4 B-LAYER, `db reset-layer NAME --yes`, `POST
+  .../reset-layer {"confirm": true}`, UI "Reset layer…"): graphersal 0.8.0 has no reset inside
+  a Store, so a NEW empty layer Store over the same base (the old one's chunk size and damage
+  policy, its JOB definitions copied, base's JOB definitions dropped) is built in
+  `databases/<name>/store-reset/` (`database::RESET_STORE_DIR`) and swapped in by
+  `Registry::reset_layer_store` (trash dir gets a copy of `database.toml` + `verify.json` +
+  `store/`, then `store-reset/` -> `store/`); the scan (`registry::finish_layer_resets`, clean
+  scans only) removes a `store-reset/` beside `store/` and renames one without it; a loaded
+  layer is unloaded, reset under `Loader::while_idle` (the base is taken BEFORE that lock:
+  `base_of` reads the loader's pool under the same mutex), loaded again and waited for
+  (`RELOAD_WAIT` 60 s); audited `LayerReset`; FOLLOW-UP: the engine's `reset_layer` once
+  released (keeps the Store and its history); tests `ops_layer_tests.rs`,
+  `router_access_tests.rs` `a_layer_reset_over_http_*`, `server_tests.rs`
+  `db_reset_layer_offline_and_through_a_server`, `ui/tests/layer-reset.test.mjs`;
   backup/backups/restore/export in `ops_transfer.rs` (a child module of `ops`:
   backups = `Store::backup_zip` of the open Store (context held) or `Store::backup_zip_dir`,
   built in `tmp/`, renamed to `backups/<name>/<UTC time with ->.zip` + sidecar `<stamp>.toml`

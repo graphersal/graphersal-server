@@ -117,6 +117,9 @@ fn command(method: &str, path: &str, body: Option<&Value>, dir_arg: &str) -> Opt
             let with = field("with").unwrap_or_else(|| "REPAIRED".to_string());
             db(format!("swap {} {with} --yes", word(name)))
         }
+        ("POST", ["databases", name, "reset-layer"]) => {
+            db(format!("reset-layer {} --yes", word(name)))
+        }
         ("GET", ["databases", name, "settings"]) => db(format!("info {}", word(name))),
         ("PUT", ["databases", name, "settings"]) => db(format!("set {} ...", word(name))),
         ("GET", ["databases", name, "export"]) => {

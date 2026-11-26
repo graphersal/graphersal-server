@@ -3755,3 +3755,217 @@ fn server_settings_are_for_admins_audited_and_based_on_the_files_revision() {
         400,
     );
 }
+
+/// The vertex count of the loaded database `db`, read through its mount as `who`.
+fn mounted_count(fx: &Fixture, who: Who<'_>, db: &str) -> i64 {
+    let answer = execute(fx, who, db, "g.v().count().next()");
+    answer["results"][0]
+        .as_i64()
+        .unwrap_or_else(|| panic!("a count in {answer}"))
+}
+
+#[test]
+fn a_layer_reset_over_http_discards_the_changes_and_keeps_grants_aliases_and_mcp() {
+    let fx = fixture("access-reset-layer");
+    let alice = Who::Bearer(&fx.alice);
+    // A base and a layer over it, a grant on the layer and one via an alias, MCP exposure.
+    expect(
+        post(
+            &fx,
+            alice,
+            "/api/admin/databases",
+            json!({"name": "b0", "role": "base"}),
+        ),
+        201,
+    );
+    expect(
+        post(
+            &fx,
+            alice,
+            "/api/admin/databases",
+            json!({"name": "l0", "kind": "layer", "base": "b0", "description": "scratch"}),
+        ),
+        201,
+    );
+    expect(
+        post(
+            &fx,
+            alice,
+            "/api/admin/databases",
+            json!({"name": "l9", "kind": "layer", "base": "b0"}),
+        ),
+        201,
+    );
+    expect(
+        put(&fx, alice, "/api/admin/aliases/lx", json!({"target": "l0"})),
+        200,
+    );
+    expect(
+        post(
+            &fx,
+            alice,
+            "/api/admin/grants",
+            json!({"subject": "user:bob", "database": "l0", "level": "write"}),
+        ),
+        200,
+    );
+    expect(
+        post(
+            &fx,
+            alice,
+            "/api/admin/grants",
+            json!({"subject": "user:carol", "database": "lx", "level": "read"}),
+        ),
+        200,
+    );
+    expect(
+        put(
+            &fx,
+            alice,
+            "/api/admin/mcp/databases/l0",
+            json!({"exposed": true}),
+        ),
+        200,
+    );
+    for db in ["l0", "l9"] {
+        expect(
+            post(
+                &fx,
+                alice,
+                &format!("/api/admin/databases/{db}/load"),
+                json!({}),
+            ),
+            202,
+        );
+        assert_eq!(fx.loader.wait(db, WAIT).unwrap(), DbState::Loaded);
+    }
+    execute(&fx, Who::Bearer(&fx.bob), "l0", WRITE);
+    execute(&fx, Who::Bearer(&fx.bob), "l0", WRITE);
+    execute(&fx, alice, "l9", WRITE);
+    assert_eq!(mounted_count(&fx, alice, "l0"), 2);
+    let grants_before = expect(get(&fx, alice, "/api/admin/grants"), 200)["grants"].clone();
+    let mcp_row = |state: &Value, name: &str| {
+        state["databases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["name"] == name)
+            .cloned()
+            .unwrap_or(Value::Null)
+    };
+    let mcp_before = mcp_row(&expect(get(&fx, alice, "/api/admin/mcp"), 200), "l0");
+    assert_eq!(mcp_before["exposed"], true, "{mcp_before}");
+
+    // Refusals: not an admin, no confirmation, plain and base databases.
+    assert_eq!(
+        post(
+            &fx,
+            Who::Bearer(&fx.bob),
+            "/api/admin/databases/l0/reset-layer",
+            json!({"confirm": true})
+        )
+        .status(),
+        404
+    );
+    let unconfirmed = expect(
+        post(&fx, alice, "/api/admin/databases/l0/reset-layer", json!({})),
+        400,
+    );
+    assert!(
+        unconfirmed["error"].as_str().unwrap().contains("confirm"),
+        "{unconfirmed}"
+    );
+    let plain = expect(
+        post(
+            &fx,
+            alice,
+            "/api/admin/databases/w/reset-layer",
+            json!({"confirm": true}),
+        ),
+        409,
+    );
+    assert!(
+        plain["error"].as_str().unwrap().contains("not a layer"),
+        "{plain}"
+    );
+    assert!(
+        plain["help"].as_str().unwrap().contains("restore"),
+        "{plain}"
+    );
+    let base = expect(
+        post(
+            &fx,
+            alice,
+            "/api/admin/databases/b0/reset-layer",
+            json!({"confirm": true}),
+        ),
+        409,
+    );
+    assert!(
+        base["error"].as_str().unwrap().contains("base database"),
+        "{base}"
+    );
+    assert!(base["help"].as_str().unwrap().contains("l0"), "{base}");
+    assert_eq!(
+        send(
+            &fx,
+            alice,
+            Method::Get,
+            "/api/admin/databases/l0/reset-layer",
+            None,
+            &[]
+        )
+        .status(),
+        405
+    );
+
+    // The reset (loaded: unloaded, reset, loaded again).
+    let done = expect(
+        post(
+            &fx,
+            alice,
+            "/api/admin/databases/l0/reset-layer",
+            json!({"confirm": true}),
+        ),
+        200,
+    );
+    assert_eq!(done["name"], "l0", "{done}");
+    assert_eq!(done["base"], "b0");
+    assert_eq!(done["reloaded"], true);
+    assert_eq!(done["discarded"]["added"]["vertices"], 2);
+    assert_eq!(done["jobsKept"], 0);
+    assert!(
+        done["trash"].as_str().unwrap().starts_with("trash/l0-"),
+        "{done}"
+    );
+    assert_eq!(done["description"], "scratch");
+    assert_eq!(fx.loader.wait("l0", WAIT).unwrap(), DbState::Loaded);
+    assert_eq!(mounted_count(&fx, alice, "l0"), 0);
+    assert_eq!(mounted_count(&fx, alice, "l9"), 1);
+    // Kept: the grants (bob's on the layer, carol's via the alias), the alias, MCP.
+    assert_eq!(
+        expect(get(&fx, alice, "/api/admin/grants"), 200)["grants"],
+        grants_before
+    );
+    execute(&fx, Who::Bearer(&fx.bob), "l0", WRITE);
+    assert_eq!(mounted_count(&fx, Who::Bearer(&fx.carol), "lx"), 1);
+    assert_eq!(
+        expect(get(&fx, alice, "/api/admin/aliases"), 200)["aliases"]["lx"],
+        "l0"
+    );
+    assert_eq!(
+        mcp_row(&expect(get(&fx, alice, "/api/admin/mcp"), 200), "l0")["exposed"],
+        true
+    );
+    // Audited.
+    let lines = fx.audit.lines();
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("layer database 'l0' reset to its base 'b0'")),
+        "{lines:#?}"
+    );
+    for db in ["l0", "l9"] {
+        let _ = fx.loader.unload(db);
+    }
+}

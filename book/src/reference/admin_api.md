@@ -142,6 +142,7 @@ A `failed` database whose `database.toml` cannot be read has only `name`, `state
 | POST | `/api/admin/databases/<name>/load` | | `202` entry + `"load": "started"` or `"already-loading"`; `200` entry + `"load": "already-loaded"` |
 | POST | `/api/admin/databases/<name>/unload` | | `200` entry + `"unloaded": true` (was loaded) or `false` (was not) |
 | POST | `/api/admin/databases/<name>/promote` | | `200` entry (`role: base`, `readOnly: true`; one way) |
+| POST | `/api/admin/databases/<name>/reset-layer` | `{"confirm": true}` | `200` entry + `"base"`, `"trash"`, `"discarded"`, `"jobsKept"`, `"reloaded"` (a layer's changes discarded: [Reset a layer](#reset-a-layer)) |
 | PUT | `/api/admin/databases/<name>/read-only` | `{"readOnly": bool, "revision"?}` | `200` entry (with its new `revision`) |
 | PUT | `/api/admin/databases/<name>/auto-load` | `{"autoLoad": bool, "revision"?}` | `200` entry (with its new `revision`) |
 | GET | `/api/admin/databases/<name>/settings` | | `200` the settings: everything about the database (see Database settings; `<name>` may be an alias; `ETag`: its `revision`) |
@@ -300,6 +301,42 @@ Refused with `409`: a database that is loaded, being loaded or unloaded (help: `
 .../unload`, then promote again); a layer (help: export it with `materialize=true` and import
 the file with `role=base`); a base; a `needs-model` database (help: add the model first; a
 base cannot get a model later); a failed one. An unknown name is `404`.
+
+### Reset a layer
+
+`POST /api/admin/databases/<name>/reset-layer` with `{"confirm": true}` discards every change
+of the layer database `<name>` over its base; the base and the other layers over it are not
+touched. A new empty layer Store over the same base takes the old one's place (graphersal 0.8.0
+has no reset inside a Store); the old layer Store moves to `trash/<name>-<UTC time>/` with a
+copy of its `database.toml` (recoverable by hand: [Reset a
+layer](../guide/databases.md#reset-a-layer)).
+
+Kept: the name, kind and base, `database.toml` (description, read-only and auto-load flags,
+query limit overrides), the grants (also via aliases), the aliases, the MCP settings and the
+layer's scheduled job definitions. Discarded: the data changes, the layer's own schema and other
+catalog changes, its history, workload statistics and last verify. A loaded layer is unloaded
+first and loaded again afterwards; the answer waits for that load (at most a minute).
+
+The answer is the entry plus:
+
+```json
+{
+  "name": "scratch", "kind": "layer", "base": "world", "state": "loaded",
+  "trash": "trash/scratch-2026-11-26T10-00-00Z",
+  "discarded": {
+    "added": {"vertices": 2, "edges": 1},
+    "modified": {"vertices": 1, "edges": 0},
+    "removed": {"vertices": 0, "edges": 1}
+  },
+  "jobsKept": 1,
+  "reloaded": true
+}
+```
+
+`400` without `"confirm": true`. `409` for a plain database (help: restore a backup), a base
+(help: names its layers' reset), a failed database, or a layer being loaded; `500` when the old
+layer cannot be read (a damaged layer: restore a backup, or delete and create it again) or the
+new one cannot be written (nothing changed). Audited as `LayerReset`.
 
 ### Read-only and auto-load
 
@@ -897,7 +934,7 @@ layers use names each layer's `unload`.
 
 ```
 graphersal-server db list | create NAME [...] | delete NAME | clone SOURCE NAME --dir DIR [--json]
-graphersal-server db load NAME [--no-wait] | unload NAME | promote NAME --dir DIR [--json]
+graphersal-server db load NAME [--no-wait] | unload NAME | promote NAME | reset-layer NAME --yes --dir DIR [--json]
 graphersal-server db read-only NAME on|off | auto-load NAME on|off --dir DIR [--json]
 graphersal-server db info NAME | set NAME description TEXT --dir DIR [--json]
 graphersal-server db set NAME limit KEY VALUE | set NAME limit KEY --clear --dir DIR [--json]

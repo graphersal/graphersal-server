@@ -58,7 +58,8 @@ memory (hover for the exact bytes and a layer's shared base).
 
 - **Actions per row** sit behind the row's "…" button: Load or Unload…, Settings… (opens the
   Settings tab), Runs… (a loaded database: opens the Runs tab filtered), Clone…,
-  Backups…, Export…, Verify, Repair…, Promote to base…, "OpenAPI description" (the database's
+  Backups…, Export…, Verify, Repair…, Promote to base…, Reset layer… (layer rows only),
+  "OpenAPI description" (the database's
   HTTP API description, in a new browser tab) and Delete…; an alias row has Settings of its
   database, Point to…, Rename…, its OpenAPI description and Remove…. An action that does not
   apply to the row is greyed out, its tooltip says why. The menu works with the keyboard (Enter
@@ -66,6 +67,11 @@ memory (hover for the exact bytes and a layer's shared base).
   upward near the bottom of the window. Read-only and auto-load are the row's checkboxes. The
   table fits the window without a horizontal scroll bar (long names and descriptions wrap).
 - **Create** a database: plain, base, or layer over a base.
+- **Reset layer…** discards a layer's changes over its base after a confirmation that names
+  what is lost (its added, changed and removed elements, its own schema and saved queries, its
+  history) and what is kept (name, base, description, flags, query limits, grants, aliases, MCP
+  settings, scheduled jobs); the old layer moves to `trash/`. The outcome notice counts what was
+  discarded ([Reset a layer](databases.md#reset-a-layer)).
 - **Aliases:** set, flip, rename, remove.
 - **Memory summary** above the table: the server process, the loaded databases (each graph
   once), the machine's total and available memory, the memory limit and what is free under it.

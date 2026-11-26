@@ -24,12 +24,13 @@ another user or open to group or others ([Security Model](../guide/security.md#t
     <name>/
       database.toml    the database's configuration
       store/           its graphersal Store (a directory Store)
+      store-reset/     a layer reset's new Store, only during the reset (finished or removed at start)
   models/
     blobs/<2 hex>/<sha256>   one copy of every embedding model blob
     models.toml        derived index of the models (rebuilt, never read back)
   backups/<name>/      <UTC time>.zip + <UTC time>.toml per backup
   backups/jobs/        the backup root of backup jobs (server.toml [jobs] backup_root)
-  trash/               deleted and replaced databases: <name>-<UTC time>/
+  trash/               deleted and replaced databases, reset layers: <name>-<UTC time>/
   tmp/                 builds and uploads in progress (emptied at start)
   imports/             the import inbox: files and Store directories an admin imports by name
   sessions/            (mode 0700)
@@ -150,6 +151,15 @@ The database's settings: [Configuration Reference](configuration.md#databasetoml
 An ordinary graphersal directory Store (snapshot chunks, journal, `blobs/`). The graphersal
 tools can open it while no server serves it.
 
+### `store-reset/`
+
+Exists only while a layer is being reset (`db reset-layer`): the new, empty layer Store is
+built here beside `store/`, then `store/` moves to `trash/<name>-<UTC time>/store/` and
+`store-reset/` is renamed to `store/`. After a crash the next start finishes it: a
+`store-reset/` beside `store/` was never swapped in and is removed (the layer is unchanged); one
+without `store/` is renamed to `store/` (the old layer is in `trash/` already). A database is
+never left without a Store.
+
 ## `models/`
 
 The server keeps ONE copy of every embedding model blob in `models/blobs/<2 hex>/<sha256>` (the
@@ -194,8 +204,9 @@ jobs](../guide/backups.md#backup-jobs). The server's own backup of the whole dir
 ## `trash/`
 
 A deleted database, and the database a restore replaced, move to `trash/<name>-<UTC time>/`
-(recoverable by hand: stop the server and move it back into `databases/`). Nothing empties
-`trash/` automatically.
+(recoverable by hand: stop the server and move it back into `databases/`). A layer reset moves
+the old layer there too: a copy of its `database.toml`, its `store/` and its `verify.json`, so
+the entry is a whole database directory as well. Nothing empties `trash/` automatically.
 
 ## `tmp/`
 
@@ -295,6 +306,7 @@ What writes which file at runtime, and under which lock:
 | `databases/<name>/database.toml` | read-only, auto-load, promote, the `needs_model` marker, the settings change (description, read-only, auto-load and the `[limits.query]` overrides in ONE write: `PUT /api/admin/databases/<name>/settings`, `db set`, the Settings tab); a new database's file is written in its build in `tmp/` before the rename into `databases/` | the registry's write lock, held across the revision check, the read of the file's current limits, the write and the memory update (read-only, also through the settings, also the loader's flip lock, taken before the registry) |
 | `databases/<name>/verify.json` | every verify of the database (the last one replaces it) | none needed: each write is one whole file (`write_atomic`), the last verify wins |
 | `databases/<name>/store/` | the graphersal engine (the Store, its WAL, the database's job definitions) | the engine's own (one open Store per database) |
+| `databases/<name>/store-reset/`, `store/` swap | a layer reset: the new layer Store built beside `store/`, then the old `store/` to `trash/` and the new one renamed (`db reset-layer`, `POST .../reset-layer`) | the loader's lock for the whole reset (the layer unloaded, nothing loads it meanwhile), the registry's write lock for the two renames |
 | `databases/` (add, remove), `trash/` | create, clone, import, restore (rename of a build), repair (a new database built in `tmp/`), delete, restore over a database, swap (the old directory to `trash/`, the copy renamed) | the registry's write lock; delete, promote and a restore over a database also hold the loader's lock (nothing loads meanwhile) |
 | `sessions/browser.json` | login, logout, a session touched or ended | the browser session table's mutex |
 | `sessions/mcp.json` | MCP sessions (new, `use_graph`, rename note, end), token changes | its writer's mutex (the MCP endpoint writes snapshots in order) |

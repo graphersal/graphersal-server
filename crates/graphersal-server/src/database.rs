@@ -34,6 +34,10 @@ use crate::names::validate_name;
 pub const DATABASE_FILE: &str = "database.toml";
 /// The directory of a database's Store, beside its `database.toml`.
 pub const STORE_DIR: &str = "store";
+/// The directory a layer reset builds the new, empty layer Store in, beside [`STORE_DIR`]
+/// (round 4 B-LAYER): renamed to [`STORE_DIR`] once the old Store moved to `trash/`. The scan
+/// finishes or discards one a crash left behind ([`crate::Registry::scan`]).
+pub const RESET_STORE_DIR: &str = "store-reset";
 
 /// What a database is made of.
 ///

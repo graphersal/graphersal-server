@@ -6159,3 +6159,91 @@ fn init_takes_server_toml_from_a_file_and_set_values() {
         text(&out.stderr)
     );
 }
+
+/// Round 4 B-LAYER: `db reset-layer NAME --yes` offline and through a running server (with the
+/// operator's run token and with an admin user's `--token`); refused without `--yes` and for
+/// plain and base databases.
+#[test]
+fn db_reset_layer_offline_and_through_a_server() {
+    let temp = TempDir::new("reset-layer");
+    let root = temp.path().join("srv");
+    let root_text = root.to_str().unwrap();
+    let dir = ServerDir::init(&root).unwrap().dir;
+    for args in [
+        &["create", "b0", "--role", "base"][..],
+        &["create", "l0", "--base", "b0", "--description", "scratch"][..],
+        &["create", "p0"][..],
+    ] {
+        let (code, out, err) = db(&root, args);
+        assert_eq!(code, 0, "{args:?}: {out}{err}");
+    }
+    let (code, out, err) = db(&root, &["reset-layer", "l0"]);
+    assert_eq!(code, 2, "{out}{err}");
+    assert!(err.contains("--yes"), "{err}");
+    let (code, _, err) = db(&root, &["list", "--yes"]);
+    assert_eq!(code, 2, "{err}");
+    assert!(
+        err.contains("--yes belongs to db swap and db reset-layer"),
+        "{err}"
+    );
+    let (code, out, err) = db(&root, &["reset-layer", "p0", "--yes"]);
+    assert_eq!(code, 1, "{out}{err}");
+    assert!(err.contains("not a layer"), "{err}");
+    assert!(err.contains("db backups p0"), "{err}");
+    let (code, out, err) = db(&root, &["reset-layer", "b0", "--yes"]);
+    assert_eq!(code, 1, "{out}{err}");
+    assert!(err.contains("base database"), "{err}");
+    assert!(err.contains("db reset-layer l0 --yes"), "{err}");
+
+    // Offline.
+    let (code, out, err) = db(&root, &["reset-layer", "l0", "--yes"]);
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(out.contains("Layer database 'l0' was reset"), "{out}");
+    assert!(out.contains("trash"), "{out}");
+    assert!(out.contains("scheduled job"), "{out}");
+    assert!(dir.trash().read_dir().unwrap().count() == 1);
+
+    // Through a running server: the operator, then an admin user's token (JSON answer).
+    let (code, out, err) = console(
+        &[
+            "user", "add", "carol", "--admin", "--dir", root_text, "--json",
+        ],
+        &[],
+    );
+    assert_eq!(code, 0, "{err}");
+    let carol = json(&out)["token"].as_str().unwrap().to_string();
+    let log = temp.path().join("serve.log");
+    let _server = serve_logged(&root, &log);
+    let info = wait_for_run_file(&dir);
+    wait_ready(info.address);
+    let (code, out, err) = db(&root, &["load", "l0"]);
+    assert_eq!(code, 0, "{out}{err}");
+    let (code, out, err) = db(&root, &["reset-layer", "l0", "--yes"]);
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(out.contains("loaded"), "{out}");
+    let (code, out, err) = console(
+        &[
+            "db",
+            "reset-layer",
+            "l0",
+            "--yes",
+            "--dir",
+            root_text,
+            "--token",
+            &carol,
+            "--json",
+        ],
+        &[],
+    );
+    assert_eq!(code, 0, "{out}{err}");
+    let answer = json(&out);
+    assert_eq!(answer["name"], "l0", "{answer}");
+    assert_eq!(answer["base"], "b0");
+    assert_eq!(answer["description"], "scratch");
+    assert_eq!(answer["reloaded"], true);
+    assert!(
+        answer["trash"].as_str().unwrap().starts_with("trash/l0-"),
+        "{answer}"
+    );
+    assert_eq!(dir.trash().read_dir().unwrap().count(), 3);
+}
