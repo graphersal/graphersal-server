@@ -4,8 +4,8 @@
 # Checks the dependency tree of graphersal-server for licences compatible with distributing it
 # under Apache-2.0 (source and the release binaries), RustSec advisories, duplicate and wildcard
 # dependencies, and dependency sources. Modelled on Graphersal's deny.toml; the licence allow list
-# holds the licences this tree uses (cargo-deny warns about unused entries), a subset of
-# `accepted` in about.toml (THIRD-PARTY-LICENSES.html of the release archives, Graphersal's list).
+# holds the licences this tree uses (cargo-deny warns about unused entries); `accepted` in
+# about.toml (THIRD-PARTY-LICENSES.html of the release archives) holds the same list plus MPL-2.0.
 # Locally: `cargo install --locked cargo-deny`, then `cargo deny check`.
 
 [graph]

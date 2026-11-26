@@ -1,0 +1,55 @@
+name: Bug report
+description: Something does not work as the book says, or the server fails.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Security problems: please do NOT file them here, see SECURITY.md
+        (private reporting). Never paste a token, `access.toml`, `server.run` or real data.
+        Problems of the graph engine itself (queries, the Store, the playground, the MCP tools)
+        belong to https://github.com/graphersal/graphersal/issues.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The output of `graphersal-server --version`.
+      placeholder: graphersal-server 0.3.0
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      description: OS and architecture; how you installed it (installer, cargo, release archive, from a clone).
+      placeholder: Ubuntu 24.04 x86_64, install.sh
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: The console commands or HTTP requests, starting from `graphersal-server init` where you can.
+      render: bash
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happened
+      description: The console's `Error:` and `Help:` lines, the JSON answer, or the relevant log lines.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: config
+    attributes:
+      label: Relevant settings
+      description: The parts of `server.toml` (or `database.toml`, `mcp.toml`) that matter. No tokens.
+      render: toml

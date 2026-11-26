@@ -6,7 +6,7 @@ members = ["crates/graphersal-server"]
 version = "0.2.0"
 authors = ["Aleksandr Dederer <aleks@graphersal.dev>"]
 repository = "https://github.com/graphersal/graphersal-server"
-homepage = "https://graphersal.dev"
+homepage = "https://github.com/graphersal/graphersal-server"
 license = "Apache-2.0"
 edition = "2024"
 # The same MSRV as Graphersal (its crates need 1.88).
