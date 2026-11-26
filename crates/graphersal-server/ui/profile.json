@@ -12,7 +12,8 @@
     { "id": "export", "title": "Export", "module": "export-tab.js" },
     { "id": "models", "title": "Models", "module": "models-tab.js" },
     { "id": "runs", "title": "Runs", "module": "runs-tab.js" },
-    { "id": "users", "title": "Users", "module": "users-tab.js" }
+    { "id": "users", "title": "Users", "module": "users-tab.js" },
+    { "id": "mcp", "title": "MCP", "module": "mcp-tab.js" }
   ],
   "header": { "module": "header.js" },
   "cards": {},

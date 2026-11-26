@@ -12,7 +12,8 @@
 //! graphersal-server import DIR --inbox FILE --name NAME [...] | import DIR --list [--json]
 //! graphersal-server models list|add|remove ... --dir DIR [--json]
 //! graphersal-server user ... --dir DIR [--json]
-//!     (db, import, models, user, stop, status also: [--token TOKEN [--server ADDRESS]])
+//! graphersal-server mcp status|on|off | mcp db NAME [read-only] on|off --dir DIR [--json]
+//!     (db, import, models, user, mcp, stop, status also: [--token TOKEN [--server ADDRESS]])
 //! ```
 //!
 //! stdout carries only results, stderr diagnostics and the log. Exit codes: `0` ok, `1` the
@@ -184,14 +185,23 @@ Usage:
             database's name or '*' (every database).
         user revoke SUBJECT DATABASE
       The last admin (admin role and a token) cannot be removed, demoted or revoked.
+  graphersal-server mcp COMMAND ... --dir DIR [--json]
+      The MCP switches of DIR/mcp.toml (a running server follows at once).
+        mcp status               on or off, each database's MCP settings, the usage
+                                 statistics (open sessions, tool calls) of a running server
+        mcp on | mcp off         MCP for the whole server (off: /mcp and /db/NAME/mcp
+                                 answer 503; open sessions go on when it is on again)
+        mcp db NAME on|off       offer a database or alias to MCP, or hide it
+        mcp db NAME read-only on|off
+            MCP sessions only read NAME, whatever their grant.
   graphersal-server --help | --version
 
-The OS user owning DIR is its operator: serve and the db, import, models and user commands
+The OS user owning DIR is its operator: serve and the db, import, models, user and mcp commands
 refuse a DIR (or access.toml, server.run, sessions/) owned by another user or open to group
 or others, naming the chmod/chown that fixes it (unix; on Windows DIR's ACL is the boundary).
 Other administrators send an admin token instead:
   ... --token TOKEN [--server ADDRESS]
-      db, import, models, user, stop and status go to the running server with this user's admin token
+      db, import, models, user, mcp, stop and status go to the running server with this user's admin token
       (or the environment variable GRAPHERSAL_SERVER_TOKEN), at ADDRESS (IP:PORT) or the
       address in DIR/server.run; no file of DIR is written and its permissions are not
       checked. Refused when no server runs.
@@ -221,6 +231,7 @@ fn main() -> ExitCode {
         Some("import") => import_command(&args[1..]),
         Some("models") => models_command(&args[1..]),
         Some("user") => user_command(&args[1..]),
+        Some("mcp") => mcp_command(&args[1..]),
         Some(other) => usage_error(&format!("unknown command {other:?}")),
     }
 }
@@ -1019,6 +1030,73 @@ fn user_command(args: &[String]) -> ExitCode {
                 "unknown command or wrong arguments: user {} (list, add NAME [--admin], token \
                  NAME [--revoke], remove NAME, admin NAME on|off, grant SUBJECT DATABASE \
                  read|write, revoke SUBJECT DATABASE)",
+                positional.join(" ")
+            ));
+        }
+    };
+    let remote = match Remote::of(token, server) {
+        Ok(remote) => remote,
+        Err(code) => return code,
+    };
+    print_outcome(&dir, &command, json, remote)
+}
+
+/// `mcp status|on|off`, `mcp db NAME [read-only] on|off` with `--dir DIR [--json]`.
+fn mcp_command(args: &[String]) -> ExitCode {
+    let mut positional: Vec<&str> = Vec::new();
+    let mut dir: Option<String> = None;
+    let mut token: Option<String> = None;
+    let mut server: Option<String> = None;
+    let mut json = false;
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        if !arg.starts_with("--") {
+            positional.push(arg);
+            continue;
+        }
+        let (flag, inline) = match arg.split_once('=') {
+            Some((flag, value)) => (flag, Some(value.to_string())),
+            None => (arg.as_str(), None),
+        };
+        match flag {
+            "--dir" | "--token" | "--server" => {
+                let Some(value) = inline.or_else(|| rest.next().cloned()) else {
+                    return usage_error(&format!("mcp: {flag} needs a value"));
+                };
+                let slot = match flag {
+                    "--dir" => &mut dir,
+                    "--token" => &mut token,
+                    _ => &mut server,
+                };
+                if slot.replace(value).is_some() {
+                    return usage_error(&format!("mcp: {flag} given twice"));
+                }
+            }
+            "--json" if inline.is_none() => json = true,
+            _ => return usage_error(&format!("mcp: unknown argument {arg:?}")),
+        }
+    }
+    let Some(dir) = dir else {
+        return usage_error("mcp needs --dir DIR");
+    };
+    let command = match positional.as_slice() {
+        ["status"] => DbCommand::McpStatus,
+        [on @ ("on" | "off")] => DbCommand::McpSwitch { on: *on == "on" },
+        ["db", name, on @ ("on" | "off")] => DbCommand::McpDatabase {
+            name: name.to_string(),
+            exposed: Some(*on == "on"),
+            read_only: None,
+        },
+        ["db", name, "read-only", on @ ("on" | "off")] => DbCommand::McpDatabase {
+            name: name.to_string(),
+            exposed: None,
+            read_only: Some(*on == "on"),
+        },
+        [] => return usage_error("no mcp command given"),
+        _ => {
+            return usage_error(&format!(
+                "unknown command or wrong arguments: mcp {} (status, on, off, db NAME on|off, \
+                 db NAME read-only on|off)",
                 positional.join(" ")
             ));
         }

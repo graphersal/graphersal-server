@@ -1,0 +1,113 @@
+//! The MCP switches as admin operations (round 3 B6; [`crate::mcp_control`]): the global
+//! on/off and the per-name exposure and read-only of `mcp.toml`, online through the server's
+//! one [`McpControl`] (the endpoints follow at once), offline on the file (the console on a
+//! stopped server). Every change may be based on the settings' revision
+//! ([`Admin::expecting`]) and is audited.
+
+use std::sync::Arc;
+
+use crate::audit::AuditEvent;
+use crate::error::ServerError;
+use crate::mcp_control::{McpControl, McpSettings, NameSettings};
+use crate::names::fold;
+
+use super::Admin;
+
+impl Admin {
+    /// The MCP switches: the running server's (the endpoints follow every change at once), or,
+    /// offline, the directory's `mcp.toml` read now.
+    ///
+    /// `Err`: [`ServerError::Config`] for an `mcp.toml` that does not parse.
+    pub(crate) fn mcp_control(&self) -> Result<Arc<McpControl>, ServerError> {
+        if let Some(control) = self.loader.as_ref().and_then(|l| l.mcp_control()) {
+            return Ok(control.clone());
+        }
+        McpControl::open(self.registry.dir()).map(Arc::new)
+    }
+
+    /// Whether the MCP endpoints exist at all (`server.toml [mcp] enabled`): online whether the
+    /// server built them at start, offline what `server.toml` says now.
+    pub(crate) fn mcp_endpoint_built(&self) -> bool {
+        match &self.loader {
+            Some(loader) => loader.mcp().is_some(),
+            None => self
+                .registry
+                .dir()
+                .load_config()
+                .map_or(true, |config| config.mcp.enabled),
+        }
+    }
+
+    /// Switches MCP on or off for the whole server (module docs): the new settings.
+    ///
+    /// `Err`: [`ServerError::Conflict`] for a stale revision; [`ServerError::Io`] when
+    /// `mcp.toml` cannot be written (nothing changed).
+    pub(crate) fn mcp_set_enabled(&self, on: bool) -> Result<McpSettings, ServerError> {
+        let settings = self.mcp_control()?.change(self.expected(), |settings| {
+            settings.enabled = on;
+            Ok(())
+        })?;
+        self.audit.record(AuditEvent::McpSwitched { on });
+        Ok(settings)
+    }
+
+    /// Changes the MCP settings of the database or alias `name` (`None` keeps a value): its
+    /// folded name, its settings and the new settings of the file. The name must be a database
+    /// or an alias, or have settings already (one left on a name that is gone, to reset it);
+    /// it is held while the file is written.
+    ///
+    /// `Err`: [`ServerError::NotFound`]; [`ServerError::Conflict`] for a stale revision;
+    /// [`ServerError::Io`].
+    pub(crate) fn mcp_set_name(
+        &self,
+        name: &str,
+        exposed: Option<bool>,
+        read_only: Option<bool>,
+    ) -> Result<(String, NameSettings, McpSettings), ServerError> {
+        let control = self.mcp_control()?;
+        let key = fold(name);
+        let change = || {
+            control.change(self.expected(), |settings| {
+                let mut value = settings.of(&key);
+                if let Some(exposed) = exposed {
+                    value.exposed = exposed;
+                }
+                if let Some(read_only) = read_only {
+                    value.read_only = read_only;
+                }
+                settings.databases.insert(key.clone(), value);
+                Ok(())
+            })
+        };
+        let settings = match self.registry.while_named(&key, change) {
+            Err(ServerError::NotFound { .. }) if control.has_own(&key) => change()?,
+            other => other?,
+        };
+        let value = settings.of(&key);
+        self.audit.record(AuditEvent::McpDatabaseSet {
+            name: key.clone(),
+            exposed: value.exposed,
+            read_only: value.read_only,
+        });
+        Ok((key, value, settings))
+    }
+
+    /// Removes the MCP settings of `name` (a database deleted, an alias removed; under the
+    /// registry's write lock, with its grants). A failure only warns.
+    pub(crate) fn forget_mcp_settings(&self, name: &str) {
+        match self.mcp_control() {
+            Ok(control) => {
+                control.forget_name(name);
+            }
+            Err(err) => tracing::warn!(target: "graphersal_server", "MCP settings: {err}"),
+        }
+    }
+
+    /// Moves the MCP settings of the alias `old` to `new` (a rename). A failure only warns.
+    pub(crate) fn move_mcp_settings(&self, old: &str, new: &str) {
+        match self.mcp_control() {
+            Ok(control) => control.rename(old, new),
+            Err(err) => tracing::warn!(target: "graphersal_server", "MCP settings: {err}"),
+        }
+    }
+}

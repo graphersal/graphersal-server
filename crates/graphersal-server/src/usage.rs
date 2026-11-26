@@ -142,12 +142,16 @@ pub(crate) fn free_bytes(
     limit: Option<u64>,
     figures: &MemoryFigures,
 ) -> (Option<u64>, &'static str) {
-    match limit {
-        Some(limit) => {
+    match (limit, figures.machine.available) {
+        (Some(limit), available) => {
             let used = figures.process.unwrap_or(figures.databases);
-            (Some(limit.saturating_sub(used)), "limit")
+            let under = limit.saturating_sub(used);
+            match available {
+                Some(available) if available < under => (Some(available), "machine-below-limit"),
+                _ => (Some(under), "limit"),
+            }
         }
-        None => (figures.machine.available, "machine"),
+        (None, available) => (available, "machine"),
     }
 }
 
@@ -370,7 +374,7 @@ mod tests {
     }
 
     #[test]
-    fn free_is_the_limit_minus_the_used_memory_or_the_machine_available() {
+    fn free_is_the_limit_minus_the_used_memory_capped_by_the_machine_available() {
         let figures = MemoryFigures {
             process: Some(300),
             databases: 100,
@@ -387,6 +391,20 @@ mod tests {
             ..figures
         };
         assert_eq!(free_bytes(Some(1_000), &no_rss), (Some(900), "limit"));
+        // Never more than the machine has available.
+        assert_eq!(
+            free_bytes(Some(9_000), &figures),
+            (Some(4_000), "machine-below-limit")
+        );
+        let unknown_machine = MemoryFigures {
+            machine: MachineMemory::default(),
+            ..figures
+        };
+        assert_eq!(
+            free_bytes(Some(9_000), &unknown_machine),
+            (Some(8_700), "limit")
+        );
+        assert_eq!(free_bytes(None, &unknown_machine), (None, "machine"));
     }
 
     #[test]

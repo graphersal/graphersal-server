@@ -19,9 +19,54 @@ see one database.
 
 ```toml
 [mcp]
-enabled = true          # default; false: /mcp and every /db/<name>/mcp answer 404
+enabled = true          # default; false: no MCP endpoint, /mcp and every /db/<name>/mcp answer 404
 max_sessions = 256      # MCP sessions remembered, the oldest forgotten first (at least 1)
 ```
+
+### Switches at runtime: the MCP tab, `mcp.toml`
+
+`server.toml [mcp] enabled` decides at start whether the endpoints exist at all. While they do,
+an admin switches them at runtime, with no restart, in the web UI's **MCP** tab, with the admin
+API (`GET`/`PUT /api/admin/mcp`, `PUT /api/admin/mcp/databases/<name>`;
+[`admin-api.md`](admin-api.md#mcp)) or the console:
+
+```bash
+graphersal-server mcp status --dir DIR                 # switches, databases, usage
+graphersal-server mcp off --dir DIR                    # | mcp on
+graphersal-server mcp db acme off --dir DIR            # hide acme from MCP | ... on
+graphersal-server mcp db acme read-only on --dir DIR   # MCP only reads acme | ... off
+```
+
+The server keeps them in `mcp.toml` of the server directory ([`server-dir.md`](server-dir.md#mcptoml)):
+
+- **MCP off** (whole server): `/mcp` and every `/db/<name>/mcp` answer `503 {"error": "MCP is
+  switched off on this server", "help"}` at once. Open MCP sessions are kept, not ended: their
+  requests are refused while it is off and go on (same session id, same selection) when it is on
+  again. `server.toml [mcp] enabled = false` stays the hard switch: then no endpoint exists and
+  the runtime switch cannot turn it on (restart after changing `server.toml`).
+- **A database or alias hidden** (`exposed = false`): `list_graphs` does not list it, `use_graph`
+  and `"graph"` answer as for an unknown name, `/db/<name>/mcp` answers `404 {"error": "MCP is
+  switched off for '<name>'", "help"}`. The HTTP API and the playground are not affected.
+- **MCP read-only** (`read_only = true`): MCP sessions only read the database, whatever their
+  grant: the reading profile, `list_graphs` shows `readOnly: true`, a write tool is refused. The
+  HTTP API still follows the grant. The effective level of an MCP request is the least of the
+  caller's grant, the database's mode (its read-only flag, a base) and this switch.
+- **Aliases**: a setting belongs to a name. A request through an alias is offered when the alias
+  AND its database are exposed, read-only when the alias OR its database is read-only: an alias
+  narrows its database, never widens it. A session that selected an alias with settings of its own
+  answers `use_graph` with the alias's name as `graph`, so the settings apply on every call. A
+  renamed alias keeps its settings; a deleted database or removed alias loses them (a new one of
+  that name starts with the defaults).
+
+### Usage statistics
+
+The MCP tab, `GET /api/admin/mcp` (`usage`) and `graphersal-server mcp status` (through a
+running server) show what agents did since the server started (in memory, reset by a restart):
+the open MCP sessions (per user, per database: a session's selection on `/mcp` or the database
+of its `/db/<name>/mcp`), the tool calls in total, per tool, per user and per database with their
+errors, the last 50 tool errors (time, tool, user, database, message) and the requests refused
+while MCP was off or a database hidden. A tool call is counted on the database it names
+(`graph`), the one `use_graph` selects, or the session's selection.
 
 `GET /api/info` at the root announces the endpoint: `"mcp": {"endpoint": "/mcp", "readOnly":
 false, "client": {...} | null}` (`client`: the last client that initialized), or `"mcp": null`

@@ -33,7 +33,10 @@
 //!   anonymous gets `401`, a logged-in principal without the admin role `404` as if the API did
 //!   not exist. The admin core records its events with the principal as the actor.
 //! - `/mcp`: the server-wide MCP endpoint over the databases the principal may see
-//!   ([`crate::mcp`]; `404` when `server.toml` turns MCP off).
+//!   ([`crate::mcp`]; `404` when `server.toml` turns MCP off, `503` while `mcp.toml` switches
+//!   it off: [`crate::mcp_control`]). `/db/<name>/mcp` follows the same switch, answers `404`
+//!   for a name MCP does not offer and is marked read-only for a name MCP serves read-only;
+//!   the tool calls of both are counted ([`crate::mcp_control::McpUsage`]).
 //! - any other `/api/...` path: `404`;
 //! - `GET /server-ui/<file>`: a file of the `server` UI profile ([`crate::ui_assets`]);
 //! - every other `GET`: a file of the embedded playground at the root (`/` = its `index.html`,
@@ -371,6 +374,12 @@ impl Router {
         let read = matches!(method, Method::Get | Method::Head);
         let answer = if path == crate::mcp::ENDPOINT {
             match loader.mcp() {
+                Some(_) if loader.mcp_control().is_some_and(|c| !c.enabled()) => {
+                    if let Some(control) = loader.mcp_control() {
+                        control.usage().refused();
+                    }
+                    return Answer::Response(crate::mcp::switched_off());
+                }
                 Some(mcp) => {
                     let directory = crate::mcp::Directory {
                         loader,
@@ -469,6 +478,24 @@ impl Router {
             Some(query) => format!("/{rest}?{query}"),
             None => format!("/{rest}"),
         };
+        // The per-database MCP endpoint: `mcp.toml`'s switches (off: 503; the name or its
+        // database not exposed: 404; read-only: the request marked read-only), and its body
+        // kept to count its tool calls.
+        let mcp_control = (rest == "mcp" && loader.mcp().is_some())
+            .then(|| loader.mcp_control())
+            .flatten();
+        let mut mcp_read_only = false;
+        if let Some(control) = mcp_control {
+            if !control.enabled() {
+                control.usage().refused();
+                return crate::mcp::switched_off();
+            }
+            if !control.exposed(name, &entry.name) {
+                control.usage().refused();
+                return crate::mcp::not_exposed(&crate::names::fold(name));
+            }
+            mcp_read_only = control.read_only(name, &entry.name);
+        }
         // A backup job's path is relative to the backup root: an absolute one is refused here
         // (the context's file root resolves a relative one and refuses one leaving the root).
         let buffered = if request.method() == &Method::Post && rest == JOBS_DEFINE {
@@ -476,9 +503,15 @@ impl Router {
                 Ok(body) => Some(body),
                 Err(answer) => return answer,
             }
+        } else if mcp_control.is_some() {
+            match crate::mcp::buffer_body(request) {
+                Ok(body) => body,
+                Err(answer) => return answer,
+            }
         } else {
             None
         };
+        let session = crate::mcp::header_of(request.headers(), crate::mcp::SESSION_HEADER);
         let mut forwarded = match &buffered {
             Some(body) => mounts::forward_with_body(request, &target, &entry.name, body),
             None => mounts::forward(request, &target, &entry.name),
@@ -486,10 +519,26 @@ impl Router {
         if let Some(identity) = principal.identity() {
             forwarded.set_identity(identity);
         }
-        if granted == Level::Read {
+        if granted == Level::Read || mcp_read_only {
             forwarded.mark_read_only();
         }
-        self.lifecycle.handle(forwarded)
+        let identity = forwarded.identity().map(str::to_string);
+        let answer = self.lifecycle.handle(forwarded);
+        if let (Some(control), Some(sent)) = (mcp_control, &buffered) {
+            let new_session = crate::mcp::header_of(answer.headers(), crate::mcp::SESSION_HEADER);
+            control.usage().observe(
+                &crate::mcp_control::ObservedRequest {
+                    identity: identity.as_deref(),
+                    mount: Some(name),
+                    session: session.as_deref(),
+                    new_session: new_session.as_deref(),
+                    body: sent,
+                },
+                answer.status(),
+                answer.body(),
+            );
+        }
+        answer
     }
 
     /// `GET /api/info` for `principal` (module docs).

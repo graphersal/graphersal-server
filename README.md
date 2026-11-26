@@ -169,6 +169,7 @@ databases and missing models. Paths and commands are never wrapped.
 | `user remove NAME` | the user and its grants (its sessions end) |
 | `user admin NAME on\|off` | give or take the `admin` role |
 | `user grant SUBJECT DATABASE read\|write`, `user revoke SUBJECT DATABASE` | grants; SUBJECT: a user name or `anonymous` (everyone, also without a token), DATABASE: a database, an alias (reached only through the alias, at its current database: `docs/access.md` "Grants on aliases") or `*`. The last admin (role and token) cannot be removed, demoted or revoked |
+| `mcp status`, `mcp on\|off`, `mcp db NAME on\|off`, `mcp db NAME read-only on\|off` | the MCP switches of `DIR/mcp.toml` (a running server follows at once): MCP for the whole server (off: `/mcp` and `/db/NAME/mcp` answer 503, open sessions are kept), a database or alias offered to MCP or hidden, MCP read-only whatever the caller's grant; `status` lists them with the usage statistics of a running server ([`docs/mcp.md`](docs/mcp.md)) |
 
 `graphersal-server --help` has the details. Exit codes: `0` ok, `1` failed (`Error: ...` and a
 `Help: ...` line on stderr; where the admin API's help names a route, the console names the
@@ -204,7 +205,11 @@ server) and `runs-tab.js` (the run administration: the queries that wait or run 
 databases, whatever their client, refreshed every 2 s, with a Stop button per run; a loaded
 database's row opens it filtered by "Runs…") and `users-tab.js` (users with the token
 shown once and as `…last4` after, new token, revoke, admin role, remove; grants, anonymous
-included, on databases and aliases, each alias marked with its current database), the views of non-admins `login-tab.js` (paste a token; then the page's `?next=`
+included, on databases and aliases, each alias marked with its current database) and
+`mcp-tab.js` (MCP on or off for the whole server, each database or alias offered to MCP or
+hidden and read-only for MCP, open sessions and tool calls per database, tool calls per tool and
+per user with the recent errors since the start, the endpoint URL and the `claude mcp add`
+command; model `mcp-api.js`), the views of non-admins `login-tab.js` (paste a token; then the page's `?next=`
 path, only a path from the server root, or the root) and `mine-tab.js` ("My databases"), the
 top bar's `header.js` (who is signed in, "Log out"), the pure models
 `admin-api.js`, `databases.js`, `access-api.js`, `fresh.js` (fresh data per visit) and `sort.js` (sortable columns), the tabs' shared state `shared.js` and the style sheet
@@ -280,6 +285,7 @@ a build first, else these two tests are skipped).
   server.lock     one running server per directory
   server.run      the running server's address and operator token (mode 0600, only while it runs)
   aliases.toml    current = "acme-2026.3"
+  mcp.toml        the MCP switches (on/off, per database offered and read-only), written by the server
   databases/<name>/database.toml + store/
   models/         one copy of every embedding model, hard-linked into the databases
   backups/<name>/ admin backups; backups/jobs/: the backup root of backup jobs
@@ -351,7 +357,8 @@ directories and file names below `databases/<name>/`, and a path over 260 charac
   are not in a database's figure, but in the process's resident memory). The process's
   resident memory is read on Linux, macOS and Windows only (`null` elsewhere).
 - No admin tools over MCP. Browser and MCP sessions survive a restart (`sessions/`, hashes
-  only; `docs/server-dir.md`).
+  only; `docs/server-dir.md`). The MCP usage statistics live in memory and start again at every
+  restart.
 - **Windows: no permission check of the server directory** (unix only): its ACL is the
   boundary; create it where only the account running the server may write.
 - **Plain HTTP** (HTTP/1.1 and h2c, no TLS, so no HTTP/2 negotiation by ALPN): tokens and

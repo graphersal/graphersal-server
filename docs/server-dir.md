@@ -17,6 +17,7 @@ another user or open to group or others ([`access.md`](access.md#the-security-mo
   server.lock          one running server per directory (an OS file lock)
   server.run           the running server's address and operator token (mode 0600, only while it runs)
   aliases.toml         alias -> database
+  mcp.toml             the MCP switches (written by the server; missing = the defaults)
   databases/
     <name>/
       database.toml    the database's configuration
@@ -279,6 +280,26 @@ an alias on every request, so a flip (`PUT /api/admin/aliases/<alias>`) takes ef
 rename (`POST /api/admin/aliases/<alias>/rename`) rewrites the file in one atomic step. An
 alias whose target is missing is dropped at start and reported in the listing's `problems`.
 
+## `mcp.toml`
+
+The runtime switches of the MCP endpoints ([`mcp.md`](mcp.md#switches-at-runtime-the-mcp-tab-mcptoml)),
+written by the server (the web UI's MCP tab, `PUT /api/admin/mcp...`, `graphersal-server mcp
+...`), whole and atomically; a missing file means the defaults (MCP on, every database
+offered, nothing forced read-only). A file that does not parse (an unknown key included) stops
+`serve` and the console with the line it points at.
+
+```toml
+enabled = true          # false: /mcp and every /db/<name>/mcp answer 503 (sessions kept)
+
+[databases.acme]        # a database or an alias, by name
+exposed = false         # hidden from MCP (list_graphs, use_graph, /db/acme/mcp)
+read_only = true        # MCP sessions only read it, whatever their grant
+```
+
+A name with the defaults is not written. A renamed alias keeps its settings; a deleted database
+or removed alias loses them. `server.toml [mcp] enabled = false` overrides `enabled = true` here
+(no endpoint at all).
+
 ## `databases/<name>/`
 
 There is no registry file: the databases ARE the directories under `databases/`, read at start.
@@ -496,8 +517,8 @@ whole and correct:
 - **One lock per file, held across read, change and write.** The change is made on a copy, the
   file is written, and only then does the server's memory take the new state: a failed write
   changes nothing.
-- **Revisions against lost updates.** Users and grants, aliases and each database's settings
-  carry a `revision` that a change may name; a change based on an older state is refused
+- **Revisions against lost updates.** Users and grants, aliases, each database's settings and
+  the MCP settings carry a `revision` that a change may name; a change based on an older state is refused
   (`409`, help `changed by someone else: reload`; [`admin-api.md`](admin-api.md#revisions-concurrent-changes)).
 
 What writes which file at runtime, and under which lock:
@@ -509,6 +530,7 @@ What writes which file at runtime, and under which lock:
 | `server.run` | `serve` at start (removed at stop); `stop` removes a stale one | the server lock |
 | `access.toml` | user and grant changes (admin API, console), alias rename/remove and database delete (grants follow), a new name taking leftover grants, the first admin (`init`, `serve`: created new, never replaced) | the access file's lock (`Access`), online; offline the server lock (one console command) |
 | `aliases.toml` | alias set/flip, rename, remove | the registry's write lock |
+| `mcp.toml` | the MCP switches (admin API, MCP tab, console `mcp`), alias rename (settings move) and remove, database delete and a new name (settings dropped) | the MCP settings' write lock (a leaf: it takes no other lock; a change of a name's settings holds the registry's read lock around it while the name must exist) |
 | `databases/<name>/database.toml` | read-only, auto-load, promote, the `needs_model` marker; a new database's file is written in its build in `tmp/` before the rename into `databases/` | the registry's write lock (read-only also the loader's flip lock) |
 | `databases/<name>/store/` | the graphersal engine (the Store, its WAL, the database's job definitions) | the engine's own (one open Store per database) |
 | `databases/` (add, remove), `trash/` | create, clone, import, restore (rename of a build), delete, restore over a database | the registry's write lock; delete, promote and a restore over a database also hold the loader's lock (nothing loads meanwhile) |
@@ -523,8 +545,8 @@ What writes which file at runtime, and under which lock:
 
 Lock order (a thread holding one lock takes only those after it, so no two requests can
 deadlock): the loader's state lock, then the loader's read-only flip lock, then the registry
-(write or read), then the access file, then a session table (browser or MCP); the models lock
-and the backup naming lock take no other lock. The audit records go to the log, no file of
+(write or read), then the access file, then a session table (browser or MCP); the models lock,
+the backup naming lock and the MCP settings' lock take no other lock. The audit records go to the log, no file of
 their own.
 
 ## External backups of the whole directory

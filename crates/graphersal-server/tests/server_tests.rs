@@ -4232,8 +4232,13 @@ fn database_rows_and_the_server_report_disk_and_memory() {
         let free = memory["freeBytes"].as_u64().unwrap();
         match memory["limitBytes"].as_u64() {
             Some(limit) => {
-                assert_eq!(memory["freeBasis"], "limit", "{body}");
-                assert!(free <= limit, "{body}");
+                // Free under the limit, never more than the machine has available.
+                assert!(free <= limit && free <= available, "{body}");
+                match memory["freeBasis"].as_str() {
+                    Some("limit") => {}
+                    Some("machine-below-limit") => assert_eq!(free, available, "{body}"),
+                    other => panic!("freeBasis {other:?}: {body}"),
+                }
             }
             None => {
                 assert_eq!(memory["freeBasis"], "machine", "{body}");
@@ -4270,4 +4275,133 @@ fn database_rows_and_the_server_report_disk_and_memory() {
         "{out}"
     );
     running.stop().unwrap();
+}
+
+/// `mcp ...` of the console: `args` with `--dir dir`: (exit code, stdout, stderr).
+fn mcp_command(dir: &Path, args: &[&str]) -> (i32, String, String) {
+    let out = Command::new(BIN)
+        .arg("mcp")
+        .args(args)
+        .arg("--dir")
+        .arg(dir)
+        .output()
+        .unwrap();
+    (
+        out.status.code().unwrap_or(-1),
+        text(&out.stdout),
+        text(&out.stderr),
+    )
+}
+
+/// Round 3 B6: the console's `mcp` commands on the directory (`mcp.toml`) and through a running
+/// server (the endpoints follow at once); a switch written offline holds at the next start.
+#[test]
+fn mcp_commands_offline_and_through_a_server() {
+    let temp = TempDir::new("console-mcp");
+    let dir = ServerDir::init(temp.path()).unwrap().dir;
+    modern_db(&dir, "acme");
+    modern_db(&dir, "beta");
+    let root = temp.path();
+    // Offline: the console writes mcp.toml.
+    let (code, out, err) = mcp_command(root, &["off"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.starts_with("MCP is switched off\n"), "{out}");
+    let settings = std::fs::read_to_string(dir.mcp_settings_path()).unwrap();
+    assert!(settings.contains("enabled = false"), "{settings}");
+    let (code, out, err) = mcp_command(root, &["db", "acme", "read-only", "on"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.starts_with("MCP settings of 'acme'\n"), "{out}");
+    assert!(out.contains("read-only: yes"), "{out}");
+    let (code, _, err) = mcp_command(root, &["db", "nope", "on"]);
+    assert_eq!(code, 1);
+    assert!(err.contains("nope"), "{err}");
+    let (code, _, err) = mcp_command(root, &["db", "acme", "maybe"]);
+    assert_eq!(code, 2, "a usage error: {err}");
+    let (code, out, err) = mcp_command(root, &["status"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        out.contains("off (switch it on: graphersal-server mcp on --dir"),
+        "{out}"
+    );
+    assert!(out.contains("only while the server runs"), "{out}");
+    let acme = out
+        .lines()
+        .find(|l| l.trim_start().starts_with("acme"))
+        .unwrap();
+    let cells: Vec<&str> = acme.split_whitespace().collect();
+    assert_eq!(
+        cells,
+        ["acme", "yes", "yes", "0", "0"],
+        "offered and read-only: {acme}"
+    );
+
+    // Through a server: off holds at the start; on, a hidden database, statistics.
+    let mut server = ServerProcess::spawn(
+        Command::new(BIN)
+            .args(["serve", "--dir"])
+            .arg(root)
+            .args(["--listen", "127.0.0.1:0"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    );
+    let info = wait_for_run_file(&dir);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while get(info.address, "/readyz").0 != 200 {
+        assert!(Instant::now() < deadline, "the server did not get ready");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let ping = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "ping"});
+    let (status, _, body) = mcp_post(info.address, "/mcp", None, &[], ping.clone());
+    assert_eq!(status, 503, "{body}");
+    assert!(
+        json(&body)["help"].as_str().unwrap().contains("mcp on"),
+        "{body}"
+    );
+    let note = format!("sent to its admin API at {}", info.address);
+    let (code, out, err) = mcp_command(root, &["on"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(err.contains(&note), "{err}");
+    assert!(out.starts_with("MCP is switched on\n"), "{out}");
+    let session = mcp_initialize(info.address, "/mcp");
+    let (code, _, err) = mcp_command(root, &["db", "beta", "off"]);
+    assert_eq!(code, 0, "{err}");
+    let (listing, error) = mcp_tool(
+        info.address,
+        "/mcp",
+        &session,
+        "list_graphs",
+        serde_json::json!({}),
+    );
+    assert!(!error, "{listing}");
+    assert!(listing.contains("\"acme\""), "{listing}");
+    assert!(!listing.contains("\"beta\""), "{listing}");
+    let (code, out, err) = mcp_command(root, &["status", "--json"]);
+    assert_eq!(code, 0, "{err}");
+    let state = json(&out);
+    assert_eq!(state["serving"], true);
+    assert_eq!(state["online"], true);
+    assert_eq!(state["usage"]["calls"]["total"], 1);
+    assert_eq!(state["usage"]["calls"]["refused"], 1);
+    assert_eq!(state["usage"]["sessions"]["open"], 1);
+    let row = |name: &str| {
+        state["databases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["name"] == name)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(row("acme")["readOnly"], true);
+    assert_eq!(row("beta")["exposed"], false);
+    let (code, out, _) = mcp_command(root, &["status"]);
+    assert_eq!(code, 0);
+    assert!(out.contains("list_graphs"), "the tool table: {out}");
+
+    send_stop(&server);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while server.0.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < deadline, "the server did not stop");
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }

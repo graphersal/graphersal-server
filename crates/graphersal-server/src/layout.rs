@@ -41,6 +41,9 @@ pub const RUN_FILE: &str = "server.run";
 pub const ALIASES_FILE: &str = "aliases.toml";
 /// The access file's name (users, token hashes, grants: [`crate::access`]).
 pub const ACCESS_FILE: &str = "access.toml";
+/// The MCP settings file's name (the runtime switches of the MCP endpoints, written by the
+/// server: the MCP tab, `PUT /api/admin/mcp...`, `graphersal-server mcp ...`).
+pub const MCP_SETTINGS_FILE: &str = "mcp.toml";
 
 /// The subdirectories `init` creates, each as its path components.
 const SUBDIRS: &[&[&str]] = &[
@@ -234,6 +237,11 @@ impl ServerDir {
     /// `access.toml`.
     pub fn access_path(&self) -> PathBuf {
         self.root.join(ACCESS_FILE)
+    }
+
+    /// `mcp.toml` (the MCP settings; missing = the defaults).
+    pub fn mcp_settings_path(&self) -> PathBuf {
+        self.root.join(MCP_SETTINGS_FILE)
     }
 
     /// `databases/`.

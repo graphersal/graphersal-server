@@ -677,6 +677,26 @@ tool gql '{"query": "MATCH (p:person) RETURN count(p) AS n", "graph": "acme"}'
 echo "$TOOL_TEXT" | grep -q '"n": *1' || fail "gql on acme: $TOOL_TEXT"
 ok
 
+STEP="mcp switched off and on, a database hidden, statistics (B6)"
+"$BIN" mcp off --dir "$DIR" >"$WORK/mcp.out" 2>"$WORK/mcp.err" || fail "mcp off: $(cat "$WORK/mcp.err")"
+grep -q "^MCP is switched off\$" "$WORK/mcp.out" || fail "mcp off: $(cat "$WORK/mcp.out")"
+mcp 2 tools/list
+expect_status 503
+"$BIN" mcp on --dir "$DIR" >"$WORK/mcp.out" 2>"$WORK/mcp.err" || fail "mcp on: $(cat "$WORK/mcp.err")"
+mcp 2 tools/list
+expect_status 200
+"$BIN" mcp db product off --dir "$DIR" >"$WORK/mcp.out" 2>"$WORK/mcp.err" ||
+  fail "mcp db product off: $(cat "$WORK/mcp.err")"
+tool list_graphs '{}'
+echo "$TOOL_TEXT" | grep -q '"product"' && fail "product still listed: $TOOL_TEXT"
+jreq PUT /api/admin/mcp/databases/product '{"exposed": true}'
+expect_status 200
+req GET /api/admin/mcp
+expect_status 200
+expect_json serving true
+[ "$(jget usage.calls.refused)" -ge 1 ] || fail "no refused request counted: $(cat "$BODY")"
+ok
+
 STEP="alias rename moves the MCP session"
 "$BIN" db alias rename current live --dir "$DIR" >"$WORK/rename.out" 2>"$WORK/rename.err" ||
   fail "db alias rename: $(cat "$WORK/rename.err")"
