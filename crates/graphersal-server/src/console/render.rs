@@ -22,7 +22,11 @@ pub(crate) fn shell_word(path: &Path) -> String {
     let plain = !text.is_empty()
         && text
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || "-_./:\\@%+=,".contains(c));
+            .enumerate()
+            // `~` expands only at the start of a word (`C:\Users\RUNNER~1` needs no quotes).
+            .all(|(i, c)| {
+                c.is_ascii_alphanumeric() || "-_./:\\@%+=,".contains(c) || (c == '~' && i > 0)
+            });
     if plain {
         text
     } else {
@@ -2302,5 +2306,10 @@ mod tests {
         assert_eq!(shell_word(Path::new("/srv/a-b_c.d")), "/srv/a-b_c.d");
         assert_eq!(shell_word(Path::new("my srv")), "'my srv'");
         assert_eq!(shell_word(Path::new("it's")), r"'it'\''s'");
+        assert_eq!(
+            shell_word(Path::new(r"C:\Users\RUNNER~1\x")),
+            r"C:\Users\RUNNER~1\x"
+        );
+        assert_eq!(shell_word(Path::new("~/srv")), "'~/srv'");
     }
 }
