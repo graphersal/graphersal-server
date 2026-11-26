@@ -88,6 +88,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "24"
+      - name: Download every platform's crates (the node tests find graphersal-serve's ui/ through cargo metadata --offline)
+        run: cargo fetch --locked
       - name: Web UI node tests
         run: node --test crates/graphersal-server/ui/tests/*.test.mjs
       - name: Build the binary
