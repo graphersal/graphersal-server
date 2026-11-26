@@ -14,6 +14,7 @@
 #
 #   scripts/smoke.sh                     # from the repository root (or anywhere)
 #   SMOKE_BIN=path/to/graphersal-server  # skip the build, test this binary
+#   SMOKE_VERSION=0.3.0                  # also check `--version` and /api/info name this version
 #   SMOKE_KEEP=1                         # keep the temporary directory (printed at the end)
 set -u
 
@@ -175,6 +176,11 @@ else
   BIN="$ROOT/target/debug/graphersal-server"
 fi
 [ -x "$BIN" ] || fail "no binary at $BIN"
+if [ -n "${SMOKE_VERSION:-}" ]; then
+  VERSION_TEXT=$("$BIN" --version 2>&1) || fail "--version: $VERSION_TEXT"
+  [ "$VERSION_TEXT" = "graphersal-server $SMOKE_VERSION" ] ||
+    fail "--version prints '$VERSION_TEXT', expected 'graphersal-server $SMOKE_VERSION'"
+fi
 ok
 
 STEP="init"
@@ -232,6 +238,7 @@ expect_json uiProfile.name server
 expect_json uiProfile.styles.0 server-ui.css
 expect_json admin null
 expect_json product null
+[ -z "${SMOKE_VERSION:-}" ] || expect_json version "$SMOKE_VERSION"
 ok
 
 STEP="access: anonymous is refused, the first admin logs in and out"

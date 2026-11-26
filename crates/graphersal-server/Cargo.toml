@@ -7,10 +7,24 @@ repository.workspace = true
 homepage.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description = "EXPERIMENTAL server for many Graphersal graph databases in one server directory"
+description = "EXPERIMENTAL server for many Graphersal graph databases in one server directory, over HTTP, with a web UI and MCP"
 readme = "../../README.md"
-# Private until its first public version (binary releases on GitHub only).
-publish = false
+# The book is not published on a website: its sources on GitHub are the documentation.
+documentation = "https://github.com/graphersal/graphersal-server/tree/main/book/src"
+keywords = ["graph", "database", "server", "gremlin", "mcp"]
+categories = ["database-implementations", "command-line-utilities", "web-programming::http-server"]
+# What the published crate carries: the code, the embedded web UI (`ui/`, with its node tests and
+# their fixture `ui/tests/root-info.json`, which a unit test reads), the OpenAPI files the binary
+# embeds (`openapi/`), the end-to-end tests and the licence files. `readme` adds README.md.
+include = [
+    "/Cargo.toml",
+    "/src/**",
+    "/ui/**",
+    "/openapi/**",
+    "/tests/**",
+    "/LICENSE-APACHE",
+    "/NOTICE",
+]
 
 [[bin]]
 name = "graphersal-server"
@@ -55,3 +69,37 @@ windows-sys = { workspace = true }
 [dev-dependencies]
 # The h2c test's client (hyper's HTTP/2 client connection; no new crate).
 hyper = { workspace = true, features = ["client"] }
+
+# `cargo binstall graphersal-server`: the release's archives (named by platform, not by target;
+# Linux builds are static musl, so they serve the gnu targets too). Keep in step with the matrix of
+# .github/workflows/release.yml and the installers. Other targets (x86_64-apple-darwin included:
+# no Intel macOS build): no release build, binstall falls back to building from source.
+[package.metadata.binstall.overrides.x86_64-unknown-linux-musl]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-v{ version }-linux-x86_64.tar.gz"
+bin-dir = "{ name }-v{ version }-linux-x86_64/{ bin }{ binary-ext }"
+pkg-fmt = "tgz"
+
+[package.metadata.binstall.overrides.x86_64-unknown-linux-gnu]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-v{ version }-linux-x86_64.tar.gz"
+bin-dir = "{ name }-v{ version }-linux-x86_64/{ bin }{ binary-ext }"
+pkg-fmt = "tgz"
+
+[package.metadata.binstall.overrides.aarch64-unknown-linux-musl]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-v{ version }-linux-aarch64.tar.gz"
+bin-dir = "{ name }-v{ version }-linux-aarch64/{ bin }{ binary-ext }"
+pkg-fmt = "tgz"
+
+[package.metadata.binstall.overrides.aarch64-unknown-linux-gnu]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-v{ version }-linux-aarch64.tar.gz"
+bin-dir = "{ name }-v{ version }-linux-aarch64/{ bin }{ binary-ext }"
+pkg-fmt = "tgz"
+
+[package.metadata.binstall.overrides.aarch64-apple-darwin]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-v{ version }-macos-arm64.tar.gz"
+bin-dir = "{ name }-v{ version }-macos-arm64/{ bin }{ binary-ext }"
+pkg-fmt = "tgz"
+
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-v{ version }-windows-x86_64.zip"
+bin-dir = "{ name }-v{ version }-windows-x86_64/{ bin }{ binary-ext }"
+pkg-fmt = "zip"

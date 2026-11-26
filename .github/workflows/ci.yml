@@ -1,22 +1,32 @@
 name: CI
 
-# One job on Windows (a decision of 2026-11-22: CI minutes are limited, and Windows is the
-# platform the maintainer does not test on locally; macOS and Linux are built and tested by hand):
-# format, clippy, the Rust tests, the web UI's node tests and a smoke test of the built binary.
+# CI runs by hand only (a decision of 2026-11-26: Actions minutes are limited), before a release
+# and whenever a change needs it:
+#   gh workflow run CI -f ref=<branch>        # or Actions tab -> CI -> Run workflow
+#
+# Platforms: Linux and Windows. Windows is the platform the maintainer does not test on locally;
+# Linux is where most servers run (and its runner minutes are the cheapest). macOS is skipped: it
+# is the maintainer's own machine (the full local checks run there before every merge) and macOS
+# minutes cost ten times Linux ones; the Release workflow builds and smoke-tests macos-arm64.
+#
+# Jobs: format; per platform clippy, the Rust tests, the web UI's node tests and the smoke test
+# of the built binary (scripts/smoke.sh on Linux, its PowerShell port scripts/smoke.ps1 on
+# Windows); cargo-deny (licences, RustSec advisories, sources: deny.toml); the MSRV (1.88, the
+# declared `rust-version`: `cargo install` users may have it), checked on Linux only.
 #
 # Graphersal's crates come from crates.io, pinned exactly in the root Cargo.toml; every cargo
 # command runs `--locked` against the committed Cargo.lock. The playground the binary embeds
 # ships in the published graphersal-serve crate (its `ui/`), and the node tests find it there
 # through `cargo metadata` (ui/tests/profile.test.mjs; they fail on CI when it is missing).
-#
-# The MSRV (1.88) is not checked here: a second toolchain doubles the build on the slowest
-# runner; check it locally (`cargo +1.88 check --all-targets`).
 
 on:
-  push:
-    branches: [main]
-  pull_request:
   workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch, tag or commit of graphersal-server to check"
+        type: string
+        required: true
+        default: main
 
 permissions:
   contents: read
@@ -27,7 +37,7 @@ env:
   CARGO_INCREMENTAL: 0
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ inputs.ref }}
   cancel-in-progress: true
 
 defaults:
@@ -35,29 +45,44 @@ defaults:
     shell: bash
 
 jobs:
-  windows:
-    name: test (windows-latest)
-    runs-on: windows-latest
+  fmt:
+    name: fmt
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    # A hung end-to-end test fails the job instead of running for GitHub's default of 6 hours.
     timeout-minutes: 90
     steps:
-      # Byte-identical files on every platform (the runner's git converts to CRLF by default):
-      # the embedded playground and the test data stay as committed.
+      # Byte-identical files on every platform (the Windows runner's git converts to CRLF by
+      # default): the embedded web UI and the test data stay as committed.
       - name: No line-ending conversion
         run: git config --global core.autocrlf false
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
+          components: clippy
       - uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: cargo fmt
-        run: cargo fmt --all --check
       - name: cargo clippy
         run: cargo clippy --locked --all-targets -- -D warnings
       # Unit tests (admin core, ops, models, router, console) and tests/server_tests.rs (the
-      # binary end to end: init, serve on port 0, the console through a running server, a clean
-      # stop by Ctrl+Break). Also builds target/debug/graphersal-server.exe for the smoke test.
+      # binary end to end).
       - name: cargo test
         run: cargo test --locked
       - uses: actions/setup-node@v4
@@ -65,11 +90,36 @@ jobs:
           node-version: "24"
       - name: Web UI node tests
         run: node --test crates/graphersal-server/ui/tests/*.test.mjs
-      # scripts/smoke.sh (the full walk) needs SIGTERM, curl and python3 and runs on Unix only;
-      # scripts/smoke.ps1 is its Windows counterpart for the built binary.
-      - name: Smoke test of the binary (PowerShell)
+      - name: Build the binary
+        run: cargo build --locked -p graphersal-server
+      - name: Smoke test of the binary (scripts/smoke.sh)
+        if: runner.os != 'Windows'
+        run: SMOKE_BIN="$PWD/target/debug/graphersal-server" bash scripts/smoke.sh
+      - name: Smoke test of the binary (scripts/smoke.ps1)
+        if: runner.os == 'Windows'
         shell: pwsh
-        run: |
-          cargo build --locked -p graphersal-server
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          ./scripts/smoke.ps1 -Bin target/debug/graphersal-server.exe
+        run: ./scripts/smoke.ps1 -Bin target/debug/graphersal-server.exe
+
+  deny:
+    name: cargo deny
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+
+  msrv:
+    name: msrv (1.88)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --locked --all-targets

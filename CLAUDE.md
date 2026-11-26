@@ -9,7 +9,9 @@ from published files). When this file disagrees with the code, the code wins: sa
 ## Layout
 
 - Workspace root `Cargo.toml` (all dependency versions in `[workspace.dependencies]`, each with
-  a one-line justification); one crate `crates/graphersal-server` (lib + bin, `publish = false`).
+  a one-line justification); one crate `crates/graphersal-server` (lib + bin, published on crates.io: `include` lists what
+  the package carries (code, `ui/`, `openapi/`, tests, licence files); `cargo publish --dry-run
+  --locked` must stay clean; `[package.metadata.binstall]` names the release archives).
 - graphersal with features `persist`, `persist-zip` (verified ZIP backups) and `io` (GraphSON
   and GraphML imports); graphersal-serve
   with features `ui-assets` (the embedded playground per mount and at `/`, where it shows the
@@ -776,8 +778,21 @@ from published files). When this file disagrees with the code, the code wins: sa
   not see another database, "my databases"), the reserved name `jobs`, the inbox, SIGTERM stop,
   a restart (a browser cookie and an MCP session with its selection survive);
   `ok <step>` / `FAIL <step>: why` lines, exit 1 on failure, the server killed in a trap
-  (`SMOKE_BIN` skips the build, `SMOKE_KEEP=1` keeps the temp dir). Extend it with a new
-  user-visible feature.
+  (`SMOKE_BIN` skips the build, `SMOKE_VERSION` checks `--version` and `/api/info`,
+  `SMOKE_KEEP=1` keeps the temp dir). Extend it with a new user-visible feature, AND port the step
+  to `scripts/smoke.ps1` (its PowerShell port for Windows, the same steps in the same order; its
+  header lists the deliberate differences: clean stop through `stop --dir`, no owner check, no
+  h2c request).
+- Release and CI (`.github/workflows/`): `release.yml` (tag `v<version>` = workspace version,
+  or `gh workflow run Release -f ref=<ref> [-f dry_run=false]`): 4 platforms (linux-x86_64 and
+  linux-aarch64 static musl, macos-arm64, windows-x86_64; no macOS x86_64, user decision
+  2026-11-26), `dist` profile, smoke test per platform, archives
+  `graphersal-server-v<version>-<platform>.tar.gz|.zip`, `SHA256SUMS`, installers test,
+  `cargo publish --dry-run`, attestations (public repo), DRAFT release only. `install.sh` /
+  `install.ps1` at the root (env prefix `GRAPHERSAL_SERVER_`, `--base-url` for tests): keep the
+  platform list in step with the release matrix and the binstall overrides. `ci.yml` runs BY HAND
+  only (user decision 2026-11-26: `gh workflow run CI -f ref=<branch>`): fmt, Linux + Windows
+  clippy/test/node/smoke, `cargo deny check` (`deny.toml`), MSRV 1.88.
 - Tests: unit tests beside the code (`test_support::TempDir`), end-to-end tests in
   `crates/graphersal-server/tests/server_tests.rs` (spawns the binary, port 0, SIGTERM; the
   `db`/`import`/`models` console offline and through a running server).

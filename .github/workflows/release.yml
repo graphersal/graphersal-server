@@ -1,19 +1,33 @@
 name: Release
 
-# Builds the prebuilt graphersal-server binary for Windows x86_64 (the only platform for now, a
-# decision of 2026-11-22: CI minutes are limited; other platforms build from source, README
-# "Download / build") with the `dist` profile of the root Cargo.toml (release + fat LTO +
-# stripped symbols, panics unwind), smoke-tests it (scripts/smoke.ps1), and packs
-# `graphersal-server-v<version>-windows-x86_64.zip` (the binary, LICENSE-APACHE, NOTICE,
-# README.md and THIRD-PARTY-LICENSES.html from cargo-about, about.toml) plus `SHA256SUMS`, uploaded
-# as the artifact `graphersal-server-windows-x86_64`. On a release tag it also creates a DRAFT
-# GitHub Release with both files; its text is `book/src/release_notes/<version>.md`. The maintainer
-# checks the draft and publishes it by hand. Nothing goes to crates.io (`publish = false`).
+# Builds the prebuilt `graphersal-server` binary for four platforms (linux-x86_64,
+# linux-aarch64, macos-arm64, windows-x86_64), each natively on its own runner, with the `dist`
+# profile of the root Cargo.toml (release + fat LTO + stripped symbols, panics unwind). Linux is a
+# static musl build (runs on every distribution; `ring`'s C code is compiled with musl-gcc). No
+# macOS x86_64 build (a decision of 2026-11-26): Intel Macs build from source with
+# `cargo install --locked graphersal-server`. Each build is smoke-tested on its runner:
+# scripts/smoke.sh (the full end-to-end walk) on Linux and macOS, scripts/smoke.ps1 (its
+# PowerShell port) on Windows. Each is packed as `graphersal-server-v<version>-<platform>.tar.gz`
+# (Windows: `.zip`) holding the binary, LICENSE-APACHE, NOTICE, README.md and
+# THIRD-PARTY-LICENSES.html (cargo-about, about.toml). The `checksums` job writes `SHA256SUMS`
+# over the archives and the installers (`install.sh`, `install.ps1`), and `installers-test` runs
+# both installers (Linux: install.sh incl. a refused checksum mismatch; Windows: install.ps1 under
+# PowerShell 7 and, through `iex`, Windows PowerShell 5.1) against these files served like a
+# release by a local HTTP server. `package` checks that the crate packs and builds as crates.io
+# would (`cargo publish --dry-run`).
+#
+# A real release (a pushed tag `v<version>`, or `workflow_dispatch` with `ref` = such a tag and
+# `dry_run` = false) adds build provenance attestations (public repositories only: GitHub offers
+# them for private repositories on Enterprise Cloud alone) and creates a DRAFT GitHub Release
+# with the archives, the installers and SHA256SUMS attached; its text is
+# `book/src/release_notes/<version>.md` plus the install commands. The maintainer checks the draft
+# and publishes it by hand; nothing is ever published by this workflow (crates.io included:
+# `cargo publish` is run by hand after the release).
 #
 # Triggers:
-#   git push origin v0.1.0                         # a release tag: build + draft release
-#   gh workflow run Release -f ref=<branch>        # a dry run: build + artifact, no release
-#   gh workflow run Release -f ref=v0.1.0          # a tag by hand: build + draft release
+#   git push origin v0.3.0                                   # a real release
+#   gh workflow run Release -f ref=<branch or tag>           # a dry run: build, test, artifacts only
+#   gh workflow run Release -f ref=v0.3.0 -f dry_run=false   # a real release of an existing tag
 # A tag must equal the workspace version (`version` in the root Cargo.toml), and the version's
 # release notes must exist (checked on dry runs too).
 #
@@ -27,44 +41,47 @@ on:
   workflow_dispatch:
     inputs:
       ref:
-        description: "Branch or tag of graphersal-server to build (a v<version> tag also drafts a release)"
+        description: "Branch or tag of graphersal-server to build"
         type: string
         required: true
         default: main
+      dry_run:
+        description: "Build, smoke-test and checksum only; no attestation, no draft release"
+        type: boolean
+        default: true
 
 permissions:
   contents: read
 
+concurrency:
+  group: release-${{ inputs.ref || github.ref }}
+  cancel-in-progress: false
+
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
-  TARGET: x86_64-pc-windows-msvc
-  PLATFORM: windows-x86_64
-
-defaults:
-  run:
-    shell: bash
+  # The commit to build: the dispatched `ref`, else the pushed tag.
+  REF: ${{ inputs.ref || github.ref }}
 
 jobs:
-  build:
-    name: graphersal-server (windows-x86_64)
-    runs-on: windows-latest
-    timeout-minutes: 90
+  check:
+    name: version
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
     outputs:
       version: ${{ steps.version.outputs.version }}
+      release: ${{ steps.version.outputs.release }}
       tag: ${{ steps.version.outputs.tag }}
       graphersal: ${{ steps.graphersal.outputs.version }}
     steps:
-      - name: No line-ending conversion
-        run: git config --global core.autocrlf false
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.ref || github.ref }}
+          ref: ${{ env.REF }}
           fetch-depth: 0
-      - name: Version, tag and release notes
+      - name: The workspace version, the release notes, and the tag of a real release
         id: version
         env:
-          REF: ${{ inputs.ref || github.ref_name }}
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
         run: |
           set -euo pipefail
           version="$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"$/\1/p' Cargo.toml)"
@@ -83,8 +100,18 @@ jobs:
           notes="book/src/release_notes/$version.md"
           test -f "$notes" || { echo "::error::$notes (the release text) is missing"; exit 1; }
           echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [ "$DRY_RUN" = true ]; then
+            echo "Dry run of $version (ref $ref)" | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ -z "$tag" ]; then
+            echo "::error::A real release runs on a tag: push v$version, or dispatch with ref=v$version (or dry_run)"
+            exit 1
+          fi
+          echo "Releasing graphersal-server $version (tag $tag)" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "release=true" >> "$GITHUB_OUTPUT"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "graphersal-server $version (ref $ref${tag:+, release tag $tag})" | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Graphersal version (Cargo.lock)
         id: graphersal
         run: |
@@ -93,87 +120,367 @@ jobs:
           test -n "$version"
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "built against graphersal $version (crates.io)" | tee -a "$GITHUB_STEP_SUMMARY"
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ env.TARGET }}
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-about
-      - name: Build
-        run: cargo build --locked -p graphersal-server --profile dist --target "$TARGET"
-      - name: Smoke test
-        shell: pwsh
-        run: ./scripts/smoke.ps1 -Bin "target/$env:TARGET/dist/graphersal-server.exe" -Version "${{ steps.version.outputs.version }}"
-      - name: THIRD-PARTY-LICENSES.html
-        run: |
-          set -euo pipefail
-          cargo about generate --config about.toml \
-            --manifest-path crates/graphersal-server/Cargo.toml about.hbs > THIRD-PARTY-LICENSES.html
-          test -s THIRD-PARTY-LICENSES.html
-      - name: Archive and SHA256SUMS
-        run: |
-          set -euo pipefail
-          name="graphersal-server-v${{ steps.version.outputs.version }}-$PLATFORM"
-          mkdir -p "dist/$name"
-          cp "target/$TARGET/dist/graphersal-server.exe" "dist/$name/"
-          cp LICENSE-APACHE NOTICE README.md THIRD-PARTY-LICENSES.html "dist/$name/"
-          cd dist
-          7z a -tzip -bso0 "$name.zip" "$name"
-          rm -r "$name"
-          sha256sum "$name.zip" > SHA256SUMS
-          cat SHA256SUMS
-          ls -l
-      - uses: actions/upload-artifact@v4
-        with:
-          name: graphersal-server-${{ env.PLATFORM }}
-          path: |
-            dist/graphersal-server-v*.zip
-            dist/SHA256SUMS
-          if-no-files-found: error
-      # Build provenance attestations need GitHub Enterprise Cloud for a PRIVATE repository (public
-      # repositories have them on every plan). Enable once the repository is public or the plan
-      # allows it, and add `id-token: write` and `attestations: write` to this job's permissions:
-      # - uses: actions/attest-build-provenance@v2
-      #   with:
-      #     subject-path: dist/graphersal-server-v*.zip
 
-  github-release:
-    name: draft GitHub Release
-    needs: build
-    if: needs.build.outputs.tag != ''
+  # The crate as crates.io gets it: packs (the embedded web UI and the OpenAPI files included)
+  # and builds from the packed sources alone. Nothing is uploaded.
+  package:
+    name: cargo publish --dry-run
+    needs: check
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.build.outputs.tag }}
+          ref: ${{ env.REF }}
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Package and build the packed crate
+        run: cargo publish --dry-run --locked -p graphersal-server
+
+  licenses:
+    name: third-party licences
+    needs: check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.REF }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about
+      # One file for every platform: cargo-about walks the dependencies of all targets
+      # (windows-sys and libc included).
+      - name: THIRD-PARTY-LICENSES.html of the graphersal-server dependency tree
+        run: |
+          set -euo pipefail
+          cargo about generate --locked --config about.toml \
+            --manifest-path crates/graphersal-server/Cargo.toml about.hbs > THIRD-PARTY-LICENSES.html
+          test -s THIRD-PARTY-LICENSES.html
+      - uses: actions/upload-artifact@v4
+        with:
+          name: third-party-licenses
+          path: THIRD-PARTY-LICENSES.html
+          if-no-files-found: error
+
+  build:
+    name: graphersal-server (${{ matrix.platform }})
+    needs: [check, licenses]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        # Keep in step with install.sh, install.ps1 and [package.metadata.binstall] of
+        # crates/graphersal-server/Cargo.toml.
+        include:
+          - { platform: linux-x86_64, os: ubuntu-latest, target: x86_64-unknown-linux-musl }
+          - { platform: linux-aarch64, os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl }
+          - { platform: macos-arm64, os: macos-latest, target: aarch64-apple-darwin }
+          - { platform: windows-x86_64, os: windows-latest, target: x86_64-pc-windows-msvc }
+    defaults:
+      run:
+        shell: bash
+    env:
+      VERSION: ${{ needs.check.outputs.version }}
+      TARGET: ${{ matrix.target }}
+      PLATFORM: ${{ matrix.platform }}
+    steps:
+      # Byte-identical files on every platform (the Windows runner's git converts to CRLF by
+      # default): README.md, NOTICE and the licence in the archive stay as committed.
+      - name: No line-ending conversion
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.REF }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      # ring (token hashes and random tokens) compiles C code: musl-gcc for the static build.
+      - name: musl-gcc for C code in dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq musl-tools
+      - name: Build
+        run: cargo build --locked -p graphersal-server --profile dist --target "$TARGET"
+      - name: The binary's kind
+        run: |
+          set -euo pipefail
+          exe=""
+          [ "$RUNNER_OS" = Windows ] && exe=".exe"
+          bin="target/$TARGET/dist/graphersal-server$exe"
+          ls -l "$bin"
+          if [ "$RUNNER_OS" != Windows ]; then file "$bin"; fi
+          if [ "$RUNNER_OS" = Linux ]; then
+            file "$bin" | grep -Eq 'statically linked|static-pie linked'
+          fi
+      # The full end-to-end walk on the release binary.
+      - name: Smoke test (scripts/smoke.sh)
+        if: runner.os != 'Windows'
+        run: SMOKE_BIN="$PWD/target/$TARGET/dist/graphersal-server" SMOKE_VERSION="$VERSION" bash scripts/smoke.sh
+      - name: Smoke test (scripts/smoke.ps1)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/smoke.ps1 -Bin "target/$env:TARGET/dist/graphersal-server.exe" -Version "$env:VERSION"
       - uses: actions/download-artifact@v4
         with:
-          name: graphersal-server-windows-x86_64
+          name: third-party-licenses
+          path: licenses
+      - name: Archive
+        run: |
+          set -euo pipefail
+          exe=""
+          [ "$RUNNER_OS" = Windows ] && exe=".exe"
+          name="graphersal-server-v$VERSION-$PLATFORM"
+          mkdir -p "dist/$name"
+          cp "target/$TARGET/dist/graphersal-server$exe" "dist/$name/"
+          cp LICENSE-APACHE NOTICE README.md licenses/THIRD-PARTY-LICENSES.html "dist/$name/"
+          cd dist
+          if [ "$RUNNER_OS" = Windows ]; then
+            7z a -tzip -bso0 "$name.zip" "$name"
+          else
+            tar -czf "$name.tar.gz" "$name"
+          fi
+          rm -r "$name"
+          ls -l
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.platform }}
+          path: dist/*
+          if-no-files-found: error
+
+  installers:
+    name: installers
+    needs: check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.REF }}
+      - name: shellcheck install.sh
+        run: shellcheck install.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-installers
+          path: |
+            install.sh
+            install.ps1
+          if-no-files-found: error
+
+  checksums:
+    name: SHA256SUMS
+    needs: [build, installers]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
           path: dist
-      - name: The archive and its SHA256SUMS
+          merge-multiple: true
+      - name: Four archives, two installers and their SHA256SUMS
         run: |
           set -euo pipefail
           cd dist
           ls -l
-          test "$(find . -maxdepth 1 -name 'graphersal-server-v*.zip' | wc -l)" -eq 1
+          test "$(find . -maxdepth 1 \( -name 'graphersal-server-v*-*.tar.gz' -o -name 'graphersal-server-v*-*.zip' \) | wc -l)" -eq 4
+          test -f install.sh && test -f install.ps1
+          sha256sum graphersal-server-v* install.sh install.ps1 > SHA256SUMS
+          cat SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-checksums
+          path: dist/SHA256SUMS
+          if-no-files-found: error
+
+  # The installers against this run's files, served like a GitHub release
+  # (`latest/download/<file>`, `download/v<version>/<file>`) from a local HTTP server.
+  installers-test:
+    name: installers (${{ matrix.os }})
+    needs: [check, checksums]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    defaults:
+      run:
+        shell: bash
+    env:
+      VERSION: ${{ needs.check.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: A local release site
+        run: |
+          set -euo pipefail
+          site="$RUNNER_TEMP/site"
+          mkdir -p "$site/latest/download" "$site/download/v$VERSION"
+          cp dist/* "$site/latest/download/"
+          cp dist/* "$site/download/v$VERSION/"
+          python -m http.server 8765 --bind 127.0.0.1 --directory "$site" > "$RUNNER_TEMP/http.log" 2>&1 &
+          for _ in $(seq 1 30); do
+            curl -fsS -o /dev/null http://127.0.0.1:8765/latest/download/SHA256SUMS && exit 0
+            sleep 1
+          done
+          cat "$RUNNER_TEMP/http.log"
+          exit 1
+      - name: install.sh (latest, a given version, a damaged archive)
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          base=http://127.0.0.1:8765
+          sh dist/install.sh --base-url "$base" --dir "$RUNNER_TEMP/bin1" | tee out1.txt
+          "$RUNNER_TEMP/bin1/graphersal-server" --version | grep -qx "graphersal-server $VERSION"
+          grep -qF "graphersal-server init" out1.txt
+          GRAPHERSAL_SERVER_BASE_URL="$base" sh dist/install.sh --version "$VERSION" --dir "$RUNNER_TEMP/bin2"
+          "$RUNNER_TEMP/bin2/graphersal-server" --version | grep -qx "graphersal-server $VERSION"
+          # A checksum that does not match: refused, nothing installed.
+          bad="$RUNNER_TEMP/site/download/v0.0.0-bad"
+          mkdir -p "$bad"
+          cp dist/*linux-x86_64.tar.gz "$bad/graphersal-server-v0.0.0-bad-linux-x86_64.tar.gz"
+          echo "$(printf '0%.0s' $(seq 1 64))  graphersal-server-v0.0.0-bad-linux-x86_64.tar.gz" > "$bad/SHA256SUMS"
+          if sh dist/install.sh --base-url "$base" --version v0.0.0-bad --dir "$RUNNER_TEMP/bin3"; then
+            echo "::error::install.sh accepted a checksum mismatch"
+            exit 1
+          fi
+          test ! -e "$RUNNER_TEMP/bin3/graphersal-server"
+      - name: install.ps1 (PowerShell 7, latest)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP 'bin1'
+          # The user PATH with an unexpanded reference, which the installer must keep as it is.
+          $key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey('Environment')
+          $before = [string]$key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+          $marker = '%USERPROFILE%\graphersal-path-check'
+          $key.SetValue('Path', ($before.TrimEnd(';') + ';' + $marker).TrimStart(';'), [Microsoft.Win32.RegistryValueKind]::ExpandString)
+          & ./dist/install.ps1 -BaseUrl http://127.0.0.1:8765 -Dir $dir
+          $version = & (Join-Path $dir 'graphersal-server.exe') --version
+          if ($version -ne "graphersal-server $env:VERSION") { throw "unexpected: $version" }
+          # On PATH in this session and in the user's registry, the rest of it unchanged.
+          $version = graphersal-server --version
+          if ($version -ne "graphersal-server $env:VERSION") { throw "not on this session's PATH: $version" }
+          $after = [string]$key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+          if ($after -notlike "*$marker;$dir") { throw "user PATH: $after" }
+          if ($key.GetValueKind('Path') -ne [Microsoft.Win32.RegistryValueKind]::ExpandString) { throw 'the value kind changed' }
+          # A second install adds nothing.
+          & ./dist/install.ps1 -BaseUrl http://127.0.0.1:8765 -Dir $dir
+          $again = [string]$key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+          if ($again -ne $after) { throw "added twice: $again" }
+          $key.SetValue('Path', $before, [Microsoft.Win32.RegistryValueKind]::ExpandString)
+      - name: install.ps1 (Windows PowerShell 5.1 through iex, a given version)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $env:GRAPHERSAL_SERVER_BASE_URL = 'http://127.0.0.1:8765'
+          $env:GRAPHERSAL_SERVER_VERSION = "v$env:VERSION"
+          $env:GRAPHERSAL_SERVER_INSTALL_DIR = Join-Path $env:RUNNER_TEMP 'bin2'
+          $env:GRAPHERSAL_SERVER_NO_PATH_UPDATE = '1'
+          $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+          Get-Content -Raw ./dist/install.ps1 | Invoke-Expression
+          $version = & (Join-Path $env:GRAPHERSAL_SERVER_INSTALL_DIR 'graphersal-server.exe') --version
+          if ($version -ne "graphersal-server $env:VERSION") { throw "unexpected: $version" }
+          # GRAPHERSAL_SERVER_NO_PATH_UPDATE: PATH left alone.
+          if ([Environment]::GetEnvironmentVariable('Path', 'User') -ne $userPath) { throw 'the user PATH changed' }
+          if (($env:Path -split ';') -contains $env:GRAPHERSAL_SERVER_INSTALL_DIR) { throw 'the session PATH changed' }
+
+  # A real release of a public repository only: a dry run never asks for more than
+  # `contents: read`, and GitHub refuses attestations in a private repository outside Enterprise
+  # Cloud.
+  attest:
+    name: build provenance attestations
+    needs: [check, checksums]
+    if: needs.check.outputs.release == 'true' && !github.event.repository.private
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            dist/graphersal-server-v*
+            dist/install.sh
+            dist/install.ps1
+
+  github-release:
+    name: draft GitHub Release
+    needs: [check, package, checksums, installers-test, attest]
+    # `attest` is skipped in a private repository: a skipped need does not stop the release.
+    if: >-
+      always() && needs.check.outputs.release == 'true' && needs.checksums.result == 'success'
+      && needs.package.result == 'success' && needs.installers-test.result == 'success'
+      && (needs.attest.result == 'success' || needs.attest.result == 'skipped')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.check.outputs.version }}
+      TAG: ${{ needs.check.outputs.tag }}
+      GRAPHERSAL_VERSION: ${{ needs.check.outputs.graphersal }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.check.outputs.tag }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+      - name: Verify the files against SHA256SUMS
+        run: |
+          set -euo pipefail
+          cd dist
+          ls -l
           sha256sum -c SHA256SUMS
       - name: Create the draft release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ needs.build.outputs.tag }}
-          VERSION: ${{ needs.build.outputs.version }}
-          GRAPHERSAL_VERSION: ${{ needs.build.outputs.graphersal }}
+          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           {
             cat "book/src/release_notes/$VERSION.md"
             echo
+            echo "## Install"
+            echo
+            echo "macOS (Apple silicon) and Linux:"
+            echo
+            echo '```sh'
+            echo "curl -fsSL https://github.com/$REPO/releases/download/$TAG/install.sh | sh -s -- --version $TAG"
+            echo '```'
+            echo
+            echo "Windows (PowerShell):"
+            echo
+            echo '```powershell'
+            echo "& ([scriptblock]::Create((irm https://github.com/$REPO/releases/download/$TAG/install.ps1))) -Version $TAG"
+            echo '```'
+            echo
+            echo "With Rust: \`cargo binstall graphersal-server\` (this release's binary) or"
+            echo "\`cargo install --locked graphersal-server\` (from source; Intel Macs and other platforms)."
+            echo "Or download the archive for your platform below, check it against \`SHA256SUMS\` (and"
+            echo "\`gh attestation verify <archive> -R $REPO\`), and put \`graphersal-server\` on your \`PATH\`."
+            echo
             echo "---"
             echo
             echo "Built against [graphersal](https://crates.io/crates/graphersal) $GRAPHERSAL_VERSION."
           } > "$RUNNER_TEMP/notes.md"
-          gh release create "$TAG" --draft --verify-tag \
+          gh release create "$TAG" --repo "$REPO" --draft --verify-tag \
             --title "graphersal-server $VERSION" --notes-file "$RUNNER_TEMP/notes.md" \
-            dist/graphersal-server-v* dist/SHA256SUMS
+            dist/graphersal-server-v* dist/install.sh dist/install.ps1 dist/SHA256SUMS
