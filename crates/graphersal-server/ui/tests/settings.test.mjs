@@ -269,7 +269,7 @@ test('the tab: fresh on every visit, sortable tables, revisions, links; the Data
   }
   for (const tab of ["navigate('mcp')", "navigate('users')", "navigate('backups'"]) assert.ok(src.includes(tab), tab);
   const profile = JSON.parse(readFileSync(new URL('../profile.json', import.meta.url), 'utf8'));
-  assert.deepEqual(profile.tabs.find((t) => t.id === 'settings'), { id: 'settings', title: 'Database settings', module: 'settings-tab.js' });
+  assert.deepEqual(profile.tabs.find((t) => t.id === 'settings'), { id: 'settings', title: 'Settings', module: 'settings-tab.js' });
   const databases = readFileSync(new URL('../databases-tab.js', import.meta.url), 'utf8');
   assert.ok(databases.includes("navigate('settings', { db: row.aliasOf || row.name })"), 'Settings… on every row');
   // Round 4: "Settings…" is an item of the row's "…" menu (was a button with data-settings-open).

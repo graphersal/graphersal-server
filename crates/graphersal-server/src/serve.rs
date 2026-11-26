@@ -426,6 +426,8 @@ pub fn start(
         Some(backup_root.clone()),
     );
     loader.set_mcp_control(mcp_control.clone());
+    // The settings the server applies; the admin API changes the `now` keys of them at runtime.
+    let live = Arc::new(crate::server_settings::LiveConfig::new(config.clone()));
     let mut running = Running {
         dir,
         shared,
@@ -451,6 +453,7 @@ pub fn start(
             running.loader =
                 Loader::with_backup_root(registry.clone(), host_check, mcp, Some(backup_root));
             running.loader.set_mcp_control(mcp_control);
+            running.loader.set_live_config(live.clone());
             running.registry = registry;
             running
                 .loader
@@ -474,7 +477,9 @@ pub fn start(
         Audit::default().with_os_user(crate::security::os_user()),
     ) {
         Ok((access, first_admin)) => {
-            running.access = Some(Arc::new(access));
+            let access = Arc::new(access);
+            live.set_access(access.clone());
+            running.access = Some(access);
             running.first_admin = first_admin;
         }
         Err(err) => {

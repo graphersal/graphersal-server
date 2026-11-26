@@ -7,7 +7,9 @@
 //!   the process's resident memory, the loaded databases' memory, the machine's total and
 //!   available memory, the engine's memory ceiling with its source and the configured
 //!   `[limits] memory_limit`/`memory_headroom`, and "free under the limit"; the fields and how
-//!   each is measured: [`crate::usage`]; a figure the process does not know is `null`).
+//!   each is measured: [`crate::usage`]; a figure the process does not know is `null`),
+//!   `restartPending` (round 4 B-SETTINGS: the `server.toml` keys whose change waits for a
+//!   restart, [`crate::server_settings::LiveConfig::pending`]).
 //! - `POST /api/admin/shutdown`: the server answers `202 {"stopping": true, "pid"}` and then
 //!   stops exactly as on Ctrl+C or SIGTERM (the same graceful path in the process that owns
 //!   it: [`crate::serve::StopHook`]). Only the operator (the token of `server.run`) or a user
@@ -121,6 +123,23 @@ fn server_json(facts: Option<&ServerFacts>, loader: &Loader) -> Value {
         None => crate::recovery::read_report(registry.dir()),
     };
     let figures = MemoryFigures::now(loader.memory().total_bytes);
+    // The memory settings the server applies now (a settings change applies them at runtime),
+    // and the server.toml keys that wait for a restart (round 4 B-SETTINGS).
+    let live = loader.live_config();
+    let memory = match live {
+        Some(live) => {
+            let applied = live.applied();
+            Some(MemorySettings {
+                limit: applied.limits.memory_limit,
+                headroom: applied.limits.memory_headroom,
+            })
+        }
+        None => facts.and_then(|f| f.memory),
+    };
+    let restart_pending: Vec<&str> = match (live, registry.dir().load_config()) {
+        (Some(live), Ok(file)) => live.pending(&file),
+        _ => Vec::new(),
+    };
     json!({
         "server": crate::router::SERVER_NAME,
         "version": env!("CARGO_PKG_VERSION"),
@@ -138,7 +157,8 @@ fn server_json(facts: Option<&ServerFacts>, loader: &Loader) -> Value {
         },
         "uncleanShutdown": unclean.and_then(|r| serde_json::to_value(r).ok()),
         "aliases": registry.aliases().len(),
-        "memory": memory_json(facts.and_then(|f| f.memory.as_ref()), &figures),
+        "memory": memory_json(memory.as_ref(), &figures),
+        "restartPending": restart_pending,
     })
 }
 

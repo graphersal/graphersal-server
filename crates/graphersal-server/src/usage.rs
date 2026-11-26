@@ -104,7 +104,7 @@ pub(crate) struct MemorySettings {
 }
 
 /// The configured `memory_limit` as JSON: bytes, `"auto"`, `"none"` or `null`.
-fn configured_limit(limit: Option<MemoryLimit>) -> Value {
+pub(crate) fn configured_limit(limit: Option<MemoryLimit>) -> Value {
     match limit {
         None => Value::Null,
         Some(MemoryLimit::Bytes(bytes)) => json!(bytes),

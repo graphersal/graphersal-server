@@ -207,6 +207,17 @@ pub fn status_text(status: &Status, dir: &Path) -> String {
             section.row(name, text);
         }
     }
+    // Round 4 B-SETTINGS: server.toml keys saved but not yet applied.
+    let pending = field("restartPending").map(names).unwrap_or_default();
+    if !pending.is_empty() {
+        section.row(
+            "restart pending",
+            format!(
+                "{} (saved in server.toml; applied at the next start: {BIN} stop, then start)",
+                pending.join(", ")
+            ),
+        );
+    }
     if let Some(why) = &status.unanswered {
         section.row(
             "no answer",

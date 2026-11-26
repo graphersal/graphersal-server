@@ -125,7 +125,7 @@ export function databaseRows(answer) {
   rows.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
   const problems = Array.isArray(answer.problems) ? answer.problems.filter((p) => typeof p === 'string' && p) : [];
   const aliasesRevision = typeof answer.aliasesRevision === 'string' ? answer.aliasesRevision : '';
-  return { rows, skipped, aliases: aliasRows(answer), aliasesRevision, problems };
+  return { rows, skipped, aliases: aliasRows(answer), aliasesRevision, problems, newDatabases: newDatabaseDefaults(answer) };
 }
 
 function byteCount(n) {
@@ -297,4 +297,14 @@ export function downloadBlob(blob, fileName) {
 export function hostInfo(api) {
   const host = api && api.info && api.info.host;
   return host && typeof host === 'object' ? host : {};
+}
+
+/**
+ * What a new database gets when its creator does not say (the listing's `newDatabases`:
+ * server.toml `[defaults]` auto_load/read_only, mcp.toml `expose_new`): `{autoLoad, readOnly, mcp}`,
+ * each false when the server did not say.
+ */
+export function newDatabaseDefaults(answer = {}) {
+  const d = (answer && answer.newDatabases) || {};
+  return { autoLoad: d.autoLoad === true, readOnly: d.readOnly === true, mcp: d.mcp === true };
 }

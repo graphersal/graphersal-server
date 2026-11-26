@@ -34,7 +34,9 @@
 //! problem objects), `modelsMissing`, `error` (`failed`), `headline` (in words)), `help` (in
 //! maintenance: repair or restore), `uncleanShutdown` (`null`, or
 //! `{"detectedAtMs", "previousPid", "check"}` when the last unclean shutdown's check covered
-//! this database: `check` = its `DatabaseCheck`, `crate::recovery`)).
+//! this database: `check` = its `DatabaseCheck`, `crate::recovery`)), and `serverDefaults`
+//! (round 4 B-SETTINGS: what a NEW database starts with: `autoLoad`, `readOnly`, `chunkBytes`,
+//! `damagePolicy` (`server.toml [defaults]`), `mcpExposeNew` (`mcp.toml`); or `{"error"}`).
 //!
 //! A change takes the real name (an alias is `404` with a help naming the database). Each
 //! field is optional, at least one is given; `limits` sets a key to a whole number
@@ -234,7 +236,24 @@ pub(crate) fn view(admin: &Admin, name: &str) -> Option<Value> {
         Err(reason) => out["storeError"] = json!(reason),
     }
     out["recovery"] = recovery_json(admin, &entry);
+    out["serverDefaults"] = server_defaults_json(admin);
     Some(out)
+}
+
+/// The `serverDefaults` of the settings (module docs): what a NEW database starts with
+/// (`server.toml`'s `[defaults]` and `mcp.toml`'s `expose_new`), shown beside the database's
+/// own values; `{"error"}` when `server.toml` cannot be read.
+fn server_defaults_json(admin: &Admin) -> Value {
+    match admin.registry().dir().load_config() {
+        Ok(config) => json!({
+            "autoLoad": config.defaults.auto_load,
+            "readOnly": config.defaults.read_only,
+            "chunkBytes": config.defaults.chunk_bytes,
+            "damagePolicy": config.damage_policy().map(|p| p.name().to_string()).ok(),
+            "mcpExposeNew": admin.mcp_control().ok().map(|c| c.settings().expose_new),
+        }),
+        Err(err) => json!({ "error": err.to_string() }),
+    }
 }
 
 /// The `recovery` of the settings (module docs): the damage state and this database's part of

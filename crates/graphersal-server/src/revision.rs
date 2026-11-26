@@ -10,9 +10,7 @@
 //! | users and grants | `access.toml` | `GET users`, `GET grants` (`revision`, `ETag`) | every `users...` and `grants...` change |
 //! | aliases | `aliases.toml` | `GET aliases` (`revision`, `ETag`), `GET databases` (`aliasesRevision`) | `PUT`/`DELETE aliases/<a>`, `POST aliases/<a>/rename` |
 //! | a database's settings | `databases/<name>/database.toml` | every entry (`revision`; `GET databases/<name>` also `ETag`) | `PUT databases/<name>/read-only`, `PUT databases/<name>/auto-load` |
-//!
-//! `server.toml` has no setting an admin request changes yet; a later one takes its revision
-//! the same way (its text through [`of`], checked under the lock its writer holds).
+//! | the server settings | `server.toml` | `GET config` (`revision`, `ETag`) | `PUT config` (round 4 B-SETTINGS, [`crate::server_settings`]) |
 //!
 //! A change MAY name the revision it was based on: the JSON body's `revision`, else the
 //! `If-Match` header (`"<rev>"`, `W/"<rev>"` or the bare value; `*` = no check). The check

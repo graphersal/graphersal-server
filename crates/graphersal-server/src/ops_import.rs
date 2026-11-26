@@ -217,7 +217,12 @@ impl Admin {
             });
         }
         let format = detect(path, source.format)?;
-        let config = DatabaseConfig::plain().with_description(description.unwrap_or_default());
+        // A new database starts with server.toml's [defaults] flags (round 4 B-SETTINGS).
+        let defaults = self.registry.dir().load_config()?.defaults;
+        let config = DatabaseConfig::plain()
+            .with_description(description.unwrap_or_default())
+            .with_auto_load(defaults.auto_load)
+            .with_read_only(defaults.read_only);
         let mut build = self.registry.prepare_tmp(name, config)?;
         let store_dir = build.store_dir();
         let built = match format {

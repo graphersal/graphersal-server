@@ -5503,3 +5503,659 @@ fn an_older_server_directory_keeps_its_mcp_exposure() {
         "{state}"
     );
 }
+
+// Round 4 B-SETTINGS: server.toml edited at runtime, server defaults for databases, the console's
+// `config` commands and `init --config/--set`.
+
+/// Spawns `serve` on `root` (port 0, output discarded) and waits for its run file (a NEW one
+/// when `previous` names the pid of the server before).
+fn spawn_quiet_server(root: &Path, previous: Option<u32>) -> (ServerProcess, SocketAddr) {
+    let dir = ServerDir::new(root);
+    let server = ServerProcess::spawn(
+        Command::new(BIN)
+            .args([
+                "serve",
+                "--dir",
+                root.to_str().unwrap(),
+                "--listen",
+                "127.0.0.1:0",
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    );
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        if let Ok(Some(info)) = RunInfo::read(&dir)
+            && info.pid == server.0.id()
+            && Some(info.pid) != previous
+        {
+            // Ready: the admin API answers.
+            loop {
+                let (status, _) = get(info.address, "/readyz");
+                if status == 200 {
+                    return (server, info.address);
+                }
+                assert!(Instant::now() < deadline, "not ready");
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+        assert!(Instant::now() < deadline, "no run file in {root:?}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Stops the server process cleanly and waits for it.
+fn stop_quiet_server(mut server: ServerProcess) {
+    send_stop(&server);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while server.0.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < deadline, "the server did not stop");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// The row of the key `key` in a `GET /api/admin/config` answer.
+fn config_row(view: &serde_json::Value, key: &str) -> serde_json::Value {
+    view["keys"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["key"] == key)
+        .unwrap_or_else(|| panic!("no row {key}: {view}"))
+        .clone()
+}
+
+/// The `Set-Cookie` header of a browser login with `token`.
+fn login_cookie_header(address: SocketAddr, token: &str) -> String {
+    let (status, head, body) = send(
+        address,
+        "POST",
+        "/api/login",
+        &[("Content-Type", "application/json")],
+        "",
+        &serde_json::json!({ "token": token }).to_string(),
+    );
+    assert_eq!(status, 200, "{body}");
+    header_of(&head, "Set-Cookie").unwrap().to_string()
+}
+
+#[test]
+fn server_settings_apply_at_once_or_after_a_restart_over_http() {
+    use serde_json::json;
+    let temp = TempDir::new("config-live");
+    let root = temp.path().join("srv");
+    let dir = ServerDir::init(&root).unwrap().dir;
+    let (server, address) = spawn_quiet_server(&root, None);
+    let pid = server.0.id();
+
+    let (status, head, body) = call(address, "GET", "/api/admin/config", &[], "");
+    assert_eq!(status, 200, "{body}");
+    let view = json(&body);
+    let revision = view["revision"].as_str().unwrap().to_string();
+    assert_eq!(
+        header_of(&head, "ETag"),
+        Some(format!("\"{revision}\"").as_str())
+    );
+    assert_eq!(view["running"], true);
+    assert_eq!(view["restartPending"], json!([]));
+    assert_eq!(config_row(&view, "limits.upload_bytes")["applies"], "now");
+    assert_eq!(config_row(&view, "listen")["applies"], "restart");
+    assert_eq!(
+        config_row(&view, "limits.query.timeout_ms")["applies"],
+        "load"
+    );
+    assert_eq!(config_row(&view, "defaults.read_only")["applies"], "create");
+
+    // A user with a browser session before the change.
+    let (status, user) = admin_json(address, "POST", "users", json!({"name": "eve"}));
+    assert_eq!(status, 201, "{user}");
+    let token = user["token"].as_str().unwrap().to_string();
+    let before = login_cookie_header(address, &token);
+    assert!(
+        before.contains("Max-Age=34560000") && !before.contains("Secure"),
+        "{before}"
+    );
+    let old_cookie = before.split(';').next().unwrap().to_string();
+
+    // The `now` keys apply at once, without a restart.
+    let (status, changed) = admin_json(
+        address,
+        "PUT",
+        "config",
+        json!({"set": {
+            "limits.upload_bytes": 1024,
+            "sessions.lifetime_secs": 1,
+            "http.public_scheme": "https",
+            "limits.memory_limit": 1_099_511_627_776u64,
+        }, "revision": revision}),
+    );
+    assert_eq!(status, 200, "{changed}");
+    let mut applied: Vec<&str> = changed["applied"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|k| k.as_str().unwrap())
+        .collect();
+    applied.sort_unstable();
+    assert_eq!(
+        applied,
+        [
+            "http.public_scheme",
+            "limits.memory_limit",
+            "limits.upload_bytes",
+            "sessions.lifetime_secs"
+        ],
+        "{changed}"
+    );
+    assert_eq!(changed["restartPending"], json!([]), "{changed}");
+    assert_eq!(changed["rewritten"], false, "{changed}");
+    let file = std::fs::read_to_string(dir.config_path()).unwrap();
+    assert!(file.contains("\nupload_bytes = 1024\n"), "{file}");
+    assert!(
+        file.contains("# The largest import upload"),
+        "comments kept: {file}"
+    );
+    // The upload limit: /api/info and the 413 of a larger upload.
+    let (_, info) = get(address, "/api/info");
+    assert_eq!(json(&info)["uploadBytes"], 1024, "{info}");
+    let (status, _, refused) = call(
+        address,
+        "POST",
+        "/api/admin/import?name=big",
+        &[("Content-Type", "application/octet-stream")],
+        &"x".repeat(2048),
+    );
+    assert_eq!(status, 413, "{refused}");
+    // The memory ceiling.
+    let (_, _, facts) = call(address, "GET", "/api/admin/server", &[], "");
+    let facts = json(&facts);
+    assert_eq!(
+        facts["memory"]["configuredLimit"], 1_099_511_627_776u64,
+        "{facts}"
+    );
+    assert_eq!(
+        facts["memory"]["limitBytes"], 1_099_511_627_776u64,
+        "{facts}"
+    );
+    assert_eq!(facts["restartPending"], json!([]), "{facts}");
+    // The login cookie gets the new lifetime and Secure; the old session ends by the new
+    // lifetime.
+    let after = login_cookie_header(address, &token);
+    assert!(
+        after.contains("Max-Age=1") && after.contains("; Secure"),
+        "{after}"
+    );
+    std::thread::sleep(Duration::from_millis(2100));
+    assert_eq!(browser_principal(address, &old_cookie), Err(401));
+
+    // A stale revision is refused; nothing changes.
+    let (status, stale) = admin_json(
+        address,
+        "PUT",
+        "config",
+        json!({"set": {"limits.upload_bytes": 5}, "revision": revision}),
+    );
+    assert_eq!(status, 409, "{stale}");
+    assert!(stale["revision"].is_string(), "{stale}");
+    let (status, _, body) = call(
+        address,
+        "PUT",
+        "/api/admin/config",
+        &[
+            ("Content-Type", "application/json"),
+            ("If-Match", &format!("\"{revision}\"")),
+        ],
+        &json!({"set": {"limits.upload_bytes": 5}}).to_string(),
+    );
+    assert_eq!(status, 409, "{body}");
+    assert!(
+        std::fs::read_to_string(dir.config_path())
+            .unwrap()
+            .contains("upload_bytes = 1024")
+    );
+    // Refused values and keys: the parser's words.
+    for (set, needle) in [
+        (json!({"limits.upload_bytes": 0}), "limits.upload_bytes"),
+        (json!({"listen": "nowhere"}), "listen"),
+        (json!({"nope": 1}), "unknown setting 'nope'"),
+        (json!({"access.enabled": "maybe"}), "true or false"),
+    ] {
+        let (status, refused) = admin_json(address, "PUT", "config", json!({ "set": set }));
+        assert_eq!(status, 400, "{refused}");
+        assert!(
+            refused["error"].as_str().unwrap().contains(needle),
+            "{refused}"
+        );
+    }
+    let (status, _) = admin_json(address, "PUT", "config", json!({"set": {}}));
+    assert_eq!(status, 400);
+
+    // A restart key: saved, restart pending, applied after the restart.
+    let (status, refused, _) = as_host(address, "db.example.com", "GET", "/api/info", "");
+    assert_eq!(status, 403, "{refused}");
+    let (status, changed) = admin_json(
+        address,
+        "PUT",
+        "config",
+        json!({"set": {"http.allowed_hosts": ["db.example.com"], "limits.memory_limit": null}}),
+    );
+    assert_eq!(status, 200, "{changed}");
+    assert_eq!(
+        changed["restartPending"],
+        json!(["http.allowed_hosts"]),
+        "{changed}"
+    );
+    assert_eq!(config_row(&changed, "http.allowed_hosts")["pending"], true);
+    assert_eq!(
+        config_row(&changed, "http.allowed_hosts")["running"],
+        json!([])
+    );
+    let (_, _, facts) = call(address, "GET", "/api/admin/server", &[], "");
+    let facts = json(&facts);
+    assert_eq!(
+        facts["restartPending"],
+        json!(["http.allowed_hosts"]),
+        "{facts}"
+    );
+    assert!(facts["memory"]["configuredLimit"].is_null(), "{facts}");
+    let (status, _, _) = as_host(address, "db.example.com", "GET", "/api/info", "");
+    assert_eq!(status, 403, "not before the restart");
+    // The console's status shows it too.
+    let out = run(&["status", "--dir", root.to_str().unwrap()]);
+    assert!(
+        text(&out.stdout).contains("restart pending: http.allowed_hosts"),
+        "{}",
+        text(&out.stdout)
+    );
+    stop_quiet_server(server);
+    let (server, address) = spawn_quiet_server(&root, Some(pid));
+    let (status, _, body) = as_host(address, "db.example.com", "GET", "/api/info", "");
+    assert_eq!(status, 200, "{body}");
+    let (_, body) = get(address, "/api/admin/config");
+    let view = json(&body);
+    assert_eq!(view["restartPending"], json!([]), "{view}");
+    // Kept after the restart: the upload limit read from the file at start.
+    let (_, info) = get(address, "/api/info");
+    assert_eq!(json(&info)["uploadBytes"], 1024, "{info}");
+    stop_quiet_server(server);
+}
+
+/// Polls `GET /api/admin/databases/<name>` until its state is `loaded`.
+fn wait_loaded(address: SocketAddr, name: &str) {
+    let deadline = Instant::now() + Duration::from_secs(120);
+    loop {
+        let (_, _, body) = call(
+            address,
+            "GET",
+            &format!("/api/admin/databases/{name}"),
+            &[],
+            "",
+        );
+        if json(&body)["state"] == "loaded" {
+            return;
+        }
+        assert!(Instant::now() < deadline, "{name} did not load: {body}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[test]
+fn server_defaults_are_inherited_by_databases_key_by_key_and_new_databases_start_with_them() {
+    use serde_json::json;
+    let temp = TempDir::new("config-defaults");
+    let root = temp.path().join("srv");
+    let dir = ServerDir::init(&root).unwrap().dir;
+    modern_db(&dir, "acme");
+    let running = start_with_acme(&root);
+    let address = running.address();
+    let settings = |name: &str| {
+        let (status, _, body) = call(
+            address,
+            "GET",
+            &format!("/api/admin/databases/{name}/settings"),
+            &[],
+            "",
+        );
+        assert_eq!(status, 200, "{body}");
+        json(&body)
+    };
+    let limit = |view: &serde_json::Value, key: &str| {
+        view["limits"]["keys"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["key"] == key)
+            .unwrap()
+            .clone()
+    };
+    let view = settings("acme");
+    assert_eq!(limit(&view, "timeout_ms")["source"], "none");
+    assert_eq!(view["serverDefaults"]["autoLoad"], false, "{view}");
+    assert_eq!(view["serverDefaults"]["mcpExposeNew"], false, "{view}");
+
+    // The server default: every database without an override follows it at its next load.
+    let (status, changed) = admin_json(
+        address,
+        "PUT",
+        "config",
+        json!({"set": {"limits.query.timeout_ms": 5000}}),
+    );
+    assert_eq!(status, 200, "{changed}");
+    assert_eq!(changed["applied"], json!([]), "{changed}");
+    assert_eq!(changed["restartPending"], json!([]), "{changed}");
+    let view = settings("acme");
+    let row = limit(&view, "timeout_ms");
+    assert_eq!(
+        (row["server"].clone(), row["effective"].clone()),
+        (json!(5000), json!(5000))
+    );
+    assert_eq!(row["source"], "server", "{row}");
+    assert!(row["inEffect"].is_null(), "loaded before the change: {row}");
+    assert_eq!(view["limits"]["reloadNeeded"], true, "{view}");
+    let (status, _) = admin_json(address, "POST", "databases/acme/unload", json!({}));
+    assert_eq!(status, 200);
+    let (status, _) = admin_json(address, "POST", "databases/acme/load", json!({}));
+    assert_eq!(status, 202);
+    wait_loaded(address, "acme");
+    let row = limit(&settings("acme"), "timeout_ms");
+    assert_eq!(row["inEffect"], 5000, "{row}");
+    // An override wins; reset to inherited follows the server again.
+    let (status, view) = admin_json(
+        address,
+        "PUT",
+        "databases/acme/settings",
+        json!({"limits": {"timeout_ms": 100}}),
+    );
+    assert_eq!(status, 200, "{view}");
+    let row = limit(&view, "timeout_ms");
+    assert_eq!(
+        (row["effective"].clone(), row["source"].clone()),
+        (json!(100), json!("database"))
+    );
+    let (status, _) = admin_json(
+        address,
+        "PUT",
+        "config",
+        json!({"set": {"limits.query.timeout_ms": 7000}}),
+    );
+    assert_eq!(status, 200);
+    let row = limit(&settings("acme"), "timeout_ms");
+    assert_eq!(
+        (row["effective"].clone(), row["server"].clone()),
+        (json!(100), json!(7000))
+    );
+    let (status, view) = admin_json(
+        address,
+        "PUT",
+        "databases/acme/settings",
+        json!({"limits": {"timeout_ms": null}}),
+    );
+    assert_eq!(status, 200, "{view}");
+    let row = limit(&view, "timeout_ms");
+    assert_eq!(
+        (row["effective"].clone(), row["source"].clone()),
+        (json!(7000), json!("server"))
+    );
+
+    // New databases start with [defaults]; a request that says otherwise wins; existing
+    // databases keep theirs.
+    let (status, changed) = admin_json(
+        address,
+        "PUT",
+        "config",
+        json!({"set": {"defaults.auto_load": true, "defaults.read_only": true, "defaults.chunk_bytes": 65536}}),
+    );
+    assert_eq!(status, 200, "{changed}");
+    let (_, _, list) = call(address, "GET", "/api/admin/databases", &[], "");
+    assert_eq!(
+        json(&list)["newDatabases"],
+        json!({"autoLoad": true, "readOnly": true, "mcp": false})
+    );
+    let (status, fresh) = admin_json(address, "POST", "databases", json!({"name": "fresh"}));
+    assert_eq!(status, 201, "{fresh}");
+    assert_eq!(
+        (fresh["autoLoad"].clone(), fresh["readOnly"].clone()),
+        (json!(true), json!(true))
+    );
+    let (status, own) = admin_json(
+        address,
+        "POST",
+        "databases",
+        json!({"name": "own", "readOnly": false, "autoLoad": false}),
+    );
+    assert_eq!(status, 201, "{own}");
+    assert_eq!(
+        (own["autoLoad"].clone(), own["readOnly"].clone()),
+        (json!(false), json!(false))
+    );
+    assert_eq!(settings("fresh")["store"]["chunkBytes"], 65536);
+    let acme = settings("acme");
+    assert_eq!(acme["store"]["chunkBytes"], 1_048_576, "{acme}");
+    assert_eq!(acme["database"]["readOnly"], false, "{acme}");
+    assert_eq!(acme["serverDefaults"]["readOnly"], true, "{acme}");
+    // The console's create takes them too, and its flags win.
+    let (code, out, err) = db(&root, &["create", "viacli", "--no-read-only", "--json"]);
+    assert_eq!(code, 0, "{out}{err}");
+    let created = json(&out);
+    assert_eq!(
+        (created["autoLoad"].clone(), created["readOnly"].clone()),
+        (json!(true), json!(false))
+    );
+    running.stop().unwrap();
+}
+
+#[test]
+fn config_commands_offline_and_through_a_server() {
+    let temp = TempDir::new("config-console");
+    let root = temp.path().join("srv");
+    let dir = ServerDir::init(&root).unwrap().dir;
+    let r = root.to_str().unwrap();
+    let config = |args: &[&str]| {
+        let out = Command::new(BIN).arg("config").args(args).output().unwrap();
+        (
+            out.status.code().unwrap_or(-1),
+            text(&out.stdout),
+            text(&out.stderr),
+        )
+    };
+    // Offline: get, set, unset straight on the file.
+    let (code, out, err) = config(&["get", "--dir", r]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        out.contains("limits.upload_bytes") && out.contains("not set (default)"),
+        "{out}"
+    );
+    assert!(out.contains("restart pending: none"), "{out}");
+    let (code, out, err) = config(&["set", "limits.query.max_operations", "1_000", "--dir", r]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        out.contains("Changed server.toml: limits.query.max_operations"),
+        "{out}"
+    );
+    assert!(out.contains("at each database's next load"), "{out}");
+    assert_eq!(
+        dir.load_config().unwrap().limits.query.max_operations,
+        Some(1000)
+    );
+    let (code, out, _) = config(&["get", "limits.query.max_operations", "--dir", r]);
+    assert_eq!(code, 0);
+    assert!(
+        out.starts_with("limits.query.max_operations = 1000"),
+        "{out}"
+    );
+    let (code, out, err) = config(&[
+        "set",
+        "http.allowed_hosts",
+        "a.example, b.example",
+        "--dir",
+        r,
+    ]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        out.contains("a.example, b.example (at the next start)"),
+        "{out}"
+    );
+    let (code, _, err) = config(&["unset", "http.allowed_hosts", "--dir", r]);
+    assert_eq!(code, 0, "{err}");
+    assert!(dir.load_config().unwrap().http.allowed_hosts.is_empty());
+    let (code, _, err) = config(&["set", "limits.upload_bytes", "0", "--dir", r]);
+    assert_eq!(code, 1);
+    assert!(
+        err.contains("limits.upload_bytes: must be at least 1"),
+        "{err}"
+    );
+    let (code, _, err) = config(&["set", "nope", "1", "--dir", r]);
+    assert_eq!(code, 2, "{err}");
+    assert!(err.contains("unknown setting 'nope'"), "{err}");
+    let (code, _, err) = config(&["set", "mcp.enabled", "maybe", "--dir", r]);
+    assert_eq!(code, 2, "{err}");
+    // check: the directory's file, another file, a broken one.
+    let (code, out, _) = config(&["check", "--dir", r]);
+    assert_eq!(code, 0);
+    assert!(out.contains("is a valid server.toml"), "{out}");
+    let bad = temp.path().join("bad.toml");
+    std::fs::write(&bad, "[limits]\nupload_bytes = 0\n").unwrap();
+    let (code, _, err) = config(&["check", bad.to_str().unwrap()]);
+    assert_eq!(code, 1);
+    assert!(err.contains("limits.upload_bytes"), "{err}");
+    let (code, _, _) = config(&["check"]);
+    assert_eq!(code, 2);
+
+    // Through the running server: a `now` key applies at once.
+    let running = serve::start(
+        &root,
+        ServeOptions::new().with_listen("127.0.0.1:0".parse().unwrap()),
+    )
+    .unwrap();
+    let address = running.address();
+    let (code, out, err) = config(&["set", "limits.upload_bytes", "4096", "--dir", r]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        out.contains("limits.upload_bytes: 4096 (applied now)"),
+        "{out}"
+    );
+    assert!(err.contains("sent to its admin API"), "{err}");
+    let (_, info) = get(address, "/api/info");
+    assert_eq!(json(&info)["uploadBytes"], 4096, "{info}");
+    let (code, out, _) = config(&["set", "limits.max_connections", "9", "--dir", r]);
+    assert_eq!(code, 0);
+    assert!(
+        out.contains("limits.max_connections: 9 (restart pending)"),
+        "{out}"
+    );
+    let (code, out, _) = config(&["get", "--dir", r, "--json"]);
+    assert_eq!(code, 0);
+    assert_eq!(
+        json(&out)["restartPending"],
+        serde_json::json!(["limits.max_connections"])
+    );
+    running.stop().unwrap();
+}
+
+#[test]
+fn init_takes_server_toml_from_a_file_and_set_values() {
+    let temp = TempDir::new("init-config");
+    let file = temp.path().join("my-server.toml");
+    std::fs::write(
+        &file,
+        "# our defaults\nlisten = \"127.0.0.1:0\"\n\n[limits.query]\ntimeout_ms = 30000\n",
+    )
+    .unwrap();
+    let root = temp.path().join("srv");
+    let out = run(&[
+        "init",
+        root.to_str().unwrap(),
+        "--config",
+        file.to_str().unwrap(),
+        "--set",
+        "limits.upload_bytes=1048576",
+        "--set=defaults.read_only=true",
+    ]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stdout).contains("listen 127.0.0.1:0"),
+        "{}",
+        text(&out.stdout)
+    );
+    // The secrets are generated as always: the first admin's token on stderr.
+    first_admin_token(&text(&out.stderr));
+    let dir = ServerDir::open(&root).unwrap();
+    let written = std::fs::read_to_string(dir.config_path()).unwrap();
+    assert!(written.starts_with("# our defaults\n"), "{written}");
+    let config = dir.load_config().unwrap();
+    assert_eq!(config.listen, "127.0.0.1:0");
+    assert_eq!(config.limits.query.timeout_ms, Some(30000));
+    assert_eq!(config.limits.upload_bytes, 1_048_576);
+    assert!(config.defaults.read_only);
+    // Keys the file leaves out keep their defaults.
+    assert_eq!(config.limits.max_connections, 256);
+    assert!(dir.mcp_settings_path().is_file() && dir.access_path().is_file());
+
+    // An invalid file, a secret-looking key and a bad --set are refused; nothing is created.
+    for (content, needle) in [
+        ("[limits]\nupload_bytes = 0\n", "limits.upload_bytes"),
+        ("[mcp]\ntoken = \"s3cret\"\n", "token"),
+        ("listen = \n", "my-bad.toml"),
+    ] {
+        let bad = temp.path().join("my-bad.toml");
+        std::fs::write(&bad, content).unwrap();
+        let target = temp.path().join("refused");
+        let out = run(&[
+            "init",
+            target.to_str().unwrap(),
+            "--config",
+            bad.to_str().unwrap(),
+        ]);
+        assert_eq!(out.status.code(), Some(1), "{content}");
+        assert!(
+            text(&out.stderr).contains(needle),
+            "{content}: {}",
+            text(&out.stderr)
+        );
+        assert!(!target.exists(), "{content}");
+    }
+    let target = temp.path().join("refused");
+    let out = run(&["init", target.to_str().unwrap(), "--set", "nope=1"]);
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
+    let out = run(&[
+        "init",
+        target.to_str().unwrap(),
+        "--set",
+        "limits.upload_bytes",
+    ]);
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
+    let out = run(&[
+        "init",
+        target.to_str().unwrap(),
+        "--set",
+        "limits.upload_bytes=0",
+    ]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    assert!(!target.exists());
+    // --set alone starts from the default text (its comments kept).
+    let out = run(&[
+        "init",
+        target.to_str().unwrap(),
+        "--set",
+        "mcp.max_sessions=8",
+    ]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let written = std::fs::read_to_string(target.join("server.toml")).unwrap();
+    assert!(
+        written.contains("\nmax_sessions = 8\n") && written.contains("# How many MCP sessions"),
+        "{written}"
+    );
+    // An existing server directory keeps its server.toml.
+    let out = run(&[
+        "init",
+        root.to_str().unwrap(),
+        "--set",
+        "mcp.max_sessions=8",
+    ]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        text(&out.stderr).contains("config set"),
+        "{}",
+        text(&out.stderr)
+    );
+}

@@ -134,8 +134,8 @@ A `failed` database whose `database.toml` cannot be read has only `name`, `state
 
 | Method | Path | Body | Answer |
 |---|---|---|---|
-| GET | `/api/admin/databases` | | `200 {"databases": [entry...], "aliases": {alias: database}, "aliasesRevision", "problems": [string...]}` (rows sorted by name, alias rows included) |
-| POST | `/api/admin/databases` | `{"name", "kind"?, "role"?, "base"?, "schema"?, "description"?, "autoLoad"?, "readOnly"?, "mcp"?}` | `201` entry (state `unloaded`) + `"mcpExposed"` |
+| GET | `/api/admin/databases` | | `200 {"databases": [entry...], "aliases": {alias: database}, "aliasesRevision", "problems": [string...], "newDatabases": {"autoLoad", "readOnly", "mcp"}}` (rows sorted by name, alias rows included; `newDatabases`: what a create or import gets when it does not say: `server.toml [defaults]` and `mcp.toml expose_new`) |
+| POST | `/api/admin/databases` | `{"name", "kind"?, "role"?, "base"?, "schema"?, "description"?, "autoLoad"?, "readOnly"?, "mcp"?}` (`autoLoad`/`readOnly` left out: `server.toml [defaults]`) | `201` entry (state `unloaded`) + `"mcpExposed"` |
 | GET | `/api/admin/databases/<name>` | | `200` entry (`<name>` may be an alias: an alias row); `ETag`: its `revision` |
 | DELETE | `/api/admin/databases/<name>` | | `200 {"name", "trash": "trash/<name>-<UTC time>", "grantsRemoved"}` (every grant on the database goes with it; a restore does not bring them back) |
 | POST | `/api/admin/databases/<name>/clone` | `{"name", "mcp"?}` | `201` entry of the new database + `"mcpExposed"` |
@@ -183,7 +183,9 @@ A `failed` database whose `database.toml` cannot be read has only `name`, `state
 | POST | `/api/admin/databases/<name>/repair` | `{"name"?}` (optional body) | `201` entry of the NEW database + `"repairedFrom"`, `"repair"`, `"next"` |
 | POST | `/api/admin/databases/<name>/swap` | `{"with", "confirm": true}` | `200` entry + `"swappedWith"`, `"trash"`, `"reloaded"`, `"grantsRemoved"` |
 | GET | `/api/admin/recovery` | | `200 {"uncleanShutdown": report \| null}` (the last unclean shutdown, see Server) |
-| GET | `/api/admin/server` | | `200 {"server", "version", "pid", "address", "url", "directory", "startedAtMs", "uptimeSecs", "databases": {"total", "loaded": [name...], "loading": [name...], "maintenance": [name...]}, "aliases", "uncleanShutdown": report \| null, "memory": {"processBytes", "liveBytes", "databasesBytes", "machineTotalBytes", "machineAvailableBytes", "limitBytes", "limitSource", "configuredLimit", "headroomBytes", "availableBytes", "freeBytes", "freeBasis"}}` (see Server) |
+| GET | `/api/admin/config` | | `200` the server settings: every key of `server.toml` (see Server settings; `ETag`: the file's revision) |
+| PUT | `/api/admin/config` | `{"set": {key: value \| null}, "revision"?}` | `200` the server settings + `"changed"`, `"applied"`, `"rewritten"` |
+| GET | `/api/admin/server` | | `200 {"server", "version", "pid", "address", "url", "directory", "startedAtMs", "uptimeSecs", "databases": {"total", "loaded": [name...], "loading": [name...], "maintenance": [name...]}, "aliases", "uncleanShutdown": report \| null, "restartPending": [key...], "memory": {"processBytes", "liveBytes", "databasesBytes", "machineTotalBytes", "machineAvailableBytes", "limitBytes", "limitSource", "configuredLimit", "headroomBytes", "availableBytes", "freeBytes", "freeBasis"}}` (see Server) |
 | POST | `/api/admin/shutdown` | | `202 {"stopping": true, "pid"}`, then the server stops (see Server) |
 | GET | `/api/admin/server-backup?withDatabases=1` | | `200` the server backup (a ZIP) as a download; the operator and admin users only (`everyone` `403`); see Server backup |
 
@@ -198,6 +200,7 @@ the object meanwhile) is refused instead of silently overwriting the other chang
 |---|---|---|---|
 | users and grants | `access.toml` | `revision` of `GET users` and `GET grants` (and their `ETag`) | `POST users`, `DELETE users/<n>`, `POST`/`DELETE users/<n>/token`, `PUT users/<n>/admin`, `PUT users/<n>/roles`, `POST grants`, `DELETE grants/<s>/<d>` |
 | aliases | `aliases.toml` | `revision` of `GET aliases` (and its `ETag`), `aliasesRevision` of `GET databases` | `PUT aliases/<a>`, `DELETE aliases/<a>`, `POST aliases/<a>/rename` |
+| the server settings | `server.toml` | `revision` of `GET config` (and its `ETag`) | `PUT config` |
 | a database's settings | `databases/<name>/database.toml` | `revision` of its entry (every listing row; `GET databases/<name>` and `GET databases/<name>/settings` also as `ETag`) | `PUT databases/<name>/read-only`, `PUT databases/<name>/auto-load`, `PUT databases/<name>/settings` |
 
 A revision is an opaque string (16 hex digits derived from the file's content: the same state
@@ -216,7 +219,7 @@ Read the object again (it may already be what you wanted) and repeat the change 
 revision. A change WITHOUT a revision is applied to the current state, as before 0.3.0: the
 console's commands, scripts and older clients send none. The web UI sends the revision of what
 it shows with every change of an existing object (the Users tab, alias set/flip/rename/remove,
-the read-only and auto-load toggles, every change of the Database settings tab) and on a `409` shows the notice and reads the tab's data
+the read-only and auto-load toggles, every change of the Settings tab) and on a `409` shows the notice and reads the tab's data
 again. Creating a database, deleting one, load/unload, promote, backups, restores, imports and
 models take no revision (they create or remove whole objects and refuse what is no longer
 possible on their own).
@@ -307,7 +310,7 @@ a running request finishes. A base refuses `false` (`409`). `auto-load` is persi
 ### Database settings
 
 `GET /api/admin/databases/<name>/settings` answers everything about one database (the web UI's
-Database settings tab, `graphersal-server db info NAME`); `<name>` may be an alias (then
+Settings tab, `graphersal-server db info NAME`); `<name>` may be an alias (then
 `requested` names it and the rest is its database's):
 
 | Field | Meaning |
@@ -323,6 +326,7 @@ Database settings tab, `graphersal-server db info NAME`); `<name>` may be an ali
 | `admins` | the users with the admin role: they reach every database |
 | `backups` | `count`, `bytes`, `latest` (the newest backup row, or `null`) |
 | `store`, `storeError` | the Store's creation parameters (fixed for its life) and position, read with the engine's `Store::inspect` (works while it is loaded): `storeId`, `graphId`, `damagePolicy` (`maintenance` \| `continue`), `chunkBytes`, `createdAt` (RFC 3339 UTC), `formatVersion`, `backend` (`directory`), `commitSeq`, `lastCommitAt`, `layerBase` (a layer Store's base identity), `snapshots`, `walBytes`, `clean`; read-only. `storeError` instead when the Store cannot be read |
+| `serverDefaults` | round 4: what a NEW database starts with, shown beside the database's own values: `autoLoad`, `readOnly`, `chunkBytes`, `damagePolicy` (`server.toml [defaults]`), `mcpExposeNew` (`mcp.toml`); or `{"error"}` |
 | `recovery` | round 3: `maintenance` (bool), `damage` (the damage report of a database in maintenance, else `null`), `needsModel` (the missing model's repository of a `needs-model` database, else `null`), `lastVerify` (`null` = never verified, or the last verify: `version`, `atMs`, `verdict`, `how`, `problemCount`, `problems` (the first 100, as in a verify result), `modelsMissing`, `error` (verdict `failed`), `headline` (in words)), `help` (in maintenance: repair or restore), `uncleanShutdown` (`null`, or `{"detectedAtMs", "previousPid", "check"}` when the last unclean shutdown's check covered this database: `check` is its entry of `uncleanShutdown.databases`, see Server) |
 
 `PUT /api/admin/databases/<name>/settings` changes what can change at runtime, all given fields
@@ -774,6 +778,32 @@ the operator (the token of `server.run`) or a user with the admin role may; the 
 `everyone` of a server with access control off gets `403` (stopping needs real credentials
 even then); a server embedded by a library caller without a stop hook answers `409`. The
 request is audited (`server shutdown requested`).
+
+### Server settings
+
+`GET /api/admin/config` answers every key of `server.toml` (the web UI's Settings tab "Server"
+and "Server defaults", `graphersal-server config get`):
+
+| Field | Meaning |
+|---|---|
+| `path`, `revision` | the file and the revision of its text (also the `ETag`) |
+| `running` | `true` when a running server answered (offline, the console reads the file) |
+| `restartPending` | the keys whose change waits for a restart: the `now` and `restart` keys whose value in the file differs from what the running server applies (a hand edit shows here too) |
+| `keys` | one row per key in file order: `key` (dotted: `listen`, `limits.upload_bytes`, `limits.query.timeout_ms`, ...), `section`, `value` (the file's; `null` = not set), `default`, `set` (the file names it), `kind` (`bool` \| `count` \| `text` \| `memory` \| `hosts`), `choices` (a text key's values, else `null`), `applies` (`now` \| `load` \| `create` \| `restart`), `appliesText`, `running` (what the running server applies, for `now` and `restart` keys), `pending`, `help` |
+| `queryLimitKeys` | the keys of `[limits.query]` |
+| `mcpExposeNew` | `mcp.toml`'s `expose_new` (the MCP default of new names; changed with `PUT mcp {"exposeNew"}`), `null` when `mcp.toml` cannot be read |
+
+`PUT /api/admin/config {"set": {key: value | null}, "revision"?}` sets each key (JSON of its
+kind: `true`/`false`, a whole number, a text, `memory_limit` a number or `"auto"`/`"none"`,
+`allowed_hosts` a list of names) or resets it to its default with `null`, in ONE atomic write
+based on the revision (else `If-Match`; stale: `409`, nothing changed). The new file is checked
+by the parser the server starts with (`400` with its words naming the key; also an unknown key
+or an empty `set`). The file keeps its comments (only the changed lines are rewritten; when its
+layout does not allow that it is rewritten from its keys: `"rewritten": true`). Each changed
+key is audited (`server.toml: KEY = VALUE`). The answer is the settings plus `changed` (the
+keys whose value changed), `applied` (the keys the running server applied at once: the upload
+limit, the memory ceiling and headroom, the session lifetimes, the public scheme) and
+`rewritten`. When each key applies: [Configuration Reference](configuration.md).
 
 ### Verify, repair and swap
 

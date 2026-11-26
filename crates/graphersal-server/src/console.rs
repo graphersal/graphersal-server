@@ -54,6 +54,7 @@ mod first_admin;
 mod help;
 mod render;
 mod service;
+mod settings;
 mod start;
 
 pub use backup::{
@@ -68,6 +69,7 @@ pub use render::{
 pub use service::{
     started_note, started_output, status_json, status_json_of, status_text, stop_text,
 };
+pub use settings::{check_file as config_check_file, check_text as config_check_text};
 pub use start::{address_line, start_block, stopped_text, stopping_text};
 
 /// How long the console waits for a load to end (`db load` without `--no-wait`).
@@ -345,6 +347,16 @@ pub enum DbCommand {
         /// On or off.
         on: bool,
     },
+    /// `config get [KEY]`: the keys of `server.toml` (round 4 B-SETTINGS), or one of them.
+    ConfigGet {
+        /// One dotted key (`limits.upload_bytes`); `None`: every key.
+        key: Option<String>,
+    },
+    /// `config set KEY VALUE` / `config unset KEY`: change keys of `server.toml` (one write).
+    ConfigSet {
+        /// Each dotted key with its new value as JSON (`null`: back to its default).
+        changes: Vec<(String, Value)>,
+    },
     /// `mcp db NAME on|off` (exposure) or `mcp db NAME read-only on|off`.
     McpDatabase {
         /// A database or an alias.
@@ -407,8 +419,12 @@ impl DbCommand {
                     body.insert("schema".into(), schema.clone());
                 }
                 body.insert("description".into(), json!(spec.description));
-                body.insert("autoLoad".into(), json!(spec.auto_load));
-                body.insert("readOnly".into(), json!(spec.read_only));
+                if let Some(auto_load) = spec.auto_load {
+                    body.insert("autoLoad".into(), json!(auto_load));
+                }
+                if let Some(read_only) = spec.read_only {
+                    body.insert("readOnly".into(), json!(read_only));
+                }
                 if let Some(mcp) = spec.mcp {
                     body.insert("mcp".into(), json!(mcp));
                 }
@@ -583,6 +599,11 @@ impl DbCommand {
                 format!("grants/{}/{}", segment(subject), segment(database)),
                 None,
             ),
+            DbCommand::ConfigGet { .. } => (Method::Get, "config".into(), None),
+            DbCommand::ConfigSet { changes } => {
+                let set: Map<String, Value> = changes.iter().cloned().collect();
+                (Method::Put, "config".into(), Some(json!({ "set": set })))
+            }
             DbCommand::McpStatus => (Method::Get, "mcp".into(), None),
             DbCommand::McpSwitch { on } => {
                 (Method::Put, "mcp".into(), Some(json!({ "enabled": on })))

@@ -4,13 +4,17 @@
 //! besides the registry: the limits in effect, the server's default limits and the Store's
 //! creation parameters.
 
+use std::sync::Arc;
+
 use graphersal::persist::Store;
 
 use crate::audit::AuditEvent;
+use crate::config::ServerConfig;
 use crate::database::{DatabaseRole, utc_text};
 use crate::error::ServerError;
 use crate::limits::QueryLimits;
 use crate::registry::DatabaseEntry;
+use crate::server_settings::{self, Edited, LiveConfig};
 use crate::settings::SettingsChange;
 
 use super::Admin;
@@ -128,8 +132,8 @@ impl Admin {
         self.loader.as_ref()?.limits_in_effect(name)
     }
 
-    /// The server's default query limits: `server.toml`'s `[limits.query]`, read now (it has no
-    /// runtime writer, so this is what the next load reads).
+    /// The server's default query limits: `server.toml`'s `[limits.query]`, read now (what
+    /// the next load reads).
     ///
     /// `Err`: [`ServerError::Config`] / [`ServerError::Io`] for a `server.toml` that cannot be
     /// read.
@@ -161,4 +165,77 @@ impl Admin {
             clean: info.clean,
         })
     }
+
+    /// The settings the running server applies (`None` offline).
+    pub(crate) fn live_config(&self) -> Option<&Arc<LiveConfig>> {
+        self.loader.as_ref().and_then(|loader| loader.live_config())
+    }
+
+    /// The server settings view (`GET /api/admin/config`, [`crate::server_settings`]): every
+    /// key of `server.toml` with its value, default, class and restart-pending mark.
+    ///
+    /// `Err`: [`ServerError::Io`] / [`ServerError::Config`] for a file that cannot be read.
+    pub(crate) fn server_settings(&self) -> Result<serde_json::Value, ServerError> {
+        let path = self.registry.dir().config_path();
+        let text = read_config(&path)?;
+        let config = ServerConfig::parse(&text, &path)?;
+        Ok(server_settings::view_json(
+            &path,
+            &text,
+            &config,
+            self.live_config().map(|live| live.as_ref()),
+        ))
+    }
+
+    /// Changes keys of `server.toml` (`PUT /api/admin/config`, `config set`): `changes` (key,
+    /// new TOML value or `None` = its default) as ONE write based on the file's revision
+    /// ([`Admin::expecting`]), under the file's writer lock (online; offline the server lock
+    /// the console holds); then the running server applies the `now` keys
+    /// ([`LiveConfig::apply`]). Each changed key is audited (`ConfigSet`). Answers the edit and
+    /// the keys applied now.
+    ///
+    /// `Err`: [`ServerError::InvalidInput`] (an unknown key, a value the parser refuses),
+    /// [`ServerError::Conflict`] (a stale revision), [`ServerError::Io`] /
+    /// [`ServerError::Config`].
+    pub(crate) fn change_server_settings(
+        &self,
+        changes: &[(String, Option<toml::Value>)],
+    ) -> Result<(Edited, Vec<&'static str>), ServerError> {
+        let path = self.registry.dir().config_path();
+        let live = self.live_config();
+        let write = || -> Result<(Edited, Vec<&'static str>), ServerError> {
+            let text = read_config(&path)?;
+            crate::revision::check(
+                self.expected(),
+                &crate::revision::of(text.as_bytes()),
+                crate::layout::CONFIG_FILE,
+            )?;
+            let edited = server_settings::edit(&text, &path, changes)?;
+            if edited.text != text {
+                crate::layout::write_atomic(&path, edited.text.as_bytes())?;
+            }
+            let applied = live
+                .map(|live| live.apply(&edited.config))
+                .unwrap_or_default();
+            Ok((edited, applied))
+        };
+        let (edited, applied) = match live {
+            Some(live) => live.writing(write)?,
+            None => write()?,
+        };
+        for key in &edited.changed {
+            let value =
+                server_settings::value_of(&edited.config, key).unwrap_or(serde_json::Value::Null);
+            self.audit().record(AuditEvent::ConfigSet {
+                key: (*key).to_string(),
+                value: value.to_string(),
+            });
+        }
+        Ok((edited, applied))
+    }
+}
+
+/// The text of `server.toml` at `path`.
+fn read_config(path: &std::path::Path) -> Result<String, ServerError> {
+    std::fs::read_to_string(path).map_err(|err| ServerError::io("read", path, err))
 }

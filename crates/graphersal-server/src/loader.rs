@@ -193,6 +193,9 @@ pub struct Loader {
     /// The MCP switches (`mcp.toml`) and usage statistics (`serve` sets them once; unset in the
     /// unit tests: everything on, no statistics).
     mcp_control: std::sync::OnceLock<Arc<crate::mcp_control::McpControl>>,
+    /// The settings the running server applies (`server.toml`, round 4 B-SETTINGS; `serve`
+    /// sets them once; unset in the unit tests: the file is all there is).
+    live_config: std::sync::OnceLock<Arc<crate::server_settings::LiveConfig>>,
     /// The backup root (`server.toml [jobs] backup_root`, resolved): every context's file root
     /// (`ContextBuilder::file_root`), and the root the stored jobs of a loaded database are
     /// checked against (`None`: no confinement, the unit tests).
@@ -283,6 +286,7 @@ impl Loader {
             unload_wait: UNLOAD_WAIT,
             mcp,
             mcp_control: std::sync::OnceLock::new(),
+            live_config: std::sync::OnceLock::new(),
             backup_root,
             memory_seen: Mutex::new(BTreeMap::new()),
             open_record: std::sync::OnceLock::new(),
@@ -343,6 +347,16 @@ impl Loader {
     /// Sets the MCP switches and statistics (once; a second call is ignored).
     pub(crate) fn set_mcp_control(&self, control: Arc<crate::mcp_control::McpControl>) {
         let _ = self.mcp_control.set(control);
+    }
+
+    /// Sets the settings the running server applies (once; a second call is ignored).
+    pub(crate) fn set_live_config(&self, live: Arc<crate::server_settings::LiveConfig>) {
+        let _ = self.live_config.set(live);
+    }
+
+    /// The settings the running server applies (`None`: not set, the unit tests).
+    pub(crate) fn live_config(&self) -> Option<&Arc<crate::server_settings::LiveConfig>> {
+        self.live_config.get()
     }
 
     /// The MCP switches and statistics (`None`: not set, the unit tests: everything on).

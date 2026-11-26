@@ -739,7 +739,7 @@ pub fn restore(
     };
     crate::security::create_private_dir(target.root())?;
     write_atomic_private(&target.config_path(), config_text.as_bytes())?;
-    ServerDir::init_with(target.root().to_path_buf(), false)?;
+    ServerDir::init_with(target.root().to_path_buf(), false, None)?;
     // 3. The data entries: model blobs into models/blobs/, the databases' backups into
     //    backups/<name>/ for the ordinary restore of a backup.
     let mut model_blobs = 0;

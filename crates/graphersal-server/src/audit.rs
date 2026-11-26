@@ -161,6 +161,15 @@ pub enum AuditEvent {
         /// The new value.
         on: bool,
     },
+    /// A key of `server.toml` was changed through the admin API or the console (round 4
+    /// B-SETTINGS, [`crate::server_settings`]).
+    #[non_exhaustive]
+    ConfigSet {
+        /// The dotted key (`limits.upload_bytes`).
+        key: String,
+        /// The new value as JSON (`null`: back to its default).
+        value: String,
+    },
     /// A database's (or alias's) MCP settings were changed (`mcp.toml`).
     #[non_exhaustive]
     McpDatabaseSet {
@@ -432,6 +441,9 @@ impl fmt::Display for AuditEvent {
                 "MCP exposure of new databases and aliases {}",
                 on_off(*on)
             ),
+            AuditEvent::ConfigSet { key, value } => {
+                write!(f, "server.toml: {key} = {value}")
+            }
             AuditEvent::McpDatabaseSet {
                 name,
                 exposed,

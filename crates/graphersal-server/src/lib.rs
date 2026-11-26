@@ -65,6 +65,7 @@ pub mod run_file;
 pub mod security;
 pub mod serve;
 pub mod server_backup;
+pub mod server_settings;
 pub mod sessions;
 mod settings;
 #[cfg(test)]

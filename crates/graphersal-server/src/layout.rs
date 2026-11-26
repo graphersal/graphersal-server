@@ -137,13 +137,35 @@ impl ServerDir {
     /// current OS user ([`ServerError::InsecureDir`] otherwise), and the modes it finds too
     /// open are tightened ([`InitReport::secured`]).
     pub fn init(root: impl Into<PathBuf>) -> Result<InitReport, ServerError> {
-        Self::init_with(root.into(), true)
+        Self::init_with(root.into(), true, None)
+    }
+
+    /// [`ServerDir::init`] writing `config` as the new `server.toml` instead of the default
+    /// text (round 4 B-SETTINGS: `init --config FILE` / `--set KEY=VALUE`). The text is
+    /// checked with the server's own parser first; secrets are never in it (`server.toml` has
+    /// no secret key: an unknown key is refused), the first admin's token is generated as
+    /// always.
+    ///
+    /// `Err`: [`ServerError::Config`] for a text that does not parse (nothing is created), or
+    /// for a directory that is a server directory already (its `server.toml` is kept: change
+    /// it with `config set`); else as [`ServerDir::init`].
+    pub fn init_configured(
+        root: impl Into<PathBuf>,
+        config: &str,
+    ) -> Result<InitReport, ServerError> {
+        let root = root.into();
+        ServerConfig::parse(config, &root.join(CONFIG_FILE))?;
+        Self::init_with(root, true, Some(config))
     }
 
     /// [`ServerDir::init`]; without `first_admin` a directory without `access.toml` stays
     /// without one (the restore of a server backup, [`crate::server_backup::restore`], writes
     /// the archive's own `access.toml` afterwards).
-    pub(crate) fn init_with(root: PathBuf, first_admin: bool) -> Result<InitReport, ServerError> {
+    pub(crate) fn init_with(
+        root: PathBuf,
+        first_admin: bool,
+        config_text: Option<&str>,
+    ) -> Result<InitReport, ServerError> {
         let dir = Self::new(root);
         let mut created = Vec::new();
         let mut config = None;
@@ -155,6 +177,16 @@ impl ServerDir {
                 // Only the owner makes (or completes) a server directory of it.
                 crate::security::check_owner(&dir)?;
                 if dir.config_path().is_file() {
+                    if config_text.is_some() {
+                        return Err(ServerError::Config {
+                            path: dir.config_path(),
+                            message: "the directory is a server directory already: init \
+                                      --config and --set write only a NEW server.toml; change \
+                                      this one with graphersal-server config set KEY VALUE \
+                                      --dir DIR"
+                                .to_string(),
+                        });
+                    }
                     config = Some(dir.load_config()?);
                     true
                 } else {
@@ -176,8 +208,10 @@ impl ServerDir {
         if !existed {
             // First the configuration: it marks the directory as a server directory, so an
             // interrupted `init` is completed by the next one.
-            write_atomic(&dir.config_path(), default_config_text().as_bytes())?;
+            let text = config_text.map_or_else(default_config_text, str::to_string);
+            write_atomic(&dir.config_path(), text.as_bytes())?;
             created.push(dir.config_path());
+            config = Some(ServerConfig::parse(&text, &dir.config_path())?);
             // A new server offers nothing to MCP until an admin switches it on (round 4
             // B-MCPDEF): `mcp.toml` with `enabled = false`, `expose_new = false`.
             if !dir.mcp_settings_path().exists() {

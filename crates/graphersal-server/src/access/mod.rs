@@ -86,7 +86,8 @@ pub struct Access {
     dir: ServerDir,
     file: Arc<RwLock<AccessFile>>,
     sessions: Arc<dyn SessionTable>,
-    limits: SessionLimits,
+    /// The browser session limits, shared with the session cookie's authenticator.
+    limits: Arc<RwLock<SessionLimits>>,
     chain: Vec<Box<dyn Authenticator>>,
     audit: Audit,
 }
@@ -148,13 +149,14 @@ impl Access {
             tracing::warn!(target: "graphersal_server", "browser sessions: {err}");
         }
         let file = Arc::new(RwLock::new(file));
+        let limits = Arc::new(RwLock::new(limits));
         let mut chain: Vec<Box<dyn Authenticator>> = Vec::new();
         if let Some(hash) = operator {
             chain.push(Box::new(OperatorToken::new(hash)));
         }
         chain.push(Box::new(UserTokens::new(file.clone())));
         chain.push(Box::new(
-            SessionCookie::new(file.clone(), sessions.clone()).with_limits(limits),
+            SessionCookie::new(file.clone(), sessions.clone()).with_shared_limits(limits.clone()),
         ));
         let access = Self {
             dir: dir.clone(),
@@ -165,6 +167,27 @@ impl Access {
             audit,
         };
         Ok((access, first))
+    }
+
+    /// The browser session limits now (`server.toml` `[sessions]`).
+    pub fn session_limits(&self) -> SessionLimits {
+        *self.limits.read().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Changes the browser session limits of the running server (a settings change of
+    /// `[sessions]`, round 4 B-SETTINGS): every later request is checked against them, and the
+    /// sessions they end now are removed.
+    pub fn set_session_limits(&self, limits: SessionLimits) {
+        *self.limits.write().unwrap_or_else(|p| p.into_inner()) = limits;
+        let now = SystemTime::now();
+        let live = self.file.read().unwrap_or_else(|p| p.into_inner());
+        let ended = self.sessions.retain(&|session| {
+            auth::session_principal(&live, session).is_some() && !limits.expired(session, now)
+        });
+        drop(live);
+        if let Err(err) = ended {
+            tracing::warn!(target: "graphersal_server", "browser sessions: {err}");
+        }
     }
 
     /// The principal of `request` (the chain of the module docs): anonymous without credentials,
@@ -396,7 +419,8 @@ impl Access {
         *live = next;
         let now = SystemTime::now();
         let ended = self.sessions.retain(&|session| {
-            auth::session_principal(&live, session).is_some() && !self.limits.expired(session, now)
+            auth::session_principal(&live, session).is_some()
+                && !self.session_limits().expired(session, now)
         });
         drop(live);
         if let Err(err) = ended {

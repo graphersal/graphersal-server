@@ -3474,7 +3474,7 @@
       },
       "put": {
         "operationId": "switchMcp",
-        "summary": "Turn MCP on or off",
+        "summary": "Turn MCP on or off, or change the MCP default of new names",
         "description": "Off: `/mcp` and `/db/<name>/mcp` answer `503`; open sessions are kept.",
         "tags": [
           "mcp"
@@ -3495,15 +3495,17 @@
                   "enabled": {
                     "type": "boolean"
                   },
+                  "exposeNew": {
+                    "type": "boolean",
+                    "description": "Whether a new database or alias is offered to MCP when its creator does not say (`mcp.toml` `expose_new`)."
+                  },
                   "revision": {
                     "type": "string",
                     "description": "The revision this change is based on (else the `If-Match` header; neither: no check). A stale one is `409 RevisionConflict`, nothing changed."
                   }
                 },
-                "required": [
-                  "enabled"
-                ],
-                "additionalProperties": false
+                "additionalProperties": false,
+                "minProperties": 1
               }
             }
           }
@@ -4007,6 +4009,122 @@
           },
           "404": {
             "$ref": "#/components/responses/AdminNotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/Failure"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/api/admin/config": {
+      "get": {
+        "operationId": "getServerSettings",
+        "summary": "Server settings (server.toml)",
+        "description": "Every key of `server.toml`: its value, default, when a change applies (`now`, `load`, `create`, `restart`) and whether it waits for a restart (`restartPending`). `ETag`: the file's revision.",
+        "tags": [
+          "server"
+        ],
+        "x-graphersal-access": "admin",
+        "responses": {
+          "200": {
+            "description": "The server settings.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServerSettings"
+                }
+              }
+            },
+            "headers": {
+              "ETag": {
+                "$ref": "#/components/headers/ETag"
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/HostRefused"
+          },
+          "404": {
+            "$ref": "#/components/responses/AdminNotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/Failure"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      },
+      "put": {
+        "operationId": "changeServerSettings",
+        "summary": "Change server settings",
+        "description": "Sets keys of `server.toml` (`null`: back to the default) in one atomic write, checked by the start-up parser, audited per key. `now` keys apply at once; `restart` keys are listed in `restartPending` until the next start.",
+        "tags": [
+          "server"
+        ],
+        "x-graphersal-access": "admin",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IfMatch"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "set": {
+                    "type": "object",
+                    "description": "Dotted key (`limits.upload_bytes`) to its new value, or `null` for its default.",
+                    "additionalProperties": true,
+                    "minProperties": 1
+                  },
+                  "revision": {
+                    "type": "string",
+                    "description": "The revision this change is based on (else the `If-Match` header; neither: no check). A stale one is `409 RevisionConflict`, nothing changed."
+                  }
+                },
+                "required": [
+                  "set"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The server settings after the change, with `changed`, `applied` and `rewritten`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServerSettings"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/HostRefused"
+          },
+          "404": {
+            "$ref": "#/components/responses/AdminNotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/RevisionConflict"
           },
           "500": {
             "$ref": "#/components/responses/Failure"
@@ -4581,6 +4699,10 @@
           },
           "recovery": {
             "type": "object"
+          },
+          "serverDefaults": {
+            "type": "object",
+            "description": "What a new database starts with: `autoLoad`, `readOnly`, `chunkBytes`, `damagePolicy` (`server.toml [defaults]`), `mcpExposeNew` (`mcp.toml`); or `{error}`."
           }
         },
         "required": [
@@ -5068,6 +5190,118 @@
           },
           "memory": {
             "type": "object"
+          },
+          "restartPending": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The `server.toml` keys whose change waits for a restart (round 4)."
+          }
+        }
+      },
+      "ServerSettings": {
+        "type": "object",
+        "description": "`server.toml` as the admin API shows it (round 4).",
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "revision": {
+            "type": "string"
+          },
+          "running": {
+            "type": "boolean"
+          },
+          "restartPending": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "keys": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "key": {
+                  "type": "string"
+                },
+                "section": {
+                  "type": "string"
+                },
+                "value": {},
+                "default": {},
+                "set": {
+                  "type": "boolean"
+                },
+                "applies": {
+                  "type": "string",
+                  "enum": [
+                    "now",
+                    "load",
+                    "create",
+                    "restart"
+                  ]
+                },
+                "appliesText": {
+                  "type": "string"
+                },
+                "running": {},
+                "pending": {
+                  "type": "boolean"
+                },
+                "help": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "bool",
+                    "count",
+                    "text",
+                    "memory",
+                    "hosts"
+                  ]
+                },
+                "choices": {
+                  "type": [
+                    "array",
+                    "null"
+                  ],
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          },
+          "queryLimitKeys": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "mcpExposeNew": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "changed": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "applied": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "rewritten": {
+            "type": "boolean"
           }
         }
       }

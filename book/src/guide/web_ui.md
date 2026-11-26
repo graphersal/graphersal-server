@@ -57,7 +57,7 @@ The list of databases and aliases with their state, kind, flags, size on disk an
 memory (hover for the exact bytes and a layer's shared base).
 
 - **Actions per row** sit behind the row's "…" button: Load or Unload…, Settings… (opens the
-  Database settings tab), Runs… (a loaded database: opens the Runs tab filtered), Clone…,
+  Settings tab), Runs… (a loaded database: opens the Runs tab filtered), Clone…,
   Backups…, Export…, Verify, Repair…, Promote to base…, "OpenAPI description" (the database's
   HTTP API description, in a new browser tab) and Delete…; an alias row has Settings of its
   database, Point to…, Rename…, its OpenAPI description and Remove…. An action that does not
@@ -145,15 +145,46 @@ without a token.
 
 More in [MCP](mcp.md).
 
-## Database settings
+## Settings
 
-One database, picked in the tab or opened by a Databases row's "Settings…":
+The tab's picker shows, in this order: **Server defaults (every database)**, **Server
+(server.toml)**, then every database. A database is also opened by its Databases row's
+"Settings…".
+
+### Server defaults
+
+What every database inherits or starts with ([Configuration Reference](../reference/configuration.md),
+"Server defaults and inheritance"):
+
+- MCP: "Offer new databases and aliases to MCP" (`mcp.toml` `expose_new`; the same switch as
+  the MCP tab's);
+- New databases: `chunk_bytes` and `damage_policy`, marked "at create only" (creation
+  parameters, fixed for each database's life), and `auto_load` and `read_only`, the first value
+  of each new database's own flags (the create form starts from them);
+- Query limits of every database: each key inherited by every database that does not override
+  it, applied at each database's next load.
+
+### Server
+
+Every key of `server.toml`, grouped by section, each with its value (or its default, marked
+"(default)"), what it means, and when a change applies: "applies now", "at next load", "new
+databases" / "at create only", or "after restart". A key is set in place (a checkbox, a choice,
+or a value with "Set") or removed with "Reset to default". The file keeps its comments; a
+toast says what was applied at once and what waits for a restart. A restart key shows
+"restart pending" with the value the running server still uses, a note above the tables
+lists all of them, and the top bar shows a "restart pending" badge (for admins, on every tab;
+it opens this view) until the server is restarted. A change made from a stale page is
+refused, and the view is read again.
+
+### A database
 
 - identity (kind, role, base, aliases, created), state and sizes;
-- the description, read-only and auto-load, edited in place;
-- the query limits: the database's own override, the server's default, the next load's value
-  and, while loaded, the value in effect; each override edited in place; "Unload and load now…"
-  when the values differ;
+- the description, read-only and auto-load, edited in place, with what a new database would get
+  from the server defaults;
+- the query limits: per key "inherited" (the server's default applies) or "override" (this
+  database's own value), the server's default, the next load's value and, while loaded, the
+  value in effect; each override set in place, "Inherit" removes it (reset to inherited);
+  "Unload and load now…" when the values differ;
 - MCP, grants and backups, with links to those tabs;
 - "Damage and recovery": a database in maintenance with its damage report; its last verify in
   one wording ("Last verify <time>: no problem found", "…: the embedding model NAME is missing
