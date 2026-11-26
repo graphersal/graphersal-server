@@ -4405,3 +4405,122 @@ fn mcp_commands_offline_and_through_a_server() {
         std::thread::sleep(Duration::from_millis(20));
     }
 }
+
+#[test]
+fn db_info_and_db_set_offline_and_through_a_server() {
+    let temp = TempDir::new("console-settings");
+    let dir = ServerDir::init(temp.path()).unwrap().dir;
+    modern_db(&dir, "acme");
+    let root = temp.path();
+    let file = dir.databases().join("acme").join("database.toml");
+    // Offline: info reads the directory, set writes database.toml.
+    let (code, out, err) = db(root, &["info", "acme"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("Database 'acme'"), "{out}");
+    let row = |key: &str, value: &str| {
+        out.lines()
+            .any(|l| l.trim_start().starts_with(key) && l.trim_end().ends_with(value))
+    };
+    assert!(row("description:", "modern"), "{out}");
+    assert!(out.contains("KEY"), "the limits table: {out}");
+    assert!(out.contains("max_operations"), "{out}");
+    assert!(row("damage policy:", "maintenance"), "{out}");
+    assert!(row("backend:", "directory"), "{out}");
+    assert!(row("store id:", ""), "{out}");
+    let (code, out, err) = db(root, &["set", "acme", "description", "Acme's graph"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        out.starts_with("Set the description of database 'acme'"),
+        "{out}"
+    );
+    let (code, out, err) = db(root, &["set", "acme", "limit", "max_operations", "1_000"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        out.starts_with("Set the query limit max_operations = 1000 of database 'acme'"),
+        "{out}"
+    );
+    let text = std::fs::read_to_string(&file).unwrap();
+    assert!(text.contains("description = \"Acme's graph\""), "{text}");
+    assert!(
+        text.contains("[limits.query]\nmax_operations = 1000"),
+        "{text}"
+    );
+    let (code, out, err) = db(root, &["info", "acme", "--json"]);
+    assert_eq!(code, 0, "{err}");
+    let info = json(&out);
+    let row = info["limits"]["keys"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["key"] == "max_operations")
+        .unwrap()
+        .clone();
+    assert_eq!(row["override"], 1000);
+    assert_eq!(info["limits"]["loaded"], false);
+    assert_eq!(info["database"]["description"], "Acme's graph");
+    // Usage errors: an unknown key, a bad value, --clear with a value, a missing value.
+    for args in [
+        &["set", "acme", "limit", "timeout", "5"][..],
+        &["set", "acme", "limit", "timeout_ms", "-5"],
+        &["set", "acme", "limit", "timeout_ms", "5", "--clear"],
+        &["set", "acme", "limit", "timeout_ms"],
+        &["set", "acme", "colour", "red"],
+        &["info", "acme", "--clear"],
+    ] {
+        let (code, _, err) = db(root, args);
+        assert_eq!(code, 2, "{args:?}: {err}");
+    }
+    let (code, _, err) = db(root, &["set", "nope", "description", "x"]);
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains("nope"), "{err}");
+
+    // Through a server: the change is in effect at the next load.
+    let mut server = ServerProcess::spawn(
+        Command::new(BIN)
+            .args(["serve", "--dir"])
+            .arg(root)
+            .args(["--listen", "127.0.0.1:0"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    );
+    let info = wait_for_run_file(&dir);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while get(info.address, "/readyz").0 != 200 {
+        assert!(Instant::now() < deadline, "the server did not get ready");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let (code, _, err) = db(root, &["load", "acme"]);
+    assert_eq!(code, 0, "{err}");
+    let (code, out, err) = db(root, &["set", "acme", "limit", "max_operations", "--clear"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        err.contains(&format!("sent to its admin API at {}", info.address)),
+        "{err}"
+    );
+    assert!(
+        out.starts_with("Cleared the query limit override max_operations of database 'acme'"),
+        "{out}"
+    );
+    assert!(out.contains("now:"), "{out}");
+    assert!(out.contains("db unload acme"), "{out}");
+    let (code, out, err) = db(root, &["info", "acme"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("NOW"), "loaded: the limits in effect: {out}");
+    assert!(
+        out.contains("changed since the load: applies at the next load"),
+        "{out}"
+    );
+    assert!(
+        !std::fs::read_to_string(&file).unwrap().contains("limits"),
+        "cleared"
+    );
+    let (code, _, err) = db(root, &["unload", "acme"]);
+    assert_eq!(code, 0, "{err}");
+
+    send_stop(&server);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while server.0.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < deadline, "the server did not stop");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}

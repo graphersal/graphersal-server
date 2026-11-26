@@ -29,7 +29,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 
 use graphersal_server::config::parse_listen;
-use graphersal_server::console::{self, DbCommand, Via};
+use graphersal_server::console::{self, DbCommand, DbSetting, Via};
 use graphersal_server::{
     CreateSpec, DatabaseKind, DatabaseRole, ExportSpec, ServeOptions, ServerDir, StopHook, daemon,
     serve,
@@ -124,6 +124,17 @@ Usage:
             is frozen forever; nothing turns it back into an ordinary database.
         db read-only NAME on|off
         db auto-load NAME on|off
+        db info NAME             everything about NAME (or the database an alias names):
+                                 kind, role, state, sizes, query limits (its own overrides
+                                 and the server's defaults), MCP, grants, backups and the
+                                 Store's creation parameters
+        db set NAME description TEXT
+        db set NAME limit KEY VALUE | db set NAME limit KEY --clear
+            A query limit override of NAME (database.toml [limits.query]; KEY: timeout_ms,
+            max_operations, max_string_size, max_array_size, max_map_size, max_traversers,
+            max_materialized_bytes, max_value_depth; 0 = no limit, for max_value_depth the
+            default 128); --clear lets the server's default apply again. Applies at NAME's
+            next load (unload + load).
         db alias set ALIAS DATABASE
         db alias remove ALIAS
         db alias rename OLD NEW  the alias OLD becomes NEW (same database); open MCP sessions
@@ -627,7 +638,7 @@ fn db_command(args: &[String]) -> ExitCode {
                 values.push((flag, value));
             }
             "--json" | "--auto-load" | "--read-only" | "--no-wait" | "--no-models"
-            | "--materialize"
+            | "--materialize" | "--clear"
                 if inline.is_none() =>
             {
                 switches.push(flag);
@@ -1172,6 +1183,27 @@ fn parse_db(
             name: name.to_string(),
             on: on_off(word)?,
         },
+        ["info", name] => DbCommand::Info {
+            name: name.to_string(),
+        },
+        ["set", name, "description", text] => DbCommand::Set {
+            name: name.to_string(),
+            setting: DbSetting::Description(text.to_string()),
+        },
+        ["set", name, "limit", key] if switch("--clear") => DbCommand::Set {
+            name: name.to_string(),
+            setting: DbSetting::limit(key, None).map_err(Problem::Usage)?,
+        },
+        ["set", name, "limit", key, value] if !switch("--clear") => DbCommand::Set {
+            name: name.to_string(),
+            setting: DbSetting::limit(key, Some(value)).map_err(Problem::Usage)?,
+        },
+        ["set", ..] => {
+            return Err(usage(
+                "db set takes NAME description TEXT, NAME limit KEY VALUE or NAME limit KEY \
+                 --clear",
+            ));
+        }
         ["alias", "set", alias, target] => DbCommand::AliasSet {
             alias: alias.to_string(),
             target: target.to_string(),
@@ -1221,6 +1253,9 @@ fn parse_db(
     only_create_flags()?;
     if switch("--no-wait") && !matches!(command, DbCommand::Load { .. }) {
         return Err(usage("--no-wait belongs to db load"));
+    }
+    if switch("--clear") && !matches!(command, DbCommand::Set { .. }) {
+        return Err(usage("--clear belongs to db set NAME limit KEY"));
     }
     if value("--name").is_some() && !matches!(command, DbCommand::Restore { .. }) {
         return Err(usage("--name belongs to db restore"));

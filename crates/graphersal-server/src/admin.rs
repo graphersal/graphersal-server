@@ -291,6 +291,53 @@ impl Registry {
         })
     }
 
+    /// Changes the settings of the database `name` (round 3 B7, [`crate::settings`]): its
+    /// description, read-only and auto-load flags and query limit overrides, written in ONE
+    /// atomic write of its `database.toml` under the registry's write lock, based on its
+    /// revision `expected` (`None`: no check). Like [`Registry::set_read_only`] this does not
+    /// flip a loaded database's runtime mode (the loader does, [`crate::loader::Loader`]), and
+    /// a base with layers refuses read-only off. A limit override changed here applies at the
+    /// database's next load.
+    ///
+    /// `Err`: [`ServerError::NotFound`], [`ServerError::DatabaseFailed`] (no configuration),
+    /// [`ServerError::Conflict`], [`ServerError::Refused`], [`ServerError::Io`]; nothing
+    /// changed.
+    pub(crate) fn change_settings(
+        &self,
+        name: &str,
+        expected: Option<&str>,
+        change: &crate::settings::SettingsChange,
+    ) -> Result<DatabaseEntry, ServerError> {
+        self.update_config(name, expected, |inner, config| {
+            if let Some(read_only) = change.read_only {
+                if !read_only && config.role == DatabaseRole::Base && inner.has_layers_over(name) {
+                    return Err(ServerError::Refused {
+                        name: name.to_string(),
+                        message: "it is the base of layers and stays read-only while a layer \
+                                  names it"
+                            .to_string(),
+                    });
+                }
+                config.read_only = read_only;
+            }
+            if let Some(auto_load) = change.auto_load {
+                config.auto_load = auto_load;
+            }
+            if let Some(description) = &change.description {
+                config.description = description.clone();
+            }
+            for (key, value) in &change.limits {
+                if !config.limits.query.set(key, *value) {
+                    return Err(ServerError::InvalidInput {
+                        name: name.to_string(),
+                        message: format!("unknown query limit '{key}'"),
+                    });
+                }
+            }
+            Ok(())
+        })
+    }
+
     /// The registry half of a promotion ([`crate::ops::Admin::promote`]): the plain, ordinary
     /// database `name` becomes `role = "base"` with `read_only = true`, written to its
     /// `database.toml`. Refused for a layer, a base, and a database that is not `unloaded`
@@ -363,12 +410,13 @@ impl Registry {
             });
         };
         let dir = entry.dir.clone();
-        change(&inner, &mut config)?;
-        // No admin request sets the limits: the file's (perhaps edited by hand since the scan)
-        // are kept, not overwritten by the copy in memory.
+        // The file's limits (perhaps edited by hand since the scan or the last load) are the
+        // ones changed or kept, not the copy in memory: only a settings change
+        // (`Registry::change_settings`) touches them.
         if let Ok(on_disk) = DatabaseConfig::read(&dir) {
             config.limits = on_disk.limits;
         }
+        change(&inner, &mut config)?;
         config.write(&dir)?;
         let entry = inner.entries.get_mut(&key).ok_or_else(|| not_found(name))?;
         entry.config = Some(config);

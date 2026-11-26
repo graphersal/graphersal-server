@@ -5,8 +5,10 @@
 //! and in a database's `database.toml` to override single keys for that database. Both files
 //! are read again at every load: the merged limits ([`QueryLimits::over`]) become the
 //! graphersal-session presets of the loaded database ([`QueryLimits::presets`]), so a change
-//! applies at the database's next load (unload + load). Default: no limit at all (the presets
-//! of the graphersal playground).
+//! applies at the database's next load (unload + load). A database's overrides are set or
+//! cleared at runtime through its settings (`crate::settings`: the admin API, `db set NAME
+//! limit KEY VALUE|--clear`, the web UI's Database settings tab), with the same refusals as
+//! this parser. Default: no limit at all (the presets of the graphersal playground).
 //!
 //! ```toml
 //! [limits.query]
@@ -37,6 +39,24 @@ use graphersal::prelude::ElementProperty;
 use graphersal::script::ScriptLimits;
 use graphersal_session::SessionPresets;
 use serde::{Deserialize, Deserializer, Serialize};
+
+/// The keys of `[limits.query]` in file order (the `with_*`-less way to name one: the admin
+/// API's settings route, the console's `db set NAME limit KEY VALUE`).
+pub const QUERY_LIMIT_KEYS: [&str; 8] = [
+    "timeout_ms",
+    "max_operations",
+    "max_string_size",
+    "max_array_size",
+    "max_map_size",
+    "max_traversers",
+    "max_materialized_bytes",
+    "max_value_depth",
+];
+
+/// The largest value a query limit may have through the admin API and the console: the
+/// engine's options are signed 64-bit numbers (a larger value would be cut to this one
+/// anyway), and a TOML integer is one too.
+pub const MAX_LIMIT_VALUE: u64 = i64::MAX as u64;
 
 /// The query limits of `[limits.query]` (module docs): each key optional, a missing key is no
 /// limit (or the global value, for a database's override).
@@ -105,6 +125,49 @@ impl QueryLimits {
     /// Whether no key is set.
     pub fn is_empty(&self) -> bool {
         *self == Self::default()
+    }
+
+    /// The value of the key `key` ([`QUERY_LIMIT_KEYS`]): `None` for an unknown key,
+    /// `Some(None)` for a key not set.
+    pub fn get(&self, key: &str) -> Option<Option<u64>> {
+        Some(match key {
+            "timeout_ms" => self.timeout_ms,
+            "max_operations" => self.max_operations,
+            "max_string_size" => self.max_string_size,
+            "max_array_size" => self.max_array_size,
+            "max_map_size" => self.max_map_size,
+            "max_traversers" => self.max_traversers,
+            "max_materialized_bytes" => self.max_materialized_bytes,
+            "max_value_depth" => self.max_value_depth,
+            _ => return None,
+        })
+    }
+
+    /// Sets (`Some`) or clears (`None`) the key `key` ([`QUERY_LIMIT_KEYS`]); `false` (nothing
+    /// changed) for an unknown key.
+    pub fn set(&mut self, key: &str, value: Option<u64>) -> bool {
+        match self.slot(key) {
+            Some(slot) => {
+                *slot = value;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The field of the key `key`.
+    fn slot(&mut self, key: &str) -> Option<&mut Option<u64>> {
+        Some(match key {
+            "timeout_ms" => &mut self.timeout_ms,
+            "max_operations" => &mut self.max_operations,
+            "max_string_size" => &mut self.max_string_size,
+            "max_array_size" => &mut self.max_array_size,
+            "max_map_size" => &mut self.max_map_size,
+            "max_traversers" => &mut self.max_traversers,
+            "max_materialized_bytes" => &mut self.max_materialized_bytes,
+            "max_value_depth" => &mut self.max_value_depth,
+            _ => return None,
+        })
     }
 
     /// These limits (a database's `[limits.query]`) over `global` (`server.toml`'s): a key set
@@ -376,6 +439,30 @@ mod tests {
         assert_eq!(merged.max_traversers, Some(0));
         assert_eq!(QueryLimits::new().over(&global), global);
         assert_eq!(global.over(&QueryLimits::new()), global);
+    }
+
+    #[test]
+    fn every_key_is_reachable_by_name() {
+        let mut limits = QueryLimits::new();
+        for (n, key) in QUERY_LIMIT_KEYS.iter().enumerate() {
+            assert_eq!(limits.get(key), Some(None), "{key}");
+            assert!(limits.set(key, Some(n as u64 + 1)), "{key}");
+            assert_eq!(limits.get(key), Some(Some(n as u64 + 1)), "{key}");
+        }
+        assert_eq!(
+            limits.summary(),
+            "timeout_ms=1, max_operations=2, max_string_size=3, max_array_size=4, \
+             max_map_size=5, max_traversers=6, max_materialized_bytes=7, max_value_depth=8"
+        );
+        assert!(limits.set("timeout_ms", None));
+        assert_eq!(limits.timeout_ms, None);
+        assert_eq!(limits.get("max_traverser"), None);
+        assert!(!limits.set("max_traverser", Some(1)));
+        let text = toml::to_string(&QueryLimits::new().with_timeout_ms(MAX_LIMIT_VALUE)).unwrap();
+        assert_eq!(
+            toml::from_str::<QueryLimits>(&text).unwrap().timeout_ms,
+            Some(MAX_LIMIT_VALUE)
+        );
     }
 
     #[test]

@@ -156,6 +156,8 @@ databases and missing models. Paths and commands are never wrapped.
 | `db load NAME [--no-wait]`, `db unload NAME` | running server only; a loaded database's note shows its URL (`served at: http://.../db/NAME/`) |
 | `db promote NAME` | an unloaded plain database becomes a base (read-only, frozen for good) |
 | `db read-only NAME on\|off`, `db auto-load NAME on\|off` | flags, persisted; read-only applies at once |
+| `db info NAME` | everything about a database (or the database an alias names): kind, role, base, aliases, created; state, flags, on disk, in memory; the query limits (its own overrides, the server's defaults, what the next load uses, what a loaded one runs under now); MCP, grants, backups; the Store's creation parameters (store id, damage policy, chunk size, created, backend, format version), read-only |
+| `db set NAME description TEXT`, `db set NAME limit KEY VALUE`, `db set NAME limit KEY --clear` | the description, or a query limit override of `database.toml [limits.query]` (`timeout_ms`, `max_operations`, ...; `--clear`: the server's default applies again), checked like `server.toml`; a limit applies at the database's next load (unload + load) |
 | `db alias set ALIAS DATABASE`, `db alias remove ALIAS`, `db alias rename OLD NEW` | aliases (a flip takes effect at once, also for the grants on the alias; a rename moves open MCP sessions and the alias's grants with it; a removal removes its grants) |
 | `db backup NAME`, `db backups NAME` | verified ZIP backups in `DIR/backups/NAME/` |
 | `db restore NAME BACKUP [--name NEW]` | over NAME (unloaded) or into the new database NEW |
@@ -209,7 +211,13 @@ included, on databases and aliases, each alias marked with its current database)
 `mcp-tab.js` (MCP on or off for the whole server, each database or alias offered to MCP or
 hidden and read-only for MCP, open sessions and tool calls per database, tool calls per tool and
 per user with the recent errors since the start, the endpoint URL and the `claude mcp add`
-command; model `mcp-api.js`), the views of non-admins `login-tab.js` (paste a token; then the page's `?next=`
+command; model `mcp-api.js`) and `settings-tab.js` ("Database settings": one database, picked or
+opened by a Databases row's "Settings…": its identity, state and sizes, query limits (its own
+override, the server's default, the next load's value and, while loaded, the value in effect,
+with "Unload and load now…" when they differ), MCP, grants and backups (with links to those
+tabs) and the Store's creation parameters read-only; the description, read-only, auto-load and
+each limit override are edited in place, every change based on the view's revision; model
+`settings-api.js`), the views of non-admins `login-tab.js` (paste a token; then the page's `?next=`
 path, only a path from the server root, or the root) and `mine-tab.js` ("My databases"), the
 top bar's `header.js` (who is signed in, "Log out"), the pure models
 `admin-api.js`, `databases.js`, `access-api.js`, `fresh.js` (fresh data per visit) and `sort.js` (sortable columns), the tabs' shared state `shared.js` and the style sheet
@@ -234,7 +242,8 @@ The Runs tab polls only while it is shown. Every answer of the server carries
 `Cache-Control: no-store`, so no browser or proxy shows a kept copy.
 
 Every table (databases, aliases, users, grants, backups, the import inbox, models, databases
-waiting for a model, runs, "My databases") sorts by a click on a column header (`sort.js`):
+waiting for a model, runs, "My databases", MCP, the Database settings tab's limits, MCP names
+and grants) sorts by a click on a column header (`sort.js`):
 ascending, a second click descending; natural text order (`db2` before `db10`), sizes,
 durations and ids by number, dates by time, missing values last; the sort is stable, and each
 table keeps its choice in the browser's localStorage. Until the first click a table keeps the
@@ -353,6 +362,12 @@ directories and file names below `databases/<name>/`, and a path over 260 charac
   -C <model dir> .`, `tar -czf model.tar.gz ...`); zstd, bzip2, xz and `.zip` are not taken.
 - A **layer `.gsnap` export carries no models** (an engine rule); export the layer with
   `materialize=true` (`--materialize`) for a standalone snapshot with the models.
+- **A query limit change applies at the database's next load** (unload + load, or a restart):
+  the engine fixes a loaded database's session limits when it loads it. The settings
+  (`db info`, the Database settings tab) show both the limits in effect now and those of the
+  next load. The Store's creation parameters are shown read-only; the server creates every
+  database with the engine's defaults, and a backend's container version is not reported by the
+  engine (0.8.0).
 - **Memory figures are the engine's estimates** of each graph's data (loaded embedding models
   are not in a database's figure, but in the process's resident memory). The process's
   resident memory is read on Linux, macOS and Windows only (`null` elsewhere).

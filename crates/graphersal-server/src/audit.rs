@@ -102,6 +102,25 @@ pub enum AuditEvent {
         /// The new value.
         on: bool,
     },
+    /// A database's description was changed (round 3 B7).
+    #[non_exhaustive]
+    DescriptionSet {
+        /// The database.
+        name: String,
+        /// The new description (empty: cleared).
+        description: String,
+    },
+    /// A query limit override of a database was set or cleared (round 3 B7; it applies at the
+    /// database's next load).
+    #[non_exhaustive]
+    QueryLimitSet {
+        /// The database.
+        name: String,
+        /// The key of `[limits.query]`.
+        key: String,
+        /// The new value (`None`: cleared, the server's default applies).
+        value: Option<u64>,
+    },
     /// An alias was set (new or re-pointed).
     #[non_exhaustive]
     AliasSet {
@@ -298,6 +317,29 @@ impl fmt::Display for AuditEvent {
             AuditEvent::AutoLoadSet { name, on } => {
                 write!(f, "database '{name}' auto-load {}", on_off(*on))
             }
+            AuditEvent::DescriptionSet { name, description } if description.is_empty() => {
+                write!(f, "database '{name}' description cleared")
+            }
+            AuditEvent::DescriptionSet { name, description } => {
+                write!(f, "database '{name}' description set to {description:?}")
+            }
+            AuditEvent::QueryLimitSet {
+                name,
+                key,
+                value: Some(value),
+            } => write!(
+                f,
+                "database '{name}' query limit {key} = {value} (applies at its next load)"
+            ),
+            AuditEvent::QueryLimitSet {
+                name,
+                key,
+                value: None,
+            } => write!(
+                f,
+                "database '{name}' query limit {key} cleared (the server's default applies at \
+                 its next load)"
+            ),
             AuditEvent::AliasSet { alias, target } => {
                 write!(f, "alias '{alias}' set to database '{target}'")
             }

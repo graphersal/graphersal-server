@@ -126,6 +126,21 @@ pub enum DbCommand {
         /// On or off.
         on: bool,
     },
+    /// `db info NAME`: everything about a database (or the database an alias names): its
+    /// identity, state, sizes, query limits, MCP settings, grants, backups and Store creation
+    /// parameters (`GET databases/<name>/settings`).
+    Info {
+        /// The database or alias.
+        name: String,
+    },
+    /// `db set NAME description TEXT` / `db set NAME limit KEY VALUE|--clear`: one setting of a
+    /// database (`PUT databases/<name>/settings`).
+    Set {
+        /// The database (its real name).
+        name: String,
+        /// What is set.
+        setting: DbSetting,
+    },
     /// `db alias set ALIAS TARGET`.
     AliasSet {
         /// The alias.
@@ -291,6 +306,40 @@ pub enum DbCommand {
     },
 }
 
+/// One setting of [`DbCommand::Set`].
+///
+/// `#[non_exhaustive]`: further settings may be added.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DbSetting {
+    /// The description (empty clears it).
+    Description(String),
+    /// A query limit override of `[limits.query]`: `Some` sets it, `None` clears it (the
+    /// server's default applies again). Applies at the database's next load.
+    Limit {
+        /// The key ([`crate::limits::QUERY_LIMIT_KEYS`]).
+        key: String,
+        /// The value.
+        value: Option<u64>,
+    },
+}
+
+impl DbSetting {
+    /// The setting `db set NAME limit KEY VALUE` (`value` `None`: `--clear`): the key and the
+    /// value checked as the server checks them. `Err` with the reason (an unknown key, a value
+    /// that is not a whole number from 0 to 2^63-1).
+    pub fn limit(key: &str, value: Option<&str>) -> Result<DbSetting, String> {
+        crate::settings::check_limit_key(key)?;
+        let value = value
+            .map(|text| crate::settings::limit_value_of_text(key, text))
+            .transpose()?;
+        Ok(DbSetting::Limit {
+            key: key.to_string(),
+            value,
+        })
+    }
+}
+
 impl DbCommand {
     /// The admin API request of the command: method, path below `/api/admin/`, JSON body.
     pub fn request(&self) -> (Method, String, Option<Value>) {
@@ -333,6 +382,22 @@ impl DbCommand {
                 format!("databases/{name}/auto-load"),
                 Some(json!({ "autoLoad": on })),
             ),
+            DbCommand::Info { name } => (
+                Method::Get,
+                format!("databases/{}/settings", segment(name)),
+                None,
+            ),
+            DbCommand::Set { name, setting } => {
+                let body = match setting {
+                    DbSetting::Description(text) => json!({ "description": text }),
+                    DbSetting::Limit { key, value } => json!({ "limits": { key: value } }),
+                };
+                (
+                    Method::Put,
+                    format!("databases/{}/settings", segment(name)),
+                    Some(body),
+                )
+            }
             DbCommand::AliasSet { alias, target } => (
                 Method::Put,
                 format!("aliases/{alias}"),

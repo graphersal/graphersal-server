@@ -62,6 +62,7 @@ pub mod run_file;
 pub mod security;
 pub mod serve;
 pub mod sessions;
+mod settings;
 #[cfg(test)]
 pub(crate) mod test_models;
 #[cfg(test)]

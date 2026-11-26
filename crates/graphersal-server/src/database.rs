@@ -12,7 +12,8 @@
 //!                                  # carry: listed as `needs-model` until a load succeeds
 //!
 //! [limits.query]                   # this database's query limits, each key over server.toml's
-//! timeout_ms = 5000                # (crate::limits); read again at every load
+//! timeout_ms = 5000                # (crate::limits); read again at every load; set or cleared
+//!                                  # at runtime by the settings route (crate::settings)
 //! ```
 //!
 //! Every key is optional (its default applies); an unknown key is an error, so a typo is never
@@ -128,8 +129,9 @@ pub struct DatabaseConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub needs_model: Option<String>,
     /// The database's own limits (`[limits.query]`, each key over `server.toml`'s): read
-    /// again from the file at every load, and kept from the file when the server rewrites it
-    /// (no admin request changes them), so a hand edit applies at the next load.
+    /// again from the file at every load, so a change applies at the next load. Only a
+    /// settings change (`PUT /api/admin/databases/<name>/settings`, `db set NAME limit`)
+    /// writes them; every other rewrite of the file keeps the file's (a hand edit survives).
     #[serde(default, skip_serializing_if = "DatabaseLimits::is_empty")]
     pub limits: DatabaseLimits,
 }
