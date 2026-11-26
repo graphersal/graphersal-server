@@ -5115,3 +5115,78 @@ fn a_server_backup_restores_on_a_new_directory_and_serves_the_same_users_and_dat
     assert_eq!(report["databases"], serde_json::json!([]), "{out}");
     assert_eq!(report["skipped"][0]["name"], "acme", "{out}");
 }
+
+#[test]
+fn the_openapi_command_writes_what_the_server_answers() {
+    let temp = TempDir::new("openapi");
+    let dir = ServerDir::init(temp.path()).unwrap().dir;
+    modern_db(&dir, "a");
+    let running = serve::start(
+        temp.path(),
+        ServeOptions::new().with_listen("127.0.0.1:0".parse().unwrap()),
+    )
+    .unwrap();
+    let address = running.address();
+    running.registry().alias_set("cur", "a").unwrap();
+    // A file of a running operation in tmp/: the offline command never touches it.
+    let marker = dir.tmp().join("upload-running.bin");
+    std::fs::write(&marker, b"x").unwrap();
+    let root = temp.path().to_str().unwrap();
+    let base = format!("http://{address}");
+
+    let output = run(&["openapi", "--dir", root, "--server", &base]);
+    assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
+    let printed: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let (status, body) = get(address, "/openapi.json");
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(printed, json(&body));
+    assert_eq!(printed["servers"][0]["url"], base);
+
+    // A database's (an alias, not loaded) into a file.
+    let file = temp.path().join("cur.openapi.json");
+    let output = run(&[
+        "openapi",
+        "--dir",
+        root,
+        "--db",
+        "cur",
+        "--out",
+        file.to_str().unwrap(),
+        "--server",
+        &base,
+    ]);
+    assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
+    assert!(
+        text(&output.stdout).starts_with("wrote "),
+        "{}",
+        text(&output.stdout)
+    );
+    let written: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    let (status, body) = get(address, "/db/cur/openapi.json");
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(written, json(&body));
+    assert_eq!(written["servers"][0]["url"], format!("{base}/db/cur"));
+    assert!(marker.exists(), "the openapi command cleaned tmp/");
+
+    // Without --server: server.toml's listen address (modulo servers the same document).
+    let output = run(&["openapi", "--dir", root, "--db", "a"]);
+    assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
+    let mut offline: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(offline["servers"][0]["url"], "http://127.0.0.1:8484/db/a");
+    let (_, body) = get(address, "/db/a/openapi.json");
+    let served = json(&body);
+    offline["servers"] = served["servers"].clone();
+    assert_eq!(offline, served);
+
+    let output = run(&["openapi", "--dir", root, "--db", "nope"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        text(&output.stderr).contains("nope"),
+        "{}",
+        text(&output.stderr)
+    );
+    let output = run(&["openapi"]);
+    assert_eq!(output.status.code(), Some(2));
+    drop(running);
+}

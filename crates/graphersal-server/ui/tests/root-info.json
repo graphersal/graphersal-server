@@ -2,5 +2,7 @@
   "server": "graphersal-server",
   "protocol": "graphersal/1",
   "dev": false,
-  "experimental": true
+  "experimental": true,
+  "openapi": "/openapi.json",
+  "databaseOpenapi": "/db/{name}/openapi.json"
 }

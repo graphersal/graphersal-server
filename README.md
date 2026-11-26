@@ -207,6 +207,7 @@ databases and missing models. Paths and commands are never wrapped.
 | `user grant SUBJECT DATABASE read\|write`, `user revoke SUBJECT DATABASE` | grants; SUBJECT: a user name or `anonymous` (everyone, also without a token), DATABASE: a database, an alias (reached only through the alias, at its current database: `docs/access.md` "Grants on aliases") or `*`. The last admin (role and token) cannot be removed, demoted or revoked |
 | `backup [--out FILE] [--with-databases]` | one ZIP (mode `0600`) of the server itself: `server.toml`, `aliases.toml`, `access.toml`, `mcp.toml`, every database's `database.toml`, the models list and a manifest with every file's SHA-256; `--with-databases` adds a verified backup of every database and the model blobs. Sessions, logs, run files, `tmp/`, `trash/`, `imports/` and `backups/` are left out. Through a running server like `db`. It holds the token hashes: keep it like a password ([`docs/server-dir.md`](docs/server-dir.md#server-backups)) |
 | `restore FILE --dir NEWDIR [--force-version]` | a NEW server directory from a server backup (missing or empty `NEWDIR` only; every checksum checked first; modes `0700`/`0600`; databases without data in the archive skipped and reported); then `serve --dir NEWDIR`. Recipe: "Move a server to a new machine" in [`docs/server-dir.md`](docs/server-dir.md#move-a-server-to-a-new-machine) |
+| `openapi [--db NAME] [--out FILE] [--server URL]` | the OpenAPI description of the server's HTTP API, or of the database or alias `NAME`'s, built from the directory alone (no server needed; nothing written in it): the same document a running server answers, `servers` = `URL`, else `server.toml`'s first `[http] allowed_hosts` name or its listen address ([`docs/http-clients.md`](docs/http-clients.md)) |
 | `mcp status`, `mcp on\|off`, `mcp db NAME on\|off`, `mcp db NAME read-only on\|off` | the MCP switches of `DIR/mcp.toml` (a running server follows at once): MCP for the whole server (off: `/mcp` and `/db/NAME/mcp` answer 503, open sessions are kept), a database or alias offered to MCP or hidden, MCP read-only whatever the caller's grant; `status` lists them with the usage statistics of a running server ([`docs/mcp.md`](docs/mcp.md)) |
 
 `graphersal-server --help` has the details. Exit codes: `0` ok, `1` failed (`Error: ...` and a
@@ -219,10 +220,11 @@ the usage), `141` stdout closed before the result was written (`| head`).
 | Path | What |
 |---|---|
 | `GET /healthz`, `GET /readyz` | liveness `200`; readiness `200` or `503` while starting or stopping |
-| `GET /api/info` | the server's identity (`server: "graphersal-server"`, `protocol: "graphersal/1"`, `dev: false`), its UI profile `uiProfile` and the request's `principal`; for a logged-in principal also `uploadBytes`, the MCP endpoint and the version (anonymous gets only what the login page needs, plus `login: "/"`) |
+| `GET /api/info` | the server's identity (`server: "graphersal-server"`, `protocol: "graphersal/1"`, `dev: false`), its UI profile `uiProfile` and the request's `principal`; for a logged-in principal also `uploadBytes`, the MCP endpoint and the version (anonymous gets only what the login page needs, plus `login: "/"`); everyone gets `openapi` and `databaseOpenapi`, the paths of the API descriptions |
 | `GET /` | the server's web UI (the playground showing the `server` UI profile: the login page, "My databases" or the admin tabs, by who asks) |
 | `POST /api/login`, `POST /api/logout` | the browser login with a user token (a `gs_session` cookie) and its logout |
-| `GET /api/databases` | the databases and aliases the caller may reach, with its level and the playground path of each ("My databases") |
+| `GET /api/databases` | the databases and aliases the caller may reach, with its level, the playground path and the OpenAPI path of each ("My databases") |
+| `GET /openapi.json`, `GET /db/<name>/openapi.json` | the OpenAPI 3.1 descriptions to generate HTTP clients from: the server's own routes (public), and a database's HTTP API (behind its grant; Bearer token or session cookie as security schemes): [`docs/http-clients.md`](docs/http-clients.md) |
 | `GET /server-ui/<file>` | the `server` UI profile's files (its modules and style sheet) |
 | `/db/<name>/...` | the playground and its HTTP API (`POST /db/<name>/api/execute {"script"}`, ...) on the database or alias `<name>`, resolved per request, at the caller's level (`docs/access.md`: without a grant `401` for anonymous, `303` to the login page for its pages, `404` for a user); `409` with help when it is not loaded (never loaded implicitly), `404` when unknown |
 | `/api/admin/...` | the admin API: [`docs/admin-api.md`](docs/admin-api.md) (also `GET /api/admin/server`, the server itself, and `POST /api/admin/shutdown`, which `stop` uses); also the run administration (`GET /api/admin/runs`, `GET /api/admin/databases/<name>/runs`, `POST /api/admin/databases/<name>/runs/cancel {"id"}`: every client's queued and running queries, stop one) |
@@ -374,6 +376,9 @@ directories and file names below `databases/<name>/`, and a path over 260 charac
   `access.toml`, `database.toml`, models, backups, the import inbox, sessions, server
   backups and their restore ("Move a server to a new machine"), external backups.
 - [`docs/admin-api.md`](docs/admin-api.md): every admin route, its body and answer.
+- [`docs/http-clients.md`](docs/http-clients.md): HTTP clients: the OpenAPI descriptions
+  (`/openapi.json`, `/db/<name>/openapi.json`, `graphersal-server openapi`), Bearer tokens,
+  curl and generated clients, errors, revisions.
 - [`docs/mcp.md`](docs/mcp.md): the MCP endpoints, configuring an agent, the request headers.
 - `scripts/smoke.sh`: an end-to-end smoke test (build, init, serve, the admin API, the
   database pages, MCP, users and a read-only user, the import inbox, a restart keeping the

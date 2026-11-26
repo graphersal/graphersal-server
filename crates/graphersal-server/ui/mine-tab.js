@@ -4,13 +4,15 @@
 // playground `db/<name>/`; a database without a grant is never listed. A 401 (the session
 // ended) loads the login page (./shared.js `handleRefusal`). The list is read again on every visit
 // and when the window gets the focus back (./shared.js `useFreshData`: a grant given meanwhile
-// shows up); the table sorts by any column. Model: ./access-api.js.
+// shows up); the table sorts by any column. Each row links the OpenAPI description of the
+// database's HTTP API (`db/<name>/openapi.json`, served also while it is not loaded). Model:
+// ./access-api.js.
 
 import { reactive, computed } from 'vue';
 import { fetchMine, mineNote, emptyMineText, principalOf } from './access-api.js';
 import { hostInfo } from './databases.js';
 import {
-  requestOptions, errorNotice, pageHref, useFreshData, useSort, SortTh,
+  requestOptions, errorNotice, pageHref, openapiHref, useFreshData, useSort, SortTh,
 } from './shared.js';
 
 /** The sortable columns of the table. */
@@ -43,7 +45,7 @@ export default {
     useFreshData(refresh);
     const mineSort = useSort('mine', MINE_COLUMNS);
     const rows = computed(() => mineSort.rows(s.rows));
-    return { s, rows, mineSort, principal, refresh, mineNote, empty: emptyMineText(principal), href: pageHref };
+    return { s, rows, mineSort, principal, refresh, mineNote, empty: emptyMineText(principal), href: pageHref, apiHref: openapiHref };
   },
   template: `
   <div class="srv-tab srv-mine">
@@ -52,7 +54,7 @@ export default {
       <span class="spacer"></span>
       <button type="button" class="btn small" :disabled="s.loading" @click="refresh">Refresh</button>
     </div>
-    <p class="muted">The databases you may use. Open one to query it in its playground.</p>
+    <p class="muted">The databases you may use. Open one to query it in its playground. "OpenAPI" is the description of its HTTP API: generate a client from it and send your token as <span class="mono">Authorization: Bearer &lt;token&gt;</span>.</p>
     <p v-if="s.read && !s.error && !s.rows.length" class="muted srv-empty">{{ empty }}</p>
     <div v-if="s.rows.length" class="srv-table-wrap">
     <table class="data-table srv-table">
@@ -60,6 +62,7 @@ export default {
       <tbody>
         <tr v-for="row in rows" :key="row.name" :data-db="row.name">
           <td><a v-if="row.open" :href="href(row)" class="mono">{{ row.name }}</a><span v-else class="mono">{{ row.name }}</span>
+            <a :href="apiHref(row)" class="srv-api-link" target="_blank" rel="noopener" data-openapi title="The OpenAPI description of this database's HTTP API">OpenAPI</a>
             <span class="muted srv-kind" :data-kind="row.kind"> {{ row.kindText }}</span>
             <div v-if="row.description" class="muted srv-sub">{{ row.description }}</div></td>
           <td><span class="badge" :class="row.readOnly ? '' : 'ok'">{{ row.levelText }}</span></td>

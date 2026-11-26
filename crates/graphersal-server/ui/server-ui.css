@@ -90,3 +90,7 @@ p.srv-problems { padding-left: 0; }
 .srv-unclean-list { margin: 0.4em 0 0; padding-left: 1.2em; }
 .srv-unclean-list li { margin: 0.15em 0; }
 .srv-repair-lines { margin: 0.4em 0; padding-left: 1.2em; font-size: 0.9em; }
+
+/* The OpenAPI links (B-OPENAPI): small, beside a database's name. */
+.srv-api-link { margin-left: 6px; font-size: 12px; }
+.srv-api-note { margin: 4px 0 8px; font-size: 12px; }

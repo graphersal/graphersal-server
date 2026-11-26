@@ -4,7 +4,7 @@
 //! grants open).
 //!
 //! The answer is `{"databases": [row]}`, sorted by name, a row being `{name, state, level,
-//! readOnly, description, playground, kind, aliasOf?}`:
+//! readOnly, description, playground, openapi, kind, aliasOf?}`:
 //! - `name`: the database's name, or the alias's (then `aliasOf` names its database);
 //! - `kind`: `database` (a real database) or `alias` (with `aliasOf`, its current target);
 //! - `state`: `unloaded`, `loading`, `loaded`, `needs-model` or `failed` (no reason: that is
@@ -13,7 +13,9 @@
 //!   the database's mode: a read-only database or a base is `read`);
 //! - `readOnly`: `level == "read"`;
 //! - `description`: the database's free text (`""` when none);
-//! - `playground`: the path of its playground from the server root, `/db/<name>/`.
+//! - `playground`: the path of its playground from the server root, `/db/<name>/`;
+//! - `openapi`: the path of its HTTP API's OpenAPI description, `/db/<name>/openapi.json`
+//!   ([`crate::openapi`]).
 //!
 //! A database the principal has no grant on is never listed (it does not exist for the
 //! principal); an alias is listed when the principal has a grant on its target or on the alias
@@ -72,6 +74,7 @@ fn row(name: &str, entry: &DatabaseEntry, level: Level, alias_of: Option<&str>) 
         "readOnly": level == Level::Read,
         "description": description,
         "playground": format!("/db/{name}/"),
+        "openapi": format!("/db/{name}/openapi.json"),
         "kind": if alias_of.is_some() { "alias" } else { "database" },
     });
     if let Some(target) = alias_of {

@@ -55,6 +55,7 @@ mod model_archive;
 pub mod models;
 mod mounts;
 pub mod names;
+pub mod openapi;
 pub mod ops;
 pub mod recovery;
 pub mod registry;

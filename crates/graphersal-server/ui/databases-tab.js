@@ -21,6 +21,8 @@
 // (a confirmed swap: the damaged one moves to trash/) or "Keep both", with the hint to restore a
 // backup instead; above the table the last unclean shutdown (`GET api/admin/recovery`: the
 // databases the server had open when it was killed, each with its recovery and verify result).
+// B-OPENAPI: each row links its database's OpenAPI description (`db/<name>/openapi.json`) and
+// the head the server's own (`openapi.json`), for HTTP clients.
 
 import { reactive, ref, computed, nextTick } from 'vue';
 import {
@@ -29,7 +31,7 @@ import {
   isOpenState, damageActions, verifyText, verifyDamaged, verifyAllText, problemLines, repairSummary, repairedName, uncleanRows, REPAIR_HELP, RESTORE_HINT,
 } from './admin-api.js';
 import {
-  admin, list, reload, patchRow, errorNotice, noticeClass, pageHref, useFreshData, useSort, SortTh,
+  admin, list, reload, patchRow, errorNotice, noticeClass, pageHref, openapiHref, serverOpenapiHref, useFreshData, useSort, SortTh,
 } from './shared.js';
 import { diskTitle, memoryText, memoryTitle, memoryRows, SIZE_COLUMNS } from './databases.js';
 
@@ -293,7 +295,7 @@ export default {
 
     return {
       list, rows, aliases, memory, diskTitle, memoryText, memoryTitle, dbSort, aliasSort, kindHelp, baseHelp: BASE_HELP, promoteHelp: PROMOTE_HELP, kindHelpOf: KIND_HELP, busy, notice, dlg, dialog, acts, more, promo, dmg, bases, databaseNames, showSize, showMemory,
-      bytesText, needsModelHint, poolText, noticeClass, href: pageHref, reload, nameHint: NAME_HINT,
+      bytesText, needsModelHint, poolText, noticeClass, href: pageHref, apiHref: openapiHref, serverApiHref: serverOpenapiHref(), reload, nameHint: NAME_HINT,
       unclean, hideUnclean, isOpenState, verifyDb, verifyAll, verifyingAll, openRepair, swapRepaired, keepBoth, repairHelp: REPAIR_HELP, restoreHint: RESTORE_HINT,
       loadDb, unloadDb, deleteDb, promoteDb, setFlag, openCreate, openClone, openAlias, openRename, closeDialog, submitDialog, removeAlias,
       openBackups: (name) => props.api.navigate('backups', name ? { db: name } : {}),
@@ -323,6 +325,7 @@ export default {
       <button class="btn" type="button" @click="openImport" :disabled="!list.loaded || !!list.error">Import…</button>
       <button class="btn primary" type="button" @click="openCreate" :disabled="!list.loaded || !!list.error">New database…</button>
     </div>
+    <p class="muted srv-api-note">HTTP clients: <a :href="serverApiHref" target="_blank" rel="noopener" data-server-openapi>the server's API (OpenAPI)</a> (login, databases, this admin API); each database's link "OpenAPI" describes its own API. Send a token as <span class="mono">Authorization: Bearer &lt;token&gt;</span>.</p>
     <div v-if="notice" class="notice srv-notice" :class="noticeClass(notice)" :role="notice.tone === 'ok' ? 'status' : 'alert'">
       <div class="srv-notice-text"><span>{{ notice.text }}</span>
         <p v-if="notice.help" class="srv-help srv-pre">{{ notice.help }}</p></div>
@@ -363,6 +366,7 @@ export default {
         <tr v-for="row in rows" :key="(row.aliasOf ? '@' : '') + row.name" :data-db="row.name" :class="{ 'alias-row': row.aliasOf }">
           <td><a :href="href(row)" class="mono">{{ row.name }}</a>
             <span v-if="row.aliasOf" class="muted"> → {{ row.aliasOf }}</span>
+            <a :href="apiHref(row)" class="srv-api-link" target="_blank" rel="noopener" data-openapi title="The OpenAPI description of this database's HTTP API (to generate a client)">OpenAPI</a>
             <div v-if="row.description" class="muted srv-sub">{{ row.description }}</div></td>
           <td><span class="badge" :class="row.pooled && !isOpenState(row.state) ? 'accent' : row.tone" :title="row.damage || row.reason || poolText(row)">{{ busy[row.name] === 'unload' ? 'unloading…' : busy[row.name] === 'verify' ? 'verifying…' : poolText(row) }}</span>
             <div v-if="row.reason" class="muted srv-sub">{{ row.reason }}</div>

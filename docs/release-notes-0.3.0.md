@@ -372,3 +372,33 @@ One archive now holds the server itself
 - The archive is a secret ([`docs/access.md`](access.md#server-backups-are-secrets)).
 - Not included: a scheduled server backup (the engine's backup jobs belong to one database);
   run `graphersal-server backup` from cron or a systemd timer.
+
+## OpenAPI descriptions for HTTP clients
+
+Programs can now generate HTTP clients for the server and its databases
+([`docs/http-clients.md`](http-clients.md)):
+
+- **`GET /db/<name>/openapi.json`** (also `/db/<name>/api/openapi.json`) answers the database's
+  HTTP API description (OpenAPI 3.1) patched for this server: `servers` is the URL the request
+  came to (`[http] public_scheme`, the `Host`) plus `/db/<name>` (an alias keeps its own name),
+  the security schemes `bearerAuth` (`Authorization: Bearer <user token>`) and `sessionCookie`
+  (`gs_session`), global `security` with both (plus `{}` when anonymous reaches the name), the
+  access layer's `401`/`404`/`409` on every operation, and `x-graphersal-access: read | query |
+  write` on every operation (not filtered by the caller's level: a reader sees the writing
+  operations, marked). It needs a read grant on the name and is answered also while the
+  database is not loaded; anonymous without a grant gets `401` (no login redirect). Before,
+  the engine's description named the dev server's `localhost:8080`, no security and none of
+  the access layer's answers. The engine's part also gets what later graphersal-serve
+  versions describe: the `409` of a read-only request on every writing route and the `403` of
+  a path outside the backup root.
+- **`GET /openapi.json`** (public) is a new, hand-written description of the server's own
+  routes: the probes, login/logout, `/api/info`, `/api/databases` and the whole admin API
+  (users, grants, aliases, databases with settings, verify/repair/swap, backups, restore,
+  export, import, the inbox, models, runs, MCP, server, shutdown, server backup, recovery),
+  with the revisions (`If-Match`, `409` with the current revision) and the error format; a
+  test keeps it complete against the router's route tables.
+- **`graphersal-server openapi --dir DIR [--db NAME] [--out FILE] [--server URL]`** writes
+  either description without a running server (nothing written in `DIR`).
+- `GET /api/info` names `openapi` and `databaseOpenapi`, `GET /api/databases` each row's
+  `openapi`; the web UI links them ("OpenAPI" per database in My databases and in the admin's
+  Databases tab, the server's description above the table).
