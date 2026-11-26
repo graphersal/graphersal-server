@@ -150,7 +150,7 @@ impl McpSettings {
     }
 
     /// Parses `mcp.toml`'s text (`path` names the file in errors); folds the names.
-    fn parse(text: &str, path: &std::path::Path) -> Result<Self, ServerError> {
+    pub(crate) fn parse(text: &str, path: &std::path::Path) -> Result<Self, ServerError> {
         let mut settings: McpSettings =
             toml::from_str(text).map_err(|err| ServerError::Config {
                 path: path.to_path_buf(),
@@ -207,6 +207,12 @@ impl McpControl {
         self.settings
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// The settings' read lock (a leaf): no change writes `mcp.toml` while it is held (the
+    /// server backup copies the file under it).
+    pub(crate) fn hold(&self) -> std::sync::RwLockReadGuard<'_, McpSettings> {
+        self.read()
     }
 
     /// Whether the MCP endpoints answer.

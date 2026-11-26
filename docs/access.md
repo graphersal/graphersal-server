@@ -58,6 +58,27 @@ Provisional (may change): root is refused on a directory it does not own, even t
 could read it anyway; the check runs only when the console or `serve` starts, not while the
 server runs.
 
+### Server backups are secrets
+
+A server backup (`graphersal-server backup`, `GET /api/admin/server-backup`, the Backups tab's
+"Download server backup"; [`server-dir.md`](server-dir.md#server-backups)) holds `access.toml`:
+every user's token HASH (SHA-256) and last four characters, the roles and the grants, beside
+every setting (and with `--with-databases` every database's data). A hash is not a token, but
+whoever holds the archive can restore it as a server of their own where the old tokens work,
+and can try to guess tokens offline (256-bit random tokens: not feasible, but keep it from
+anyone who should not have the data anyway). Keep the archive like a password or a private
+key:
+
+- it is written with mode `0600` (`<FILE>.part`, renamed when complete); store it where only
+  the operator can read it (an encrypted disk or vault), never in a shared folder or a ticket;
+- only the operator token and admin users may download it; `everyone` of a server without
+  access control is refused (`403`), as for the shutdown; every download is audited;
+- it never holds a token, a session id or the run's operator token: sessions (`sessions/`) and
+  `server.run` are left out, so a restored server logs every browser out and makes MCP clients
+  initialize again; the users log in with their tokens as before;
+- after a leak, give every user a new token (`graphersal-server user token NAME`): the archive's
+  hashes then match nothing.
+
 ### The console with an admin token
 
 `--token TOKEN` (or the environment variable `GRAPHERSAL_SERVER_TOKEN`, which keeps the token
@@ -370,7 +391,7 @@ operator's lines name the OS user who acted: the console's own user offline, and
 server the user the server runs as (only the directory's owner can read the operator token).
 A command sent with `--token` is logged as the token's user. Events are logged
 at `info`; refusals, such as a failed login, at `warn`. The events cover databases (create,
-delete, clone, import, restore, promote, backup), the read-only and auto-load flags, aliases
+delete, clone, import, restore, promote, backup), server backups (offline and downloaded), the read-only and auto-load flags, aliases
 (set, remove, rename), users (add, remove, roles, the first admin), tokens (issued, showing
 only `…last4`, and revoked), grants (set, revoked), logins (succeeded, refused, logout), a shutdown request, and
 after a crash (round 3) the unclean shutdown found at start (actor `-`), each database's check

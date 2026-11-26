@@ -573,6 +573,20 @@ execute acme-restored 'g.v().has_label("person").count().next()'
 [ "$RESULT" = 1 ] || fail "acme-restored counts $RESULT"
 ok
 
+STEP="server backup (API download) restored into a new directory"
+OUT="$WORK/server-backup.zip" req GET "/api/admin/server-backup?withDatabases=1"
+expect_status 200
+[ "$(header X-Graphersal-Server-Backup)" = with-databases ] || fail "X-Graphersal-Server-Backup: $(header X-Graphersal-Server-Backup)"
+[ -s "$WORK/server-backup.zip" ] || fail "empty server backup"
+"$BIN" restore "$WORK/server-backup.zip" --dir "$WORK/restored" > "$WORK/restore.out" 2>&1 \
+  || fail "restore: $(cat "$WORK/restore.out")"
+cmp -s "$DIR/access.toml" "$WORK/restored/access.toml" || fail "access.toml differs after the restore"
+[ -d "$WORK/restored/databases/acme/store" ] || fail "acme was not restored"
+grep -q "serve --dir" "$WORK/restore.out" || fail "no next command: $(cat "$WORK/restore.out")"
+"$BIN" restore "$WORK/server-backup.zip" --dir "$WORK/restored" > /dev/null 2>&1 \
+  && fail "a restore into a non-empty directory was accepted"
+ok
+
 STEP="export and re-import by upload"
 OUT="$WORK/acme.gsnap" req GET /api/admin/databases/acme/export
 expect_status 200

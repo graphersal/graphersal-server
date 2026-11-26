@@ -6,14 +6,22 @@
 // `error`/`help` stay shown; a finished action reloads the database list. The backups and the
 // database list are read again on every visit of the tab and when the window gets the focus back
 // (./shared.js `useFreshData`; an open restore form keeps its input); the table sorts by any column.
+//
+// Below, "Download server backup" (`GET api/admin/server-backup`, ./admin-api.js
+// `serverBackupPath`): one ZIP of the server's configuration, optionally with every database's
+// data, shown with the warning that it holds the users' token hashes. Without host headers it is
+// a plain link (the browser streams the file); with them it is fetched and saved
+// (`fetchServerBackup`), a refusal showing the server's `error`/`help`.
 
 import { reactive, ref, computed, watch } from 'vue';
 import {
+  serverBackupPath, fetchServerBackup, SERVER_BACKUP_WARNING,
   backupRows, restoreOverAction, nameProblem, existingNameProblem, restoredName, NAME_HINT, RESTORE_GRANTS_NOTE, confirmText, outcomeText, outcomeTone, bytesText, realRows, kindHelp,
 } from './admin-api.js';
 import {
-  admin, list, reload, errorNotice, noticeClass, useFreshData, useSort, SortTh,
+  ROOT, headers, admin, list, reload, errorNotice, noticeClass, useFreshData, useSort, SortTh,
 } from './shared.js';
+import { downloadBlob } from './databases.js';
 
 /** The kind cell's text of a backup. */
 const kindText = (b) => [b.kind, b.role === 'base' ? 'base' : ''].filter(Boolean).join(' · ');
@@ -33,6 +41,29 @@ export default {
       name: '', typed: '', list: [], listed: false, error: null, busy: '', restoring: null, target: 'over', newName: '',
     });
     const notice = ref(null);
+    // The server backup (below the database's backups).
+    const sb = reactive({ full: false, busy: false, error: null, notice: null });
+    const withHeaders = Object.keys(headers).length > 0;
+    const serverBackupHref = computed(() => new URL(serverBackupPath({ withDatabases: sb.full }).path, ROOT).href);
+    function serverBackupStarted() {
+      sb.error = null;
+      sb.notice = { tone: 'ok', text: 'The server backup is being prepared; the download starts when it is written.' };
+    }
+    async function downloadServerBackup() {
+      sb.busy = true;
+      sb.error = null;
+      sb.notice = null;
+      try {
+        const got = await fetchServerBackup({ base: ROOT, headers, withDatabases: sb.full });
+        downloadBlob(got.blob, got.fileName);
+        const left = got.skipped.length ? ` Left out (their backup failed): ${got.skipped.join(', ')}.` : '';
+        sb.notice = { tone: got.skipped.length ? 'warn' : 'ok', text: `Saved ${got.fileName}.${left}` };
+      } catch (err) {
+        sb.error = errorNotice(err);
+      } finally {
+        sb.busy = false;
+      }
+    }
 
     const names = computed(() => realRows(list.rows).map((r) => r.name));
     const row = computed(() => list.rows.find((r) => r.name === s.name && !r.aliasOf) || null);
@@ -134,7 +165,7 @@ export default {
       }
     });
 
-    return { s, backups, backupSort, kindText, kindHelp, notice, names, row, over, show, backupNow, startRestore, restore, bytesText, refresh, noticeClass, nameHint: NAME_HINT, grantsNote: RESTORE_GRANTS_NOTE };
+    return { sb, withHeaders, serverBackupHref, serverBackupStarted, downloadServerBackup, serverBackupWarning: SERVER_BACKUP_WARNING, s, backups, backupSort, kindText, kindHelp, notice, names, row, over, show, backupNow, startRestore, restore, bytesText, refresh, noticeClass, nameHint: NAME_HINT, grantsNote: RESTORE_GRANTS_NOTE };
   },
   template: `
   <div class="srv-tab">
@@ -189,6 +220,24 @@ export default {
       <div class="srv-notice-text"><span>{{ s.error.text }}</span>
         <p v-if="s.error.help" class="srv-help">{{ s.error.help }}</p></div>
     </div>
+    <section class="srv-server-backup srv-form srv-narrow" aria-labelledby="srv-server-backup-title">
+      <h2 id="srv-server-backup-title">Server backup</h2>
+      <p class="muted">One ZIP of the whole server: server.toml, the users and grants, the aliases, the MCP switches and every database's settings. Restore it on a new machine with <code>graphersal-server restore FILE --dir NEWDIR</code>.</p>
+      <label class="inline"><input type="checkbox" name="withDatabases" v-model="sb.full"> With every database's data <span class="muted">(a fresh verified backup of each and the shared models: a full backup, can be large)</span></label>
+      <p class="srv-secret" role="note">{{ serverBackupWarning }}</p>
+      <div class="store-dialog-buttons">
+        <a v-if="!withHeaders" class="btn" :href="serverBackupHref" download @click="serverBackupStarted">Download server backup</a>
+        <button v-else type="button" class="btn" :disabled="sb.busy" @click="downloadServerBackup">{{ sb.busy ? 'Preparing…' : 'Download server backup' }}</button>
+      </div>
+      <div v-if="sb.error" class="notice srv-notice srv-error" role="alert">
+        <div class="srv-notice-text"><span>{{ sb.error.text }}</span>
+          <p v-if="sb.error.help" class="srv-help">{{ sb.error.help }}</p></div>
+      </div>
+      <div v-if="sb.notice" class="notice srv-notice" :class="noticeClass(sb.notice)" role="status">
+        <div class="srv-notice-text"><span>{{ sb.notice.text }}</span></div>
+        <button type="button" class="icon-btn" @click="sb.notice = null" aria-label="Dismiss">×</button>
+      </div>
+    </section>
   </div>
   `,
 };

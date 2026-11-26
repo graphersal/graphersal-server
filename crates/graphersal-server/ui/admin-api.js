@@ -805,6 +805,48 @@ export function exportPath(name, { models = true, materialize = false, layer = f
   };
 }
 
+/**
+ * The warning shown beside every server backup download: the archive holds the users' token
+ * hashes (and every setting), so it is a secret.
+ */
+export const SERVER_BACKUP_WARNING = "The archive holds the users' token hashes, the grants and every setting: keep it like a password (an encrypted disk or a password manager), never in a shared folder.";
+
+/**
+ * The server backup's download (`GET api/admin/server-backup`, admin only): the configuration,
+ * or with `withDatabases` every database's data too (a full backup). `fileName` is the fallback
+ * when the answer names none (`Content-Disposition`).
+ */
+export function serverBackupPath({ withDatabases = false } = {}) {
+  return {
+    path: `api/admin/server-backup${withDatabases ? '?withDatabases=1' : ''}`,
+    fileName: withDatabases ? 'server-backup-full.zip' : 'server-backup.zip',
+  };
+}
+
+/** The file name of a `Content-Disposition: attachment; filename="..."` header, else `fallback`. */
+export function fileNameOf(disposition, fallback) {
+  const m = /filename="([^"\\/]+)"/.exec(disposition || '');
+  return m ? m[1] : fallback;
+}
+
+/**
+ * Fetches the server backup (with the host `headers`, through `fetch`, against `base`): `{blob,
+ * fileName, skipped}` (`skipped`: the databases a full backup left out, from
+ * `X-Graphersal-Skipped`); a refusal throws the server's `AdminError` (`error`/`help`).
+ */
+export async function fetchServerBackup({ base, fetch = globalThis.fetch, headers = {}, withDatabases = false }) {
+  const target = serverBackupPath({ withDatabases });
+  let r;
+  try {
+    r = await fetch(new URL(target.path, base).href, { cache: 'no-store', headers: { ...headers } });
+  } catch (err) {
+    throw new AdminError(`The server could not be reached: ${err && err.message ? err.message : err}`);
+  }
+  if (!r.ok) throw parseAdminError(r.status, await r.text());
+  const skipped = (r.headers.get('X-Graphersal-Skipped') || '').split(',').filter(Boolean);
+  return { blob: await r.blob(), fileName: fileNameOf(r.headers.get('Content-Disposition'), target.fileName), skipped };
+}
+
 /** The upload size limit (`uploadBytes` of the root `/api/info`), or null when not announced. */
 export function uploadLimit(info) {
   const n = info && info.uploadBytes;

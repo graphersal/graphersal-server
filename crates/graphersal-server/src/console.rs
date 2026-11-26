@@ -49,12 +49,17 @@ use crate::layout::ServerDir;
 use crate::ops::{Admin, CreateSpec, ExportSpec};
 use crate::run_file::RunInfo;
 
+mod backup;
 mod first_admin;
 mod help;
 mod render;
 mod service;
 mod start;
 
+pub use backup::{
+    default_backup_file, restore_json, restore_text, server_backup, server_backup_text,
+    server_backup_with_token,
+};
 pub use first_admin::first_admin_text;
 pub(crate) use render::shell_word;
 pub use render::{

@@ -134,6 +134,13 @@ impl ServerDir {
     /// current OS user ([`ServerError::InsecureDir`] otherwise), and the modes it finds too
     /// open are tightened ([`InitReport::secured`]).
     pub fn init(root: impl Into<PathBuf>) -> Result<InitReport, ServerError> {
+        Self::init_with(root.into(), true)
+    }
+
+    /// [`ServerDir::init`]; without `first_admin` a directory without `access.toml` stays
+    /// without one (the restore of a server backup, [`crate::server_backup::restore`], writes
+    /// the archive's own `access.toml` afterwards).
+    pub(crate) fn init_with(root: PathBuf, first_admin: bool) -> Result<InitReport, ServerError> {
         let dir = Self::new(root);
         let mut created = Vec::new();
         let mut config = None;
@@ -191,7 +198,11 @@ impl ServerDir {
         let audit = Audit::default()
             .with_actor(Some(crate::access::OPERATOR.to_string()))
             .with_os_user(crate::security::os_user());
-        let first_admin = crate::access::ensure_first_admin(&dir, &audit)?;
+        let first_admin = if first_admin {
+            crate::access::ensure_first_admin(&dir, &audit)?
+        } else {
+            None
+        };
         if let Some(first) = &first_admin {
             created.push(first.path.clone());
         }

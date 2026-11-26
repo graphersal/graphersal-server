@@ -250,6 +250,16 @@ pub enum ServerError {
         /// Its current revision (to read it again and retry).
         revision: String,
     },
+    /// A server backup archive ([`crate::server_backup`]) cannot be restored: it is damaged,
+    /// was changed after it was written (a checksum against its manifest), or is not a server
+    /// backup. Nothing was restored.
+    #[non_exhaustive]
+    BackupArchive {
+        /// The archive.
+        path: PathBuf,
+        /// What is wrong with it.
+        message: String,
+    },
     /// The running server refused an admin request (the console's admin client): its answer.
     #[non_exhaustive]
     Remote {
@@ -403,6 +413,11 @@ impl fmt::Display for ServerError {
             ),
             ServerError::Service { message, .. } => f.write_str(message),
             ServerError::Remote { message, .. } => f.write_str(message),
+            ServerError::BackupArchive { path, message } => write!(
+                f,
+                "cannot restore the server backup {}: {message}; nothing was restored",
+                path.display()
+            ),
             ServerError::Conflict { what, revision } => write!(
                 f,
                 "the {what} changed by someone else since you read them (now revision \

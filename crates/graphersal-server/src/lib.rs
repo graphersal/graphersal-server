@@ -36,6 +36,7 @@
 pub mod access;
 pub mod admin;
 mod admin_api;
+mod archive;
 pub mod audit;
 mod client;
 pub mod config;
@@ -62,6 +63,7 @@ mod router;
 pub mod run_file;
 pub mod security;
 pub mod serve;
+pub mod server_backup;
 pub mod sessions;
 mod settings;
 #[cfg(test)]

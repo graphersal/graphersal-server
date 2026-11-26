@@ -412,6 +412,13 @@ impl Access {
     fn read(&self) -> std::sync::RwLockReadGuard<'_, AccessFile> {
         self.file.read().unwrap_or_else(|p| p.into_inner())
     }
+
+    /// The access file's read lock: no user or grant change writes `access.toml` while it is
+    /// held (the server backup copies the file under it, [`crate::server_backup`]). Lock
+    /// order: take the registry's lock first, if at all.
+    pub(crate) fn hold(&self) -> std::sync::RwLockReadGuard<'_, AccessFile> {
+        self.read()
+    }
 }
 
 /// The user and grant changes of one actor based on one revision ([`Access::edit`]).

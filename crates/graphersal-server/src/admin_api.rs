@@ -17,6 +17,7 @@
 //! | GET | `databases/<name>/backups` | | `200 {"database", "backups": [backup...]}` (also for a deleted database's name) |
 //! | POST | `databases/<name>/restore` | `{"backup", "name"?}` | `201` entry + `"restoredFrom": {"database", "backup"}`, `"replaced"`, `"trash"?` |
 //! | GET | `databases/<name>/export?models=true\|false&materialize=true\|false` | | `200` the `.gsnap` file (download) |
+//! | GET | `server-backup?withDatabases=1` | | `200` the server backup ZIP (download, [`crate::server_backup`]); the operator and admin users only (`everyone` `403`, answered by the router), audited |
 //! | POST | `import?name=<n>&base=<b>&format=<f>&description=<d>&role=<normal\|base>` | the file itself (any content type but JSON) | `201` entry + `"import"` |
 //! | POST | `import` | JSON `{"path" \| "inbox", "name", "base"?, "format"?, "description"?, "role"?}` (`path`: a file or directory on the server's machine, absolute; `inbox`: an entry name of the import inbox `imports/`) | `201` entry + `"import"` |
 //! | GET | `imports` | | `200 {"dir", "imports": [{"name", "kind", "directory", "bytes", "modified"}...]}`: the import inbox |
@@ -148,8 +149,8 @@ use crate::error::ServerError;
 use crate::loader::LoadStart;
 use crate::names::fold;
 use crate::ops::{
-    Admin, BackupInfo, CreateSpec, DatabaseRun, ExportFile, ExportSpec, ImportFormat, ImportSource,
-    InboxFile, ModelAddSpec, ModelAdded, TmpFile,
+    Admin, BackupInfo, CreateSpec, DatabaseRun, ExportSpec, ImportFormat, ImportSource, InboxFile,
+    ModelAddSpec, ModelAdded, TmpFile,
 };
 use crate::registry::{DatabaseEntry, DbState, Registry};
 
@@ -1256,39 +1257,44 @@ pub(crate) fn export_spec(query: Option<&str>) -> Result<ExportSpec, HttpError> 
     Ok(spec)
 }
 
-/// An export download: the `.gsnap` written into `tmp/`, removed when this is dropped.
+/// A download: a file written into `tmp/` (an export's `.gsnap`, a server backup's ZIP),
+/// streamed by the listener and removed when this (its guard) is dropped.
 pub(crate) struct Download {
-    export: ExportFile,
+    headers: Vec<(String, String)>,
     file: File,
     length: u64,
+    guard: TmpFile,
 }
 
 impl Download {
+    /// The download of the file `guard` (opened now) with `headers`; a file that cannot be
+    /// read answers `500` (`what` names it).
+    pub(crate) fn of(
+        guard: TmpFile,
+        headers: Vec<(String, String)>,
+        what: &str,
+    ) -> Result<Download, Response> {
+        let opened = File::open(guard.path()).and_then(|file| {
+            let length = file.metadata()?.len();
+            Ok((file, length))
+        });
+        match opened {
+            Ok((file, length)) => Ok(Download {
+                headers,
+                file,
+                length,
+                guard,
+            }),
+            Err(err) => Err(Response::json(
+                500,
+                &json!({ "error": format!("cannot read the {what}: {err}") }),
+            )),
+        }
+    }
+
     /// The answer's headers (module docs).
     pub(crate) fn headers(&self) -> Vec<(String, String)> {
-        let exported = &self.export.exported;
-        vec![
-            ("Content-Type".into(), "application/octet-stream".into()),
-            (
-                "Content-Disposition".into(),
-                format!("attachment; filename=\"{}\"", exported.file_name),
-            ),
-            ("Cache-Control".into(), "no-store".into()),
-            ("X-Content-Type-Options".into(), "nosniff".into()),
-            (
-                "X-Graphersal-Snapshot".into(),
-                if exported.layer { "layer" } else { "full" }.into(),
-            ),
-            (
-                "X-Graphersal-Models".into(),
-                if exported.models {
-                    "included"
-                } else {
-                    "excluded"
-                }
-                .into(),
-            ),
-        ]
+        self.headers.clone()
     }
 
     /// The file's length in bytes.
@@ -1297,8 +1303,8 @@ impl Download {
     }
 
     /// The open file to stream and the guard that removes it (drop the guard after the file).
-    pub(crate) fn into_parts(self) -> (File, ExportFile) {
-        (self.file, self.export)
+    pub(crate) fn into_parts(self) -> (File, TmpFile) {
+        (self.file, self.guard)
     }
 
     /// The download as an in-memory answer (tests; a file that cannot be read answers `500`).
@@ -1311,7 +1317,7 @@ impl Download {
         if let Err(err) = file.read_to_end(&mut bytes) {
             return Response::json(
                 500,
-                &json!({ "error": format!("cannot read the export: {err}") }),
+                &json!({ "error": format!("cannot read the download: {err}") }),
             );
         }
         headers
@@ -1322,6 +1328,19 @@ impl Download {
     }
 }
 
+/// The headers every download carries: the type, the file name, no caching, no sniffing.
+fn download_headers(file_name: &str) -> Vec<(String, String)> {
+    vec![
+        ("Content-Type".into(), "application/octet-stream".into()),
+        (
+            "Content-Disposition".into(),
+            format!("attachment; filename=\"{file_name}\""),
+        ),
+        ("Cache-Control".into(), "no-store".into()),
+        ("X-Content-Type-Options".into(), "nosniff".into()),
+    ]
+}
+
 /// `GET databases/<name>/export?...`: the export written into `tmp/`, as a download; an error
 /// as its JSON answer.
 pub(crate) fn export(admin: &Admin, name: &str, query: Option<&str>) -> Result<Download, Response> {
@@ -1330,21 +1349,97 @@ pub(crate) fn export(admin: &Admin, name: &str, query: Option<&str>) -> Result<D
     let export = admin
         .export_to_tmp(name, spec)
         .map_err(|err| error_answer(&err, None))?;
-    let opened = File::open(export.path()).and_then(|file| {
-        let length = file.metadata()?.len();
-        Ok((file, length))
-    });
-    match opened {
-        Ok((file, length)) => Ok(Download {
-            export,
-            file,
-            length,
-        }),
-        Err(err) => Err(Response::json(
-            500,
-            &json!({ "error": format!("cannot read the export: {err}") }),
-        )),
+    let (exported, guard) = export.into_parts();
+    let mut headers = download_headers(&exported.file_name);
+    headers.push((
+        "X-Graphersal-Snapshot".into(),
+        if exported.layer { "layer" } else { "full" }.into(),
+    ));
+    headers.push((
+        "X-Graphersal-Models".into(),
+        if exported.models {
+            "included"
+        } else {
+            "excluded"
+        }
+        .into(),
+    ));
+    Download::of(guard, headers, "export")
+}
+
+/// Whether the request is `GET server-backup` (the router answers it as a download).
+pub(crate) fn is_server_backup(method: &Method, endpoint: &str) -> bool {
+    matches!(method, Method::Get) && endpoint == "server-backup"
+}
+
+/// `GET server-backup?withDatabases=1`: the server backup ([`crate::server_backup`]) written
+/// into `tmp/`, as a download; an error as its JSON answer. The router has refused every
+/// principal but the operator and admin users (`everyone` of a server without access control
+/// included: the archive holds the token hashes).
+pub(crate) fn server_backup(admin: &Admin, query: Option<&str>) -> Result<Download, Response> {
+    let mut with_databases = false;
+    for pair in query
+        .unwrap_or_default()
+        .split('&')
+        .filter(|p| !p.is_empty())
+    {
+        let (key, value) = pair.split_once('=').unwrap_or((pair, "1"));
+        let flag = match value {
+            "true" | "1" | "yes" => true,
+            "false" | "0" | "no" => false,
+            other => {
+                return Err(Response::json(
+                    400,
+                    &json!({ "error": format!("server-backup: {key}={other} is not 1 or 0") }),
+                ));
+            }
+        };
+        match key {
+            "withDatabases" => with_databases = flag,
+            other => {
+                return Err(Response::json(
+                    400,
+                    &json!({
+                        "error": format!("server-backup: unknown parameter {other:?} (withDatabases)")
+                    }),
+                ));
+            }
+        }
     }
+    let (guard, made) = admin
+        .server_backup_to_tmp(with_databases)
+        .map_err(|err| error_answer(&err, None))?;
+    let mut headers = download_headers(&made.file_name);
+    headers.push((
+        "X-Graphersal-Server-Backup".into(),
+        if with_databases {
+            "with-databases"
+        } else {
+            "config"
+        }
+        .into(),
+    ));
+    let manifest = &made.manifest;
+    headers.push((
+        "X-Graphersal-Databases".into(),
+        manifest
+            .databases
+            .iter()
+            .filter(|d| d.included)
+            .count()
+            .to_string(),
+    ));
+    headers.push((
+        "X-Graphersal-Skipped".into(),
+        manifest
+            .databases
+            .iter()
+            .filter(|d| !d.included && with_databases)
+            .map(|d| d.name.as_str())
+            .collect::<Vec<_>>()
+            .join(","),
+    ));
+    Download::of(guard, headers, "server backup")
 }
 
 /// `path` relative to the server directory `root`, with `/` separators.

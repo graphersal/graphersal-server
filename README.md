@@ -205,6 +205,8 @@ databases and missing models. Paths and commands are never wrapped.
 | `user remove NAME` | the user and its grants (its sessions end) |
 | `user admin NAME on\|off` | give or take the `admin` role |
 | `user grant SUBJECT DATABASE read\|write`, `user revoke SUBJECT DATABASE` | grants; SUBJECT: a user name or `anonymous` (everyone, also without a token), DATABASE: a database, an alias (reached only through the alias, at its current database: `docs/access.md` "Grants on aliases") or `*`. The last admin (role and token) cannot be removed, demoted or revoked |
+| `backup [--out FILE] [--with-databases]` | one ZIP (mode `0600`) of the server itself: `server.toml`, `aliases.toml`, `access.toml`, `mcp.toml`, every database's `database.toml`, the models list and a manifest with every file's SHA-256; `--with-databases` adds a verified backup of every database and the model blobs. Sessions, logs, run files, `tmp/`, `trash/`, `imports/` and `backups/` are left out. Through a running server like `db`. It holds the token hashes: keep it like a password ([`docs/server-dir.md`](docs/server-dir.md#server-backups)) |
+| `restore FILE --dir NEWDIR [--force-version]` | a NEW server directory from a server backup (missing or empty `NEWDIR` only; every checksum checked first; modes `0700`/`0600`; databases without data in the archive skipped and reported); then `serve --dir NEWDIR`. Recipe: "Move a server to a new machine" in [`docs/server-dir.md`](docs/server-dir.md#move-a-server-to-a-new-machine) |
 | `mcp status`, `mcp on\|off`, `mcp db NAME on\|off`, `mcp db NAME read-only on\|off` | the MCP switches of `DIR/mcp.toml` (a running server follows at once): MCP for the whole server (off: `/mcp` and `/db/NAME/mcp` answer 503, open sessions are kept), a database or alias offered to MCP or hidden, MCP read-only whatever the caller's grant; `status` lists them with the usage statistics of a running server ([`docs/mcp.md`](docs/mcp.md)) |
 
 `graphersal-server --help` has the details. Exit codes: `0` ok, `1` failed (`Error: ...` and a
@@ -233,7 +235,7 @@ same mechanism graphersal-memory uses for its `memory` profile; the playground's
 "UI profiles"). The profile and its modules live in `crates/graphersal-server/ui/` and are
 built into the binary: `profile.json`, the tabs `databases-tab.js` (the list with load,
 unload, clone, promote, delete, read-only and auto-load, create, aliases), `backups-tab.js`
-(back up, list, restore), `import-tab.js` (upload with progress, a file picked from the server's import inbox
+(back up, list, restore; "Download server backup": the whole server's configuration, optionally with every database, beside the warning that it holds the token hashes), `import-tab.js` (upload with progress, a file picked from the server's import inbox
 `imports/`, or a path on the server),
 `export-tab.js` (`.gsnap` download), `models-tab.js` (the shared models; add one by
 uploading a `.gsnap` or a `.tar` of a model directory with progress, or from a path on the
@@ -366,10 +368,11 @@ directories and file names below `databases/<name>/`, and a path over 260 charac
 ## Documentation
 
 - [`docs/access.md`](docs/access.md): access control: principals, grants and levels, tokens,
-  the first admin, browser login and sessions, MCP with a token, the modes, limits, audit.
+  the first admin, browser login and sessions, MCP with a token, the modes, limits, audit,
+  server backups as secrets.
 - [`docs/server-dir.md`](docs/server-dir.md): the server directory, `server.toml`,
-  `access.toml`, `database.toml`, models, backups, the import inbox, sessions, external
-  backups.
+  `access.toml`, `database.toml`, models, backups, the import inbox, sessions, server
+  backups and their restore ("Move a server to a new machine"), external backups.
 - [`docs/admin-api.md`](docs/admin-api.md): every admin route, its body and answer.
 - [`docs/mcp.md`](docs/mcp.md): the MCP endpoints, configuring an agent, the request headers.
 - `scripts/smoke.sh`: an end-to-end smoke test (build, init, serve, the admin API, the
