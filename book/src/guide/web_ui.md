@@ -29,11 +29,12 @@ links back to the server's UI.
   remembers its sort in the browser; until you pick one, the Databases, Aliases and MCP tables
   sort by name.
 - **Notices.** The outcome of an action ("Loaded …", "… verifies: no problem found") and the
-  failure of an action started from a table row appear as small notices in the top-right
-  corner, over the page: the page never moves. An outcome hides itself after about 6 seconds, a
-  warning after about 12 seconds, an error stays until you close it (×); a notice stays while
-  the pointer is on it. Several stack; the same notice again counts up (×2) instead of
-  stacking. They stay when you switch tabs.
+  failure of an action started from a table row appear as small notices in the bottom-right
+  corner, over the page: the page never moves, and the top bar and the tab bar stay free. An
+  outcome hides itself after about 6 seconds, a warning after about 12 seconds, an error stays
+  until you close it (×); a notice stays while the pointer is on it. A long explanation shows
+  its first three lines; "More" shows the rest. Several stack (the newest at the bottom); the
+  same notice again counts up (×2) instead of stacking. They stay when you switch tabs.
 - **Form errors** appear right under the form's own button ("Grant", "Create", "Restore",
   "Save description", "Sign in", ...), where you just clicked, not at the top of the page.
 - **Conflicts.** Every change is based on what the tab showed. When someone else changed the
@@ -75,6 +76,9 @@ memory (hover for the exact bytes and a layer's shared base).
 - **Aliases:** set, flip, rename, remove.
 - **Memory summary** above the table: the server process, the loaded databases (each graph
   once), the machine's total and available memory, the memory limit and what is free under it.
+- **Kind** is one word: `plain`, `layer` or `base`; a layer shows `over <base>` on a second line
+  (cut with "…" when the name is long). The tooltip says it in full ("layer over products") and
+  what the kind means. Names never break in the middle.
 - **Bases and layers** are explained in the Kind column's tooltips, a box under the table and the
   confirmation of "Promote to base…" (one way, forever).
 - **Damage:** a database in the state `maintenance` shows its damage report. "Verify" per row,
@@ -141,7 +145,10 @@ without a token.
   of agents connected before; their sessions are not ended, and when MCP is switched on again
   they continue with the same session and selected database, without connecting again. The
   HTTP API and the web pages are not affected.
-- Per database or alias: offered to MCP or hidden, and read-only for MCP.
+- Per database or alias: offered to MCP or hidden, and read-only for MCP. A base, a database
+  with its own Read-only flag and an alias of a database read-only for MCP are read-only for MCP
+  anyway: their checkbox is ticked and greyed out, its tooltip says why ("A base is always
+  read-only").
 - "Expose new databases and aliases": whether a database or alias created from now on is offered
   to MCP (off by default: a new name is hidden until exposed here). The create, clone, new alias
   and import forms have their own "Expose through MCP" checkbox.
@@ -177,10 +184,12 @@ Every key of `server.toml`, grouped by section, each with its value (or its defa
 databases" / "at create only", or "after restart". A key is set in place (a checkbox, a choice,
 or a value with "Set") or removed with "Reset to default". The file keeps its comments; a
 toast says what was applied at once and what waits for a restart. A restart key shows
-"restart pending" with the value the running server still uses, a note above the tables
+"restart pending" with the value the running server still uses ("running: …"), a note above the tables
 lists all of them, and the top bar shows a "restart pending" badge (for admins, on every tab;
-it opens this view) until the server is restarted. A change made from a stale page is
-refused, and the view is read again.
+it opens this view) until the server is restarted. When the server listens on another address
+than the file's `listen` because it was started with `--listen` (or the file's port 0 picked a
+port), the row says "running: 127.0.0.1:18731 (command line)" (or "(picked port)"): that is not
+a restart pending. A change made from a stale page is refused, and the view is read again.
 
 ### A database
 

@@ -260,7 +260,10 @@ export const ToastStack = {
       close(t.id);
       link.run();
     };
-    return { v: toastView, close, hover, follow };
+    // The toasts whose long help is shown in full ("More").
+    const expanded = reactive(new Set());
+    const toggleHelp = (id) => (expanded.has(id) ? expanded.delete(id) : expanded.add(id));
+    return { v: toastView, close, hover, follow, expanded, toggleHelp };
   },
   template: `
   <div class="srv-toasts" aria-label="Notices">
@@ -270,7 +273,8 @@ export const ToastStack = {
          @focusin="hover(t.id, true)" @focusout="hover(t.id, false)">
       <div class="srv-toast-body">
         <span class="srv-toast-text">{{ t.text }}<span v-if="t.count > 1" class="srv-toast-count" :aria-label="t.count + ' times'"> ×{{ t.count }}</span></span>
-        <p v-if="t.help" class="srv-toast-help">{{ t.help }}</p>
+        <p v-if="t.help" class="srv-toast-help" :class="{ 'srv-toast-clamped': t.longHelp && !expanded.has(t.id) }">{{ t.help }}</p>
+        <button v-if="t.longHelp" type="button" class="srv-toast-more" :aria-expanded="expanded.has(t.id) ? 'true' : 'false'" @click="toggleHelp(t.id)">{{ expanded.has(t.id) ? 'Less' : 'More' }}</button>
         <p v-if="t.links.length" class="srv-toast-links"><template v-for="(l, i) in t.links" :key="l.text"><template v-if="i"> · </template><a href="#" @click.prevent="follow(t, l)">{{ l.text }}</a></template></p>
       </div>
       <button type="button" class="srv-toast-close" @click="close(t.id)" aria-label="Close notice">×</button>

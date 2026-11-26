@@ -5381,6 +5381,17 @@
                   "type": "string"
                 },
                 "running": {},
+                "runningSource": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "enum": [
+                    "command line",
+                    "picked port",
+                    null
+                  ]
+                },
                 "pending": {
                   "type": "boolean"
                 },

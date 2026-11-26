@@ -694,6 +694,9 @@ pub struct LiveConfig {
     writer: Mutex<()>,
     /// The access state whose session limits follow `[sessions]`.
     access: OnceLock<Arc<crate::access::Access>>,
+    /// The address the server listens on and whether the command line chose it (`--listen`):
+    /// it may differ from the file's `listen` without a restart pending.
+    listening: Option<(std::net::SocketAddr, bool)>,
 }
 
 impl LiveConfig {
@@ -703,7 +706,35 @@ impl LiveConfig {
             applied: RwLock::new(started),
             writer: Mutex::new(()),
             access: OnceLock::new(),
+            listening: None,
         }
+    }
+
+    /// The same, listening on `address` (bound; a port 0 became a real port), chosen by the
+    /// command line (`--listen`) when `from_command_line`.
+    pub fn with_listening(
+        mut self,
+        address: std::net::SocketAddr,
+        from_command_line: bool,
+    ) -> Self {
+        self.listening = Some((address, from_command_line));
+        self
+    }
+
+    /// The address the server listens on, when it differs from the `listen` it started with,
+    /// and why: `command line` (`--listen`) or `picked port` (port 0 in the file).
+    fn listen_override(&self) -> Option<(String, &'static str)> {
+        let (address, from_command_line) = self.listening?;
+        let started = self.applied().listen_addr().ok();
+        if started == Some(address) {
+            return None;
+        }
+        let source = if from_command_line {
+            "command line"
+        } else {
+            "picked port"
+        };
+        Some((address.to_string(), source))
     }
 
     /// Links the access state (its browser session limits follow `[sessions]`).
@@ -808,7 +839,10 @@ impl LiveConfig {
 /// `key`, `section`, `value` (the file's, `null` = not set), `default`, `set` (the file names
 /// it), `kind` (`bool` | `count` | `text` | `memory` | `hosts`), `choices` (the values a text
 /// key takes, else `null`), `applies`, `appliesText`, `running` (what the running server
-/// applies: `now`/`restart` keys only, else `null`), `pending`, `help`) and `queryLimitKeys`.
+/// applies: `now`/`restart` keys only, else `null`; `listen`: the address it listens on),
+/// `runningSource` (`listen` only: `command line` or `picked port` when the server listens on
+/// another address than the `listen` it started with, else `null`; not a restart pending),
+/// `pending`, `help`) and `queryLimitKeys`.
 pub(crate) fn view_json(
     path: &Path,
     text: &str,
@@ -819,6 +853,7 @@ pub(crate) fn view_json(
     let defaults = ServerConfig::default();
     let applied = live.map(LiveConfig::applied);
     let pending = live.map(|live| live.pending(config)).unwrap_or_default();
+    let listen_override = live.and_then(LiveConfig::listen_override);
     let keys: Vec<Value> = KEYS
         .iter()
         .map(|key| {
@@ -828,6 +863,10 @@ pub(crate) fn view_json(
                     value_of(applied, key.name).unwrap_or(Value::Null)
                 }
                 _ => Value::Null,
+            };
+            let (running, running_source) = match (&listen_override, key.name) {
+                (Some((address, source)), "listen") => (json!(address), json!(source)),
+                _ => (running, Value::Null),
             };
             json!({
                 "key": key.name,
@@ -840,6 +879,7 @@ pub(crate) fn view_json(
                 "applies": key.applies.as_str(),
                 "appliesText": key.applies.text(),
                 "running": running,
+                "runningSource": running_source,
                 "pending": pending.contains(&key.name),
                 "help": key.help,
             })
@@ -1090,5 +1130,35 @@ mod tests {
         assert_eq!(row("limits.query.max_operations")["set"], json!(false));
         assert_eq!(row("defaults.read_only")["applies"], json!("create"));
         assert_eq!(row("limits.upload_bytes")["running"], json!(99));
+        assert_eq!(row("listen")["runningSource"], Value::Null);
+    }
+
+    #[test]
+    fn a_listen_address_from_the_command_line_is_running_not_pending() {
+        let text = default_config_text();
+        let config = ServerConfig::default();
+        let started = config.listen_addr().unwrap();
+        let other: std::net::SocketAddr = "127.0.0.1:18731".parse().unwrap();
+        let row_of = |live: &LiveConfig| {
+            let view = view_json(path(), &text, &config, Some(live));
+            assert_eq!(view["restartPending"], json!([]), "{view}");
+            view["keys"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["key"] == "listen")
+                .unwrap()
+                .clone()
+        };
+        let row = row_of(&LiveConfig::new(config.clone()).with_listening(other, true));
+        assert_eq!(row["pending"], json!(false));
+        assert_eq!(row["running"], json!("127.0.0.1:18731"));
+        assert_eq!(row["runningSource"], json!("command line"));
+        let row = row_of(&LiveConfig::new(config.clone()).with_listening(other, false));
+        assert_eq!(row["runningSource"], json!("picked port"));
+        // The same address as the file: nothing to say.
+        let row = row_of(&LiveConfig::new(config.clone()).with_listening(started, true));
+        assert_eq!(row["runningSource"], Value::Null);
+        assert_eq!(row["running"], json!(config.listen));
     }
 }

@@ -29,6 +29,14 @@
 .srv-facts dd { margin: 0; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
 .srv-limit-edit { display: flex; gap: 4px; align-items: center; justify-content: flex-end; }
 .srv-limit-edit input { width: 9em; font: inherit; }
+/* The Database settings' query limits fit 1024 px without a horizontal scroll: the texts under a
+   key and beside a badge wrap (between words), the edit cell stays one compact line. */
+.srv-settings-limits td { white-space: normal; overflow: visible; overflow-wrap: normal; }
+.srv-settings-limits td.num { white-space: nowrap; }
+.srv-settings-limits .srv-limit-source { display: block; }
+.srv-settings-limits .srv-sub { overflow-wrap: normal; }
+.srv-settings-limits .srv-actions.srv-limit-edit-cell { min-width: 0; white-space: nowrap; }
+.srv-settings-limits .srv-limit-edit input { width: 7em; }
 .srv-settings-limits tr.srv-differs td { background: color-mix(in srgb, var(--warn) 10%, transparent); }
 .srv-problems { margin: 10px 0 0; padding-left: 18px; color: var(--danger); font-size: 12.5px; }
 p.srv-problems { padding-left: 0; }
@@ -96,9 +104,15 @@ p.srv-problems { padding-left: 0; }
 
 /* The Databases table fits its width (no horizontal scroll down to ~1024 px): long names and
    texts wrap, the row actions sit behind one "…" button (shared.js ActionMenu). */
-.srv-databases td { white-space: normal; overflow: visible; overflow-wrap: anywhere; }
+.srv-databases td { white-space: normal; overflow: visible; overflow-wrap: normal; }
 .srv-databases td:first-child { min-width: 14ch; max-width: none; }
 .srv-databases td.num, .srv-databases .badge { white-space: nowrap; overflow-wrap: normal; }
+/* Names (at most 32 characters) never break inside; an alias may wrap before its arrow. */
+.srv-databases .srv-name, .srv-databases .srv-alias-target { white-space: nowrap; }
+/* Kind: one word, a layer's "over <base>" on its own line, cut with an ellipsis (the cell's
+   tooltip says it in full), never broken inside a word. */
+.srv-kind-cell { white-space: nowrap; }
+.srv-table .srv-kind-sub { max-width: 16ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; overflow-wrap: normal; }
 .srv-table td.srv-menu-cell { width: 1%; white-space: nowrap; text-align: right; overflow: visible; }
 
 /* The row actions menu (shared.js ActionMenu, ui/menu.js): fixed to the viewport, so a table
@@ -129,12 +143,14 @@ p.srv-problems { padding-left: 0; }
 .srv-inline-form .srv-form-error { flex: 1 0 100%; margin-top: -2px; }
 .srv-limit-edit-cell .srv-form-error { max-width: 32ch; margin-left: auto; text-align: left; white-space: normal; }
 
-/* The toasts of every tab (shared.js ToastStack, ui/toasts.js), modelled on the playground's
-   system journal notices: top right below the top bar, never moving the page; the stack lets
-   clicks through, only the toasts take them. */
+/* The toasts of every tab (shared.js ToastStack, ui/toasts.js), looking like the playground's
+   system journal notices: bottom right, so they never cover the top bar or the tab bar and never
+   move the page; narrow, a long help clamped to three lines ("More"); the stack lets clicks
+   through, only the toasts take them; the newest sits at the bottom. */
 .srv-toasts {
-  position: fixed; top: 54px; right: 14px; z-index: 130;
-  display: flex; flex-direction: column; gap: 8px; width: min(380px, calc(100vw - 28px));
+  position: fixed; bottom: 14px; right: 14px; z-index: 130;
+  display: flex; flex-direction: column; justify-content: flex-end; gap: 8px;
+  width: min(340px, calc(100vw - 28px)); max-height: calc(100vh - 110px); overflow: hidden;
   pointer-events: none;
 }
 .srv-toast {
@@ -150,7 +166,12 @@ p.srv-problems { padding-left: 0; }
 .srv-toast-text { overflow-wrap: anywhere; }
 .srv-toast-error .srv-toast-text { color: var(--danger); }
 .srv-toast-count { color: var(--text-muted); font-size: 12px; }
+.srv-toast { flex: none; }
 .srv-toast-help { margin: 4px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12.5px; max-height: 14em; overflow-y: auto; }
+.srv-toast-help.srv-toast-clamped { display: -webkit-box; -webkit-line-clamp: 3; line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.srv-toast-more { margin: 2px 0 0; padding: 0; border: 0; background: transparent; color: var(--accent); font: inherit; font-size: 12px; cursor: pointer; }
+.srv-toast-more:hover { text-decoration: underline; }
+.srv-toast-more:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; border-radius: 2px; }
 .srv-toast-links { margin: 4px 0 0; font-size: 12.5px; }
 .srv-toast-close {
   position: absolute; top: 4px; right: 4px; width: 22px; height: 22px; padding: 0;
@@ -161,7 +182,7 @@ p.srv-problems { padding-left: 0; }
 .srv-toast-close:hover { background: var(--surface-3); color: var(--text); }
 .srv-toast-close:focus-visible { opacity: 1; outline: 2px solid var(--accent); outline-offset: 0; }
 @media (hover: none) { .srv-toast-close { opacity: 1; } }
-@keyframes srv-toast-in { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: none; } }
+@keyframes srv-toast-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 @media (prefers-reduced-motion: reduce) { .srv-toast { animation: none; } }
 /* B-VERIFY: the last verify in the Database settings' "Damage and recovery". */
 .srv-verify { margin: 8px 0; }

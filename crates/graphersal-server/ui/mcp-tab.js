@@ -14,7 +14,7 @@
 
 import { reactive, ref, computed } from 'vue';
 import {
-  createMcp, statusOf, mcpRows, usageOf, usageText, exposedTitle, readOnlyTitle, connectInfo, MCP_OFF_CONFIRM,
+  createMcp, statusOf, mcpRows, usageOf, usageText, exposedTitle, readOnlyTitle, readOnlyCell, connectInfo, MCP_OFF_CONFIRM,
   exposeNewOf, EXPOSE_NEW_HELP,
 } from './mcp-api.js';
 import {
@@ -132,7 +132,7 @@ export default {
 
     return {
       s, busy, copied, status, rows, usage, connect, databases, tools, users, sessions, errors,
-      dbSort, toolSort, userSort, sessionSort, errorSort, noticeClass, usageText, exposedTitle, readOnlyTitle,
+      dbSort, toolSort, userSort, sessionSort, errorSort, noticeClass, usageText, exposedTitle, readOnlyTitle, readOnlyCell,
       exposeNewOf, EXPOSE_NEW_HELP, refresh, toggleMcp, toggleExposeNew, toggleExposed, toggleReadOnly, copy,
     };
   },
@@ -168,7 +168,7 @@ export default {
         <tr v-for="r in databases" :key="r.name" :data-mcp-db="r.name">
           <td class="mono">{{ r.nameText }} <span v-if="r.kind === 'alias'" class="badge">alias</span></td>
           <td :title="exposedTitle(r)"><label class="inline"><input type="checkbox" :checked="r.exposed" :disabled="!!busy[r.name]" data-mcp-exposed @change="toggleExposed(r)"> {{ r.effectiveExposed ? 'yes' : 'no' }}</label></td>
-          <td :title="readOnlyTitle(r)"><label class="inline"><input type="checkbox" :checked="r.readOnly" :disabled="!!busy[r.name]" data-mcp-read-only @change="toggleReadOnly(r)"> {{ r.effectiveReadOnly ? 'yes' : 'no' }}</label></td>
+          <td :title="readOnlyTitle(r)"><label class="inline"><input type="checkbox" :checked="readOnlyCell(r).checked" :disabled="!!busy[r.name] || readOnlyCell(r).disabled" data-mcp-read-only @change="toggleReadOnly(r)"> {{ readOnlyCell(r).text }}</label></td>
           <td class="num">{{ r.sessions }}</td>
           <td class="num">{{ r.calls }}</td>
           <td class="num">{{ r.errors }}</td>

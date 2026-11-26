@@ -294,7 +294,7 @@ export default {
           <td class="num">{{ limitText(r.key, r.override) }}</td>
           <td class="num">{{ limitText(r.key, r.server) }}</td>
           <td class="num">{{ limitText(r.key, r.effective) }}</td>
-          <td><span class="badge" :class="r.inherited ? '' : 'accent'" :title="r.inherited ? 'No override here: the server default applies' : 'This database overrides the server default'">{{ r.inherited ? 'inherited' : 'override' }}</span> <span class="muted srv-sub">{{ r.sourceText }}</span></td>
+          <td><span class="badge" :class="r.inherited ? '' : 'accent'" :title="r.inherited ? 'No override here: the server default applies' : 'This database overrides the server default'">{{ r.inherited ? 'inherited' : 'override' }}</span> <span class="muted srv-sub srv-limit-source">{{ r.sourceText }}</span></td>
           <td v-if="loaded" class="num" :title="r.differs ? 'Differs from the next load: unload and load the database to apply' : null">{{ limitText(r.key, r.inEffect) }}</td>
           <td class="srv-actions srv-limit-edit-cell">
             <form class="srv-limit-edit" @submit.prevent="setLimit(r)">

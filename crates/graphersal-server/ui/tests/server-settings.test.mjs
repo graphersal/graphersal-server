@@ -13,6 +13,7 @@ import { readFileSync } from 'node:fs';
 import {
   configRequest, createConfig, SECTIONS, APPLIES, isDefaultsKey, settingRows, settingSections, inputText,
   parseInput, changeSet, pendingKeys, pendingText, savedNotice, valueText, unsetText, newDatabaseText,
+  runningNote, placeholderText,
 } from '../server-settings-api.js';
 import { limitRows } from '../settings-api.js';
 import { createBody, isConflict } from '../admin-api.js';
@@ -240,4 +241,30 @@ test('the templates: the Settings tab\'s server entries, the view and the top ba
   assert.equal(profile.tabs.find((t) => t.id === 'settings').title, 'Settings');
   const assets = readFileSync(new URL('../../src/ui_assets.rs', import.meta.url), 'utf8');
   for (const file of ['server-settings-api.js', 'server-settings-view.js']) assert.ok(assets.includes(`"${file}"`), file);
+});
+
+test('running line: a pending key, a --listen from the command line (not pending), nothing else', () => {
+  const rows = settingRows({ keys: [
+    { key: 'listen', section: '', value: '127.0.0.1:8484', set: true, applies: 'restart', running: '127.0.0.1:18731', runningSource: 'command line', pending: false },
+    { key: 'http.allowed_hosts', section: 'http', value: ['db.example.com'], set: true, applies: 'restart', running: [], pending: true },
+    { key: 'limits.upload_bytes', section: 'limits', value: 99, set: true, applies: 'now', running: 99, pending: false },
+    { key: 'limits.memory_limit', section: 'limits', value: null, set: false, kind: 'memory', applies: 'now', running: null, pending: false },
+    { key: 'limits.memory_headroom', section: 'limits', value: null, set: false, applies: 'now', running: null, pending: false },
+  ] });
+  const by = Object.fromEntries(rows.map((r) => [r.key, r]));
+  assert.equal(by.listen.runningSource, 'command line');
+  assert.equal(by.listen.pending, false);
+  assert.equal(runningNote(by.listen).text, 'running: 127.0.0.1:18731 (command line)');
+  assert.match(runningNote(by.listen).title, /--listen/);
+  assert.equal(runningNote(by['http.allowed_hosts']).text, 'running: none');
+  assert.equal(runningNote(by['limits.upload_bytes']), null);
+  assert.equal(runningNote({ ...by.listen, runningSource: 'picked port' }).text, 'running: 127.0.0.1:18731 (picked port)');
+  // Short placeholders: the help says the rest.
+  assert.equal(placeholderText(by['limits.memory_limit']), 'auto');
+  assert.equal(placeholderText(by['limits.memory_headroom']), 'a tenth');
+  assert.equal(placeholderText(by['limits.upload_bytes']), '99');
+  for (const r of rows) assert.ok(placeholderText(r).length <= 16, `${r.key}: ${placeholderText(r)}`);
+  const view = src('server-settings-view.js');
+  assert.match(view, /:placeholder="placeholderText\(r\)"/);
+  assert.match(view, /v-if="runningNote\(r\)"/);
 });

@@ -18,7 +18,10 @@
 //! `kind` (`database` | `alias` | `missing`), `target` (an alias's database), `exposed` and
 //! `readOnly` (the name's own settings), `effectiveExposed` (the name and its database
 //! exposed), `effectiveReadOnly` (MCP read-only on the name or its database, or the
-//! database's own mode: its read-only flag, a base), `sessions` (open MCP sessions working on
+//! database's own mode: its read-only flag, a base), `readOnlyReason` (`null`, or why the name
+//! is read-only for MCP whatever its own setting: `base` (a base is always read-only), `flag`
+//! (the database's read-only flag), `database` (an alias whose database is read-only for
+//! MCP)), `sessions` (open MCP sessions working on
 //! the name: its selection on `/mcp` or its `/db/<name>/mcp`), `calls`, `errors` (tool calls
 //! since the start)) and `usage` ([`crate::mcp_control::McpUsage::to_json`]: `startedAtMs`,
 //! `sessions {open, byUser, byDatabase, withoutDatabase}`, `calls {total, errors, refused}`,
@@ -206,17 +209,29 @@ fn rows(
     let registry = admin.registry();
     let entries = registry.list();
     let aliases = registry.aliases();
-    let mode_read_only = |real: &str| {
+    // Why the database's own mode makes it read-only: a base, or its read-only flag.
+    let mode_reason = |real: &str| {
         entries
             .iter()
             .find(|e| e.name == real)
             .and_then(|e| e.config.as_ref())
-            .is_some_and(|c| c.read_only || c.role == DatabaseRole::Base)
+            .and_then(|c| {
+                if c.role == DatabaseRole::Base {
+                    Some("base")
+                } else if c.read_only {
+                    Some("flag")
+                } else {
+                    None
+                }
+            })
     };
     let row = |name: &str, kind: &str, target: Option<&str>| {
         let real = target.unwrap_or(name);
         let own = settings.of(name);
         let (sessions, calls, errors) = counts(name);
+        // Read-only for MCP whatever the name's own setting says.
+        let forced = mode_reason(real)
+            .or_else(|| (target.is_some() && settings.of(real).read_only).then_some("database"));
         json!({
             "name": name,
             "kind": kind,
@@ -224,7 +239,8 @@ fn rows(
             "exposed": own.exposed,
             "readOnly": own.read_only,
             "effectiveExposed": settings.exposed(name, real),
-            "effectiveReadOnly": settings.read_only(name, real) || mode_read_only(real),
+            "effectiveReadOnly": settings.read_only(name, real) || forced.is_some(),
+            "readOnlyReason": forced,
             "sessions": sessions,
             "calls": calls,
             "errors": errors,

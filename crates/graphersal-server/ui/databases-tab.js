@@ -33,7 +33,7 @@
 import { reactive, ref, computed, nextTick } from 'vue';
 import {
   createBody, nameProblem, existingNameProblem, renameProblem, NAME_HINT, rowActions, confirmText, outcomeText, outcomeTone, loadAndWatch, baseNames, realRows,
-  bytesText, transferActions, needsModelHint, poolText, promoteAction, resetLayerAction, isConflict, kindHelp, BASE_HELP, PROMOTE_HELP, KIND_HELP,
+  bytesText, transferActions, needsModelHint, poolText, promoteAction, resetLayerAction, isConflict, kindHelp, kindCell, BASE_HELP, PROMOTE_HELP, KIND_HELP,
   isOpenState, damageActions, verifyText, verifyVerdict, verifyHelp, verifyAllText, verifyAllLabel, runVerifyAll, verifyBadge, repairSummary, repairedName, uncleanRows, REPAIR_HELP, RESTORE_HINT,
   MCP_NEW_HELP,
 } from './admin-api.js';
@@ -42,14 +42,12 @@ import {
 } from './shared.js';
 import { diskTitle, memoryText, memoryTitle, memoryRows, SIZE_COLUMNS } from './databases.js';
 
-/** The kind column's text: the kind, and "base" for a base. */
-const kindText = (row) => [row.kind, row.role === 'base' ? 'base' : ''].filter(Boolean).join(' · ');
 
 /** The sortable columns of the database table. */
 const DATABASE_COLUMNS = Object.freeze({
   name: { type: 'text' },
   state: { type: 'text', value: (r) => r.stateText },
-  kind: { type: 'text', value: kindText },
+  kind: { type: 'text', value: (r) => kindCell(r).sortKey },
   readOnly: { type: 'bool' },
   autoLoad: { type: 'bool' },
   ...SIZE_COLUMNS,
@@ -386,7 +384,7 @@ export default {
       openSettings: (row) => props.api.navigate('settings', { db: row.aliasOf || row.name }),
       openImport: () => props.api.navigate('import'),
       openModels: () => props.api.navigate('models'),
-      kindText,
+      kindCell,
       dialogTitle: computed(() => ({
         create: 'New database',
         clone: `Clone "${dialog.source}"`,
@@ -441,8 +439,8 @@ export default {
       </tr></thead>
       <tbody>
         <tr v-for="row in rows" :key="(row.aliasOf ? '@' : '') + row.name" :data-db="row.name" :class="{ 'alias-row': row.aliasOf }">
-          <td><a :href="href(row)" class="mono">{{ row.name }}</a>
-            <span v-if="row.aliasOf" class="muted"> → {{ row.aliasOf }}</span>
+          <td><a :href="href(row)" class="mono srv-name">{{ row.name }}</a>
+            <span v-if="row.aliasOf" class="muted"> → <span class="srv-alias-target">{{ row.aliasOf }}</span></span>
             <div v-if="row.description" class="muted srv-sub">{{ row.description }}</div></td>
           <td><span class="badge" :class="row.pooled && !isOpenState(row.state) ? 'accent' : row.tone" :title="row.damage || row.reason || poolText(row)">{{ badgeText(row) }}</span>
             <div v-if="row.reason" class="muted srv-sub">{{ row.reason }}</div>
@@ -451,7 +449,7 @@ export default {
             <div v-if="needsModelHint(row)" class="srv-sub srv-hint" :title="needsModelHint(row)">Add the model in the <a href="#" @click.prevent="openModels">Models</a> tab.</div>
             <div v-if="row.linkWarning" class="srv-sub srv-warn" :title="row.linkWarning">{{ row.linkWarning }}</div>
             <div v-if="!row.aliasOf && verifyBadge(row)" class="srv-sub" data-verify-badge><span class="badge" :class="verifyBadge(row).tone" :title="verifyBadge(row).title">{{ verifyBadge(row).text }}</span></div></td>
-          <td :title="kindHelp(row) || null">{{ kindText(row) }}<div v-if="row.base" class="muted srv-sub">over {{ row.base }}</div></td>
+          <td class="srv-kind-cell" :title="kindCell(row).title || null"><span class="srv-kind-text">{{ kindCell(row).text }}</span><div v-if="kindCell(row).sub" class="muted srv-sub srv-kind-sub">{{ kindCell(row).sub }}</div></td>
           <td><input type="checkbox" :checked="row.readOnly" :disabled="!acts(row).readOnly.enabled" :title="acts(row).readOnly.title"
                      :aria-label="'Read-only: ' + row.name" @change="setFlag(row, 'readOnly', $event)"></td>
           <td><input type="checkbox" :checked="row.autoLoad" :disabled="!acts(row).autoLoad.enabled" :title="acts(row).autoLoad.title"

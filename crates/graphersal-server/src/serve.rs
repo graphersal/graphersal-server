@@ -427,7 +427,10 @@ pub fn start(
     );
     loader.set_mcp_control(mcp_control.clone());
     // The settings the server applies; the admin API changes the `now` keys of them at runtime.
-    let live = Arc::new(crate::server_settings::LiveConfig::new(config.clone()));
+    let live = Arc::new(
+        crate::server_settings::LiveConfig::new(config.clone())
+            .with_listening(address, options.listen.is_some()),
+    );
     let mut running = Running {
         dir,
         shared,

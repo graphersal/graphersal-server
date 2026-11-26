@@ -16,21 +16,18 @@
 import { reactive, computed, watch } from 'vue';
 import {
   serverBackupPath, fetchServerBackup, SERVER_BACKUP_WARNING,
-  backupRows, restoreOverAction, nameProblem, existingNameProblem, restoredName, NAME_HINT, RESTORE_GRANTS_NOTE, confirmText, outcomeText, outcomeTone, bytesText, realRows, kindHelp,
+  backupRows, restoreOverAction, nameProblem, existingNameProblem, restoredName, NAME_HINT, RESTORE_GRANTS_NOTE, confirmText, outcomeText, outcomeTone, bytesText, realRows, kindHelp, kindCell,
 } from './admin-api.js';
 import {
   ROOT, headers, admin, list, reload, errorNotice, notify, useFreshData, useSort, SortTh, FormError,
 } from './shared.js';
 import { downloadBlob } from './databases.js';
 
-/** The kind cell's text of a backup. */
-const kindText = (b) => [b.kind, b.role === 'base' ? 'base' : ''].filter(Boolean).join(' · ');
-
 /** The sortable columns of the backup table (a backup's name is its time: text order is time order). */
 const BACKUP_COLUMNS = Object.freeze({
   backup: { type: 'text' },
   size: { type: 'number', value: (b) => b.bytes },
-  kind: { type: 'text', value: kindText },
+  kind: { type: 'text', value: (r) => kindCell(r).sortKey },
 });
 
 export default {
@@ -162,7 +159,7 @@ export default {
       }
     });
 
-    return { sb, withHeaders, serverBackupHref, serverBackupStarted, downloadServerBackup, serverBackupWarning: SERVER_BACKUP_WARNING, s, backups, backupSort, kindText, kindHelp, names, row, over, show, backupNow, startRestore, restore, bytesText, refresh, nameHint: NAME_HINT, grantsNote: RESTORE_GRANTS_NOTE };
+    return { sb, withHeaders, serverBackupHref, serverBackupStarted, downloadServerBackup, serverBackupWarning: SERVER_BACKUP_WARNING, s, backups, backupSort, kindCell, kindHelp, names, row, over, show, backupNow, startRestore, restore, bytesText, refresh, nameHint: NAME_HINT, grantsNote: RESTORE_GRANTS_NOTE };
   },
   template: `
   <div class="srv-tab">
@@ -190,7 +187,7 @@ export default {
         <tr v-for="b in backups" :key="b.backup" :data-backup="b.backup">
           <td class="mono">{{ b.backup }}<div v-if="b.file" class="muted srv-sub">{{ b.file }}</div></td>
           <td class="num">{{ bytesText(b.bytes) }}</td>
-          <td :title="kindHelp(b) || null">{{ kindText(b) }}<div v-if="b.base" class="muted srv-sub">over {{ b.base }}</div></td>
+          <td class="srv-kind-cell" :title="kindCell(b).title || null"><span class="srv-kind-text">{{ kindCell(b).text }}</span><div v-if="kindCell(b).sub" class="muted srv-sub srv-kind-sub">{{ kindCell(b).sub }}</div></td>
           <td class="srv-actions"><button type="button" class="btn small" :disabled="!!s.busy" @click="startRestore(b)">Restore…</button></td>
         </tr>
       </tbody>

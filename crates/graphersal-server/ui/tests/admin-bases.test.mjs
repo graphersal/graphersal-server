@@ -10,7 +10,7 @@ import { readFileSync } from 'node:fs';
 import http from 'node:http';
 import {
   adminRequest, createAdmin, AdminError, promoteAction, confirmText, outcomeText, importRequest,
-  uploadImport, BASE_IS_FROZEN, BASE_HELP, PROMOTE_HELP, KIND_HELP, kindHelp,
+  uploadImport, BASE_IS_FROZEN, BASE_HELP, PROMOTE_HELP, KIND_HELP, kindHelp, kindCell,
 } from '../admin-api.js';
 import { databaseRows } from '../databases.js';
 
@@ -141,7 +141,8 @@ test('the help on bases and layers: what a base is, that promotion is forever, w
   assert.equal(kindHelp(null), '');
   const tab = readFileSync(new URL('../databases-tab.js', import.meta.url), 'utf8');
   assert.ok(tab.includes('<summary>Bases and layers</summary>'), 'the Databases tab has the help box');
-  assert.ok(tab.includes(':title="kindHelp(row) || null"'), 'the Kind cells explain the kind');
+  assert.ok(tab.includes(':title="kindCell(row).title || null"'), 'the Kind cells explain the kind');
+  assert.ok(kindCell({ kind: 'layer', role: 'normal', base: 'b' }).title.includes(KIND_HELP.layer), 'the cell title holds the kind help');
 });
 
 test('promoteAction: only an unloaded plain normal database; every other row says why not', () => {
@@ -240,4 +241,26 @@ test('import with role base against the mock: upload and path form; a layer sour
   } finally {
     server.close();
   }
+});
+
+test('kindCell: one word per kind, a layer\'s base on its own line, the full text in the title', () => {
+  const plain = kindCell({ kind: 'plain', role: 'normal' });
+  assert.deepEqual([plain.text, plain.sub], ['plain', '']);
+  const base = kindCell({ kind: 'plain', role: 'base' });
+  assert.deepEqual([base.text, base.sub], ['base', ''], 'a base reads "base", not "plain · base"');
+  assert.ok(base.title.startsWith('base\n'));
+  assert.ok(base.title.includes(KIND_HELP.base));
+  const layer = kindCell({ kind: 'layer', role: 'normal', base: 'products' });
+  assert.deepEqual([layer.text, layer.sub, layer.sortKey], ['layer', 'over products', 'layer over products']);
+  assert.ok(layer.title.startsWith('layer over products\n'));
+  assert.deepEqual(kindCell(null), { text: '', sub: '', title: '', sortKey: '' });
+  for (const file of ['databases-tab.js', 'backups-tab.js']) {
+    const tab = readFileSync(new URL(`../${file}`, import.meta.url), 'utf8');
+    assert.ok(!tab.includes("join(' · ')"), `${file}: no "plain · base"`);
+    assert.match(tab, /class="muted srv-sub srv-kind-sub"/, `${file}: the base on its own line`);
+  }
+  const css = readFileSync(new URL('../server-ui.css', import.meta.url), 'utf8');
+  assert.match(css, /\.srv-table \.srv-kind-sub \{[^}]*text-overflow: ellipsis[^}]*white-space: nowrap/, 'cut, never broken inside a word');
+  assert.match(css, /\.srv-databases td \{[^}]*overflow-wrap: normal/, 'no break inside a word in the Databases table');
+  assert.doesNotMatch(css, /\.srv-databases td \{[^}]*anywhere/);
 });
