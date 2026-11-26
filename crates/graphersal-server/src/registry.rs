@@ -52,6 +52,16 @@ pub enum DbState {
         /// Why.
         reason: String,
     },
+    /// Loaded and served READ-ONLY because its Store is damaged (round 3 B-CRASH): the
+    /// engine opened it in maintenance mode (damage found at the open), or a verify of the
+    /// open Store found damage under the damage policy `maintenance`. Queries read the intact
+    /// data, writes are refused; repair it into a new database (`db repair`) or restore a
+    /// backup.
+    #[non_exhaustive]
+    Maintenance {
+        /// The damage report in words (the engine's `DamageReport`, or the verify problems).
+        damage: String,
+    },
 }
 
 impl DbState {
@@ -77,8 +87,27 @@ impl DbState {
         }
     }
 
+    /// [`DbState::Maintenance`].
+    pub fn maintenance(damage: impl Into<String>) -> Self {
+        DbState::Maintenance {
+            damage: damage.into(),
+        }
+    }
+
+    /// Whether the database is loaded and served: [`DbState::Loaded`] or
+    /// [`DbState::Maintenance`].
+    pub fn is_open(&self) -> bool {
+        matches!(self, DbState::Loaded | DbState::Maintenance { .. })
+    }
+
+    /// Whether the database is loaded or being loaded ([`DbState::is_open`] or
+    /// [`DbState::Loading`]): what a delete, a promotion or a replacement refuses.
+    pub fn is_busy(&self) -> bool {
+        self.is_open() || *self == DbState::Loading
+    }
+
     /// The state's name as the admin API shows it: `unloaded`, `loading`, `loaded`,
-    /// `needs-model`, `failed`.
+    /// `needs-model`, `failed`, `maintenance`.
     pub fn as_str(&self) -> &'static str {
         match self {
             DbState::Unloaded => "unloaded",
@@ -86,6 +115,7 @@ impl DbState {
             DbState::Loaded => "loaded",
             DbState::NeedsModel { .. } => "needs-model",
             DbState::Failed { .. } => "failed",
+            DbState::Maintenance { .. } => "maintenance",
         }
     }
 }

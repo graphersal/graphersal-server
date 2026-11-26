@@ -372,7 +372,9 @@ A command sent with `--token` is logged as the token's user. Events are logged
 at `info`; refusals, such as a failed login, at `warn`. The events cover databases (create,
 delete, clone, import, restore, promote, backup), the read-only and auto-load flags, aliases
 (set, remove, rename), users (add, remove, roles, the first admin), tokens (issued, showing
-only `…last4`, and revoked), grants (set, revoked), and logins (succeeded, refused, logout).
+only `…last4`, and revoked), grants (set, revoked), logins (succeeded, refused, logout), a shutdown request, and
+after a crash (round 3) the unclean shutdown found at start (actor `-`), each database's check
+or verify (`database 'x' checked: ok|damaged (...)`), a repair into a new database and a swap.
 No line carries a token or a session id. The lines go to stderr with the rest of the log
 (redirect it to keep a file). An offline console command writes its audit lines to its stderr
 only when `RUST_LOG` is set (for example `RUST_LOG=graphersal_server::audit=info`): there is no

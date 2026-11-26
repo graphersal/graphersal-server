@@ -127,6 +127,19 @@ struct LoadedDb {
     limits: QueryLimits,
 }
 
+impl LoadedDb {
+    /// The damage report of a Store the engine opened in maintenance mode (`None`: healthy, or
+    /// a base, whose Store is never opened).
+    fn damage(&self) -> Option<String> {
+        let report = match (&self.store, &self.layer_store) {
+            (Some(store), _) => store.maintenance().cloned(),
+            (None, Some(store)) => store.maintenance().cloned(),
+            (None, None) => None,
+        };
+        report.map(|report| report.to_string().trim_end().to_string())
+    }
+}
+
 /// A base in the pool and the databases using it.
 struct PoolEntry {
     base: LayerBase,
@@ -188,6 +201,11 @@ pub struct Loader {
     /// name, a pooled base by `base:<name>`): answered while a writer holds the graph's lock
     /// ([`Loader::memory`]).
     memory_seen: Mutex<BTreeMap<String, u64>>,
+    /// The `server.open` writer (round 3 B-CRASH, [`crate::recovery`]; `serve` sets it once,
+    /// unset in the unit tests: nothing recorded).
+    open_record: std::sync::OnceLock<Arc<crate::recovery::OpenRecord>>,
+    /// The last unclean shutdown's report (`serve` sets it once).
+    recovery: std::sync::OnceLock<Arc<crate::recovery::Recovery>>,
 }
 
 /// The memory of the loaded databases ([`Loader::memory`]): the engine's footprint of each
@@ -267,6 +285,58 @@ impl Loader {
             mcp_control: std::sync::OnceLock::new(),
             backup_root,
             memory_seen: Mutex::new(BTreeMap::new()),
+            open_record: std::sync::OnceLock::new(),
+            recovery: std::sync::OnceLock::new(),
+        })
+    }
+
+    /// Sets the `server.open` writer (once) and records the open set now.
+    pub(crate) fn set_open_record(&self, record: Arc<crate::recovery::OpenRecord>) {
+        let _ = self.open_record.set(record);
+        self.record_open();
+    }
+
+    /// Whether this loader keeps `server.open` (a writer is set).
+    pub(crate) fn records_open(&self) -> bool {
+        self.open_record.get().is_some()
+    }
+
+    /// Sets the recovery state (once).
+    pub(crate) fn set_recovery(&self, recovery: Arc<crate::recovery::Recovery>) {
+        let _ = self.recovery.set(recovery);
+    }
+
+    /// The recovery state (`None`: not set, the unit tests).
+    pub(crate) fn recovery(&self) -> Option<&Arc<crate::recovery::Recovery>> {
+        self.recovery.get()
+    }
+
+    /// Writes the open set (loaded and loading databases) into `server.open`, when a writer is
+    /// set. Never called with the loader's state lock held (the writer's lock comes first).
+    fn record_open(&self) {
+        let Some(record) = self.open_record.get() else {
+            return;
+        };
+        let _guard = record.guard();
+        let names: BTreeSet<String> = {
+            let state = self.lock();
+            state
+                .loaded
+                .keys()
+                .chain(state.loading.iter())
+                .cloned()
+                .collect()
+        };
+        let _ = record.write(names.into_iter().collect());
+    }
+
+    /// What the open of the loaded plain or layer database `name`'s Store did (the engine's
+    /// recovery report); `None` when it is not loaded or is a base (no Store opened).
+    pub(crate) fn open_report_of(&self, name: &str) -> Option<graphersal::persist::OpenReport> {
+        let (_context, store) = self.open_store_of(name)?;
+        Some(match store {
+            OpenStoreRef::Plain(store) => store.open_report().clone(),
+            OpenStoreRef::Layer(store) => store.open_report().clone(),
         })
     }
 
@@ -445,21 +515,32 @@ impl Loader {
         name: &str,
         change: impl FnOnce() -> Result<T, ServerError>,
     ) -> Result<T, ServerError> {
-        let key = fold(name);
+        self.while_all_idle(&[name], change)
+    }
+
+    /// [`Loader::while_idle`] for several databases at once (a swap of two).
+    pub(crate) fn while_all_idle<T>(
+        &self,
+        names: &[&str],
+        change: impl FnOnce() -> Result<T, ServerError>,
+    ) -> Result<T, ServerError> {
         let state = self.lock();
-        let busy = if state.loaded.contains_key(&key) {
-            Some("it is loaded; unload it first")
-        } else if state.loading.contains(&key) {
-            Some("it is being loaded; unload it once it is loaded")
-        } else if state.unloading.contains(&key) {
-            Some("it is being unloaded; try again in a moment")
-        } else if state.pool.contains_key(&key) {
-            Some("loaded layers use it as their base; unload them first")
-        } else {
-            None
-        };
-        if let Some(message) = busy {
-            return Err(refused(&key, message));
+        for name in names {
+            let key = fold(name);
+            let busy = if state.loaded.contains_key(&key) {
+                Some("it is loaded; unload it first")
+            } else if state.loading.contains(&key) {
+                Some("it is being loaded; unload it once it is loaded")
+            } else if state.unloading.contains(&key) {
+                Some("it is being unloaded; try again in a moment")
+            } else if state.pool.contains_key(&key) {
+                Some("loaded layers use it as their base; unload them first")
+            } else {
+                None
+            };
+            if let Some(message) = busy {
+                return Err(refused(&key, message));
+            }
         }
         let out = change();
         drop(state);
@@ -507,6 +588,8 @@ impl Loader {
                 return Err(err);
             }
         }
+        // Recorded before the Store is opened: a kill during the load names it too.
+        self.record_open();
         tracing::info!(target: "graphersal_server", "loading database '{key}'");
         let loader = self.clone();
         let spawned = std::thread::Builder::new()
@@ -523,6 +606,7 @@ impl Loader {
                 self.lock().loading.remove(&key);
                 let _ = self.registry.set_state(&key, previous);
                 self.changed.notify_all();
+                self.record_open();
                 Err(ServerError::Thread {
                     message: err.to_string(),
                 })
@@ -608,6 +692,11 @@ impl Loader {
         self.lock().unloading.remove(&key);
         let _ = self.registry.set_state(&key, DbState::Unloaded);
         self.changed.notify_all();
+        // Only a cleanly closed Store leaves the open set: one whose close failed is checked
+        // after the next start as if the server had been killed.
+        if closed.is_ok() {
+            self.record_open();
+        }
         closed.map(|()| true)
     }
 
@@ -770,8 +859,14 @@ impl Loader {
                     DbState::Unloaded
                 }
                 Ok(db) => {
+                    // A Store the engine opened in maintenance mode (damage found at the open)
+                    // is served read-only by the engine itself: state `maintenance`.
+                    let damage = db.damage();
                     state.loaded.insert(key.clone(), db);
-                    DbState::Loaded
+                    match damage {
+                        Some(damage) => DbState::maintenance(damage),
+                        None => DbState::Loaded,
+                    }
                 }
                 Err(LoadFailure::NeedsModel(repo)) => DbState::needs_model(repo),
                 Err(LoadFailure::Failed(reason)) => DbState::failed(reason),
@@ -783,7 +878,15 @@ impl Loader {
         if let Some(db) = leftover {
             let _ = self.close(db);
         }
+        self.record_open();
         match &state_now {
+            DbState::Maintenance { damage } => tracing::error!(
+                target: "graphersal_server",
+                "database '{key}' is loaded READ-ONLY in maintenance mode: its Store is damaged \
+                 ({}); repair it into a new database (graphersal-server db repair {key}) or \
+                 restore a backup (graphersal-server db backups {key})",
+                damage.lines().next().unwrap_or_default()
+            ),
             DbState::Loaded => {
                 tracing::info!(
                     target: "graphersal_server",

@@ -224,6 +224,11 @@ export const adminRequest = Object.freeze({
   runs: (name) => ({ method: 'GET', path: name ? `api/admin/databases/${seg(name)}/runs` : 'api/admin/runs' }),
   server: () => ({ method: 'GET', path: 'api/admin/server' }),
   cancelRun: (name, id) => ({ method: 'POST', path: `api/admin/databases/${seg(name)}/runs/cancel`, body: { id } }),
+  verify: (name) => ({ method: 'POST', path: `api/admin/databases/${seg(name)}/verify` }),
+  verifyAll: () => ({ method: 'POST', path: 'api/admin/verify' }),
+  repair: (name, newName) => ({ method: 'POST', path: `api/admin/databases/${seg(name)}/repair`, body: newName ? { name: newName } : {} }),
+  swap: (name, withName) => ({ method: 'POST', path: `api/admin/databases/${seg(name)}/swap`, body: { with: withName, confirm: true } }),
+  recovery: () => ({ method: 'GET', path: 'api/admin/recovery' }),
 });
 
 /** A model's repository (`owner/name`: its slash stays part of the path) or blob hash as path segments. */
@@ -388,25 +393,21 @@ export function baseNames(rows) {
 export function rowActions(row, { busy = false, aliasTargets = [] } = {}) {
   const off = (title) => ({ enabled: false, title });
   const on = (title) => ({ enabled: true, title });
-  if (row.aliasOf) {
-    const why = `An alias of ${row.aliasOf}: change it under Aliases`;
-    return { load: off(why), unload: off(why), clone: off(why), delete: off(why), readOnly: off(why), autoLoad: off(why) };
-  }
-  if (busy) {
-    const why = 'Wait until the running action ends';
-    return { load: off(why), unload: off(why), clone: off(why), delete: off(why), readOnly: off(why), autoLoad: off(why) };
-  }
+  const all = (why) => ({ load: off(why), unload: off(why), clone: off(why), delete: off(why), readOnly: off(why), autoLoad: off(why) });
+  if (row.aliasOf) return all(`An alias of ${row.aliasOf}: change it under Aliases`);
+  if (busy) return all('Wait until the running action ends');
   const configless = !row.kind; // a failed database whose database.toml cannot be read
   const s = row.state;
+  const open = isOpenState(s);
   return {
-    load: s === 'loaded' || s === 'loading'
-      ? off(s === 'loaded' ? 'Already loaded' : 'Loading…')
+    load: open || s === 'loading'
+      ? off(open ? 'Already loaded' : 'Loading…')
       : configless ? off('Its configuration cannot be read') : on('Load it into memory and serve it'),
-    unload: s === 'loaded' ? on('Close it; running requests get up to 30 s') : off('Not loaded'),
+    unload: open ? on('Close it; running requests get up to 30 s') : off('Not loaded'),
     clone: configless || s === 'failed'
       ? off('A failed database cannot be cloned')
       : on('Copy its latest state into a new database'),
-    delete: s === 'loaded' || s === 'loading'
+    delete: open || s === 'loading'
       ? off('Unload it first')
       : aliasTargets.includes(row.name)
         ? off('An alias names it: remove or flip the alias first')
@@ -417,6 +418,161 @@ export function rowActions(row, { busy = false, aliasTargets = [] } = {}) {
         ? off('A base database is always read-only')
         : on(row.readOnly ? 'Allow writes again' : 'Refuse every write'),
     autoLoad: configless ? off('Its configuration cannot be read') : on('Load it when the server starts'),
+  };
+}
+
+// ------------------------------------------------------------------ verify, repair, swap (B-CRASH)
+
+/** Whether a database state is loaded and served: `loaded`, or `maintenance` (loaded read-only, damaged). */
+export function isOpenState(state) {
+  return state === 'loaded' || state === 'maintenance';
+}
+
+/** The tooltip of "Verify". */
+export const VERIFY_HELP = 'Check every checksum, snapshot and journal record of its Store (a loaded database: its open Store; damage found makes it read-only)';
+
+/** What a repair does, for its dialog. */
+export const REPAIR_HELP = 'A repair builds a NEW database from the damaged one: damaged parts are rebuilt from older snapshots and the journal, and what cannot be rebuilt is reported as lost. The damaged database is not changed. Afterwards the copy can take its name (the damaged one moves to the trash/ directory), or both are kept.';
+
+/** The hint after a crash or damage: a backup is the other way back. */
+export const RESTORE_HINT = 'Or restore a backup instead: Backups… on its row.';
+
+/**
+ * The damage actions of a row (round 3 B-CRASH): `{verify, repair}`, each `{enabled, title}`.
+ * Verify applies to every database but a loading one (a failed one's files are verified);
+ * repair: `repairAction`.
+ */
+export function damageActions(row, { busy = false } = {}) {
+  const off = (title) => ({ enabled: false, title });
+  if (row.aliasOf) {
+    const why = `An alias of ${row.aliasOf}: use that database's row`;
+    return { verify: off(why), repair: off(why) };
+  }
+  if (busy) {
+    const why = 'Wait until the running action ends';
+    return { verify: off(why), repair: off(why) };
+  }
+  return {
+    verify: row.state === 'loading' ? off('Loading…: verify it once loaded') : { enabled: true, title: VERIFY_HELP },
+    repair: repairAction(row),
+  };
+}
+
+/**
+ * Whether "Repair…" applies to a row: `{enabled, title}`. A plain normal database with a
+ * readable configuration (the engine repairs plain Stores; a layer or base is restored from a
+ * backup instead).
+ */
+export function repairAction(row, { busy = false } = {}) {
+  const off = (title) => ({ enabled: false, title });
+  if (row.aliasOf) return off(`An alias of ${row.aliasOf}: use that database's row`);
+  if (busy) return off('Wait until the running action ends');
+  if (!row.kind) return off('Its configuration cannot be read');
+  if (row.kind === 'layer') return off('A layer cannot be repaired: restore a backup of it');
+  if (row.role === 'base') return off('A base cannot be repaired: restore a backup of it');
+  if (row.state === 'loading') return off('Loading…: repair it once loaded');
+  return { enabled: true, title: row.state === 'maintenance' ? 'Its Store is damaged: build a repaired copy as a new database' : 'Build a repaired copy as a new database (the database is not changed)' };
+}
+
+/** The default name of a repaired copy: `<name>-repaired`, cut to a valid new name like `restoredName`. */
+export function repairedName(name) {
+  const suffix = '-repaired';
+  const n = String(name || '').toLowerCase().replace(/[^a-z0-9._-]+/g, '-').replace(/\.{2,}/g, '.')
+    .slice(0, NAME_MAX - suffix.length).replace(/[._-]+$/, '');
+  return n ? `${n}${suffix}` : 'repaired';
+}
+
+/** Whether a verify result (`POST .../verify`, or one of `POST verify`) reports damage. */
+export function verifyDamaged(result) {
+  return !result || result.ok !== true || result.state === 'maintenance' || typeof result.error === 'string';
+}
+
+/** One verify result in words (a notice). */
+export function verifyText(result) {
+  if (!result || typeof result !== 'object') return 'The verify answered nothing.';
+  const name = result.database || '';
+  if (typeof result.error === 'string') return `"${name}": the verify failed: ${result.error}`;
+  const problems = Array.isArray(result.problems) ? result.problems : [];
+  const n = (k) => (typeof result[k] === 'number' ? result[k] : 0);
+  const checked = `${counted(n('snapshotsChecked'), 'snapshot')}, ${counted(n('recordsChecked'), 'journal record')}`;
+  if (result.ok === true && result.state !== 'maintenance') return `"${name}" verifies: no problem found (${checked}).`;
+  if (result.ok === true) return `"${name}" is in maintenance (read-only): its Store opened with damage.`;
+  const first = problems[0] ? `; first: ${problems[0].path}: ${problems[0].reason}` : '';
+  return `"${name}" is DAMAGED: ${counted(problems.length, 'problem')}${first}.`;
+}
+
+/** The problems of a verify result as lines (`path at byte N: reason`). */
+export function problemLines(result) {
+  const problems = result && Array.isArray(result.problems) ? result.problems : [];
+  return problems.map((p) => `${p.path}${typeof p.offset === 'number' ? ` at byte ${p.offset}` : ''}: ${p.reason}`);
+}
+
+/** The text of `POST verify` (every database): `{tone, text, lines}`. */
+export function verifyAllText(answer) {
+  const results = answer && Array.isArray(answer.results) ? answer.results : [];
+  const damaged = results.filter(verifyDamaged);
+  if (!results.length) return { tone: 'ok', text: 'No databases to verify.', lines: [] };
+  if (!damaged.length) return { tone: 'ok', text: `Every database verifies (${results.length}).`, lines: [] };
+  return {
+    tone: 'error',
+    text: `${counted(damaged.length, 'database')} of ${results.length} damaged or not verifiable: ${damaged.map((r) => r.database).join(', ')}. Repair one into a new database, or restore a backup.`,
+    lines: damaged.map(verifyText),
+  };
+}
+
+/**
+ * The summary of a repair answer (`POST .../repair`): `{tone, text, lines}`; `lines` lists what
+ * was rebuilt, lost and not carried.
+ */
+export function repairSummary(answer) {
+  const r = answer && answer.repair && typeof answer.repair === 'object' ? answer.repair : {};
+  const lines = [];
+  for (const x of Array.isArray(r.repaired) ? r.repaired : []) lines.push(`rebuilt: ${x}`);
+  for (const c of Array.isArray(r.lostCommits) ? r.lostCommits : []) {
+    lines.push(c && typeof c.last === 'number' ? `lost: commits ${c.first}..${c.last}` : `lost: commits from ${c && c.first} on`);
+  }
+  for (const x of Array.isArray(r.lostRanges) ? r.lostRanges : []) lines.push(`lost: ${x}`);
+  for (const x of Array.isArray(r.lostElements) ? r.lostElements : []) lines.push(`lost: ${x}`);
+  if (typeof r.divergedCount === 'number' && r.divergedCount > 0) lines.push(`diverged: ${counted(r.divergedCount, 'element')}, check them by hand`);
+  for (const x of Array.isArray(r.modelsNotCarried) ? r.modelsNotCarried : []) lines.push(`model not carried: ${x}`);
+  if (typeof r.notCarried === 'string' && r.notCarried) lines.push(`never carried by a repair: ${r.notCarried}`);
+  const lossless = r.lossless === true;
+  return {
+    tone: lossless ? 'ok' : 'warn',
+    text: `Repaired "${answer && answer.repairedFrom}" into the new database "${answer && answer.name}" at commit ${typeof r.commitSeq === 'number' ? r.commitSeq : '?'}: ${lossless ? 'lossless, verified' : 'DATA LOST or diverged (below), verified'}.`,
+    lines,
+  };
+}
+
+/**
+ * The rows of the last unclean shutdown (`GET api/admin/recovery` `uncleanShutdown`, or `GET
+ * api/admin/server`'s): `{when, pid, done, known, rows: [{name, outcome, tone, text, damaged}]}`,
+ * or null when there was none.
+ */
+export function uncleanRows(report) {
+  if (!report || typeof report !== 'object' || !Array.isArray(report.databases)) return null;
+  const tones = { ok: 'ok', damaged: 'danger', failed: 'danger', 'needs-model': 'warn', missing: 'warn', pending: 'accent', checking: 'accent' };
+  const rows = report.databases
+    .filter((d) => d && typeof d.name === 'string')
+    .map((d) => {
+      const parts = [];
+      const rec = d.recovery && typeof d.recovery === 'object' ? d.recovery : null;
+      if (rec) {
+        parts.push(`${rec.cleanClose ? 'closed cleanly' : 'not closed cleanly'}; ${counted(rec.commitsReplayed || 0, 'journal commit')} replayed, at commit ${rec.commitSeq}`);
+        if (rec.tornTail) parts.push(`torn tail cut (${rec.tornTail})`);
+      }
+      const v = d.verify && typeof d.verify === 'object' ? d.verify : null;
+      if (v) parts.push(v.ok ? 'verify ok' : `verify found ${counted(Array.isArray(v.problems) ? v.problems.length : 0, 'problem')}`);
+      if (typeof d.message === 'string' && d.message) parts.push(d.message);
+      const outcome = typeof d.outcome === 'string' ? d.outcome : '';
+      return { name: d.name, outcome, tone: tones[outcome] || '', text: parts.join('; '), damaged: outcome === 'damaged' };
+    });
+  return {
+    when: typeof report.detectedAtMs === 'number' ? new Date(report.detectedAtMs).toISOString().replace(/\.\d{3}Z$/, 'Z') : '',
+    pid: typeof report.previousPid === 'number' ? report.previousPid : null,
+    done: report.done === true,
+    known: report.databasesKnown !== false,
+    rows,
   };
 }
 
@@ -442,6 +598,8 @@ export function confirmText(action, subject, extra = '') {
       return `Promote "${subject}" to a base? ${BASE_IS_FROZEN}\n\n${BASE_HELP}\n\n${PROMOTE_HELP}`;
     case 'cancelRun':
       return `Stop run ${extra} of "${subject}"? Its query ends at its next check and its changes roll back; its client gets an error.`;
+    case 'swap':
+      return `Let "${extra}" take the name "${subject}"? The current "${subject}" moves to the server's trash/ directory (recoverable by hand only) and the name "${extra}" goes away; the grants, aliases and settings of "${subject}" stay. Both are unloaded first; "${subject}" is loaded again if it was loaded.`;
     default:
       return null;
   }
@@ -522,6 +680,8 @@ function baseOutcomeText(action, subject, answer) {
       ? `Run ${answer.id} of "${subject}" is stopping.`
       : `Run ${answer.id} of "${subject}" had already ended.`;
     case 'promote': return `"${answer.name || subject}" is now a base (read-only, frozen); create layers over it with "New database…".`;
+    case 'verify': return verifyText(answer);
+    case 'swap': return `"${answer.swappedWith || ''}" took the name "${answer.name || subject}"; the old one moved to ${answer.trash || "the server's trash/ directory"}${answer.reloaded ? '; loaded again' : ''}.`;
     default: return '';
   }
 }
@@ -624,7 +784,7 @@ export function backupRows(answer) {
  */
 export function restoreOverAction(row) {
   if (!row) return { enabled: true, title: 'The database no longer exists: the backup becomes a new database of this name' };
-  if (row.state === 'loaded' || row.state === 'loading') return { enabled: false, title: 'Unload it first (or restore into a new name)' };
+  if (isOpenState(row.state) || row.state === 'loading') return { enabled: false, title: 'Unload it first (or restore into a new name)' };
   return { enabled: true, title: "Replace it; its current directory moves to the server's trash/ directory" };
 }
 
@@ -974,7 +1134,7 @@ export function needsModelHint(row) {
  */
 export function poolText(row) {
   if (!row || !row.pooled) return row ? row.stateText : '';
-  if (row.state === 'loaded') return row.stateText;
+  if (isOpenState(row.state)) return row.stateText;
   return row.pooledBy && row.pooledBy.length ? `in pool (layers: ${row.pooledBy.join(', ')})` : 'in pool';
 }
 
@@ -1049,7 +1209,7 @@ export function promoteAction(row, { busy = false } = {}) {
   if (row.state === 'failed' || !row.kind) return off('A failed database cannot be promoted');
   if (row.kind === 'layer') return off('A layer cannot become a base: export it with "materialize" and import the file as a base');
   if (row.role === 'base') return off('Already a base');
-  if (row.state === 'loaded') return off('Unload it first: only an unloaded database can be promoted');
+  if (isOpenState(row.state)) return off('Unload it first: only an unloaded database can be promoted');
   if (row.state === 'loading') return off('Loading…: unload it once loaded, then promote it');
   if (row.state === 'needs-model') return off('Add its model first: a base cannot get a model later');
   if (row.state !== 'unloaded') return off(`Only an unloaded database can be promoted (it is ${row.state})`);

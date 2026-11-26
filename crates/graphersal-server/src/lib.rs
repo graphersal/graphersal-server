@@ -55,6 +55,7 @@ pub mod models;
 mod mounts;
 pub mod names;
 pub mod ops;
+pub mod recovery;
 pub mod registry;
 pub mod revision;
 mod router;

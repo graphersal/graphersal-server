@@ -123,7 +123,7 @@ pub(crate) fn not_loaded_text(entry: &DatabaseEntry) -> (String, String) {
             format!("database '{name}' is not loaded: it needs the embedding model '{repo}'"),
             format!("add the model '{repo}' to the server, then load it: {load}"),
         ),
-        DbState::Unloaded | DbState::Loaded => (
+        DbState::Unloaded | DbState::Loaded | DbState::Maintenance { .. } => (
             format!("database '{name}' is not loaded"),
             format!("load it: {load}"),
         ),

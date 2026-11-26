@@ -876,4 +876,39 @@ CODE=0
 if grep -q "panicked" "$LOG"; then fail "the log shows a panic"; fi
 ok
 
+STEP="kill -9 and restart: the unclean-shutdown check, verify (B-CRASH)"
+"$BIN" db create crashy --dir "$DIR" >/dev/null 2>&1 || fail "db create crashy"
+"$BIN" start --dir "$DIR" --listen 127.0.0.1:0 >"$WORK/start2.out" 2>"$WORK/start2.err" ||
+  fail "start: $(cat "$WORK/start2.err")"
+SERVER_PID=$(sed -n 's/^pid = //p' "$DIR/server.run")
+"$BIN" db load crashy --dir "$DIR" >/dev/null 2>"$WORK/load.err" || fail "db load: $(cat "$WORK/load.err")"
+grep -q '"crashy"' "$DIR/server.open" || fail "server.open does not name crashy: $(cat "$DIR/server.open")"
+kill -9 "$SERVER_PID"
+for _ in $(seq 1 100); do kill -0 "$SERVER_PID" 2>/dev/null || break; sleep 0.1; done
+SERVER_PID=""
+[ -f "$DIR/server.run" ] || fail "a killed server should leave server.run behind"
+CODE=0
+"$BIN" status --dir "$DIR" >"$WORK/status.out" 2>&1 || CODE=$?
+[ "$CODE" = 3 ] || fail "status after the kill: exit code $CODE"
+grep -q 'Last unclean shutdown' "$WORK/status.out" || fail "status: $(cat "$WORK/status.out")"
+"$BIN" start --dir "$DIR" --listen 127.0.0.1:0 >"$WORK/start3.out" 2>"$WORK/start3.err" ||
+  fail "start after the kill: $(cat "$WORK/start3.err")"
+SERVER_PID=$(sed -n 's/^pid = //p' "$DIR/server.run")
+grep -q 'UNCLEAN SHUTDOWN' "$WORK/start3.err" || fail "no unclean-shutdown notice: $(cat "$WORK/start3.err")"
+DONE=""
+for _ in $(seq 1 300); do
+  "$BIN" status --dir "$DIR" --json >"$WORK/status.json" 2>/dev/null || true
+  DONE=$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); u=(d.get("server") or {}).get("uncleanShutdown") or {}; print("yes" if u.get("done") else "")' "$WORK/status.json")
+  [ -n "$DONE" ] && break
+  sleep 0.2
+done
+[ -n "$DONE" ] || fail "the unclean-shutdown check did not end: $(cat "$WORK/status.json")"
+OUTCOME=$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d["server"]["uncleanShutdown"]["databases"][0]["outcome"])' "$WORK/status.json")
+[ "$OUTCOME" = ok ] || fail "crashy was not checked ok: $(cat "$WORK/status.json")"
+"$BIN" db verify --all --dir "$DIR" >"$WORK/verify.out" 2>&1 || fail "db verify --all: $(cat "$WORK/verify.out")"
+"$BIN" stop --dir "$DIR" >/dev/null 2>&1 || fail "stop"
+SERVER_PID=""
+[ ! -f "$DIR/server.open" ] || fail "a clean stop should remove server.open"
+ok
+
 echo "smoke: all steps passed"

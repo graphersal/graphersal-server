@@ -16,7 +16,6 @@ use graphersal_serve::{Context, RunEntry, ServeError};
 
 use super::Admin;
 use crate::error::ServerError;
-use crate::registry::DbState;
 
 /// One queued or running run of a loaded database ([`Admin::runs`]).
 #[derive(Debug, Clone)]
@@ -137,7 +136,7 @@ impl Admin {
     pub(crate) fn is_loaded(&self, name: &str) -> bool {
         self.registry
             .get(name)
-            .is_ok_and(|entry| entry.state == DbState::Loaded)
+            .is_ok_and(|entry| entry.state.is_open())
     }
 }
 

@@ -5,7 +5,8 @@
 //
 // `GET api/admin/databases` (docs/admin-api.md):
 //   `{"databases": [{"name", "state", "kind", "role", "readOnly", "autoLoad", "description",
-//   "base"?, "created"?, "aliasOf"?, "reason"?, "model"?}], "aliases": {alias: database},
+//   "base"?, "created"?, "aliasOf"?, "reason"?, "model"?, "damage"? (state `maintenance`: the
+//   damage report)}], "aliases": {alias: database},
 //   "aliasesRevision", "problems": [text]}` with `state` one of `DATABASE_STATES`; each entry
 //   also carries its settings' `revision`. Checked by `databaseRows`; a
 //   malformed entry is skipped and counted, never shown half. The optional byte counts
@@ -15,7 +16,7 @@
 //   `pooled` + `pooledBy` (a base held in the shared pool by its loaded layers) and
 //   `linkWarning` (model blobs copied, not hard-linked) are optional too.
 
-import { aliasRows, bytesText, exactBytes } from './admin-api.js';
+import { aliasRows, bytesText, exactBytes, isOpenState } from './admin-api.js';
 
 /** The database states of the server, in the words the list shows. */
 export const DATABASE_STATES = Object.freeze({
@@ -24,6 +25,7 @@ export const DATABASE_STATES = Object.freeze({
   loaded: 'loaded',
   'needs-model': 'needs a model',
   failed: 'failed',
+  maintenance: 'maintenance (read-only, damaged)',
 });
 
 /** The badge tone (CSS class `badge <tone>`) of each state; unknown states get none. */
@@ -33,6 +35,7 @@ export const STATE_TONES = Object.freeze({
   loaded: 'ok',
   'needs-model': 'warn',
   failed: 'danger',
+  maintenance: 'danger',
 });
 
 /** How often the list reloads while a database is loading (milliseconds). */
@@ -79,6 +82,7 @@ export function databaseRows(answer) {
       created: typeof d.created === 'string' ? d.created : '',
       aliasOf: typeof d.aliasOf === 'string' && d.aliasOf ? d.aliasOf : null,
       reason: typeof d.reason === 'string' ? d.reason : '',
+      damage: typeof d.damage === 'string' ? d.damage : '',
       model: typeof d.model === 'string' ? d.model : '',
       sizeBytes: byteCount(d.sizeBytes),
       memoryBytes: byteCount(d.memoryBytes),
@@ -106,7 +110,7 @@ function byteCount(n) {
  */
 export const SIZE_COLUMNS = Object.freeze({
   size: Object.freeze({ type: 'number', value: (r) => r.sizeBytes }),
-  memory: Object.freeze({ type: 'number', value: (r) => (r.state === 'loaded' ? r.memoryBytes : null) }),
+  memory: Object.freeze({ type: 'number', value: (r) => (isOpenState(r.state) ? r.memoryBytes : null) }),
 });
 
 /** The tooltip of a row's "On disk" cell: the exact bytes and what they count. */
@@ -117,7 +121,7 @@ export function diskTitle(row) {
 
 /** The "In memory" cell of a row: '' when it is not loaded (or not measured). */
 export function memoryText(row) {
-  return row && row.state === 'loaded' && row.memoryBytes !== null ? bytesText(row.memoryBytes) : '';
+  return row && isOpenState(row.state) && row.memoryBytes !== null ? bytesText(row.memoryBytes) : '';
 }
 
 /** The tooltip of a row's "In memory" cell: the exact bytes; a layer adds its shared base. */

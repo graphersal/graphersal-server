@@ -60,7 +60,9 @@ pub(crate) use render::shell_word;
 pub use render::{
     command_error_text, error_text, failed, init_text, render, render_outcome, usage_error_text,
 };
-pub use service::{started_note, started_output, status_json, status_text, stop_text};
+pub use service::{
+    started_note, started_output, status_json, status_json_of, status_text, stop_text,
+};
 pub use start::{address_line, start_block, stopped_text, stopping_text};
 
 /// How long the console waits for a load to end (`db load` without `--no-wait`).
@@ -140,6 +142,28 @@ pub enum DbCommand {
         name: String,
         /// What is set.
         setting: DbSetting,
+    },
+    /// `db verify NAME` / `db verify --all` (`name` `None`): the engine's scrub of the
+    /// database's Store, or of every database's (round 3 B-CRASH).
+    Verify {
+        /// The database (`None`: every database).
+        name: Option<String>,
+    },
+    /// `db repair NAME [--name NEW]`: the engine's repair of NAME into the NEW database
+    /// (default `NAME-repaired`; never in place).
+    Repair {
+        /// The damaged database.
+        name: String,
+        /// The new database's name (`None`: `NAME-repaired`).
+        target: Option<String>,
+    },
+    /// `db swap NAME WITH --yes`: the database WITH (a repaired copy) takes NAME's name; the
+    /// old NAME moves to `trash/`.
+    Swap {
+        /// The name kept.
+        name: String,
+        /// The database that takes it.
+        with: String,
     },
     /// `db alias set ALIAS TARGET`.
     AliasSet {
@@ -398,6 +422,28 @@ impl DbCommand {
                     Some(body),
                 )
             }
+            DbCommand::Verify { name: Some(name) } => (
+                Method::Post,
+                format!("databases/{}/verify", segment(name)),
+                None,
+            ),
+            DbCommand::Verify { name: None } => (Method::Post, "verify".into(), None),
+            DbCommand::Repair { name, target } => {
+                let mut body = Map::new();
+                if let Some(target) = target {
+                    body.insert("name".into(), json!(target));
+                }
+                (
+                    Method::Post,
+                    format!("databases/{}/repair", segment(name)),
+                    Some(Value::Object(body)),
+                )
+            }
+            DbCommand::Swap { name, with } => (
+                Method::Post,
+                format!("databases/{}/swap", segment(name)),
+                Some(json!({ "with": with, "confirm": true })),
+            ),
             DbCommand::AliasSet { alias, target } => (
                 Method::Put,
                 format!("aliases/{alias}"),

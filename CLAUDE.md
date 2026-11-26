@@ -378,6 +378,60 @@ from published files). When this file disagrees with the code, the code wins: sa
   database)). Every admin change writes its file first
   (atomically), then memory, under the registry's write lock. `serve::start` scans after the
   bind and before `ready()` (`/readyz` 503 meanwhile); `Running::registry()`.
+- `recovery` (round 3 B-CRASH, public: after a forced kill): `server.open` = `OpenFile`
+  (`pid`, `started_at_ms`, `databases`; `write_atomic` WITH the directory fsync) written by
+  `OpenRecord` (a leaf mutex taken BEFORE the loader's state is read: `Loader::record_open`,
+  called after a load start, a load end, a thread-spawn failure and a CLEAN unload; set by
+  `serve` after `router.ready()` and before `auto_load` (its fsync must not delay the probes),
+  `Loader::set_open_record` writes the whole open set; `records_open()`), removed by
+  `Running::shutdown` only when `Loader::shutdown` was Ok and a record was set (a start that
+  fails before the scan keeps the evidence); `daemon::stop` removes a stale `server.run`, never
+  `server.open`. `detect(dir)` (lock held, before this server writes `server.run`) =
+  `Previous {pid, started_at_ms, url, databases: Option (None = no server.open: the auto_load
+  databases are checked, `names_to_check`), run_file_left}`. `start_check` (in `serve::start`
+  after `auto_load`): `Recovery::begin` (`recovery.json` = `UncleanShutdown {detectedAtMs,
+  previousPid, ..., databasesKnown, databases: [DatabaseCheck {name, outcome: CheckOutcome
+  (pending|checking|ok|damaged|failed|needs-model|missing), state, recovery: RecoveryFacts (the
+  engine's `OpenReport`), verify: VerifyFacts, damage, message, checkedAtMs}], done}`, camelCase
+  JSON), log warn, audit `UncleanShutdown`, `loader.load` of every name (whether or not
+  auto-load), then ONE thread `graphersal-server-recovery`: per name `loader.wait` (1 h),
+  `Loader::open_report_of`, `Admin::verify`, log + audit `DatabaseChecked` + `Recovery::update`;
+  `finish`. `Recovery` (leaf mutex) lives on the loader (`set_recovery`/`recovery()`;
+  `Admin::recovery()`), offline `read_report(dir)`. Shown by: start block (`console/start.rs`
+  warning row `UNCLEAN SHUTDOWN` + section "Unclean shutdown", `Running::unclean_shutdown()`),
+  `status` ("Last unclean shutdown": `console/service.rs` `unclean_section`; stopped = `detect`
+  as "pending" + `recovery.json`; `status_json_of` adds `uncleanShutdown`/`uncleanShutdownPending`
+  for a stopped server), `GET /api/admin/server` (`uncleanShutdown`, `databases.maintenance`),
+  `GET /api/admin/recovery`, the settings view's `recovery`, `db info` ("Damage and
+  recovery"), the Databases tab's box. `DbState::Maintenance {damage}` (`is_open()` = loaded or
+  maintenance, `is_busy()` = + loading; every former `Loaded` check uses them): set by
+  `Loader::run_load` when the engine opened the Store in maintenance mode (`LoadedDb::damage`
+  = `Store::maintenance()` text; layer stores too) and by `Admin::verify` when the open Store's
+  verify froze it (`damage_found` non-empty + policy `maintenance`); entry JSON `damage` +
+  `reason`. Admin side `ops_damage.rs`: `Admin::verify` (open store: context held,
+  `store.verify()`; else `Store::verify_dir`), `verify_all`, `repair(name, new)` (plain normal
+  only; `prepare_tmp` build, `store.repair_to` / `Store::repair_dir`, `adopt_build`,
+  `commit_new`, audit `DatabaseRepaired`; default name `free_repair_name` = `<n>-repaired`,
+  `-2`..), `swap(name, with)` (unload both, `Loader::while_all_idle`, `Registry::swap_in` in
+  `admin.rs`: old dir -> trash, `with` dir renamed, old `database.toml` bytes put back, `with`
+  entry removed, `drop_grants_on(with)` under the write lock; reload when it was loaded; audit
+  `DatabaseSwapped`), `repair_json`. Routes `admin_api_damage.rs` (`POST databases/<n>/verify`,
+  `POST verify`, `POST databases/<n>/repair {"name"?}` (empty body allowed), `POST
+  databases/<n>/swap {"with","confirm":true}` (400 without confirm), `GET recovery`;
+  `damage_help`, `unclean_json`); console `db verify NAME|--all` (exit 1 on damage:
+  `console::failed`), `db repair NAME [--name NEW]`, `db swap NAME WITH --yes` (usage error
+  without `--yes`); help mapping in `console/help.rs`. UI: `admin-api.js` `isOpenState`,
+  `damageActions`/`repairAction` (NOT in `rowActions`), `repairedName`, `verifyText`,
+  `verifyAllText`, `problemLines`, `repairSummary`, `uncleanRows`, `adminRequest.verify|
+  verifyAll|repair|swap|recovery`, `confirmText('swap')`; `databases.js` state `maintenance`
+  (tone danger, row `damage`); `databases-tab.js` (Verify, Verify all, Repair… dialog with
+  the report then "Let it take the name…"/"Keep both", the unclean box); `settings-api.js`
+  `recoveryView` + "Damage and recovery" in `settings-tab.js`. Tests: `recovery::tests`,
+  `ops_damage_tests.rs` (a snapshot segment damaged by hand: maintenance, repair, swap; open
+  set), `server_tests.rs` `a_server_killed_mid_writes_is_checked_at_the_next_start` (unix,
+  SIGKILL of a child mid-writes) and `a_damaged_database_is_in_maintenance_and_is_repaired_and_swapped`,
+  `ui/tests/recovery.test.mjs`. Docs: `docs/server-dir.md` "`server.open` and
+  `recovery.json`" and "After a crash", `docs/admin-api.md` "Verify, repair and swap".
 - `model_archive` (private, V18): `is_tar` (ustar magic + checksum) and `unpack(archive, dir)`,
   the safe unpack of a model directory's tar (rules in its module docs; tests beside it, their
   `entry`/`archive`/`model_tar`/`gzip` builders reused by `models_tests.rs`); `is_gzip` (magic
@@ -481,7 +535,7 @@ from published files). When this file disagrees with the code, the code wins: sa
   `large` samples; `test_support::skip_on_ci`).
 - `src/main.rs`: the hand-parsed command line (no parser crate, like graphersal's CLI): `init`,
   `serve`, `db list|create|delete|clone|load|unload|promote|read-only|auto-load|info|set|alias|backup|
-  backups|restore|export ... --dir DIR [--json]` (`db set NAME limit KEY --clear`: the only
+  backups|restore|verify|repair|swap|export ... --dir DIR [--json]` (`db swap` needs `--yes`) (`db set NAME limit KEY --clear`: the only
   `--clear`), `import DIR SOURCE --name N [--base B] [--format F]
   [--description D] [--role normal|base] [--json]` (or `--inbox FILE` instead of SOURCE; `import DIR
   --list`), `models list|add SOURCE [--repo R] [--license L]|remove REPO
@@ -583,7 +637,9 @@ WD_TIMEOUT=600 ../graphersal/ai/bench/watchdog.sh scripts/smoke.sh   # end to en
 - Concurrent changes (B-CONCUR): a writer of a server file takes that file's lock and holds it
   across read, change and write; memory changes only after the write succeeded; never take a
   lock earlier in the documented order while holding a later one (loader state, loader flips,
-  registry, access, session tables; models/naming/MCP settings locks are leaves). A new runtime writer goes
+  registry, access, session tables; models/naming/MCP settings/`server.open` writer/recovery
+  report locks are leaves; the `server.open` writer reads the loader's state inside its own
+  lock, so it is never taken while the loader's state lock is held). A new runtime writer goes
   into the inventory of `docs/server-dir.md`; a new editable shared object gets a revision.
 - Tokens and session ids: only hashes at rest, never logged (`Secret`'s `Debug` is redacted;
   audit events show `token_last4` only).

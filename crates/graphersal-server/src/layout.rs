@@ -37,6 +37,12 @@ pub const CONFIG_FILE: &str = "server.toml";
 pub const LOCK_FILE: &str = "server.lock";
 /// The run file's name.
 pub const RUN_FILE: &str = "server.run";
+/// The open-databases file's name (round 3 B-CRASH: the databases the running server has
+/// loaded or is loading, rewritten on every load and unload, removed at a clean stop; one left
+/// behind marks an unclean shutdown: [`crate::recovery`]).
+pub const OPEN_FILE: &str = "server.open";
+/// The file of the last unclean shutdown's check (round 3 B-CRASH: [`crate::recovery`]).
+pub const RECOVERY_FILE: &str = "recovery.json";
 /// The alias file's name.
 pub const ALIASES_FILE: &str = "aliases.toml";
 /// The access file's name (users, token hashes, grants: [`crate::access`]).
@@ -227,6 +233,16 @@ impl ServerDir {
     /// `server.run`.
     pub fn run_path(&self) -> PathBuf {
         self.root.join(RUN_FILE)
+    }
+
+    /// `server.open` ([`OPEN_FILE`]).
+    pub fn open_path(&self) -> PathBuf {
+        self.root.join(OPEN_FILE)
+    }
+
+    /// `recovery.json` ([`RECOVERY_FILE`]).
+    pub fn recovery_path(&self) -> PathBuf {
+        self.root.join(RECOVERY_FILE)
     }
 
     /// `aliases.toml`.
@@ -481,6 +497,8 @@ fn write_atomic_file(path: &Path, bytes: &[u8], private: bool) -> Result<(), Ser
 const ATOMIC_FILES: &[&str] = &[
     CONFIG_FILE,
     RUN_FILE,
+    OPEN_FILE,
+    RECOVERY_FILE,
     ALIASES_FILE,
     ACCESS_FILE,
     crate::database::DATABASE_FILE,

@@ -16,6 +16,8 @@ another user or open to group or others ([`access.md`](access.md#the-security-mo
   access.toml          users (token hashes), roles and grants (mode 0600)
   server.lock          one running server per directory (an OS file lock)
   server.run           the running server's address and operator token (mode 0600, only while it runs)
+  server.open          the databases the running server has open (removed at a clean stop)
+  recovery.json        the last unclean shutdown and its check of each database
   aliases.toml         alias -> database
   mcp.toml             the MCP switches (written by the server; missing = the defaults)
   databases/
@@ -203,6 +205,75 @@ the next server overwrites it).
 `GET /api/admin/server`, the uptime from `started_at_ms` when the server does not answer); a
 `server.run` without the lock is reported as stale. `graphersal-server stop` removes a stale
 one (holding the lock meanwhile) and `start` refuses while the lock is held.
+
+## `server.open` and `recovery.json`
+
+`server.open` (round 3) names the databases the running server has open: rewritten
+atomically (with the directory's `fsync`) when a load starts, when it ends and after an unload,
+and removed at a clean stop (after every Store closed cleanly). A database whose Store could not
+be closed cleanly at an unload stays listed.
+
+```toml
+pid = 12345
+started_at_ms = 1764151975000
+databases = ["acme", "orders"]
+```
+
+A `server.open` (or a stale `server.run`) found by the next `serve` (with the lock held) means
+the last server did not stop cleanly: see [After a crash](#after-a-crash). `stop` on a
+stopped directory removes a stale `server.run`, never `server.open`, so the next start still
+checks those databases.
+
+`recovery.json` is the last unclean shutdown and its check, written by the server (JSON, the
+shape of `uncleanShutdown` in [`admin-api.md`](admin-api.md#server)): when it was found, the
+pid of the server that did not stop, whether its open set was known, and per database the
+outcome (`pending`, `checking`, `ok`, `damaged`, `failed`, `needs-model`, `missing`), the state
+afterwards, what the open of its Store did (clean close, journal commits replayed, the position,
+a torn tail cut, ...), what the verify found and the damage report. It stays until the next
+unclean shutdown replaces it; deleting it while the server is stopped only forgets the report.
+
+## After a crash
+
+A server killed by force (`kill -9`, an OOM kill, a power loss, a crash) leaves its databases'
+Stores open. Nothing has to be repaired by hand first:
+
+1. **The lock.** The OS releases `server.lock` with the process; `server.run` (and
+   `server.open`) stay behind. `status` reports the stale `server.run` and, under "Last
+   unclean shutdown", what the next start will check.
+2. **The journal.** Every commit a client got an answer for is in its database's WAL; the next
+   open of the Store replays it onto the last snapshot and cuts an interrupted last write (a
+   commit in flight at the kill may or may not be there; it was never acknowledged).
+3. **The check at the next start.** `serve` (or `start`) finds the stale files, says so in the
+   start block (`UNCLEAN SHUTDOWN` and an "Unclean shutdown" section) and the log, records an
+   audit event, and checks every database of `server.open` on a background thread: it is loaded
+   again (also without `auto_load`: the server serves again what it served before), its Store's
+   open report is kept, and the open Store is verified (`Store::verify`: every checksum,
+   snapshot and WAL record). Each result is logged (`unclean shutdown: database 'x' is ok: ...`),
+   audited (`database 'x' checked: ok (...)`) and written to `recovery.json`. Without
+   `server.open` (a crash of a server older than 0.3.0) the open set is unknown and the
+   `auto_load` databases are checked.
+4. **Damage.** A Store the engine finds damaged at the open opens in maintenance mode, and one
+   whose verify finds damage under the damage policy `maintenance` (the default) is frozen by
+   the engine: the database is served **read-only** in the state `maintenance` with its damage
+   report (`db list`, `db info`, `status`, the Databases tab, the Database settings). Queries read
+   the intact data; writes are refused.
+5. **Per database:** `db verify NAME` (or `--all`) scrubs a Store again at any time (exit 1 on
+   damage). `db repair NAME [--name NEW]` builds a repaired copy as a NEW database (default
+   `NAME-repaired`; the engine's `repair_to`: damaged snapshot chunks rebuilt from older
+   snapshots and the WAL, what has no donor reported as lost, elements whose state differs from
+   the journal reported as diverged; the copy is verified before it is registered; the damaged
+   database is never written). Then either `db swap NAME NEW --yes` (the copy takes the name;
+   the damaged one moves to `trash/`; grants, aliases, MCP settings and `database.toml` of the
+   name stay) or keep both. A repaired copy starts a new history: older snapshots, marks and
+   the store id (so the backup chain) are not carried. Layers and bases are not repaired.
+6. **Or a backup.** `db backups NAME` lists the verified backups; `db restore NAME BACKUP`
+   (unloaded) or `--name NEW` brings one back: everything after the backup is lost, so prefer a
+   lossless repair when the repair report says so.
+
+The same routes for scripts: `POST /api/admin/databases/<name>/verify`, `POST
+/api/admin/verify`, `POST /api/admin/databases/<name>/repair`, `POST
+/api/admin/databases/<name>/swap`, `GET /api/admin/recovery`
+([`admin-api.md`](admin-api.md#verify-repair-and-swap)).
 
 ## Running as a service
 
@@ -534,12 +605,14 @@ What writes which file at runtime, and under which lock:
 | `server.toml` | `init` only (no admin request changes it yet) | the server lock (`init` of an existing directory: none) |
 | `server.lock` | `serve`, the offline console, `start` | the OS file lock itself |
 | `server.run` | `serve` at start (removed at stop); `stop` removes a stale one | the server lock |
+| `server.open` | the loader: each load start, load end and unload (removed at a clean stop) | its writer's mutex (a leaf, taken before the loader's state is read, never while it is held) |
+| `recovery.json` | the unclean-shutdown check at start (one write per database checked) | its report's mutex (a leaf) |
 | `access.toml` | user and grant changes (admin API, console), alias rename/remove and database delete (grants follow), a new name taking leftover grants, the first admin (`init`, `serve`: created new, never replaced) | the access file's lock (`Access`), online; offline the server lock (one console command) |
 | `aliases.toml` | alias set/flip, rename, remove | the registry's write lock |
 | `mcp.toml` | the MCP switches (admin API, MCP tab, console `mcp`), alias rename (settings move) and remove, database delete and a new name (settings dropped) | the MCP settings' write lock (a leaf: it takes no other lock; a change of a name's settings holds the registry's read lock around it while the name must exist) |
 | `databases/<name>/database.toml` | read-only, auto-load, promote, the `needs_model` marker, the settings change (description, read-only, auto-load and the `[limits.query]` overrides in ONE write: `PUT /api/admin/databases/<name>/settings`, `db set`, the Database settings tab); a new database's file is written in its build in `tmp/` before the rename into `databases/` | the registry's write lock, held across the revision check, the read of the file's current limits, the write and the memory update (read-only, also through the settings, also the loader's flip lock, taken before the registry) |
 | `databases/<name>/store/` | the graphersal engine (the Store, its WAL, the database's job definitions) | the engine's own (one open Store per database) |
-| `databases/` (add, remove), `trash/` | create, clone, import, restore (rename of a build), delete, restore over a database | the registry's write lock; delete, promote and a restore over a database also hold the loader's lock (nothing loads meanwhile) |
+| `databases/` (add, remove), `trash/` | create, clone, import, restore (rename of a build), repair (a new database built in `tmp/`), delete, restore over a database, swap (the old directory to `trash/`, the copy renamed) | the registry's write lock; delete, promote and a restore over a database also hold the loader's lock (nothing loads meanwhile) |
 | `sessions/browser.json` | login, logout, a session touched or ended | the browser session table's mutex |
 | `sessions/mcp.json` | MCP sessions (new, `use_graph`, rename note, end), token changes | its writer's mutex (the MCP endpoint writes snapshots in order) |
 | `models/blobs/`, `models/models.toml` | adopting blobs, the models listing (rebuilds the index), model add/remove | the models lock |
@@ -552,7 +625,9 @@ What writes which file at runtime, and under which lock:
 Lock order (a thread holding one lock takes only those after it, so no two requests can
 deadlock): the loader's state lock, then the loader's read-only flip lock, then the registry
 (write or read), then the access file, then a session table (browser or MCP); the models lock,
-the backup naming lock and the MCP settings' lock take no other lock. The audit records go to the log, no file of
+the backup naming lock, the MCP settings' lock, the `server.open` writer's lock and the
+recovery report's lock take no other lock (the `server.open` writer reads the loader's state
+inside its own lock, never the other way round). The audit records go to the log, no file of
 their own.
 
 ## External backups of the whole directory

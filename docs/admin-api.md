@@ -94,7 +94,7 @@ The object describing one database (listing rows, and the answer of most actions
 | Field | Type | When | Meaning |
 |---|---|---|---|
 | `name` | string | always | the database's name (for an alias row: the alias) |
-| `state` | string | always | `unloaded`, `loading`, `loaded`, `needs-model`, `failed` |
+| `state` | string | always | `unloaded`, `loading`, `loaded`, `needs-model`, `failed`, `maintenance` (loaded and served READ-ONLY because its Store is damaged: the engine opened it in maintenance mode, or a verify of the open Store found damage under the damage policy `maintenance`; see [Verify, repair and swap](#verify-repair-and-swap)) |
 | `kind` | string | config readable | `plain` or `layer` |
 | `role` | string | config readable | `normal` or `base` |
 | `readOnly` | bool | config readable | served read-only (a base: always `true`) |
@@ -102,7 +102,8 @@ The object describing one database (listing rows, and the answer of most actions
 | `description` | string | config readable | free text |
 | `base` | string | layers | the base database |
 | `created` | string | when known | UTC, RFC 3339 |
-| `reason` | string | `failed`, `needs-model` | why |
+| `reason` | string | `failed`, `needs-model`, `maintenance` | why |
+| `damage` | string | `maintenance` | the damage report in words (the engine's `DamageReport`: the damaged items, the readable state, whether a repair keeps all data; or the verify's problems) |
 | `model` | string | `needs-model` | the missing model's repository |
 | `aliasOf` | string | alias rows | the database the alias names (other fields are that database's) |
 | `import` | object | import answers | see Import |
@@ -167,7 +168,12 @@ A `failed` database whose `database.toml` cannot be read has only `name`, `state
 | GET | `/api/admin/mcp` | | `200` the MCP state (see MCP; `ETag`: its revision) |
 | PUT | `/api/admin/mcp` | `{"enabled": bool, "revision"?}` | `200` the MCP state |
 | PUT | `/api/admin/mcp/databases/<name>` | `{"exposed"?: bool, "readOnly"?: bool, "revision"?}` | `200` the MCP state + `"changed": {"name", "exposed", "readOnly"}` |
-| GET | `/api/admin/server` | | `200 {"server", "version", "pid", "address", "url", "directory", "startedAtMs", "uptimeSecs", "databases": {"total", "loaded": [name...], "loading": [name...]}, "aliases", "memory": {"processBytes", "liveBytes", "databasesBytes", "machineTotalBytes", "machineAvailableBytes", "limitBytes", "limitSource", "configuredLimit", "headroomBytes", "availableBytes", "freeBytes", "freeBasis"}}` (see Server) |
+| POST | `/api/admin/databases/<name>/verify` | | `200` a verify result (see Verify, repair and swap) |
+| POST | `/api/admin/verify` | | `200 {"results": [verify result \| {"database", "ok": false, "error"}...], "ok"}` (every database) |
+| POST | `/api/admin/databases/<name>/repair` | `{"name"?}` (optional body) | `201` entry of the NEW database + `"repairedFrom"`, `"repair"`, `"next"` |
+| POST | `/api/admin/databases/<name>/swap` | `{"with", "confirm": true}` | `200` entry + `"swappedWith"`, `"trash"`, `"reloaded"`, `"grantsRemoved"` |
+| GET | `/api/admin/recovery` | | `200 {"uncleanShutdown": report \| null}` (the last unclean shutdown, see Server) |
+| GET | `/api/admin/server` | | `200 {"server", "version", "pid", "address", "url", "directory", "startedAtMs", "uptimeSecs", "databases": {"total", "loaded": [name...], "loading": [name...], "maintenance": [name...]}, "aliases", "uncleanShutdown": report \| null, "memory": {"processBytes", "liveBytes", "databasesBytes", "machineTotalBytes", "machineAvailableBytes", "limitBytes", "limitSource", "configuredLimit", "headroomBytes", "availableBytes", "freeBytes", "freeBasis"}}` (see Server) |
 | POST | `/api/admin/shutdown` | | `202 {"stopping": true, "pid"}`, then the server stops (see Server) |
 
 ### Revisions (concurrent changes)
@@ -306,6 +312,7 @@ Database settings tab, `graphersal-server db info NAME`); `<name>` may be an ali
 | `admins` | the users with the admin role: they reach every database |
 | `backups` | `count`, `bytes`, `latest` (the newest backup row, or `null`) |
 | `store`, `storeError` | the Store's creation parameters (fixed for its life) and position, read with the engine's `Store::inspect` (works while it is loaded): `storeId`, `graphId`, `damagePolicy` (`maintenance` \| `continue`), `chunkBytes`, `createdAt` (RFC 3339 UTC), `formatVersion`, `backend` (`directory`), `commitSeq`, `lastCommitAt`, `layerBase` (a layer Store's base identity), `snapshots`, `walBytes`, `clean`; read-only. `storeError` instead when the Store cannot be read |
+| `recovery` | round 3: `maintenance` (bool), `damage` (the damage report of a database in maintenance, else `null`), `help` (in maintenance: repair or restore), `uncleanShutdown` (`null`, or `{"detectedAtMs", "previousPid", "check"}` when the last unclean shutdown's check covered this database: `check` is its entry of `uncleanShutdown.databases`, see Server) |
 
 `PUT /api/admin/databases/<name>/settings` changes what can change at runtime, all given fields
 in ONE atomic write of `database.toml`, based on the `revision` (else `If-Match`; stale: `409`
@@ -694,6 +701,24 @@ Databases tab shows it above the table; `status` prints it). A figure the server
 | `availableBytes` | the engine's room below the ceiling (the whole ceiling without a tracking allocator), `null` without one |
 | `freeBytes`, `freeBasis` | "free under the limit": `limitBytes` minus the process's memory (`processBytes`, else `databasesBytes`) with `freeBasis: "limit"` when a ceiling is in effect, but never more than the machine's available memory (`machineAvailableBytes`): when that is smaller, it is the answer with `freeBasis: "machine-below-limit"`; without a ceiling the machine's available memory, `freeBasis: "machine"` |
 
+`databases.loaded` names every database that is served (also those in `maintenance`, which
+`databases.maintenance` names again). `uncleanShutdown` is the last unclean shutdown
+(`recovery.json`; `null` when there was none): `detectedAtMs` (when this server found it),
+`previousPid`, `previousStartedAtMs`, `runFileLeft`, `databasesKnown` (`false`: the server
+that crashed left no `server.open`, so the `auto_load` databases were checked), `done` (every
+check ended) and `databases`, one check per database it had open:
+
+| Field | Meaning |
+|---|---|
+| `name` | the database |
+| `outcome` | `pending`, `checking`, `ok`, `damaged` (served read-only in `maintenance`, or under the damage policy `continue` still writable with the problems), `failed` (it could not be loaded; its files were verified), `needs-model`, `missing` (deleted meanwhile) |
+| `state` | its state after the check |
+| `recovery` | what the open of its Store did (the engine's open report): `cleanClose` (`false` after a kill), `commitsReplayed` (WAL commits replayed onto the snapshot), `snapshotCommitSeq`, `commitSeq` (the position after the replay: the last commit acknowledged before the kill, or a commit in flight), `tornTail` (an interrupted last WAL write that was cut off, in words, or `null`), `intentCompleted`, `tmpRemoved`, `graphFileRepaired`, `marksRebuilt`, `refusedCut`, `warnings`, `maintenance` (opened in maintenance mode); `null` for a base (no Store opened) or a database that did not load |
+| `verify` | a verify result's facts (see Verify, repair and swap) |
+| `damage` | the damage report (a database in maintenance) |
+| `message` | why it failed, or a note |
+| `checkedAtMs` | when it was checked |
+
 `POST /api/admin/shutdown` stops the server (`graphersal-server stop`): it answers `202
 {"stopping": true, "pid"}` and the server then stops exactly as on Ctrl+C or SIGTERM (running
 requests get 5 s, every database is unloaded, `server.run` removed, the lock released). Only
@@ -701,6 +726,57 @@ the operator (the token of `server.run`) or a user with the admin role may; the 
 `everyone` of a server with access control off gets `403` (stopping needs real credentials
 even then); a server embedded by a library caller without a stop hook answers `409`. The
 request is audited (`server shutdown requested`).
+
+### Verify, repair and swap
+
+Round 3: what to do with a damaged Store ([`server-dir.md`, "After a
+crash"](server-dir.md#after-a-crash)). All three are synchronous (the console waits up to 10
+minutes for an answer).
+
+`POST /api/admin/databases/<name>/verify` scrubs the database's Store (the engine's
+`Store::verify`: every checksum of `GRAPH`, every snapshot fully decoded, every WAL record,
+commit continuity, lineage, models and blobs). A loaded plain or layer database: its open Store
+(found damage under the damage policy `maintenance` freezes it: the state becomes
+`maintenance`); anything else (unloaded, failed, needs-model, a base, the console on a stopped
+server): its files without opening it (a layer's without its base). A verify result:
+`database`, `state` (afterwards), `ok`, `how` (`open store` \| `files`), `problems`
+(`[{"path", "offset", "reason"}]`, paths relative to the Store), `notes`, `snapshotsChecked`,
+`segmentsChecked`, `recordsChecked`, `firstCommit`, `lastCommit`, `modelsChecked`,
+`blobsChecked`, `damage` (in maintenance) and, when it is not ok or in maintenance, `help`
+(repair, or restore a backup). Audited (`database 'x' checked: ok|damaged (...)`). `POST
+/api/admin/verify` verifies every database (`"ok"`: all of them are; a verify that failed is
+`{"database", "ok": false, "error"}`).
+
+`POST /api/admin/databases/<name>/repair` builds a repaired copy of the plain database `<name>`
+as a NEW database: the engine's repair (`Store::repair_to` of the open Store, else
+`Store::repair_dir`) into a build in `tmp/`, never in place (the damaged database is not
+written); damaged snapshot chunks are rebuilt from donors (an older snapshot plus the WAL),
+damaged WAL records a later snapshot covers are skipped, otherwise the replay goes on after the
+gap and elements whose state differs are reported as diverged; the copy is verified before it is
+registered. The body names the new database (`{"name"}`; default `<name>-repaired`, then
+`-repaired-2`, ...); it gets the damaged one's description and read-only flag, auto-load off.
+The answer is the new entry plus `repairedFrom`, `repair` (`commitSeq`, `lossless` (no data of
+the readable state lost, nothing diverged), `damage` (the scan's report in words),
+`damageItems`, `repaired` (what was rebuilt, one line per range), `lostCommits`
+(`[{"first", "last" | null}]`), `lostRanges`, `lostElements`, `diverged` (at most 100
+`{"element", "commitSeq", "reason"}`), `divergedCount`, `marksNotCarried`, `modelsNotCarried`,
+`blobsNotCarried`, `notCarried` (what a repair never carries: the history before its position,
+the marks, the store id, so its backups start anew)) and `next` (`swap`: the request below;
+`keep`: keeping both needs nothing; `restore`: the backups instead). `409` for a layer or base
+database (help: restore a backup), the new-name refusals of a create otherwise. Audited
+(`database 'x' repaired into 'y' (lossless|DATA LOST ...)`).
+
+`POST /api/admin/databases/<name>/swap {"with", "confirm": true}` lets the database `with` take
+the name `<name>`: both are unloaded first, `databases/<name>/` moves to
+`trash/<name>-<UTC time>/`, `databases/<with>/` is renamed to `databases/<name>/` and gets the
+old `database.toml` back (description, flags, limits); `<name>`'s grants, aliases and MCP
+settings stay with the name, `with`'s name goes away with its grants and MCP settings. `<name>`
+is loaded again when it was loaded (`reloaded`). Without `"confirm": true` it is `400`; `409`
+for a layer, base or failed database, while an alias names `with`, or while one of them cannot
+be unloaded. Audited (`database 'y' took the name 'x'; the old 'x' moved to ...`).
+
+`GET /api/admin/recovery` answers `{"uncleanShutdown"}`: the last unclean shutdown (see Server;
+offline, from `recovery.json`).
 
 ### Help on refusals
 
@@ -720,6 +796,7 @@ graphersal-server db info NAME | set NAME description TEXT --dir DIR [--json]
 graphersal-server db set NAME limit KEY VALUE | set NAME limit KEY --clear --dir DIR [--json]
 graphersal-server db alias set ALIAS DATABASE | alias remove ALIAS | alias rename OLD NEW --dir DIR [--json]
 graphersal-server db backup NAME | backups NAME | restore NAME BACKUP [--name NEW] --dir DIR [--json]
+graphersal-server db verify NAME | verify --all | repair NAME [--name NEW] | swap NAME WITH --yes --dir DIR [--json]
 graphersal-server db export NAME --out FILE [--no-models] [--materialize] --dir DIR [--json]
 graphersal-server import DIR SOURCE --name NAME [--base BASE] [--format F] [--description TEXT] [--role normal|base] [--json]
 graphersal-server import DIR --inbox FILE --name NAME [--base BASE] [--format F] [--description TEXT] [--role normal|base] [--json]
@@ -743,6 +820,14 @@ are `PUT databases/NAME/settings` (`{"description"}`, `{"limits": {KEY: VALUE|nu
 checked before anything is sent (a whole number, `_` allowed between digits; else a usage error,
 exit code `2`); a loaded database's text names the unload and load that apply a limit now.
 Offline both work on the directory (`database.toml` written atomically under the server lock).
+
+`db verify NAME` is `POST databases/NAME/verify`, `db verify --all` `POST verify` (a table of
+every database, then the damaged ones in full); exit code `1` when damage is found. `db repair
+NAME [--name NEW]` is `POST databases/NAME/repair` (the text lists what was rebuilt, lost,
+diverged and never carried, and the next commands); `db swap NAME WITH --yes` is `POST
+databases/NAME/swap {"with": WITH, "confirm": true}` (without `--yes` a usage error, exit code
+`2`). Offline all three work on the directory (verify reads the files, repair and swap write
+under the server lock).
 
 `db export` writes `FILE` (through `FILE.part`, renamed when complete): offline the admin core
 writes it, through a server the console streams the download. Its `--json` answer is

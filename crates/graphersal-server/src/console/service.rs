@@ -152,7 +152,14 @@ pub fn status_text(status: &Status, dir: &Path) -> String {
             section.unwrapped("log", log.display().to_string());
         }
         section.unwrapped("start", format!("{BIN} start --dir {arg}"));
-        return text::render(&[section]);
+        let server_dir = crate::layout::ServerDir::new(dir);
+        let pending = crate::recovery::detect(&server_dir);
+        let last =
+            crate::recovery::read_report(&server_dir).and_then(|r| serde_json::to_value(r).ok());
+        return text::render(&[
+            section,
+            unclean_section(last.as_ref(), pending.as_ref(), &arg),
+        ]);
     }
     section.row("state", "running");
     let server = status.server.as_ref();
@@ -210,7 +217,101 @@ pub fn status_text(status: &Status, dir: &Path) -> String {
         section.unwrapped("log", log.display().to_string());
     }
     section.unwrapped("stop", format!("{BIN} stop --dir {arg}"));
-    text::render(&[section])
+    let last = field("uncleanShutdown").filter(|v| !v.is_null());
+    text::render(&[section, unclean_section(last, None, &arg)])
+}
+
+/// The "Last unclean shutdown" section of `status` (round 3 B-CRASH, [`crate::recovery`]):
+/// `last` = the report (`GET /api/admin/server`'s `uncleanShutdown`, or `recovery.json` of a
+/// stopped server), `pending` = what a stopped server's directory shows (a `server.open` or
+/// a stale `server.run`: the next start checks it). Empty (left out) when there is neither.
+pub(crate) fn unclean_section(
+    last: Option<&Value>,
+    pending: Option<&crate::recovery::Previous>,
+    arg: &str,
+) -> Section {
+    let mut section = Section::new("Last unclean shutdown");
+    if let Some(previous) = pending {
+        let names = match &previous.databases {
+            Some(names) if names.is_empty() => "no database (none was open)".to_string(),
+            Some(names) => names.join(", "),
+            None => "the auto-load databases (the open set is unknown)".to_string(),
+        };
+        section.row(
+            "pending",
+            format!(
+                "the last server{} did not stop cleanly; the next start loads and checks: \
+                 {names}",
+                previous
+                    .pid
+                    .map(|pid| format!(" (pid {pid})"))
+                    .unwrap_or_default()
+            ),
+        );
+    }
+    let Some(last) = last else {
+        return section;
+    };
+    let when = last["detectedAtMs"]
+        .as_u64()
+        .map(|ms| crate::database::utc_text(ms / 1000))
+        .unwrap_or_default();
+    let pid = last["previousPid"]
+        .as_u64()
+        .map(|pid| format!(" (the server with pid {pid} did not stop cleanly)"))
+        .unwrap_or_default();
+    section.row("found", format!("at the start of {when}{pid}"));
+    if last["databasesKnown"] == Value::Bool(false) {
+        section.row(
+            "checked",
+            "the auto-load databases (the open set was unknown)",
+        );
+    }
+    let checks = last["databases"].as_array().cloned().unwrap_or_default();
+    if checks.is_empty() {
+        section.row("databases", "none was open");
+    }
+    let mut damaged = Vec::new();
+    for check in &checks {
+        let name = check["name"].as_str().unwrap_or_default();
+        let outcome = check["outcome"].as_str().unwrap_or_default();
+        let mut parts = vec![outcome.to_string()];
+        if let Some(recovery) = check.get("recovery").filter(|r| !r.is_null()) {
+            let replayed = recovery["commitsReplayed"].as_u64().unwrap_or_default();
+            let at = recovery["commitSeq"].as_u64().unwrap_or_default();
+            parts.push(format!("{replayed} WAL commit(s) replayed, at commit {at}"));
+            if let Some(tail) = recovery["tornTail"].as_str() {
+                parts.push(format!("torn tail cut: {tail}"));
+            }
+        }
+        if let Some(verify) = check.get("verify").filter(|v| !v.is_null()) {
+            if verify["ok"] == Value::Bool(true) {
+                parts.push("verify ok".to_string());
+            } else {
+                parts.push(format!(
+                    "verify found {} problem(s)",
+                    verify["problems"].as_array().map(Vec::len).unwrap_or(0)
+                ));
+            }
+        }
+        if let Some(message) = check["message"].as_str() {
+            parts.push(message.to_string());
+        }
+        if outcome == "damaged" {
+            damaged.push(name.to_string());
+        }
+        section.row(format!("  {name}"), parts.join("; "));
+    }
+    if last["done"] == Value::Bool(false) {
+        section.row("state", "the checks are still running");
+    }
+    for name in damaged {
+        section.unwrapped(
+            format!("repair {name}"),
+            format!("{BIN} db repair {name} --dir {arg} (or db backups {name})"),
+        );
+    }
+    section
 }
 
 /// The memory rows of `status` from the `memory` object of `GET /api/admin/server`
@@ -299,6 +400,24 @@ pub fn status_json(status: &Status) -> Value {
         "unanswered": status.unanswered,
         "log": status.log.as_ref().map(|p| p.display().to_string()),
     })
+}
+
+/// [`status_json`] of the server directory `dir`: a stopped server's also carries
+/// `uncleanShutdown` (the last report of `recovery.json`) and `uncleanShutdownPending` (a
+/// `server.open` or stale `server.run` the next start checks: `{"pid", "databases"}`, or
+/// `null`); a running server's report is in `server.uncleanShutdown`.
+pub fn status_json_of(status: &Status, dir: &Path) -> Value {
+    let mut out = status_json(status);
+    if !status.running {
+        let server_dir = crate::layout::ServerDir::new(dir);
+        out["uncleanShutdown"] = crate::recovery::read_report(&server_dir)
+            .and_then(|r| serde_json::to_value(r).ok())
+            .unwrap_or(Value::Null);
+        out["uncleanShutdownPending"] = crate::recovery::detect(&server_dir)
+            .map(|p| json!({ "pid": p.pid, "databases": p.databases }))
+            .unwrap_or(Value::Null);
+    }
+    out
 }
 
 #[cfg(test)]

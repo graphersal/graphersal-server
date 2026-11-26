@@ -33,6 +33,9 @@
 //! | POST | `aliases/<alias>/rename` | `{"name", "revision"?}` | `200 {"alias", "renamedFrom", "target", "mcpSessionsMoved", "grantsMoved"}` |
 //! | GET, POST, PUT, DELETE | `users...`, `grants...` | | the users and grants of `access.toml` (the `admin_api_users.rs` table) |
 //! | GET, PUT | `mcp`, `mcp/databases/<name>` | | the MCP switches of `mcp.toml` and the usage statistics (the `admin_api_mcp.rs` table) |
+//! | POST | `databases/<name>/verify`, `verify` | | verify one database's Store, or every database's (the `admin_api_damage.rs` table) |
+//! | POST | `databases/<name>/repair`, `databases/<name>/swap` | `{"name"?}`, `{"with", "confirm"}` | repair into a new database; let one database take another's name (the `admin_api_damage.rs` table) |
+//! | GET | `recovery` | | `200 {"uncleanShutdown"}`: the last unclean shutdown and its check |
 //! | GET, PUT | `databases/<name>/settings` | `{"description"?, "readOnly"?, "autoLoad"?, "limits"?: {key: n \| null}, "revision"?}` | everything about one database, and the change of its editable settings (the `admin_api_settings.rs` table) |
 //!
 //! A new database or alias never inherits grants left on its name (from a database or alias
@@ -123,7 +126,8 @@
 //! `sharedMemoryBytes`, its base's memory, shared with the base and the other layers
 //! (`Loader::memory`, never waiting for a graph).
 //!
-//! An entry: `name`, `state` (`unloaded` | `loading` | `loaded` | `needs-model` | `failed`),
+//! An entry: `name`, `state` (`unloaded` | `loading` | `loaded` | `needs-model` | `failed` |
+//! `maintenance`: loaded read-only because its Store is damaged, with `damage`, the report),
 //! `kind` (`plain` | `layer`), `role` (`normal` | `base`), `readOnly` (a base is always
 //! read-only), `autoLoad`, `description`, and when they apply `base` (a layer's base), `created`,
 //! `reason` (`failed`: why; `needs-model`: the missing model), `model` (`needs-model`: the
@@ -184,6 +188,9 @@ pub(crate) fn route(
         return answer;
     }
     if let Some(answer) = settings::route(admin, method, &segments, request, &expecting) {
+        return answer;
+    }
+    if let Some(answer) = damage::route(admin, method, &segments, request) {
         return answer;
     }
     let answer = match (method, segments.as_slice()) {
@@ -1003,7 +1010,7 @@ fn error_answer(err: &ServerError, help: Option<String>) -> Response {
 fn delete_help(registry: &Registry, name: &str) -> Option<String> {
     let key = fold(name);
     let entry = registry.get(&key).ok()?;
-    if matches!(entry.state, DbState::Loaded | DbState::Loading) {
+    if entry.state.is_busy() {
         return Some(format!(
             "unload it first: POST /api/admin/databases/{key}/unload"
         ));
@@ -1099,7 +1106,7 @@ fn promote_help(registry: &Registry, name: &str, err: &ServerError) -> Option<St
     }
     let key = fold(name);
     let entry = registry.get(&key).ok()?;
-    if matches!(entry.state, DbState::Loaded | DbState::Loading) {
+    if entry.state.is_busy() {
         return Some(format!(
             "unload it first: POST /api/admin/databases/{key}/unload, then promote it again"
         ));
@@ -1145,9 +1152,8 @@ fn read_only_help(
 fn restore_help(registry: &Registry, target: &str, err: &ServerError) -> Option<String> {
     let key = fold(target);
     let entry = registry.get(&key).ok()?;
-    (matches!(err, ServerError::Refused { .. })
-        && matches!(entry.state, DbState::Loaded | DbState::Loading))
-    .then(|| format!("unload it first: POST /api/admin/databases/{key}/unload"))
+    (matches!(err, ServerError::Refused { .. }) && entry.state.is_busy())
+        .then(|| format!("unload it first: POST /api/admin/databases/{key}/unload"))
 }
 
 /// A backup as JSON (module docs).
@@ -1641,6 +1647,15 @@ pub(crate) fn entry_json(entry: &DatabaseEntry, alias: Option<&str>) -> Value {
             );
             out.insert("model".into(), Value::String(repo.clone()));
         }
+        DbState::Maintenance { damage } => {
+            out.insert(
+                "reason".into(),
+                Value::String(
+                    "its Store is damaged: served read-only in maintenance mode".to_string(),
+                ),
+            );
+            out.insert("damage".into(), Value::String(damage.clone()));
+        }
         DbState::Unloaded | DbState::Loading | DbState::Loaded => {}
     }
     if let Some(config) = &entry.config {
@@ -1676,6 +1691,10 @@ mod mcp;
 
 #[path = "admin_api_settings.rs"]
 mod settings;
+
+#[path = "admin_api_damage.rs"]
+mod damage;
+pub(crate) use damage::{damage_help, unclean_json};
 
 #[cfg(test)]
 mod tests {

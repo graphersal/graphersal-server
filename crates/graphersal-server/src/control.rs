@@ -113,8 +113,13 @@ fn server_json(facts: Option<&ServerFacts>, loader: &Loader) -> Value {
             .map(|e| e.name.clone())
             .collect()
     };
-    let loaded = names(|state| matches!(state, DbState::Loaded));
+    let loaded = names(DbState::is_open);
     let loading = names(|state| matches!(state, DbState::Loading));
+    let maintenance = names(|state| matches!(state, DbState::Maintenance { .. }));
+    let unclean = match loader.recovery() {
+        Some(recovery) => recovery.current(),
+        None => crate::recovery::read_report(registry.dir()),
+    };
     let figures = MemoryFigures::now(loader.memory().total_bytes);
     json!({
         "server": crate::router::SERVER_NAME,
@@ -129,7 +134,9 @@ fn server_json(facts: Option<&ServerFacts>, loader: &Loader) -> Value {
             "total": entries.len(),
             "loaded": loaded,
             "loading": loading,
+            "maintenance": maintenance,
         },
+        "uncleanShutdown": unclean.and_then(|r| serde_json::to_value(r).ok()),
         "aliases": registry.aliases().len(),
         "memory": memory_json(facts.and_then(|f| f.memory.as_ref()), &figures),
     })

@@ -4524,3 +4524,407 @@ fn db_info_and_db_set_offline_and_through_a_server() {
         std::thread::sleep(Duration::from_millis(20));
     }
 }
+
+/// Every file below `dir`.
+fn files_below(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(next) = stack.pop() {
+        for entry in std::fs::read_dir(&next).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                out.push(path);
+            }
+        }
+    }
+    out
+}
+
+/// Damages the snapshot data of the Store `store` as a failing disk would: flips 16 bytes in
+/// the middle of its largest snapshot segment file.
+fn damage_snapshot(store: &Path) {
+    let segment = files_below(store)
+        .into_iter()
+        .filter(|p| {
+            let text = p.to_string_lossy();
+            text.contains("snap") && !text.ends_with(".json") && !text.contains("manifest")
+        })
+        .max_by_key(|p| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0))
+        .expect("a snapshot segment");
+    let mut bytes = std::fs::read(&segment).unwrap();
+    let middle = bytes.len() / 2;
+    let end = (middle + 16).min(bytes.len());
+    for byte in &mut bytes[middle..end] {
+        *byte ^= 0xA5;
+    }
+    std::fs::write(&segment, bytes).unwrap();
+}
+
+/// Waits until the server at `address` answers `/readyz` 200 (30 s at most).
+fn wait_ready(address: SocketAddr) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while get(address, "/readyz").0 != 200 {
+        assert!(Instant::now() < deadline, "the server did not get ready");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// The last unclean shutdown's report once its checks ended (`GET /api/admin/recovery`, 120 s
+/// at most).
+#[cfg(unix)]
+fn recovery_done(address: SocketAddr) -> serde_json::Value {
+    let deadline = Instant::now() + Duration::from_secs(120);
+    loop {
+        let (status, _, body) = call(address, "GET", "/api/admin/recovery", &[], "");
+        assert_eq!(status, 200, "{body}");
+        let report = json(&body)["uncleanShutdown"].clone();
+        if report["done"] == serde_json::Value::Bool(true) {
+            return report;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the checks did not end: {report}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// A `serve` of `root` on port 0 whose stderr goes to the file `log`.
+fn serve_logged(root: &Path, log: &Path) -> ServerProcess {
+    let file = std::fs::File::create(log).unwrap();
+    ServerProcess::spawn(
+        Command::new(BIN)
+            .args(["serve", "--dir"])
+            .arg(root)
+            .args(["--listen", "127.0.0.1:0"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(file)),
+    )
+}
+
+/// Round 3 B-CRASH: a server killed by force (SIGKILL) in the middle of writes. The next start
+/// says so, loads the database it had open again, replays its WAL and verifies it: every
+/// acknowledged commit is there.
+#[cfg(unix)]
+#[test]
+fn a_server_killed_mid_writes_is_checked_at_the_next_start() {
+    let temp = TempDir::new("crash");
+    let dir = ServerDir::init(temp.path().join("srv")).unwrap().dir;
+    let root = dir.root().to_path_buf();
+    modern_db(&dir, "acme");
+    let log1 = temp.path().join("first.log");
+    let mut server = serve_logged(&root, &log1);
+    let info = wait_for_run_file(&dir);
+    wait_ready(info.address);
+    let (code, _, err) = db(&root, &["load", "acme"]);
+    assert_eq!(code, 0, "{err}");
+    let open = std::fs::read_to_string(dir.open_path()).unwrap();
+    assert!(open.contains("\"acme\""), "{open}");
+
+    // A writer commits one vertex per request and counts what was acknowledged.
+    let acked = std::sync::Arc::new(AtomicUsize::new(0));
+    let writer = {
+        let acked = acked.clone();
+        let address = info.address;
+        let token = operator_token(address).expect("the operator token");
+        std::thread::spawn(move || {
+            for n in 0.. {
+                let body =
+                    serde_json::json!({ "script": format!("g.add_v(\"crash\").property(\"n\", {n}).iterate()") })
+                        .to_string();
+                let Ok(mut stream) = TcpStream::connect(address) else {
+                    return;
+                };
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
+                let head = format!(
+                    "POST /db/acme/api/execute HTTP/1.1\r\nHost: {address}\r\nConnection: \
+                     close\r\nAuthorization: Bearer {token}\r\nContent-Type: \
+                     application/json\r\nContent-Length: {}\r\n\r\n",
+                    body.len()
+                );
+                if stream.write_all(head.as_bytes()).is_err()
+                    || stream.write_all(body.as_bytes()).is_err()
+                {
+                    return;
+                }
+                let mut answer = Vec::new();
+                if stream.read_to_end(&mut answer).is_err() {
+                    return;
+                }
+                let answer = text(&answer);
+                if !answer.starts_with("HTTP/1.1 200") || answer.contains("\"ok\":false") {
+                    return;
+                }
+                acked.store(n + 1, Ordering::SeqCst);
+            }
+        })
+    };
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while acked.load(Ordering::SeqCst) < 25 {
+        assert!(Instant::now() < deadline, "the writes do not go through");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    // kill -9 while the writer keeps writing.
+    server.0.kill().unwrap();
+    server.0.wait().unwrap();
+    writer.join().unwrap();
+    let acked = acked.load(Ordering::SeqCst);
+    assert!(acked >= 25);
+    // The OS released the lock; server.run and server.open stay behind.
+    assert!(!ServerLock::is_held(&dir).unwrap());
+    assert!(dir.run_path().exists());
+    assert!(dir.open_path().exists());
+    let out = run(&["status", "--dir", root.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(3));
+    let status = text(&out.stdout);
+    let flat = status.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(status.contains("Last unclean shutdown"), "{status}");
+    assert!(
+        flat.contains("next start loads and checks: acme"),
+        "{status}"
+    );
+
+    // The next start: the notice, the database loaded again and checked.
+    let log2 = temp.path().join("second.log");
+    let mut server = serve_logged(&root, &log2);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let info = loop {
+        if let Ok(Some(run)) = RunInfo::read(&dir)
+            && run.pid == server.0.id()
+        {
+            break run;
+        }
+        assert!(Instant::now() < deadline, "no new run file");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    wait_ready(info.address);
+    let report = recovery_done(info.address);
+    assert_eq!(report["databasesKnown"], true, "{report}");
+    let check = &report["databases"][0];
+    assert_eq!(check["name"], "acme", "{report}");
+    assert_eq!(check["outcome"], "ok", "{report}");
+    assert_eq!(check["state"], "loaded", "{report}");
+    assert_eq!(check["recovery"]["cleanClose"], false, "{report}");
+    assert!(
+        check["recovery"]["commitSeq"].as_u64().unwrap() >= acked as u64,
+        "{report}"
+    );
+    assert_eq!(check["verify"]["ok"], true, "{report}");
+    assert_eq!(check["verify"]["how"], "open store", "{report}");
+    // Every acknowledged commit is there (a commit in flight at the kill may be too).
+    let count = execute(info.address, "acme", r#"g.v().has_label("crash").count()"#);
+    let count = count.as_u64().unwrap_or_else(|| panic!("a count: {count}"));
+    assert!(count >= acked as u64, "{count} < {acked}");
+    let max = execute(
+        info.address,
+        "acme",
+        r#"g.v().has_label("crash").values("n").max()"#,
+    );
+    assert!(max.as_u64().unwrap() + 1 >= acked as u64, "{max}");
+    // status, the server facts and a verify by hand say the same.
+    let (status, _, body) = call(info.address, "GET", "/api/admin/server", &[], "");
+    assert_eq!(status, 200);
+    assert_eq!(
+        json(&body)["uncleanShutdown"]["databases"][0]["outcome"],
+        "ok"
+    );
+    let out = run(&["status", "--dir", root.to_str().unwrap()]);
+    let status = text(&out.stdout);
+    let flat = status.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(status.contains("Last unclean shutdown"), "{status}");
+    assert!(
+        flat.contains("acme: ok;") && flat.contains("verify ok"),
+        "{status}"
+    );
+    let (code, out, err) = db(&root, &["verify", "acme"]);
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(out.contains("verifies: no problem found"), "{out}");
+    let (code, out, err) = db(&root, &["verify", "--all"]);
+    assert_eq!(code, 0, "{out}{err}");
+    let (code, out, err) = db(&root, &["info", "acme"]);
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(out.contains("Damage and recovery"), "{out}");
+    assert!(out.contains("checked at the start of"), "{out}");
+    // A clean stop removes server.open; the start block named the unclean shutdown.
+    send_stop(&server);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while server.0.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < deadline, "the server did not stop");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!dir.open_path().exists());
+    assert!(!dir.run_path().exists());
+    let log = std::fs::read_to_string(&log2).unwrap();
+    assert!(log.contains("UNCLEAN SHUTDOWN"), "{log}");
+    assert!(log.contains("Unclean shutdown"), "{log}");
+    assert!(
+        log.contains("unclean shutdown: database 'acme' is ok"),
+        "{log}"
+    );
+    assert!(
+        log.contains("database 'acme' checked: ok"),
+        "the audit record: {log}"
+    );
+    // A clean start afterwards finds nothing to check (the last report stays for status).
+    let log3 = temp.path().join("third.log");
+    let server = serve_logged(&root, &log3);
+    let info = loop {
+        if let Ok(Some(run)) = RunInfo::read(&dir)
+            && run.pid == server.0.id()
+        {
+            break run;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    wait_ready(info.address);
+    drop(server);
+    let log = std::fs::read_to_string(&log3).unwrap();
+    assert!(!log.contains("UNCLEAN SHUTDOWN"), "{log}");
+}
+
+/// Round 3 B-CRASH: a damaged Store is served read-only in the state `maintenance`, repaired
+/// into a new database through the console and the admin API, and the copy takes its name.
+#[test]
+fn a_damaged_database_is_in_maintenance_and_is_repaired_and_swapped() {
+    let temp = TempDir::new("damage");
+    let dir = ServerDir::init(temp.path().join("srv")).unwrap().dir;
+    let root = dir.root().to_path_buf();
+    modern_db(&dir, "acme");
+    modern_db(&dir, "fine");
+    damage_snapshot(&dir.databases().join("acme").join("store"));
+    // Offline: the verify finds the damage (exit 1) and names the repair.
+    let (code, out, _) = db(&root, &["verify", "acme"]);
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("DAMAGED"), "{out}");
+    assert!(out.contains("db repair acme"), "{out}");
+    let (code, out, err) = db(&root, &["swap", "acme", "fine"]);
+    assert_eq!(code, 2, "{out}{err}");
+    assert!(err.contains("--yes"), "{err}");
+
+    let log = temp.path().join("serve.log");
+    let _server = serve_logged(&root, &log);
+    let info = wait_for_run_file(&dir);
+    wait_ready(info.address);
+    let (code, out, err) = db(&root, &["load", "acme"]);
+    assert_eq!(code, 0, "{out}{err}");
+    let (_, out, _) = db(&root, &["list"]);
+    assert!(out.contains("maintenance"), "{out}");
+    assert!(out.contains("db repair acme"), "{out}");
+    let (status, _, body) = call(info.address, "GET", "/api/admin/databases/acme", &[], "");
+    assert_eq!(status, 200);
+    let entry = json(&body);
+    assert_eq!(entry["state"], "maintenance", "{entry}");
+    assert!(
+        entry["damage"].as_str().unwrap().contains("damaged item"),
+        "{entry}"
+    );
+    let (status, _, body) = call(
+        info.address,
+        "GET",
+        "/api/admin/databases/acme/settings",
+        &[],
+        "",
+    );
+    assert_eq!(status, 200);
+    let settings = json(&body);
+    assert_eq!(settings["recovery"]["maintenance"], true, "{settings}");
+    let (code, out, err) = db(&root, &["info", "acme"]);
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(
+        out.contains("Damage and recovery") && out.contains("served read-only"),
+        "{out}"
+    );
+    assert!(out.contains("db repair acme"), "{out}");
+    assert!(
+        settings["recovery"]["help"]
+            .as_str()
+            .unwrap()
+            .contains("repair")
+    );
+    // Writes are refused, reads work.
+    let body = serde_json::json!({ "script": "g.add_v(\"x\").iterate()" }).to_string();
+    let (_, _, answer) = call(
+        info.address,
+        "POST",
+        "/db/acme/api/execute",
+        &[("Content-Type", "application/json")],
+        &body,
+    );
+    assert!(answer.contains("\"ok\":false"), "{answer}");
+    // Every database verified through the API: acme damaged, fine ok.
+    let (status, _, body) = call(info.address, "POST", "/api/admin/verify", &[], "");
+    assert_eq!(status, 200);
+    let all = json(&body);
+    assert_eq!(all["ok"], false, "{all}");
+    let fine = all["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["database"] == "fine")
+        .unwrap();
+    assert_eq!(fine["ok"], true, "{all}");
+    // A swap without the confirmation is refused.
+    let (status, _, body) = call(
+        info.address,
+        "POST",
+        "/api/admin/databases/acme/swap",
+        &[("Content-Type", "application/json")],
+        r#"{"with": "fine"}"#,
+    );
+    assert_eq!(status, 400, "{body}");
+    // The repair through the console: a new database, verified.
+    let (code, out, err) = db(&root, &["repair", "acme"]);
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(
+        out.contains("Repaired database 'acme' into 'acme-repaired'"),
+        "{out}"
+    );
+    assert!(out.contains("db swap acme acme-repaired --yes"), "{out}");
+    let (code, out, err) = db(&root, &["verify", "acme-repaired"]);
+    assert_eq!(code, 0, "{out}{err}");
+    // Through the API, under another name.
+    let (status, _, body) = call(
+        info.address,
+        "POST",
+        "/api/admin/databases/acme/repair",
+        &[("Content-Type", "application/json")],
+        r#"{"name": "acme-copy"}"#,
+    );
+    assert_eq!(status, 201, "{body}");
+    let repaired = json(&body);
+    assert_eq!(repaired["name"], "acme-copy");
+    assert_eq!(repaired["repairedFrom"], "acme");
+    assert!(
+        repaired["repair"]["damageItems"].as_u64().unwrap() >= 1,
+        "{repaired}"
+    );
+    assert!(repaired["next"]["swap"].as_str().unwrap().contains("swap"));
+    // The swap: the copy takes the name, the damaged one goes to trash/, loaded again.
+    let (code, out, err) = db(&root, &["swap", "acme", "acme-repaired", "--yes"]);
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(out.contains("took the name 'acme'"), "{out}");
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let (_, _, body) = call(info.address, "GET", "/api/admin/databases/acme", &[], "");
+        if json(&body)["state"] == "loaded" {
+            break;
+        }
+        assert!(Instant::now() < deadline, "{body}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let (code, out, err) = db(&root, &["verify", "acme"]);
+    assert_eq!(code, 0, "{out}{err}");
+    let (_, out, _) = db(&root, &["list"]);
+    assert!(!out.contains("acme-repaired"), "{out}");
+    assert!(
+        std::fs::read_dir(dir.trash())
+            .unwrap()
+            .flatten()
+            .any(|e| e.file_name().to_string_lossy().starts_with("acme-")),
+        "the damaged one is in trash/"
+    );
+    let log = std::fs::read_to_string(&log).unwrap();
+    assert!(log.contains("maintenance"), "{log}");
+}
