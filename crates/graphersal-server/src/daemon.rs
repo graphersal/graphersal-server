@@ -16,7 +16,7 @@
 //!   within the timeout, is [`ServerError::Service`] with the log's last lines (a server still
 //!   starting after the timeout keeps running; the error says so).
 //! - [`stop`] asks the running server to stop (`POST /api/admin/shutdown` with the operator
-//!   token of `server.run`, `docs/admin-api.md`); the server stops as on Ctrl+C. When the
+//!   token of `server.run`, `book/src/reference/admin_api.md`); the server stops as on Ctrl+C. When the
 //!   server cannot be reached (or is too old to know the route) the fallback on Unix is
 //!   SIGTERM to the pid of `server.run` (the same graceful path); on Windows the error names
 //!   `taskkill`. It waits until `server.lock` is free. No server: [`Stopped::NotRunning`]

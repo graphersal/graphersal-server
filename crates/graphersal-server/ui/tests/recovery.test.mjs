@@ -3,7 +3,7 @@
 // a verify, of "Verify all" and of a repair report, the last unclean shutdown's rows
 // (ui/admin-api.js, ui/databases.js) and the Database settings' "Damage and recovery" part
 // (ui/settings-api.js), and a round against a mock of the admin API (node:http on port 0,
-// shaped after docs/admin-api.md "Verify, repair and swap"): verify, repair, swap, recovery.
+// shaped after book/src/reference/admin_api.md "Verify, repair and swap"): verify, repair, swap, recovery.
 // Run: node --test crates/graphersal-server/ui/tests/*.test.mjs
 import { test } from 'node:test';
 import assert from 'node:assert/strict';

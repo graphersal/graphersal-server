@@ -2,7 +2,7 @@
 // (the request, the one-way confirmation, the reasons it is disabled, the server's 409 help shown
 // verbatim) and the import with role base (upload query and JSON path form, the refusals of a
 // layer source and of a source missing its model), against a stateful mock (node:http on port 0)
-// shaped after docs/admin-api.md (Promote, Import).
+// shaped after book/src/reference/admin_api.md (Promote, Import).
 // Run: node --test crates/graphersal-server/ui/tests/*.test.mjs
 import { test } from 'node:test';
 import assert from 'node:assert/strict';

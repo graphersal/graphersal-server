@@ -1,5 +1,5 @@
 // The MCP tab's model (no Vue): the requests of the admin API's MCP routes (`GET/PUT
-// api/admin/mcp`, `PUT api/admin/mcp/databases/<name>`; docs/admin-api.md "MCP"), the rows of
+// api/admin/mcp`, `PUT api/admin/mcp/databases/<name>`; book/src/reference/admin_api.md "MCP"), the rows of
 // its tables, the status text and how to connect an agent. Imports only ./admin-api.js.
 
 import { sendAdmin } from './admin-api.js';

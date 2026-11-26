@@ -1,6 +1,6 @@
 // Node tests of access in the `server` profile (ui/access-api.js, B4): the login and logout
 // against a mock of `POST /api/login` / `POST /api/logout` (node:http on port 0, shaped after
-// docs/admin-api.md "Login"), the return path `next` (no open redirect), the principal and the
+// book/src/reference/admin_api.md "Login"), the return path `next` (no open redirect), the principal and the
 // header, "my databases" (`GET /api/databases`), the refusal handling of the admin client (401:
 // login page; 404: recheck) and the per-principal profile views (ui/profile-views.json) checked
 // by the engine's validateProfile when a playground is found.

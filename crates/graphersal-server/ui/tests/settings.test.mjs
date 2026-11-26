@@ -2,7 +2,7 @@
 // requests (the revision as If-Match), the edit rules against the server's own texts
 // (src/settings.rs, src/limits.rs), the rows of every section, and a round against a stateful
 // mock of `/api/admin/databases/<name>/settings` (node:http on port 0, shaped after
-// docs/admin-api.md "Database settings"): a description, a limit set and cleared, read-only, a
+// book/src/reference/admin_api.md "Database settings"): a description, a limit set and cleared, read-only, a
 // stale revision refused (409) and read again.
 // Run: node --test crates/graphersal-server/ui/tests/*.test.mjs
 import { test } from 'node:test';
@@ -64,7 +64,7 @@ test('the limit keys and the edit rules are the server\'s', () => {
   assert.equal(descriptionProblem('é'.repeat(1000)), null);
 });
 
-/** A settings answer as the server gives it (docs/admin-api.md). */
+/** A settings answer as the server gives it (book/src/reference/admin_api.md). */
 function answerOf({ loaded = true, override = null, inEffect = null, reloadNeeded = false } = {}) {
   return {
     name: 'acme',

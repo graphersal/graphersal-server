@@ -1,6 +1,6 @@
 // Node tests of the run administration in the admin panel's model (ui/admin-api.js, V25): the
 // requests, the rows, the texts and the Stop rule, against a stateful mock (node:http on port 0)
-// shaped after docs/admin-api.md "Runs".
+// shaped after book/src/reference/admin_api.md "Runs".
 // Run: node --test crates/graphersal-server/ui/tests/*.test.mjs
 import { test } from 'node:test';
 import assert from 'node:assert/strict';

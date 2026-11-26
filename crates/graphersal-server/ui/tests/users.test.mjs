@@ -1,7 +1,7 @@
 // Node tests of the Users tab's model (ui/admin-api.js "Users and grants", B4): the requests,
 // the rows (token as `…last4`), the last-admin rule of the row actions, the forms, the texts
 // and a whole round against a stateful mock of `/api/admin/users` and `/api/admin/grants`
-// (node:http on port 0, shaped after docs/admin-api.md "Users and grants").
+// (node:http on port 0, shaped after book/src/reference/admin_api.md "Users and grants").
 // Run: node --test crates/graphersal-server/ui/tests/*.test.mjs
 import { test } from 'node:test';
 import assert from 'node:assert/strict';

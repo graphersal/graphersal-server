@@ -1,6 +1,6 @@
 // Node tests of the server backup download (ui/admin-api.js `serverBackupPath`,
 // `fileNameOf`, `fetchServerBackup`, `SERVER_BACKUP_WARNING`) against a mock of
-// `GET /api/admin/server-backup` (node:http on port 0, shaped after docs/admin-api.md), and the
+// `GET /api/admin/server-backup` (node:http on port 0, shaped after book/src/reference/admin_api.md), and the
 // Backups tab's "Download server backup" button with its warning (ui/backups-tab.js).
 // Run: node --test crates/graphersal-server/ui/tests/*.test.mjs
 import { test } from 'node:test';

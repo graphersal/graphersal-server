@@ -51,7 +51,7 @@
 //! A restore therefore never brings a deleted database's grants back.
 //!
 //! Concurrent changes (round 3 B-CONCUR; the inventory of files, writers and locks is in
-//! `docs/server-dir.md` "Concurrent changes"): every change takes the lock of its file and
+//! `book/src/reference/server_directory.md` "Concurrent changes"): every change takes the lock of its file and
 //! holds it across read, change and write; the memory follows only a successful write. Lock
 //! order, never reversed: the loader's state lock ([`Loader`] `while_idle`), the loader's
 //! read-only flip lock, the registry (write or read), the access file ([`crate::access::Access`]),

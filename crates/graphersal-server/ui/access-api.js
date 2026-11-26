@@ -3,7 +3,7 @@
 // `GET /api/info`, the "my databases" listing (`GET /api/databases`) and what the profile does
 // with a refused admin request (401: the login page; 404: the principal may have lost the admin
 // role, so the root is read again). The views are ./login-tab.js, ./mine-tab.js and ./header.js;
-// the contract is docs/admin-api.md ("Login" and "My databases").
+// the contract is book/src/reference/admin_api.md ("Login" and "My databases").
 //
 // The server answers each principal its own profile: an admin the management tabs, a user the
 // "My databases" tab, anonymous the "Sign in" tab. After a login or a logout the page loads the

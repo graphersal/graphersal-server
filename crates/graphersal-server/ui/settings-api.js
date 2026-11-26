@@ -1,5 +1,5 @@
 // The Database settings tab's model (no Vue, round 3 B7): the requests of the admin API's
-// settings route (`GET/PUT api/admin/databases/<name>/settings`; docs/admin-api.md "Database
+// settings route (`GET/PUT api/admin/databases/<name>/settings`; book/src/reference/admin_api.md "Database
 // settings"), the rules of an edit (the same refusals and texts as the server's
 // src/settings.rs), and the rows of the tab's sections: identity, state and sizes, query
 // limits (the database's own override, the server's default, what the next load uses, what
