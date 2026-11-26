@@ -10,7 +10,7 @@
 //! graphersal-server db list|create|delete|clone|load|unload|promote|reset-layer|read-only|auto-load|alias|backup|backups|restore|verify|repair|swap|export ... --dir DIR [--json]
 //! graphersal-server import DIR SOURCE --name NAME [--base BASE] [--format F] [--description TEXT] [--role normal|base] [--mcp|--no-mcp] [--json]
 //! graphersal-server import DIR --inbox FILE --name NAME [...] | import DIR --list [--json]
-//! graphersal-server models list|add|remove ... --dir DIR [--json]
+//! graphersal-server models list|add|remove|download ... --dir DIR [--json]
 //! graphersal-server user ... --dir DIR [--json]
 //! graphersal-server mcp status|on|off | mcp expose-new on|off | mcp db NAME [read-only] on|off --dir DIR [--json]
 //! graphersal-server backup --dir DIR [--out FILE] [--with-databases] [--json]
@@ -155,8 +155,8 @@ Usage:
             A query limit override of NAME (database.toml [limits.query]; KEY: timeout_ms,
             max_operations, max_string_size, max_array_size, max_map_size, max_traversers,
             max_materialized_bytes, max_value_depth; 0 = no limit, for max_value_depth the
-            default 128); --clear lets the server's default apply again. Applies at NAME's
-            next load (unload + load).
+            default 128); --clear lets the server's default apply again. Applies at once
+            to NAME's new runs (a run already going keeps its limits).
         db alias set ALIAS DATABASE [--mcp|--no-mcp]
         db alias remove ALIAS
         db alias rename OLD NEW  the alias OLD becomes NEW (same database); open MCP sessions
@@ -217,6 +217,13 @@ Usage:
             name them), or the repository of a model the shared models hold. Every needs-model database whose model is then there
             gets it and can be loaded.
         models remove REPO       refused while a database uses it
+        models download REPO [--revision REV]
+            Downloads the Model2Vec model REPO (owner/name; REV: branch, tag or commit,
+            default main) from Hugging Face into the shared models, then resolves the
+            needs-model databases waiting for it. Through a running server it runs there
+            (one download at a time; the console waits for its end). The server's
+            environment: GRAPHERSAL_HF_ENDPOINT (a mirror), HF_TOKEN (gated repositories).
+        models download --cancel the running download of the server stops; nothing is kept
   graphersal-server user COMMAND ... --dir DIR [--json]
       The users and grants of DIR/access.toml. Through a running server like db (its
       sessions of a changed token end at once: browser and MCP).
@@ -1147,11 +1154,12 @@ fn import_command(args: &[String]) -> ExitCode {
     print_outcome(dir, &command, json, remote)
 }
 
-/// `models list|add|remove ... --dir DIR`.
+/// `models list|add|remove|download ... --dir DIR`.
 fn models_command(args: &[String]) -> ExitCode {
     let mut positional: Vec<&String> = Vec::new();
     let mut values: Vec<(String, String)> = Vec::new();
     let mut json = false;
+    let mut cancel = false;
     let mut rest = args.iter();
     while let Some(arg) = rest.next() {
         if !arg.starts_with("--") {
@@ -1163,7 +1171,7 @@ fn models_command(args: &[String]) -> ExitCode {
             None => (arg.clone(), None),
         };
         match flag.as_str() {
-            "--dir" | "--repo" | "--license" | "--token" | "--server" => {
+            "--dir" | "--repo" | "--license" | "--revision" | "--token" | "--server" => {
                 let Some(value) = inline.or_else(|| rest.next().cloned()) else {
                     return usage_error(&format!("models: {flag} needs a value"));
                 };
@@ -1173,6 +1181,7 @@ fn models_command(args: &[String]) -> ExitCode {
                 values.push((flag, value));
             }
             "--json" if inline.is_none() => json = true,
+            "--cancel" if inline.is_none() => cancel = true,
             _ => return usage_error(&format!("models: unknown argument {arg:?}")),
         }
     }
@@ -1187,7 +1196,18 @@ fn models_command(args: &[String]) -> ExitCode {
     };
     let words: Vec<&str> = positional.iter().map(|s| s.as_str()).collect();
     let add_flags = value("--repo").is_some() || value("--license").is_some();
+    let revision = value("--revision");
+    if (revision.is_some() || cancel) && words.first() != Some(&"download") {
+        return usage_error("--revision and --cancel belong to models download");
+    }
     let command = match words.as_slice() {
+        ["download"] if cancel && !add_flags && revision.is_none() => {
+            DbCommand::ModelsDownloadCancel
+        }
+        ["download", repo] if !cancel && !add_flags => DbCommand::ModelsDownload {
+            repo: repo.to_string(),
+            revision,
+        },
         ["list"] if !add_flags => DbCommand::ModelsList,
         ["add", source] => {
             let path = std::path::Path::new(source);
@@ -1220,7 +1240,7 @@ fn models_command(args: &[String]) -> ExitCode {
         _ => {
             return usage_error(&format!(
                 "unknown command or wrong arguments: models {} (list, add SOURCE [--repo R] \
-                 [--license L], remove REPO)",
+                 [--license L], remove REPO, download REPO [--revision REV], download --cancel)",
                 words.join(" ")
             ));
         }

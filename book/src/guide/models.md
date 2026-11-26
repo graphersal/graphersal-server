@@ -61,6 +61,23 @@ From a packed snapshot that carries models:
 graphersal-server models add /data/with-models.gsnap --dir ./srv
 ```
 
+From Hugging Face, downloaded by the server itself (into `tmp/` first, then into `models/`):
+
+```bash
+graphersal-server models download minishlab/potion-base-8M --dir ./srv
+graphersal-server models download org/model --revision v1.0 --dir ./srv   # a branch, tag or commit
+```
+
+Through a running server the download runs there (the web UI's Models tab shows its progress
+and has Cancel; `models download --cancel` stops it from the console); the console waits for
+its end and prints the model's identity and **licence**, with warnings about passing it on (an
+unknown or non-commercial licence, custom terms, a gated repository). Read them before you hand
+databases holding the model to others. One download runs at a time. The server process's
+environment decides where from: `GRAPHERSAL_HF_ENDPOINT` names a mirror (default
+`https://huggingface.co`), `HF_TOKEN` the token of a gated or private repository (accept its
+terms on the hub with that account first). Set them where the server starts (the service unit,
+`docker run -e`, the shell of `start`).
+
 From another computer: the web UI's Models tab uploads a `.gsnap` or a `.tar`/`.tar.gz` with a
 progress bar ("A file from this computer"). The upload limit is `server.toml`'s `[limits]
 upload_bytes`.
@@ -77,8 +94,9 @@ lack a model's blob. At the import:
 - otherwise the database is created in the state **`needs-model`** (the model's repository is
   shown). It cannot load until the model is added.
 
-Fix it by adding the model, from any source above, or by its repository when `models/` already
-holds it:
+Fix it by adding the model, from any source above (a model downloaded from Hugging Face is
+another copy than the one the database was made with: it resolves the database only when its
+blob is the same), or by its repository when `models/` already holds it:
 
 ```bash
 graphersal-server models add org/model --dir ./srv

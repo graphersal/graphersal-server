@@ -4634,7 +4634,7 @@ fn db_info_and_db_set_offline_and_through_a_server() {
     assert_eq!(code, 1, "{err}");
     assert!(err.contains("nope"), "{err}");
 
-    // Through a server: the change is in effect at the next load.
+    // Through a server: the change is in effect at once.
     let mut server = ServerProcess::spawn(
         Command::new(BIN)
             .args(["serve", "--dir"])
@@ -4662,13 +4662,30 @@ fn db_info_and_db_set_offline_and_through_a_server() {
         "{out}"
     );
     assert!(out.contains("now:"), "{out}");
-    assert!(out.contains("db unload acme"), "{out}");
+    assert!(out.contains("its new runs use it"), "{out}");
+    assert!(!out.contains("db unload acme"), "no reload needed: {out}");
     let (code, out, err) = db(root, &["info", "acme"]);
     assert_eq!(code, 0, "{err}");
     assert!(out.contains("NOW"), "loaded: the limits in effect: {out}");
     assert!(
-        out.contains("changed since the load: applies at the next load"),
-        "{out}"
+        !out.contains("changed by hand"),
+        "applied at once, nothing waits: {out}"
+    );
+    let (code, out, err) = db(root, &["info", "acme", "--json"]);
+    assert_eq!(code, 0, "{err}");
+    let info = json(&out);
+    assert_eq!(info["limits"]["reloadNeeded"], false, "{info}");
+    let row = info["limits"]["keys"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["key"] == "max_operations")
+        .unwrap()
+        .clone();
+    assert_eq!(
+        row["inEffect"],
+        serde_json::Value::Null,
+        "the cleared limit is gone now: {row}"
     );
     assert!(
         !std::fs::read_to_string(&file).unwrap().contains("limits"),
@@ -5743,7 +5760,7 @@ fn server_settings_apply_at_once_or_after_a_restart_over_http() {
     assert_eq!(config_row(&view, "listen")["applies"], "restart");
     assert_eq!(
         config_row(&view, "limits.query.timeout_ms")["applies"],
-        "load"
+        "now"
     );
     assert_eq!(config_row(&view, "defaults.read_only")["applies"], "create");
 
@@ -5974,7 +5991,8 @@ fn server_defaults_are_inherited_by_databases_key_by_key_and_new_databases_start
     assert_eq!(view["serverDefaults"]["autoLoad"], false, "{view}");
     assert_eq!(view["serverDefaults"]["mcpExposeNew"], false, "{view}");
 
-    // The server default: every database without an override follows it at its next load.
+    // The server default: every database without an override follows it at once (S1:
+    // `Context::set_presets`), and at every later load.
     let (status, changed) = admin_json(
         address,
         "PUT",
@@ -5982,7 +6000,11 @@ fn server_defaults_are_inherited_by_databases_key_by_key_and_new_databases_start
         json!({"set": {"limits.query.timeout_ms": 5000}}),
     );
     assert_eq!(status, 200, "{changed}");
-    assert_eq!(changed["applied"], json!([]), "{changed}");
+    assert_eq!(
+        changed["applied"],
+        json!(["limits.query.timeout_ms"]),
+        "{changed}"
+    );
     assert_eq!(changed["restartPending"], json!([]), "{changed}");
     let view = settings("acme");
     let row = limit(&view, "timeout_ms");
@@ -5991,8 +6013,11 @@ fn server_defaults_are_inherited_by_databases_key_by_key_and_new_databases_start
         (json!(5000), json!(5000))
     );
     assert_eq!(row["source"], "server", "{row}");
-    assert!(row["inEffect"].is_null(), "loaded before the change: {row}");
-    assert_eq!(view["limits"]["reloadNeeded"], true, "{view}");
+    assert_eq!(
+        row["inEffect"], 5000,
+        "applied to the loaded database: {row}"
+    );
+    assert_eq!(view["limits"]["reloadNeeded"], false, "{view}");
     let (status, _) = admin_json(address, "POST", "databases/acme/unload", json!({}));
     assert_eq!(status, 200);
     let (status, _) = admin_json(address, "POST", "databases/acme/load", json!({}));
@@ -6036,6 +6061,10 @@ fn server_defaults_are_inherited_by_databases_key_by_key_and_new_databases_start
     assert_eq!(
         (row["effective"].clone(), row["source"].clone()),
         (json!(7000), json!("server"))
+    );
+    assert_eq!(
+        row["inEffect"], 7000,
+        "the server's default again, at once: {row}"
     );
 
     // New databases start with [defaults]; a request that says otherwise wins; existing
@@ -6113,7 +6142,7 @@ fn config_commands_offline_and_through_a_server() {
         out.contains("Changed server.toml: limits.query.max_operations"),
         "{out}"
     );
-    assert!(out.contains("at each database's next load"), "{out}");
+    assert!(out.contains("at the next start"), "offline: {out}");
     assert_eq!(
         dir.load_config().unwrap().limits.query.max_operations,
         Some(1000)
@@ -6340,9 +6369,12 @@ fn db_reset_layer_offline_and_through_a_server() {
     let (code, out, err) = db(&root, &["reset-layer", "l0", "--yes"]);
     assert_eq!(code, 0, "{out}{err}");
     assert!(out.contains("Layer database 'l0' was reset"), "{out}");
-    assert!(out.contains("trash"), "{out}");
+    assert!(out.contains("history"), "{out}");
     assert!(out.contains("scheduled job"), "{out}");
-    assert!(dir.trash().read_dir().unwrap().count() == 1);
+    assert!(
+        dir.trash().read_dir().map(|d| d.count()).unwrap_or(0) == 0,
+        "the engine resets the Store in place: nothing goes to trash/"
+    );
 
     // Through a running server: the operator, then an admin user's token (JSON answer).
     let (code, out, err) = console(
@@ -6361,7 +6393,7 @@ fn db_reset_layer_offline_and_through_a_server() {
     assert_eq!(code, 0, "{out}{err}");
     let (code, out, err) = db(&root, &["reset-layer", "l0", "--yes"]);
     assert_eq!(code, 0, "{out}{err}");
-    assert!(out.contains("loaded"), "{out}");
+    assert!(out.contains("in place: it stays loaded"), "{out}");
     let (code, out, err) = console(
         &[
             "db",
@@ -6381,10 +6413,135 @@ fn db_reset_layer_offline_and_through_a_server() {
     assert_eq!(answer["name"], "l0", "{answer}");
     assert_eq!(answer["base"], "b0");
     assert_eq!(answer["description"], "scratch");
-    assert_eq!(answer["reloaded"], true);
+    assert_eq!(answer["inPlace"], true);
+    assert_eq!(answer["state"], "loaded");
     assert!(
-        answer["trash"].as_str().unwrap().starts_with("trash/l0-"),
-        "{answer}"
+        dir.trash().read_dir().map(|d| d.count()).unwrap_or(0) == 0,
+        "nothing goes to trash/"
     );
-    assert_eq!(dir.trash().read_dir().unwrap().count(), 3);
+}
+
+/// A fake Hugging Face endpoint on 127.0.0.1 serving the files of the model directory `model`
+/// as the repository `acme/tiny` at `main` (no network); `http://127.0.0.1:<port>`.
+fn fake_hub(model: &Path) -> String {
+    use std::io::{BufRead, BufReader, Write};
+    let mut files = std::collections::HashMap::new();
+    for name in [
+        "config.json",
+        "tokenizer.json",
+        "model.safetensors",
+        "README.md",
+    ] {
+        files.insert(
+            format!("/acme/tiny/resolve/main/{name}"),
+            std::fs::read(model.join(name)).unwrap(),
+        );
+    }
+    files.insert(
+        "/api/models/acme/tiny/revision/main".to_string(),
+        br#"{"cardData": {"license": "mit"}, "gated": false, "siblings": []}"#.to_vec(),
+    );
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let Ok(clone) = stream.try_clone() else {
+                continue;
+            };
+            let mut reader = BufReader::new(clone);
+            let mut line = String::new();
+            if reader.read_line(&mut line).is_err() {
+                continue;
+            }
+            let path = line.split_whitespace().nth(1).unwrap_or("").to_string();
+            loop {
+                let mut header = String::new();
+                if reader.read_line(&mut header).unwrap_or(0) == 0 || header == "\r\n" {
+                    break;
+                }
+            }
+            let (status, body) = match files.get(path.split('?').next().unwrap_or("")) {
+                Some(body) => ("200 OK", body.clone()),
+                None => ("404 Not Found", b"not found".to_vec()),
+            };
+            let head = format!(
+                "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(head.as_bytes());
+            let _ = stream.write_all(&body);
+            let _ = stream.shutdown(std::net::Shutdown::Both);
+        }
+    });
+    url
+}
+
+/// S1: `models download` offline (the console downloads into the shared models itself) and
+/// through a running server (the download runs there, the console waits for its end), from the
+/// endpoint in `GRAPHERSAL_HF_ENDPOINT`; a bad name and an unknown repository fail with exit 1;
+/// `--cancel` without a running download says so.
+#[test]
+fn models_download_offline_and_through_a_server() {
+    let temp = TempDir::new("console-models-download");
+    let dir = ServerDir::init(temp.path().join("srv")).unwrap().dir;
+    let root = dir.root().to_str().unwrap().to_string();
+    let model = temp.path().join("tiny");
+    tiny_model_dir(&model);
+    let hub = fake_hub(&model);
+    let env = [("GRAPHERSAL_HF_ENDPOINT", hub.as_str())];
+    let (code, out, err) = console(&["models", "download", "acme/tiny", "--dir", &root], &env);
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(
+        out.starts_with("Downloaded acme/tiny (main) into the shared models"),
+        "{out}"
+    );
+    assert!(
+        out.lines()
+            .any(|l| l.trim_start().starts_with("licence:") && l.ends_with(" mit")),
+        "{out}"
+    );
+    assert!(
+        out.contains("Model acme/tiny is in the shared models"),
+        "{out}"
+    );
+    let (code, out, err) = models(dir.root(), &["list"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("acme/tiny"), "{out}");
+    let (code, out, err) = console(&["models", "download", "acme/none", "--dir", &root], &env);
+    assert_eq!(code, 1, "{out}{err}");
+    assert!(out.contains("failed; nothing was kept"), "{out}");
+    let (code, _, err) = console(&["models", "download", "tiny", "--dir", &root], &env);
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains("not a Hugging Face repository name"), "{err}");
+    let (code, _, err) = console(&["models", "list", "--revision", "x", "--dir", &root], &env);
+    assert_eq!(code, 2, "{err}");
+
+    // Through a running server started with the endpoint in its environment.
+    let mut server = ServerProcess::spawn(
+        Command::new(BIN)
+            .args(["serve", "--dir", &root, "--listen", "127.0.0.1:0"])
+            .env("GRAPHERSAL_HF_ENDPOINT", &hub)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    );
+    let info = wait_for_run_file(&dir);
+    wait_ready(info.address);
+    let (code, out, err) = console(
+        &["models", "download", "acme/tiny", "--dir", &root, "--json"],
+        &[],
+    );
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(err.contains("sent to its admin API"), "{err}");
+    let answer = json(&out);
+    assert_eq!(answer["download"]["state"], "done", "{answer}");
+    assert_eq!(answer["download"]["report"]["license"], "mit", "{answer}");
+    assert_eq!(answer["download"]["actor"], "operator", "{answer}");
+    let (code, out, err) = console(&["models", "download", "--cancel", "--dir", &root], &[]);
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(
+        out.contains("No download runs (the last one, acme/tiny, is done)"),
+        "{out}"
+    );
+    stop_and_wait(&mut server);
 }

@@ -2,7 +2,7 @@
 // ./settings-tab.js for its first two picker entries: `mode` "defaults" (Server defaults:
 // the query limits every database inherits key by key, what a new database starts with, and
 // mcp.toml's MCP default of new names) and "server" (every key of server.toml). Each key shows
-// its value (or its default), when a change applies (now, at the next load, for new databases,
+// its value (or its default), when a change applies (now, for new databases,
 // after a restart) and "restart pending" while the running server still applies the old value;
 // a key is set, or reset to its default, one at a time, based on the file's revision (a change
 // someone else made meanwhile is refused, 409, and the view is read again). Outcomes are
@@ -163,7 +163,7 @@ export default {
       <template v-for="sec in sections" :key="sec.id">
         <h3>{{ sec.title }}</h3>
         <p v-if="sec.id === 'defaults'" class="muted">What a new database (create, import) starts with. Chunk size and damage policy are creation parameters: applied when a database is created, fixed for its life. Auto-load and read-only are the first value of its own flags (changeable per database afterwards).</p>
-        <p v-if="sec.id === 'limits.query'" class="muted">Inherited by every database key by key, unless it overrides the key in its own settings; a change applies at each database's next load.</p>
+        <p v-if="sec.id === 'limits.query'" class="muted">Inherited by every database key by key, unless it overrides the key in its own settings; a change applies at once to every loaded database's new runs.</p>
         <div class="srv-table-wrap">
         <table class="data-table srv-table srv-config-table" :data-config-section="sec.id">
           <thead><tr><sort-th :s="keySort" k="key">Key</sort-th><sort-th :s="keySort" k="value">Value</sort-th><sort-th :s="keySort" k="applies">Applies</sort-th><th><span class="sr-only">Change</span></th></tr></thead>

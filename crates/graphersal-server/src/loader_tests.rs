@@ -631,6 +631,60 @@ fn query_limits_apply_at_the_next_load_and_bad_ones_fail_it() {
     assert!(loader.unload("acme").unwrap());
 }
 
+/// S1 (graphersal-serve's `Context::set_presets`): `apply_limits` gives a loaded database the
+/// limits the files say now, without a reload; a file that does not parse keeps the limits in
+/// effect; every loaded database follows a change of `server.toml`.
+#[test]
+fn query_limits_are_applied_to_a_loaded_database_without_a_reload() {
+    let temp = TempDir::new("loader-limits-live");
+    let dir = server(&temp);
+    store_db(&dir, "acme", "", TraversalGraph::tinkerpop_modern());
+    store_db(&dir, "other", "", TraversalGraph::tinkerpop_modern());
+    let loader = loader_of(&dir);
+    assert_eq!(load(&loader, "acme"), DbState::Loaded);
+    assert_eq!(load(&loader, "other"), DbState::Loaded);
+    let context = loader.context("acme").unwrap();
+    run(&context, HEAVY_SCRIPT).expect("not limited");
+
+    let file = dir.databases().join("acme").join(DATABASE_FILE);
+    std::fs::write(&file, "[limits.query]\nmax_operations = 1000\n").unwrap();
+    loader.apply_limits("acme").unwrap();
+    let err = run(&context, HEAVY_SCRIPT).expect_err("limited at once, same context");
+    assert!(err.contains("operations"), "{err}");
+    assert_eq!(
+        loader.limits_in_effect("acme").unwrap().max_operations,
+        Some(1000)
+    );
+    run(&loader.context("other").unwrap(), HEAVY_SCRIPT).expect("the other is not limited");
+
+    // A broken file: refused, the limits in effect stay.
+    std::fs::write(&file, "[limits.query]\nmax_operations = -1\n").unwrap();
+    assert!(loader.apply_limits("acme").is_err());
+    assert_eq!(
+        loader.limits_in_effect("acme").unwrap().max_operations,
+        Some(1000)
+    );
+    run(&context, HEAVY_SCRIPT).expect_err("still limited");
+
+    // The server's default reaches every loaded database; a database's own key wins.
+    std::fs::write(&file, "[limits.query]\ntimeout_ms = 50000\n").unwrap();
+    server_toml(
+        &dir,
+        "[limits.query]\nmax_operations = 1000\ntimeout_ms = 60000\n",
+    );
+    loader.apply_limits_everywhere().unwrap();
+    for name in ["acme", "other"] {
+        let err = run(&loader.context(name).unwrap(), HEAVY_SCRIPT).expect_err(name);
+        assert!(err.contains("operations"), "{name}: {err}");
+    }
+    assert_eq!(presets_of(&loader, "acme")["scriptTimeoutMs"], 50000);
+    assert_eq!(presets_of(&loader, "other")["scriptTimeoutMs"], 60000);
+    // Not loaded: nothing to apply, no error.
+    assert!(loader.unload("other").unwrap());
+    loader.apply_limits("other").unwrap();
+    assert!(loader.unload("acme").unwrap());
+}
+
 #[test]
 fn a_bad_database_limit_fails_the_database_at_the_scan() {
     let temp = TempDir::new("loader-limits-scan");

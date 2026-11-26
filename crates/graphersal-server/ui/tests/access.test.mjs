@@ -273,7 +273,12 @@ function playgroundDir() {
       { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'] },
     );
     const serve = JSON.parse(out).packages.find((p) => p.name === 'graphersal-serve');
-    return serve ? join(dirname(serve.manifest_path), 'ui') : null;
+    if (!serve) return null;
+    // A published crate carries `ui/`; a graphersal checkout (a path dependency) embeds its
+    // `playground/` two levels up.
+    const ui = join(dirname(serve.manifest_path), 'ui');
+    const checkout = join(dirname(serve.manifest_path), '..', '..', 'playground');
+    return existsSync(ui) || !existsSync(checkout) ? ui : checkout;
   } catch {
     return null;
   }

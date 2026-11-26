@@ -651,14 +651,9 @@ impl Router {
             forwarded.mark_read_only();
         }
         let identity = forwarded.identity().map(str::to_string);
-        let feed = forwarded.method() == &Method::Get && rest == "api/changes";
+        // The change feed hides other identities' client ids itself (SEC M3, graphersal-serve
+        // keys runs and feed entries by the identity set above).
         let answer = self.lifecycle.handle(forwarded);
-        // The change feed names client ids: only the reader's own are shown (SEC M3).
-        let answer = if feed {
-            mounts::own_changes(answer, identity.as_deref())
-        } else {
-            answer
-        };
         if let (Some(control), Some(sent)) = (mcp_control, &buffered) {
             let new_session = crate::mcp::header_of(answer.headers(), crate::mcp::SESSION_HEADER);
             if let Some(opened) = new_session.as_deref()

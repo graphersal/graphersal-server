@@ -15,9 +15,9 @@
 //!   web UI's Settings, `graphersal-server config set`): the upload limit, the process memory
 //!   ceiling and its headroom (`graphersal::exec::set_memory_limit` is a runtime setter), the
 //!   browser session lifetimes (the access state's limits and the login cookie's `Max-Age`) and
-//!   the public scheme (the login cookie's `Secure`, the API descriptions' URLs);
-//! - `load`: the query limits: read at every load of a database (a loaded one keeps its limits
-//!   until it is loaded again);
+//!   the public scheme (the login cookie's `Secure`, the API descriptions' URLs) and the query
+//!   limits (`Loader::apply_limits_everywhere`: every loaded database's new runs use them at
+//!   once; a run already going keeps its limits; every load reads them too);
 //! - `create`: `[defaults]`: read at every create and import (never touches an existing
 //!   database);
 //! - `restart`: the rest (the listener, the MCP endpoint, the connection limits, access
@@ -27,7 +27,7 @@
 //! "Restart pending" ([`LiveConfig::pending`]) is derived, never stored: the `now` and
 //! `restart` keys whose value in the file differs from the value the running server applies.
 //! A hand edit of the file therefore shows as pending too (only the admin API applies a change
-//! at once; `load` and `create` keys are read from the file when they are used).
+//! at once; `create` keys are read from the file when they are used).
 //!
 //! **Writing** ([`edit`]): the change is made on the file's TOML table and checked by
 //! [`ServerConfig::parse`]; then the file's own text is patched line by line (a key's line
@@ -58,8 +58,6 @@ use crate::limits::QUERY_LIMIT_KEYS;
 pub enum Applies {
     /// At once (through the admin API).
     Now,
-    /// At each database's next load.
-    NextLoad,
     /// At the next create or import of a database.
     NewDatabases,
     /// At the next start of the server.
@@ -67,11 +65,11 @@ pub enum Applies {
 }
 
 impl Applies {
-    /// The class as the API and the console write it: `now`, `load`, `create`, `restart`.
+    /// The class as the API and the console write it: `now`, `create`, `restart` (0.2's
+    /// `load`, the query limits, is `now` since 0.3.0).
     pub fn as_str(self) -> &'static str {
         match self {
             Applies::Now => "now",
-            Applies::NextLoad => "load",
             Applies::NewDatabases => "create",
             Applies::Restart => "restart",
         }
@@ -81,7 +79,6 @@ impl Applies {
     pub fn text(self) -> &'static str {
         match self {
             Applies::Now => "applies now",
-            Applies::NextLoad => "at each database's next load",
             Applies::NewDatabases => "for new databases",
             Applies::Restart => "after a restart",
         }
@@ -235,49 +232,49 @@ pub const KEYS: &[Key] = &[
     key(
         "limits.query.timeout_ms",
         Kind::Count,
-        Applies::NextLoad,
+        Applies::Now,
         "Query limit of every database: the timeout of a traversal and of a run, in ms (0 = none).",
     ),
     key(
         "limits.query.max_operations",
         Kind::Count,
-        Applies::NextLoad,
+        Applies::Now,
         "Query limit of every database: Rhai operations one script may run (0 = none).",
     ),
     key(
         "limits.query.max_string_size",
         Kind::Count,
-        Applies::NextLoad,
+        Applies::Now,
         "Query limit of every database: the longest string, in bytes (0 = none).",
     ),
     key(
         "limits.query.max_array_size",
         Kind::Count,
-        Applies::NextLoad,
+        Applies::Now,
         "Query limit of every database: the largest array, in items (0 = none).",
     ),
     key(
         "limits.query.max_map_size",
         Kind::Count,
-        Applies::NextLoad,
+        Applies::Now,
         "Query limit of every database: the largest map, in entries (0 = none).",
     ),
     key(
         "limits.query.max_traversers",
         Kind::Count,
-        Applies::NextLoad,
+        Applies::Now,
         "Query limit of every database: traversers one step may leave alive (0 = none).",
     ),
     key(
         "limits.query.max_materialized_bytes",
         Kind::Count,
-        Applies::NextLoad,
+        Applies::Now,
         "Query limit of every database: memory one query holds at once, in bytes (0 = none).",
     ),
     key(
         "limits.query.max_value_depth",
         Kind::Count,
-        Applies::NextLoad,
+        Applies::Now,
         "Query limit of every database: the deepest nesting in one value (0 = the default 128).",
     ),
     key(
@@ -778,6 +775,9 @@ impl LiveConfig {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let before = applied.clone();
         applied.limits.upload_bytes = file.limits.upload_bytes;
+        // The loaded databases take them from the files (`Loader::apply_limits_everywhere`,
+        // called by the admin core after this).
+        applied.limits.query = file.limits.query.clone();
         applied.http.public_scheme = file.http.public_scheme;
         if applied.sessions != file.sessions {
             applied.sessions = file.sessions.clone();
@@ -1122,11 +1122,15 @@ mod tests {
             ],
         )
         .unwrap();
+        // The query limits are `now` keys since S1 (applied to the loaded databases at once).
         assert_eq!(
             live.pending(&edited.config),
-            ["listen", "limits.upload_bytes"]
+            ["listen", "limits.upload_bytes", "limits.query.timeout_ms"]
         );
-        assert_eq!(live.apply(&edited.config), ["limits.upload_bytes"]);
+        assert_eq!(
+            live.apply(&edited.config),
+            ["limits.upload_bytes", "limits.query.timeout_ms"]
+        );
         assert_eq!(live.upload_bytes(), 99);
         assert_eq!(live.pending(&edited.config), ["listen"]);
         let view = view_json(path(), &edited.text, &edited.config, Some(&live));
@@ -1142,7 +1146,7 @@ mod tests {
         };
         assert_eq!(row("listen")["pending"], json!(true));
         assert_eq!(row("listen")["running"], json!("127.0.0.1:8484"));
-        assert_eq!(row("limits.query.timeout_ms")["applies"], json!("load"));
+        assert_eq!(row("limits.query.timeout_ms")["applies"], json!("now"));
         assert_eq!(row("limits.query.timeout_ms")["set"], json!(true));
         assert_eq!(row("limits.query.max_operations")["set"], json!(false));
         assert_eq!(row("defaults.read_only")["applies"], json!("create"));

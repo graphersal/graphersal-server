@@ -138,6 +138,11 @@ fn command(method: &str, path: &str, body: Option<&Value>, dir_arg: &str) -> Opt
         }
         ("DELETE", ["aliases", alias]) => db(format!("alias remove {}", word(alias))),
         ("GET", ["models"]) => models("list".to_string()),
+        ("POST", ["models", "download"]) => match body.and_then(|b| b["repo"].as_str()) {
+            Some(repo) => models(format!("download {}", word(repo))),
+            None => models("download REPO".to_string()),
+        },
+        ("POST", ["models", "download", "cancel"]) => models("download --cancel".to_string()),
         ("POST", ["models"]) => match (body.and_then(|b| b["repo"].as_str()), field("path")) {
             (Some(repo), _) => models(format!("add {}", word(repo))),
             (None, Some(path)) if !path.contains(' ') => models(format!("add {path}")),

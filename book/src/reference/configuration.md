@@ -10,7 +10,7 @@ the server (or fails the database) instead of being ignored.
 | `access.toml` | the server and the console (`user ...`, the Users tab, the admin API) | at start, then kept in memory |
 | `aliases.toml` | the server (`db alias ...`, the Databases tab, the admin API) | at start, then kept in memory |
 | `mcp.toml` | the server (`mcp ...`, the MCP tab, the admin API) | at start, then kept in memory |
-| `databases/<name>/database.toml` | the server (flags, settings); its `[limits.query]` also by hand | at start, and again at every load of the database |
+| `databases/<name>/database.toml` | the server (flags, settings); its `[limits.query]` also by hand | at start, again at every load of the database, and at every query limit change through the server (applied to a loaded database at once) |
 
 The other files of the directory (run files, sessions, logs) are described in
 [The Server Directory](server_directory.md).
@@ -72,10 +72,12 @@ public_scheme = "http"      # "https" when a reverse proxy ends TLS (Secure logi
 The **Read** column says when the server reads a key, and so when a change applies. A change
 made through the admin API (the web UI's Settings tab, `graphersal-server config set` with a
 running server, `PUT /api/admin/config`) is applied at once where the column says
-**live**; a **restart** key is saved and listed as *restart pending* (the Settings tab, the top
-bar's badge, `config get`, `status`, `GET /api/admin/server`) until the next start; **load**
-keys apply at each database's next load, **create** keys to the next new database. A hand edit
-of the file applies at the next start (or, for load and create keys, when they are read).
+**live** (the query limits: every loaded database's runs that start afterwards; a run already
+going keeps its limits); a **restart** key is saved and listed as *restart pending* (the
+Settings tab, the top bar's badge, `config get`, `status`, `GET /api/admin/server`) until the
+next start; **create** keys apply to the next new database. A hand edit of the file applies at
+the next start (or, for create keys, when they are read; for the query limits at a database's
+next load).
 
 | Key | Default | Read | Meaning |
 |---|---|---|---|
@@ -93,14 +95,14 @@ of the file applies at the next start (or, for load and create keys, when they a
 | `[limits] idle_timeout_secs` | `60` | restart | seconds a connection without a running request stays open (HTTP/1.1: at most the shorter of this and `header_timeout_secs`). `serve --idle-timeout SECS` overrides it |
 | `[limits] memory_limit` | none (the library's `auto`) | live (the engine's setter applies from then on; a running execution keeps its ceiling) | the process memory ceiling, one setting for every database (`graphersal::exec::set_memory_limit`; the graphersal command line's `--memory-limit`): a number of bytes (`0` = none), `"auto"` (the cgroup limit minus the headroom, else 80 % of the physical memory) or `"none"`. A query, import or write that would take the process over it fails with a `memory.limit` diagnostic and rolls back. Only in `server.toml` (a `database.toml` refuses it). The start block shows the ceiling in effect when it is set |
 | `[limits] memory_headroom` | none (a tenth of the cgroup limit, at least 64 MiB) | live | what `memory_limit = "auto"` keeps free below a cgroup memory limit, in bytes (at least 1; `--memory-headroom`) |
-| `[limits.query] timeout_ms` | none | load | the default `evaluationTimeout` of every traversal and the budget of a whole run (the Rhai code between traversals), in milliseconds (`--timeout`); `0` = no timeout |
-| `[limits.query] max_operations` | none | load | Rhai operations one script may run (`--max-operations`); `0` = unlimited |
-| `[limits.query] max_string_size` | none | load | the longest string a script or a step may build, in bytes: the script limit and the `traversal.max_string_bytes` default (`--max-string-size`); `0` = unlimited |
-| `[limits.query] max_array_size` | none | load | the largest array a script may build, in items (`--max-array-size`); `0` = unlimited |
-| `[limits.query] max_map_size` | none | load | the largest map a script may build, in entries (`--max-map-size`); `0` = unlimited |
-| `[limits.query] max_traversers` | none (engine default 10M) | load | the `traversal.max_traversers` default: traversers one step may leave alive (`--max-traversers`); `0` = unlimited |
-| `[limits.query] max_materialized_bytes` | none (engine default 1 GiB) | load | the `traversal.max_materialized_bytes` default: the memory one query holds at once (`--max-materialized-bytes`); `0` = unlimited |
-| `[limits.query] max_value_depth` | none (128) | load | the deepest nesting of arrays and maps in one value, script and engine values (`--max-value-depth`); `0` = the default, never unlimited |
+| `[limits.query] timeout_ms` | none | live (every loaded database's new runs; and every load) | the default `evaluationTimeout` of every traversal and the budget of a whole run (the Rhai code between traversals), in milliseconds (`--timeout`); `0` = no timeout |
+| `[limits.query] max_operations` | none | live (every loaded database's new runs; and every load) | Rhai operations one script may run (`--max-operations`); `0` = unlimited |
+| `[limits.query] max_string_size` | none | live (every loaded database's new runs; and every load) | the longest string a script or a step may build, in bytes: the script limit and the `traversal.max_string_bytes` default (`--max-string-size`); `0` = unlimited |
+| `[limits.query] max_array_size` | none | live (every loaded database's new runs; and every load) | the largest array a script may build, in items (`--max-array-size`); `0` = unlimited |
+| `[limits.query] max_map_size` | none | live (every loaded database's new runs; and every load) | the largest map a script may build, in entries (`--max-map-size`); `0` = unlimited |
+| `[limits.query] max_traversers` | none (engine default 10M) | live (every loaded database's new runs; and every load) | the `traversal.max_traversers` default: traversers one step may leave alive (`--max-traversers`); `0` = unlimited |
+| `[limits.query] max_materialized_bytes` | none (engine default 1 GiB) | live (every loaded database's new runs; and every load) | the `traversal.max_materialized_bytes` default: the memory one query holds at once (`--max-materialized-bytes`); `0` = unlimited |
+| `[limits.query] max_value_depth` | none (128) | live (every loaded database's new runs; and every load) | the deepest nesting of arrays and maps in one value, script and engine values (`--max-value-depth`); `0` = the default, never unlimited |
 | `[sessions] lifetime_secs` | `2592000` (30 days) | live (existing sessions too; the login cookie's `Max-Age` of new logins) | the longest a browser session lasts after its login, in seconds; `0` = no limit (the cookie then lasts 400 days, the longest a browser keeps one); the browser logs in again afterwards. Before 0.3.0 a missing key meant no limit |
 | `[sessions] idle_timeout_secs` | `604800` (7 days) | live | the longest a browser session lasts after its last request, in seconds; `0` = no limit; counted coarsely (the last request is recorded at most every minute, every quarter of a shorter timeout). Before 0.3.0 a missing key meant no limit |
 | `[access] enabled` | `true` | restart | `false` turns access control off: every request is an admin. Valid admin credentials keep their identity (the console's operator, an admin user); every other request (none, a user without the admin role, wrong credentials) runs as the admin principal `everyone`, which the audit names. `everyone` is refused only what would hand out or use real credentials: the shutdown, the server backup, a new user and a new token (`403`). It protects no data: whoever reaches the address reads, changes and deletes every database ([Security Model](../guide/security.md#what-access-control-off-protects)). Login still works but is not needed. The `serve` start block warns loudly, and louder (in the banner too) when the address is not a loopback address. `access.toml` is still read and its first admin created, so turning access back on needs no other change |
@@ -141,7 +143,7 @@ What every database gets from the server:
 
 | Setting | Kept in | How a database gets it |
 |---|---|---|
-| query limits | `server.toml [limits.query]` | inherited live, key by key: a database without its own key uses the server's at its next load; its own key wins ("override"); removing it ("reset to inherited", `db set NAME limit KEY --clear`) inherits again |
+| query limits | `server.toml [limits.query]` | inherited live, key by key: a database without its own key uses the server's (at once when changed through the server); its own key wins ("override"); removing it ("reset to inherited", `db set NAME limit KEY --clear`) inherits again |
 | auto-load, read-only | `server.toml [defaults]` | copied at create and import (the database's own flags afterwards) |
 | chunk size, damage policy | `server.toml [defaults]` | creation parameters: fixed at create, never changed afterwards |
 | MCP exposure of new names | `mcp.toml expose_new` | copied at birth into the name's MCP settings (the MCP tab and the Settings tab's "Server defaults" show the same switch) |
@@ -164,10 +166,13 @@ browser sessions: a new login ends that user's oldest. The logout clears the coo
 may carry its own `[limits.query]`, whose keys win one by one (`0` there lifts a global limit
 for that database; set or cleared at runtime with `graphersal-server db set NAME limit KEY
 VALUE|--clear`, `PUT /api/admin/databases/<name>/settings` or the web UI's Settings
-tab). Both files are read again whenever a database is loaded, so a change
-applies at the database's next load (unload + load; a server restart loads the `auto_load`
-ones again; `db info NAME` and the settings show the limits a loaded database runs under now
-beside what its next load will use); a file that does not parse then fails the load (`failed` with the reason). The
+tab). Both files are read again whenever a database is loaded and whenever a limit changes
+through the server (a database's settings, `config set limits.query.*`): the change applies at
+once to a loaded database's runs that start afterwards (a run already going keeps its limits).
+A hand edit applies at the next load (or the next change through the server; until then `db
+info NAME` and the settings show the limits a loaded database runs under now beside the
+files'); a file that does not parse fails the load (`failed` with the reason), and a loaded
+database keeps the limits it runs under (a warning in the log). The
 key names are the graphersal command line's flags; the limits are the session presets of the
 loaded database (`GET /db/<name>/api/statistics` shows them under `limits.presets`). Nothing
 set: no limit at all, as in the graphersal playground. A configured limit is a ceiling: a
@@ -274,7 +279,7 @@ max_traversers = 0               # 0: no limit here, whatever server.toml says
 | `read_only` | `false` | writes through the database's API and MCP endpoint are refused; a base is always read-only |
 | `created` | none | the creation time (UTC, RFC 3339) |
 | `description` | `""` | free text, one line (the settings change refuses line breaks and control characters, at most 1000 characters) |
-| `[limits.query] ...` | none (`server.toml`'s) | the database's own query limits, the same keys as `server.toml`'s `[limits.query]`; each key set here wins over the global one. Read at every load, so a change applies at the next load. Set or cleared at runtime by the settings change (`db set NAME limit KEY VALUE\|--clear`, `PUT /api/admin/databases/<name>/settings`, the Settings tab; validated like this file); may also be edited by hand while the server runs (every other rewrite of the file keeps the file's limits). `[limits]` holds only `query`: the memory ceiling is server-wide |
+| `[limits.query] ...` | none (`server.toml`'s) | the database's own query limits, the same keys as `server.toml`'s `[limits.query]`; each key set here wins over the global one. Read at every load and at every limit change through the server, so a change applies at once to a loaded database's new runs (a hand edit at the next load). Set or cleared at runtime by the settings change (`db set NAME limit KEY VALUE\|--clear`, `PUT /api/admin/databases/<name>/settings`, the Settings tab; validated like this file); may also be edited by hand while the server runs (every other rewrite of the file keeps the file's limits). `[limits]` holds only `query`: the memory ceiling is server-wide |
 | `needs_model` | none | the repository of an embedding model the database's Store names but does not hold, set by an import whose source names a model that `models/` lacks too (one `models/` holds is taken from there at the import): the database is listed as `needs-model` and cannot load until `models add <repo>` (the marker is removed then, or by the first successful load) |
 
 Unknown keys are an error (the database is listed `failed`). The server writes the file

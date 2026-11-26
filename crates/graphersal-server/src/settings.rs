@@ -7,11 +7,12 @@
 //!
 //! When a change applies: the description and auto-load at once (auto-load is read at the next
 //! server start); read-only at once (a loaded database's context is flipped, a request already
-//! running finishes under the old mode); a query limit override at the database's NEXT LOAD
-//! (unload + load, or a server restart): graphersal-serve 0.8.0 fixes a context's session
-//! presets when it is built, so a loaded database keeps the limits it was loaded with until
-//! then ([`crate::loader::Loader::limits_in_effect`]; the settings answer shows both and
-//! `reloadNeeded`).
+//! running finishes under the old mode); a query limit override at once as well: a loaded
+//! database's context gets the new session presets (`Context::set_presets`,
+//! [`crate::loader::Loader::apply_limits`]), so every run that starts afterwards uses them and
+//! a run already going keeps its limits; a database that is not loaded reads them at its next
+//! load ([`crate::loader::Loader::limits_in_effect`]; the settings answer shows both, and
+//! `reloadNeeded` when a hand edit of a file is not applied yet).
 
 use serde_json::Value;
 
@@ -22,9 +23,9 @@ use crate::limits::{MAX_LIMIT_VALUE, QUERY_LIMIT_KEYS};
 pub(crate) const MAX_DESCRIPTION_CHARS: usize = 1000;
 
 /// When a changed query limit override applies (shown by the UI, the console and the docs).
-pub(crate) const LIMITS_APPLY_TEXT: &str = "a query limit change applies at the database's next \
-     load: unload and load it (or restart the server); a loaded database keeps the limits it was \
-     loaded with until then";
+pub(crate) const LIMITS_APPLY_TEXT: &str = "a query limit change applies at once: every run that \
+     starts afterwards uses it, a run already going keeps its limits; a database that is not \
+     loaded uses it from its next load";
 
 /// A change of a database's settings: every field optional (`None` keeps it).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

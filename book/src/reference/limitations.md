@@ -21,16 +21,14 @@ What this version does not do, or does differently than you might expect.
   is unique within its database only.
 - A model archive is a **ustar `.tar`**, uncompressed or gzip-compressed (`tar -cf model.tar
   -C <model dir> .`, `tar -czf model.tar.gz ...`); zstd, bzip2, xz and `.zip` are not taken.
-- **A layer reset replaces the layer's Store** (graphersal 0.8.0 has no reset inside a Store):
-  the old Store with its history goes to `trash/`, so a Store rollback of the reset layer
-  cannot go back before the reset, and a loaded layer is unloaded for the moment of the reset.
-  A later graphersal release resets inside the Store; the server will use it then.
+- **A layer reset waits for running queries** at most 30 s (the graph's write lock), then
+  refuses and names the runs to cancel; it is undone by a rollback of the layer's Store (its
+  playground's Store menu) or a backup, not by a console command.
 - A **layer `.gsnap` export carries no models** (an engine rule); export the layer with
   `materialize=true` (`--materialize`) for a standalone snapshot with the models.
-- **A query limit change applies at the database's next load** (unload + load, or a restart):
-  the engine fixes a loaded database's session limits when it loads it. The settings
-  (`db info`, the Settings tab) show both the limits in effect now and those of the
-  next load. The Store's creation parameters are shown read-only; the server creates every
+- **A query already running keeps its limits** when they change; only the runs that start
+  afterwards use the new ones. A hand edit of a limit in a file applies at the next load. The
+  Store's creation parameters are shown read-only; the server creates every
   database with the engine's defaults, and a backend's container version is not reported by the
   engine (0.8.0).
 - **Memory figures are the engine's estimates** of each graph's data (loaded embedding models

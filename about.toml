@@ -3,12 +3,13 @@
 #   cargo about generate --locked --config about.toml \
 #     --manifest-path crates/graphersal-server/Cargo.toml about.hbs > THIRD-PARTY-LICENSES.html
 # The accepted list holds the licences this tree uses: deny.toml's allow list plus MPL-2.0
-# (its exception for smartstring). A licence added to deny.toml must be added here too.
+# (its exception for smartstring) and CDLA-Permissive-2.0 (its exception for webpki-roots). A licence added to deny.toml must be added here too.
 accepted = [
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",
     "MIT",
     "BSD-2-Clause",
+    "BSD-3-Clause",
     "ISC",
     "0BSD",
     "Zlib",
@@ -16,6 +17,17 @@ accepted = [
     "CC0-1.0",
     "Unicode-3.0",
     "MPL-2.0",
+    "CDLA-Permissive-2.0",
 ]
 ignore-dev-dependencies = true
 ignore-build-dependencies = true
+
+# model2vec-rs (Graphersal's `model2vec` runtime) declares its licence only through
+# `license-file = "LICENSE"`; that file is the MIT licence text. The checksum pins it.
+[model2vec-rs.clarify]
+license = "MIT"
+
+[[model2vec-rs.clarify.files]]
+path = "LICENSE"
+license = "MIT"
+checksum = "6869ad291a9df9866448579b7157bf337373a21ced5b4b315e68b2924aff2ab9"

@@ -1,6 +1,7 @@
-//! Tests of the layer reset (round 4 B-LAYER, [`Admin::reset_layer`]): synthetic stores (the
-//! `modern` sample as a base, vertices added and removed through the served sessions), offline
-//! and online, the trash entry put back by hand, the refusals and the scan after a crash.
+//! Tests of the layer reset (round 4 B-LAYER, S1: the engine's `reset_layer`,
+//! [`Admin::reset_layer`]): synthetic stores (the `modern` sample as a base, vertices added and
+//! removed through the served sessions), in place while loaded, offline and online unloaded,
+//! the history before the reset, a running query, the refusals.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -11,7 +12,11 @@ use graphersal_serve::{Exposure, HostCheck};
 use serde_json::{Value, json};
 
 use super::*;
-use crate::database::{RESET_STORE_DIR, STORE_DIR};
+use graphersal::persist::RecoveryTarget;
+use graphersal::storage::LayeredGraph;
+
+use crate::database::STORE_DIR;
+
 use crate::registry::DbState;
 use crate::registry::tests::server;
 use crate::test_support::TempDir;
@@ -190,18 +195,22 @@ fn a_layer_reset_discards_its_changes_and_keeps_everything_else() {
     let l2_names = served_names(&loader, "l2");
     let base_before = contents(&dir.databases().join("prod"));
 
-    // Reset while loaded: unloaded, reset, loaded again.
+    // Reset while loaded: in place, on its open Store (the same context keeps serving).
+    let context_before = loader.context("l1").unwrap();
     let done = admin.reset_layer("l1").expect("the reset");
-    assert!(done.reloaded);
+    assert!(done.loaded);
     assert_eq!(done.base, "prod");
     assert_eq!(done.discarded.added, (2, 0));
     assert_eq!(done.discarded.removed.0, 1);
     assert!(done.discarded.modified.0 >= 1, "{:?}", done.discarded);
     assert_eq!(done.jobs_kept, 1);
-    assert!(done.trash.starts_with(dir.trash()), "{:?}", done.trash);
-    assert!(done.trash.join(STORE_DIR).is_dir());
-    assert!(done.trash.join("database.toml").is_file());
-    assert!(!dir.databases().join("l1").join(RESET_STORE_DIR).exists());
+    assert_eq!(done.entry.state, DbState::Loaded);
+    assert!(Arc::ptr_eq(&context_before, &loader.context("l1").unwrap()));
+    drop(context_before);
+    assert!(
+        fs::read_dir(dir.trash()).map(|d| d.count()).unwrap_or(0) == 0,
+        "nothing goes to the trash"
+    );
 
     // The layer reads exactly its base; the other layer and the base are untouched.
     assert_eq!(loader.wait("l1", WAIT).unwrap(), DbState::Loaded);
@@ -238,15 +247,30 @@ fn a_layer_reset_discards_its_changes_and_keeps_everything_else() {
     assert_eq!(job["schedule"], "0 3 * * *", "{job}");
     loader.shutdown().unwrap();
 
-    // The old layer is recoverable by hand: its trash directory is a whole database directory.
-    fs::rename(&done.trash, dir.databases().join("l1-old")).unwrap();
-    let (loader, _admin) = online(&dir);
-    load(&loader, "l1-old");
-    assert_eq!(served_count(&loader, "l1-old"), 7);
-    let names = served_names(&loader, "l1-old");
-    assert!(names.contains(&"new1".to_string()), "{names:?}");
-    assert!(!names.contains(&"marko".to_string()), "{names:?}");
-    loader.shutdown().unwrap();
+    // The state before the reset is in the Store's history: read it back at the commit
+    // before the reset's (the reset, then new3: two commits after it).
+    let seq = Store::inspect(entry.store_dir().as_path())
+        .unwrap()
+        .commit_seq;
+    let base = admin.base_of("prod").unwrap();
+    let before = Store::<LayeredGraph>::open_layer_read_only(
+        entry.store_dir().as_path(),
+        &base,
+        RecoveryTarget::CommitSeq(seq - 2),
+    )
+    .unwrap()
+    .into_graph();
+    let names: Vec<String> = graphersal::prelude::GraphTraversalSource::new(&*before.read())
+        .v(None)
+        .values("name")
+        .to_list()
+        .unwrap()
+        .iter()
+        .map(|v| format!("{v:?}"))
+        .collect();
+    assert_eq!(names.len(), 7, "{names:?}");
+    assert!(names.iter().any(|n| n.contains("new1")), "{names:?}");
+    assert!(!names.iter().any(|n| n.contains("marko")), "{names:?}");
 }
 
 #[test]
@@ -264,18 +288,29 @@ fn an_unloaded_layer_resets_offline_and_online_without_a_load() {
         run(&loader, "l1", r#"g.add_v("x").iterate()"#);
         loader.shutdown().unwrap();
     }
-    // Offline (the console with the server lock): no loader, nothing loaded again.
+    let store_dir = dir.databases().join("l1").join(STORE_DIR);
+    let seq = Store::inspect(store_dir.as_path()).unwrap().commit_seq;
+    // Offline (the console with the server lock): the layer Store opened directly.
     let done = offline(&dir).reset_layer("l1").expect("offline");
-    assert!(!done.reloaded);
+    assert!(!done.loaded);
     assert_eq!(done.discarded.added, (1, 0));
     assert_eq!(done.jobs_kept, 0);
-    // Online but unloaded: it stays unloaded; a second reset of an unchanged layer works too.
+    assert_eq!(
+        Store::inspect(store_dir.as_path()).unwrap().commit_seq,
+        seq + 1,
+        "one commit"
+    );
+    // Online but unloaded: it stays unloaded; a second reset of an unchanged layer commits
+    // nothing.
     let (loader, admin) = online(&dir);
     let again = admin.reset_layer("l1").expect("online");
-    assert!(!again.reloaded);
+    assert!(!again.loaded);
     assert!(again.discarded.is_empty());
     assert_eq!(again.entry.state, DbState::Unloaded);
-    assert_ne!(again.trash, done.trash);
+    assert_eq!(
+        Store::inspect(store_dir.as_path()).unwrap().commit_seq,
+        seq + 1
+    );
     load(&loader, "l1");
     assert_eq!(served_count(&loader, "l1"), 6);
     loader.shutdown().unwrap();
@@ -313,51 +348,32 @@ fn plain_base_failed_and_unknown_databases_are_refused() {
     assert!(fs::read_dir(dir.trash()).map(|d| d.count()).unwrap_or(0) == 0);
 }
 
+/// A loaded layer with a query holding its graph: the reset waits, then refuses naming the
+/// runs to cancel; nothing changed.
 #[test]
-fn the_scan_finishes_or_discards_an_interrupted_reset() {
-    let temp = TempDir::new("layer-reset-crash");
+fn a_reset_waits_for_a_running_query_then_refuses() {
+    let temp = TempDir::new("layer-reset-busy");
     let dir = server(&temp);
     {
         let admin = offline(&dir);
         modern_base(&admin, "prod");
         admin.create("l1", &CreateSpec::layer("prod")).unwrap();
-        admin.create("l2", &CreateSpec::layer("prod")).unwrap();
     }
-    {
-        let (loader, _admin) = online(&dir);
-        load(&loader, "l1");
-        run(&loader, "l1", r#"g.add_v("kept").iterate()"#);
-        loader.shutdown().unwrap();
-    }
-    // Killed before the first rename: store/ and store-reset/ both there: the old layer stays.
-    let l1 = dir.databases().join("l1");
-    fs::create_dir_all(l1.join(RESET_STORE_DIR).join("debris")).unwrap();
-    // Killed between the renames: the old store is in trash/, only store-reset/ is left. The
-    // new layer Store is an empty layer over the base: here l2's (equally empty) Store.
-    let l2 = dir.databases().join("l2");
-    fs::create_dir_all(dir.trash()).unwrap();
-    fs::rename(l2.join(STORE_DIR), dir.trash().join("l2-old-store")).unwrap();
-    {
-        let admin = offline(&dir);
-        modern_base(&admin, "spare");
-        admin.create("donor", &CreateSpec::layer("prod")).unwrap();
-    }
-    fs::rename(
-        dir.databases().join("donor").join(STORE_DIR),
-        l2.join(RESET_STORE_DIR),
-    )
-    .unwrap();
-    fs::remove_dir_all(dir.databases().join("donor")).unwrap();
-
-    let (loader, admin) = online(&dir);
-    assert!(!l1.join(RESET_STORE_DIR).exists());
-    assert!(l1.join(STORE_DIR).is_dir());
-    assert!(!l2.join(RESET_STORE_DIR).exists());
-    assert!(l2.join(STORE_DIR).is_dir());
-    assert_eq!(admin.registry().get("l2").unwrap().state, DbState::Unloaded);
+    let (loader, _admin) = online(&dir);
     load(&loader, "l1");
-    assert_eq!(served_count(&loader, "l1"), 7);
-    load(&loader, "l2");
-    assert_eq!(served_count(&loader, "l2"), 6);
+    run(&loader, "l1", r#"g.add_v("x").iterate()"#);
+    let Some((_context, crate::loader::OpenStoreRef::Layer(store))) = loader.open_store_of("l1")
+    else {
+        panic!("a layer store");
+    };
+    let reading = store.graph().read();
+    let refused = super::layer::reset_graph("l1", store.graph(), Duration::from_millis(200));
+    assert!(
+        matches!(&refused, Err(ServerError::Refused { message, .. }) if message.contains("runs/cancel")),
+        "{refused:?}"
+    );
+    drop(reading);
+    drop(store);
+    assert_eq!(served_count(&loader, "l1"), 7, "nothing changed");
     loader.shutdown().unwrap();
 }

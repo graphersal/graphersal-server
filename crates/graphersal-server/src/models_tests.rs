@@ -1347,3 +1347,183 @@ fn a_loaded_database_names_a_vanished_model_blob_from_its_catalog_and_stays_load
     assert_eq!(config.needs_model, None);
     loader.shutdown().unwrap();
 }
+
+// S1: the server-side download from Hugging Face (`Admin::model_download_start`), against the
+// fake endpoint of `test_models::FakeHub` (no network).
+
+/// The download spec of `acme/tiny` from `hub`.
+fn tiny_download(hub: &crate::test_models::FakeHub) -> crate::ops::ModelDownloadSpec {
+    let mut spec = crate::ops::ModelDownloadSpec::new("acme/tiny");
+    spec.endpoint = Some(hub.url.clone());
+    spec
+}
+
+/// The entries of `tmp/` (a download leaves none behind).
+fn tmp_entries(dir: &ServerDir) -> Vec<String> {
+    fs::read_dir(dir.tmp())
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().to_string())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[test]
+fn an_offline_download_adds_the_model_with_its_licence_and_audits() {
+    use crate::model_download::DownloadState;
+    let temp = TempDir::new("models-download-offline");
+    let dir = server(&temp);
+    let hub = crate::test_models::FakeHub::start("cc-by-nc-4.0", false);
+    let memory = Arc::new(crate::audit::MemoryAudit::default());
+    let admin = offline(&dir).with_audit(
+        crate::audit::Audit::new(memory.clone()).with_actor(Some("operator".to_string())),
+    );
+    let done = admin.model_download_start(&tiny_download(&hub)).unwrap();
+    assert_eq!(done.state, DownloadState::Done, "{done:?}");
+    assert_eq!(done.revision, "main");
+    let report = done.report.clone().unwrap();
+    assert_eq!(report.license, "cc-by-nc-4.0");
+    assert!(
+        !report.warnings.is_empty(),
+        "a non-commercial licence warns"
+    );
+    assert!(
+        report.identity.starts_with("model2vec/acme/tiny@"),
+        "{report:?}"
+    );
+    assert!(
+        report
+            .files
+            .iter()
+            .any(|(name, _)| name == "model.safetensors"),
+        "{report:?}"
+    );
+    assert!(done.received_bytes() > 0);
+    let added = done.added.clone().unwrap();
+    assert_eq!(added.added.len(), 1, "{added:?}");
+    assert_eq!(added.added[0].repo.as_deref(), Some("acme/tiny"));
+    assert_eq!(added.added[0].license.as_deref(), Some("cc-by-nc-4.0"));
+    let index = admin.models_index().unwrap();
+    assert_eq!(index.of_repo("acme/tiny").count(), 1);
+    assert!(tmp_entries(&dir).is_empty(), "{:?}", tmp_entries(&dir));
+    let lines = memory.lines();
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("model download of acme/tiny (main) started")),
+        "{lines:#?}"
+    );
+    assert!(
+        lines.iter().any(
+            |l| l.contains("model acme/tiny (main) downloaded into models/")
+                && l.contains("licence cc-by-nc-4.0")
+        ),
+        "{lines:#?}"
+    );
+    // A repository the endpoint does not have: failed, nothing kept, audited.
+    let mut missing = crate::ops::ModelDownloadSpec::new("acme/none");
+    missing.endpoint = Some(hub.url.clone());
+    let failed = admin.model_download_start(&missing).unwrap();
+    assert_eq!(failed.state, DownloadState::Failed, "{failed:?}");
+    assert_eq!(failed.error_kind, Some("not-found"), "{failed:?}");
+    assert!(tmp_entries(&dir).is_empty());
+    assert!(
+        memory
+            .lines()
+            .iter()
+            .any(|l| l.contains("model download of acme/none (main) failed"))
+    );
+    // Bad names are refused before anything runs; offline there is nothing to cancel.
+    for repo in ["tiny", "a/b/c", "../x", ""] {
+        assert!(
+            matches!(
+                admin.model_download_start(&crate::ops::ModelDownloadSpec::new(repo)),
+                Err(ServerError::InvalidInput { .. })
+            ),
+            "{repo}"
+        );
+    }
+    let bad = crate::ops::ModelDownloadSpec::new("acme/tiny").with_revision(Some("../x".into()));
+    assert!(matches!(
+        admin.model_download_start(&bad),
+        Err(ServerError::InvalidInput { .. })
+    ));
+    assert!(matches!(
+        admin.model_download_cancel(),
+        Err(ServerError::Refused { .. })
+    ));
+}
+
+#[test]
+fn an_online_download_shows_its_progress_runs_alone_and_is_cancelled() {
+    use crate::model_download::DownloadState;
+    let temp = TempDir::new("models-download-online");
+    let dir = server(&temp);
+    let loader = loader_of(&dir);
+    let admin = Admin::online(loader.clone());
+    assert!(admin.model_download_status().is_none());
+    assert_eq!(admin.model_download_cancel().unwrap(), None);
+    let slow = crate::test_models::FakeHub::start("mit", true);
+    let started = admin.model_download_start(&tiny_download(&slow)).unwrap();
+    assert_eq!(started.state, DownloadState::Running);
+    // Progress: the weights trickle in.
+    let deadline = std::time::Instant::now() + WAIT;
+    loop {
+        let now = admin.model_download_status().unwrap();
+        if now.file.as_deref() == Some("model.safetensors") && now.file_bytes > 0 {
+            assert_eq!(now.file_total, Some(64 * 1024 * 1024));
+            assert!(now.files_done.len() >= 2, "{now:?}");
+            break;
+        }
+        assert_eq!(now.state, DownloadState::Running, "{now:?}");
+        assert!(std::time::Instant::now() < deadline, "no progress: {now:?}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // One at a time.
+    let hub = crate::test_models::FakeHub::start("mit", false);
+    assert!(matches!(
+        admin.model_download_start(&tiny_download(&hub)),
+        Err(ServerError::Refused { .. })
+    ));
+    // Cancelled: stops at its next chunk, nothing kept.
+    let (stopped, status) = admin.model_download_cancel().unwrap().unwrap();
+    assert!(stopped && status.cancel_requested);
+    let deadline = std::time::Instant::now() + WAIT;
+    let ended = loop {
+        let now = admin.model_download_status().unwrap();
+        if now.state != DownloadState::Running {
+            break now;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "not cancelled: {now:?}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert_eq!(ended.state, DownloadState::Cancelled, "{ended:?}");
+    assert_eq!(ended.error_kind, Some("cancelled"));
+    assert!(admin.models_index().unwrap().models.is_empty());
+    assert!(tmp_entries(&dir).is_empty(), "{:?}", tmp_entries(&dir));
+    assert!(!admin.model_download_cancel().unwrap().unwrap().0);
+    // The next one runs to its end in the background.
+    let second = admin.model_download_start(&tiny_download(&hub)).unwrap();
+    assert_eq!(second.id, started.id + 1);
+    let deadline = std::time::Instant::now() + WAIT;
+    let done = loop {
+        let now = admin.model_download_status().unwrap();
+        if now.state != DownloadState::Running {
+            break now;
+        }
+        assert!(std::time::Instant::now() < deadline, "never ended: {now:?}");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert_eq!(done.state, DownloadState::Done, "{done:?}");
+    assert_eq!(done.phase, "install");
+    assert_eq!(
+        admin.models_index().unwrap().of_repo("acme/tiny").count(),
+        1
+    );
+    loader.shutdown().unwrap();
+}

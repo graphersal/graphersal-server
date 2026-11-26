@@ -92,3 +92,97 @@ pub(crate) fn tiny_model_dir(seed: u8, dir: &std::path::Path) {
     )
     .expect("README.md");
 }
+
+/// A fake Hugging Face endpoint on 127.0.0.1 serving the tiny model as the repository
+/// `acme/tiny` at `main` (no network): the three model files, a card and the repository's
+/// metadata with the licence `license`. `slow`: the weights are an endless trickle (a download
+/// that only a cancel ends). Every other path is `404`. Each connection has a thread of its
+/// own; the listener lives as long as the process (tests only).
+pub(crate) struct FakeHub {
+    /// `http://127.0.0.1:<port>`.
+    pub(crate) url: String,
+}
+
+impl FakeHub {
+    pub(crate) fn start(license: &str, slow: bool) -> FakeHub {
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a port");
+        let url = format!("http://{}", listener.local_addr().expect("its address"));
+        let base = "/acme/tiny/resolve/main";
+        let mut files: std::collections::HashMap<String, Vec<u8>> =
+            std::collections::HashMap::new();
+        files.insert(format!("{base}/config.json"), CONFIG.as_bytes().to_vec());
+        files.insert(
+            format!("{base}/tokenizer.json"),
+            tokenizer_json().into_bytes(),
+        );
+        files.insert(format!("{base}/model.safetensors"), safetensors(1));
+        files.insert(
+            format!("{base}/README.md"),
+            format!("---\nlicense: {license}\n---\n# tiny\n").into_bytes(),
+        );
+        files.insert(
+            "/api/models/acme/tiny/revision/main".to_string(),
+            format!(
+                r#"{{"cardData": {{"license": "{license}"}}, "gated": false,
+                    "siblings": [{{"rfilename": "config.json"}}]}}"#
+            )
+            .into_bytes(),
+        );
+        let files = std::sync::Arc::new(files);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let files = files.clone();
+                std::thread::spawn(move || {
+                    let Ok(clone) = stream.try_clone() else {
+                        return;
+                    };
+                    let mut reader = BufReader::new(clone);
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).is_err() {
+                        return;
+                    }
+                    let path = line.split_whitespace().nth(1).unwrap_or("");
+                    let path = path.split('?').next().unwrap_or("").to_string();
+                    loop {
+                        let mut header = String::new();
+                        if reader.read_line(&mut header).unwrap_or(0) == 0 || header == "\r\n" {
+                            break;
+                        }
+                    }
+                    if slow && path.ends_with("/model.safetensors") {
+                        let total = 64 * 1024 * 1024;
+                        let head = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {total}\r\nConnection: close\r\n\r\n"
+                        );
+                        if stream.write_all(head.as_bytes()).is_err() {
+                            return;
+                        }
+                        let chunk = vec![0u8; 64 * 1024];
+                        for _ in 0..(total / chunk.len()) {
+                            if stream.write_all(&chunk).is_err() {
+                                return;
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis(20));
+                        }
+                        return;
+                    }
+                    let (status, body) = match files.get(&path) {
+                        Some(body) => ("200 OK", body.clone()),
+                        None => ("404 Not Found", b"not found".to_vec()),
+                    };
+                    let head = format!(
+                        "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = stream.write_all(head.as_bytes());
+                    let _ = stream.write_all(&body);
+                    let _ = stream.flush();
+                    let _ = stream.shutdown(std::net::Shutdown::Both);
+                });
+            }
+        });
+        FakeHub { url }
+    }
+}

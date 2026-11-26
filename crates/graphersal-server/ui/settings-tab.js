@@ -4,8 +4,8 @@
 // maintenance state with its damage report, the last unclean shutdown's check of it), the
 // Store's creation parameters), and the
 // edit of what can change at runtime: the description, read-only, auto-load and the query limit
-// overrides (set or clear each; a limit applies at the database's next load, which the tab
-// says and offers to do). The database comes from the tab's address parameter `db` (the
+// overrides (set or clear each; a limit applies at once to the database's new runs; a hand edit
+// of a file not applied yet is shown with an offer to reload). The database comes from the tab's address parameter `db` (the
 // Databases tab's row button "Settings…") or the picker. Every change sends the view's
 // revision: a change someone else made meanwhile is refused (409) and the tab reads the view
 // again. The view is read on every visit of the tab and when the window gets the focus back
@@ -287,7 +287,7 @@ export default {
     <p v-if="s.answer.limits && s.answer.limits.serverError" class="muted">server.toml: {{ s.answer.limits.serverError }}</p>
     <div class="srv-table-wrap">
     <table class="data-table srv-table srv-settings-limits">
-      <thead><tr><sort-th :s="limitSort" k="key">Limit</sort-th><sort-th :s="limitSort" k="override" num title="This database's own value (database.toml)">This database</sort-th><sort-th :s="limitSort" k="server" num title="server.toml [limits.query]">Server default</sort-th><sort-th :s="limitSort" k="effective" num title="What the next load uses">Next load</sort-th><sort-th :s="limitSort" k="source">From</sort-th><sort-th v-if="loaded" :s="limitSort" k="inEffect" num title="What the loaded database runs under now">Now</sort-th><th><span class="sr-only">Change</span></th></tr></thead>
+      <thead><tr><sort-th :s="limitSort" k="key">Limit</sort-th><sort-th :s="limitSort" k="override" num title="This database's own value (database.toml)">This database</sort-th><sort-th :s="limitSort" k="server" num title="server.toml [limits.query]">Server default</sort-th><sort-th :s="limitSort" k="effective" num title="What the files say: applied at once by a change here, read by every load">Effective</sort-th><sort-th :s="limitSort" k="source">From</sort-th><sort-th v-if="loaded" :s="limitSort" k="inEffect" num title="What the loaded database runs under now">Now</sort-th><th><span class="sr-only">Change</span></th></tr></thead>
       <tbody>
         <tr v-for="r in limits" :key="r.key" :data-limit="r.key" :class="{ 'srv-differs': r.differs }">
           <td :title="r.help"><span class="mono">{{ r.key }}</span><div class="muted srv-sub">{{ r.label }}<template v-if="r.unit">, {{ r.unit }}</template>; 0 = {{ r.zero }}</div></td>
@@ -295,7 +295,7 @@ export default {
           <td class="num">{{ limitText(r.key, r.server) }}</td>
           <td class="num">{{ limitText(r.key, r.effective) }}</td>
           <td><span class="badge" :class="r.inherited ? '' : 'accent'" :title="r.inherited ? 'No override here: the server default applies' : 'This database overrides the server default'">{{ r.inherited ? 'inherited' : 'override' }}</span> <span class="muted srv-sub srv-limit-source">{{ r.sourceText }}</span></td>
-          <td v-if="loaded" class="num" :title="r.differs ? 'Differs from the next load: unload and load the database to apply' : null">{{ limitText(r.key, r.inEffect) }}</td>
+          <td v-if="loaded" class="num" :title="r.differs ? 'Differs from the files (changed by hand): unload and load the database to apply' : null">{{ limitText(r.key, r.inEffect) }}</td>
           <td class="srv-actions srv-limit-edit-cell">
             <form class="srv-limit-edit" @submit.prevent="setLimit(r)">
               <input v-model="s.edits[r.key]" class="mono" inputmode="numeric" :placeholder="r.override === null ? 'value' : String(r.override)" :aria-label="'New value of ' + r.key" autocomplete="off">

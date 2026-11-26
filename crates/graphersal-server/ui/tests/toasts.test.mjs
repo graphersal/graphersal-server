@@ -125,7 +125,7 @@ test('every form shows its error under its own submit button', () => {
   const dir = new URL('../', import.meta.url);
   const forms = {
     'databases-tab.js': 1, 'users-tab.js': 2, 'backups-tab.js': 4, 'import-tab.js': 1, 'export-tab.js': 1,
-    'models-tab.js': 1, 'settings-tab.js': 2, 'login-tab.js': 1,
+    'models-tab.js': 2, 'settings-tab.js': 2, 'login-tab.js': 1,
   };
   for (const [file, count] of Object.entries(forms)) {
     const src = readFileSync(new URL(file, dir), 'utf8');

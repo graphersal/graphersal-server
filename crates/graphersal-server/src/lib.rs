@@ -52,6 +52,7 @@ pub mod lock;
 mod mcp;
 mod mcp_control;
 mod model_archive;
+mod model_download;
 pub mod models;
 mod mounts;
 pub mod names;
@@ -95,7 +96,8 @@ pub use lock::ServerLock;
 pub use models::{Adoption, ModelBlob, ModelsDir, ModelsIndex};
 pub use ops::{
     Admin, BackupInfo, CreateSpec, Deleted, DiscardedChanges, ExportSpec, Exported, ImportFormat,
-    ImportSource, Imported, LayerResetDone, ModelAddSpec, ModelAdded, ModelRemoved, Restored,
+    ImportSource, Imported, LayerResetDone, ModelAddSpec, ModelAdded, ModelDownloadSpec,
+    ModelRemoved, Restored,
 };
 pub use registry::{DatabaseEntry, DbState, Registry};
 pub use run_file::RunInfo;

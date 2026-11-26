@@ -1000,7 +1000,7 @@
       "post": {
         "operationId": "resetLayer",
         "summary": "Reset a layer: discard its changes",
-        "description": "Discards every change of the layer database `{name}` over its base; the base and other layers are untouched. A new empty layer over the same base takes the old one's place, the old layer Store moves to `trash/<name>-<UTC time>/` (recoverable by hand). Kept: name, base, description, read-only and auto-load flags, query limit overrides, grants (also via aliases), aliases, MCP settings and the layer's scheduled job definitions. Discarded: data changes, the layer's own schema and other catalog changes, its history. A loaded layer is unloaded and loaded again (`reloaded`). Needs `confirm: true`. `409` for a plain, base or failed database.",
+        "description": "Discards every change of the layer database `{name}` over its base in one commit of its own Store (the engine's layer reset); the base and other layers are untouched, the Store's history keeps the state before (a Store rollback or a backup goes back). Kept: name, base, description, read-only and auto-load flags, query limit overrides, grants (also via aliases), aliases, MCP settings, history and the layer's scheduled job definitions. Discarded: data changes, the layer's own schema and other catalog changes. A loaded layer is reset in place and stays loaded (`inPlace`); the reset waits for running queries at most 30 s. Needs `confirm: true`. `409` for a plain, base or failed database, a layer being loaded, or queries that did not end.",
         "tags": [
           "databases"
         ],
@@ -1051,9 +1051,6 @@
                         "base": {
                           "type": "string"
                         },
-                        "trash": {
-                          "type": "string"
-                        },
                         "discarded": {
                           "type": "object",
                           "properties": {
@@ -1092,10 +1089,16 @@
                             }
                           }
                         },
+                        "schemaReset": {
+                          "type": "boolean"
+                        },
+                        "definitionsReset": {
+                          "type": "integer"
+                        },
                         "jobsKept": {
                           "type": "integer"
                         },
-                        "reloaded": {
+                        "inPlace": {
                           "type": "boolean"
                         }
                       }
@@ -4340,6 +4343,198 @@
           }
         }
       }
+    },
+    "/api/admin/models/download": {
+      "get": {
+        "operationId": "getModelDownload",
+        "summary": "The model download's progress",
+        "description": "The running or last model download since the server started: progress (the file being fetched, bytes), then the model's report (identity, licence, licence warnings, gated, base models) and what was added, or the error. `null` when none ran.",
+        "tags": [
+          "models"
+        ],
+        "x-graphersal-access": "admin",
+        "responses": {
+          "200": {
+            "description": "The download.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "download": {
+                      "oneOf": [
+                        {
+                          "$ref": "#/components/schemas/ModelDownload"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/HostRefused"
+          },
+          "404": {
+            "$ref": "#/components/responses/AdminNotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/Failure"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      },
+      "post": {
+        "operationId": "startModelDownload",
+        "summary": "Download a model from Hugging Face",
+        "description": "Downloads the Model2Vec model `repo` (`owner/name`) at `modelRevision` (default `main`) from Hugging Face (or the endpoint in the server's `GRAPHERSAL_HF_ENDPOINT`; a gated repository needs `HF_TOKEN` in the server's environment) into the shared `models/`, in the background; then resolves the `needs-model` databases waiting for it. One download at a time. Audited.",
+        "tags": [
+          "models"
+        ],
+        "x-graphersal-access": "admin",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "repo": {
+                    "type": "string",
+                    "description": "The Hugging Face repository, `owner/name`."
+                  },
+                  "modelRevision": {
+                    "type": "string",
+                    "description": "The branch, tag or commit (default `main`)."
+                  }
+                },
+                "required": [
+                  "repo"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Offline (the console): the download ran to its end.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "download": {
+                      "$ref": "#/components/schemas/ModelDownload"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Started; poll `GET /api/admin/models/download`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "download": {
+                      "$ref": "#/components/schemas/ModelDownload"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/HostRefused"
+          },
+          "404": {
+            "$ref": "#/components/responses/AdminNotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Refused"
+          },
+          "500": {
+            "$ref": "#/components/responses/Failure"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/api/admin/models/download/cancel": {
+      "post": {
+        "operationId": "cancelModelDownload",
+        "summary": "Cancel the model download",
+        "description": "Asks the running download to stop at its next chunk (`cancelled: true`); nothing is kept. `false` when none runs. `409` offline.",
+        "tags": [
+          "models"
+        ],
+        "x-graphersal-access": "admin",
+        "responses": {
+          "200": {
+            "description": "Asked.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "cancelled": {
+                      "type": "boolean"
+                    },
+                    "download": {
+                      "oneOf": [
+                        {
+                          "$ref": "#/components/schemas/ModelDownload"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/HostRefused"
+          },
+          "404": {
+            "$ref": "#/components/responses/AdminNotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Refused"
+          },
+          "500": {
+            "$ref": "#/components/responses/Failure"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -5463,6 +5658,198 @@
           },
           "rewritten": {
             "type": "boolean"
+          }
+        }
+      },
+      "ModelDownload": {
+        "type": "object",
+        "description": "A model download (`/api/admin/models/download`).",
+        "properties": {
+          "id": {
+            "type": "integer"
+          },
+          "repo": {
+            "type": "string"
+          },
+          "revision": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "running",
+              "done",
+              "failed",
+              "cancelled"
+            ]
+          },
+          "phase": {
+            "type": "string",
+            "enum": [
+              "download",
+              "install"
+            ]
+          },
+          "actor": {
+            "type": "string"
+          },
+          "startedAtMs": {
+            "type": "integer"
+          },
+          "finishedAtMs": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "file": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "bytes": {
+                "type": "integer"
+              },
+              "total": {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              }
+            }
+          },
+          "filesDone": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "bytes": {
+                  "type": "integer"
+                }
+              }
+            }
+          },
+          "receivedBytes": {
+            "type": "integer"
+          },
+          "cancelRequested": {
+            "type": "boolean"
+          },
+          "report": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "identity": {
+                "type": "string"
+              },
+              "commit": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "dimension": {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "license": {
+                "type": "string"
+              },
+              "licenseFile": {
+                "type": "boolean"
+              },
+              "gated": {
+                "type": "boolean"
+              },
+              "baseModels": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "repo": {
+                      "type": "string"
+                    },
+                    "license": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  }
+                }
+              },
+              "warnings": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "files": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "bytes": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "added": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ModelsAdded"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "errorKind": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "invalid-request",
+              "refused",
+              "not-found",
+              "transfer",
+              "integrity",
+              "not-a-model",
+              "io",
+              "cancelled",
+              "install",
+              null
+            ]
+          },
+          "notes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
           }
         }
       }

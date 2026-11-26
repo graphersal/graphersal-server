@@ -69,10 +69,11 @@ memory (hover for the exact bytes and a layer's shared base).
   table fits the window without a horizontal scroll bar (long names and descriptions wrap).
 - **Create** a database: plain, base, or layer over a base.
 - **Reset layer…** discards a layer's changes over its base after a confirmation that names
-  what is lost (its added, changed and removed elements, its own schema and saved queries, its
-  history) and what is kept (name, base, description, flags, query limits, grants, aliases, MCP
-  settings, scheduled jobs); the old layer moves to `trash/`. The outcome notice counts what was
-  discarded ([Reset a layer](databases.md#reset-a-layer)).
+  what is lost (its added, changed and removed elements, its own schema and saved queries) and
+  what is kept (name, base, description, flags, query limits, grants, aliases, MCP settings,
+  history, scheduled jobs); the reset is one commit of the layer's Store and a loaded layer
+  stays loaded. The outcome notice counts what was discarded ([Reset a
+  layer](databases.md#reset-a-layer)).
 - **Aliases:** set, flip, rename, remove.
 - **Memory summary** above the table: the server process, the loaded databases (each graph
   once), the machine's total and available memory, the memory limit and what is free under it.
@@ -121,8 +122,11 @@ layer snapshot or materialized.
 ## Models
 
 The shared embedding models with their size, licence and users, and the databases waiting for a
-model. Add one by uploading a `.gsnap` or a `.tar`/`.tar.gz` of a model directory (with
-progress), or from a path on the server. Remove one ([Embedding Models](models.md)).
+model. **Download from Hugging Face**: a repository (and a revision) downloaded by the server,
+with the file being fetched and its progress, Cancel, and at the end the model's licence with
+its warnings (a toast too); a waiting database's "Download…" puts its model into the form. Add
+one by uploading a `.gsnap` or a `.tar`/`.tar.gz` of a model directory (with progress), or from
+a path on the server. Remove one ([Embedding Models](models.md)).
 
 ## Runs
 
@@ -175,13 +179,13 @@ What every database inherits or starts with ([Configuration Reference](../refere
   parameters, fixed for each database's life), and `auto_load` and `read_only`, the first value
   of each new database's own flags (the create form starts from them);
 - Query limits of every database: each key inherited by every database that does not override
-  it, applied at each database's next load.
+  it, applied at once to every loaded database's new runs.
 
 ### Server
 
 Every key of `server.toml`, grouped by section, each with its value (or its default, marked
-"(default)"), what it means, and when a change applies: "applies now", "at next load", "new
-databases" / "at create only", or "after restart". A key is set in place (a checkbox, a choice,
+"(default)"), what it means, and when a change applies: "applies now", "new databases" / "at
+create only", or "after restart". A key is set in place (a checkbox, a choice,
 or a value with "Set") or removed with "Reset to default". The file keeps its comments; a
 toast says what was applied at once and what waits for a restart. A restart key shows
 "restart pending" with the value the running server still uses ("running: …"), a note above the tables
@@ -197,9 +201,10 @@ a restart pending. A change made from a stale page is refused, and the view is r
 - the description, read-only and auto-load, edited in place, with what a new database would get
   from the server defaults;
 - the query limits: per key "inherited" (the server's default applies) or "override" (this
-  database's own value), the server's default, the next load's value and, while loaded, the
-  value in effect; each override set in place, "Inherit" removes it (reset to inherited);
-  "Unload and load now…" when the values differ;
+  database's own value), the server's default, the effective value and, while loaded, the
+  value in effect (a change applies at once to the database's new runs); each override set in
+  place, "Inherit" removes it (reset to inherited); "Unload and load now…" when a hand edit of
+  a file is not applied yet;
 - MCP, grants and backups, with links to those tabs;
 - "Damage and recovery": a database in maintenance with its damage report; its last verify in
   one wording ("Last verify <time>: no problem found", "…: the embedding model NAME is missing
