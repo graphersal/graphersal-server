@@ -1295,14 +1295,20 @@ fn db_commands_act_on_the_directory_when_no_server_runs() {
         format!("  {name:4}  {state:8}  {kind:17}  {flags:9}  ")
     };
     assert!(
-        lines[1].starts_with(&format!("{}SIZE", cells("NAME", "STATE", "KIND", "FLAGS"))),
+        lines[1].starts_with(&format!(
+            "{}ON DISK",
+            cells("NAME", "STATE", "KIND", "FLAGS")
+        )),
         "{out}"
     );
-    let size_at = lines[1].find("SIZE").unwrap();
+    let size_at = lines[1].find("ON DISK").unwrap();
+    let memory_at = lines[1].find("MEMORY").unwrap();
     let description_at = lines[1].find("DESCRIPTION").unwrap();
     assert_eq!(lines[2][..size_at], cells("acme", "unloaded", "plain", ""));
     assert_eq!(&lines[2][description_at..], "Acme graph");
-    assert!(lines[2][size_at..description_at].contains("KiB"), "{out}");
+    assert!(lines[2][size_at..memory_at].contains("KiB"), "{out}");
+    // Not loaded: no memory.
+    assert_eq!(lines[2][memory_at..description_at].trim(), "", "{out}");
     assert_eq!(
         lines[3][..size_at],
         cells("base", "unloaded", "base", "read-only")
@@ -4123,5 +4129,145 @@ fn a_deleted_database_takes_its_grants_through_the_console_and_http() {
     assert_eq!(code, 0, "{err}");
     assert!(!out.contains("acme"), "no grant left: {out}");
     loader.unload("acme").unwrap();
+    running.stop().unwrap();
+}
+
+#[test]
+fn database_rows_and_the_server_report_disk_and_memory() {
+    use graphersal::prelude::{Graph, GraphExport, TraversalGraph};
+    let temp = TempDir::new("usage");
+    let dir = ServerDir::init(temp.path().join("srv")).unwrap().dir;
+    let root = dir.root().to_str().unwrap().to_string();
+    modern_db(&dir, "acme");
+    modern_db(&dir, "idle");
+    let graphson = temp.path().join("modern.json");
+    Graph::new(TraversalGraph::tinkerpop_modern())
+        .export_graphson_writer(std::fs::File::create(&graphson).unwrap())
+        .unwrap();
+    let (code, _, err) = import(&[
+        &root,
+        graphson.to_str().unwrap(),
+        "--name",
+        "prod",
+        "--role",
+        "base",
+    ]);
+    assert_eq!(code, 0, "{err}");
+    let (code, _, err) = db(dir.root(), &["create", "l1", "--base", "prod"]);
+    assert_eq!(code, 0, "{err}");
+    // The headroom only: the ceiling itself is process-wide state shared with the other tests.
+    std::fs::write(
+        dir.root().join("server.toml"),
+        "listen = \"127.0.0.1:0\"\n[limits]\nmemory_headroom = 1048576\n",
+    )
+    .unwrap();
+    let running = serve::start(
+        dir.root(),
+        ServeOptions::new().with_listen("127.0.0.1:0".parse().unwrap()),
+    )
+    .unwrap();
+    let address = running.address();
+    let loader = running.loader();
+    for name in ["acme", "l1"] {
+        loader.load(name).unwrap();
+        assert_eq!(
+            loader.wait(name, Duration::from_secs(120)).unwrap(),
+            DbState::Loaded
+        );
+    }
+    execute(
+        address,
+        "l1",
+        "g.add_v(\"own\").property(\"text\", \"x\").iterate()",
+    );
+
+    let (status, _, body) = call(address, "GET", "/api/admin/databases", &[], "");
+    assert_eq!(status, 200, "{body}");
+    let list = json(&body);
+    let row = |name: &str| {
+        list["databases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["name"] == name && r.get("aliasOf").is_none())
+            .unwrap_or_else(|| panic!("no row {name}: {body}"))
+            .clone()
+    };
+    for name in ["acme", "idle", "prod", "l1"] {
+        let size = row(name)["sizeBytes"].as_u64().unwrap();
+        assert!(size > 0, "{name}: {body}");
+    }
+    let acme = row("acme")["memoryBytes"].as_u64().unwrap();
+    assert!(acme > 0, "{body}");
+    assert!(row("idle")["memoryBytes"].is_null(), "{body}");
+    assert!(row("idle").get("sharedMemoryBytes").is_none(), "{body}");
+    let l1 = row("l1");
+    let delta = l1["memoryBytes"].as_u64().unwrap();
+    let base = l1["sharedMemoryBytes"].as_u64().unwrap();
+    assert!(delta > 0 && base > 0, "{body}");
+    // The base itself is not loaded for reading: its row has no memory, the pool holds it.
+    assert!(row("prod")["memoryBytes"].is_null(), "{body}");
+    let (status, _, one) = call(address, "GET", "/api/admin/databases/acme", &[], "");
+    assert_eq!(status, 200, "{one}");
+    assert_eq!(json(&one)["memoryBytes"], acme);
+
+    let (status, _, body) = call(address, "GET", "/api/admin/server", &[], "");
+    assert_eq!(status, 200, "{body}");
+    let memory = json(&body)["memory"].clone();
+    // Every graph once: acme, the layer's delta and the pooled base.
+    assert_eq!(memory["databasesBytes"], acme + delta + base, "{body}");
+    assert_eq!(memory["headroomBytes"], 1_048_576, "{body}");
+    assert!(memory["configuredLimit"].is_null(), "{body}");
+    assert!(
+        memory["liveBytes"].is_null(),
+        "no tracking allocator: {body}"
+    );
+    assert!(memory["limitSource"].is_string(), "{body}");
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    {
+        let rss = memory["processBytes"].as_u64().unwrap();
+        let total = memory["machineTotalBytes"].as_u64().unwrap();
+        let available = memory["machineAvailableBytes"].as_u64().unwrap();
+        assert!(rss > 0 && rss < total && available <= total, "{body}");
+        let free = memory["freeBytes"].as_u64().unwrap();
+        match memory["limitBytes"].as_u64() {
+            Some(limit) => {
+                assert_eq!(memory["freeBasis"], "limit", "{body}");
+                assert!(free <= limit, "{body}");
+            }
+            None => {
+                assert_eq!(memory["freeBasis"], "machine", "{body}");
+                assert_eq!(free, available, "{body}");
+            }
+        }
+    }
+
+    // `status` shows the same figures, `--json` carries the server's answer.
+    let (code, out, err) = service("status", dir.root(), &[]);
+    assert_eq!(code, 0, "{err}");
+    for row in ["memory:", "machine:", "memory limit:", "free:"] {
+        assert!(out.contains(row), "{row}: {out}");
+    }
+    assert!(out.contains("memory_headroom = 1048576"), "{out}");
+    let (code, out, _) = service("status", dir.root(), &["--json"]);
+    assert_eq!(code, 0);
+    assert_eq!(
+        json(&out)["server"]["memory"]["databasesBytes"],
+        acme + delta + base,
+        "{out}"
+    );
+
+    // `db list` through the server: a memory column for the loaded ones.
+    let (code, out, err) = db(dir.root(), &["list"]);
+    assert_eq!(code, 0, "{err}");
+    let lines: Vec<&str> = out.lines().collect();
+    let memory_at = lines[1].find("MEMORY").unwrap();
+    let acme_line = lines.iter().find(|l| l.starts_with("  acme ")).unwrap();
+    assert!(
+        acme_line[memory_at..]
+            .trim_start()
+            .starts_with(|c: char| c.is_ascii_digit()),
+        "{out}"
+    );
     running.stop().unwrap();
 }

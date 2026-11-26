@@ -595,12 +595,13 @@ fn flags(entry: &Value) -> String {
     flags.join(", ")
 }
 
-/// The table of the database rows `rows` (no alias rows): with the size and description
-/// columns for `db list`, without them for the start block.
+/// The table of the database rows `rows` (no alias rows): with the size on disk, memory (a
+/// loaded database's graph; a layer's own changes, without its base) and description columns
+/// for `db list`, without them for the start block.
 pub(crate) fn database_table(rows: &[&Value], full: bool) -> Vec<String> {
     let mut header = vec!["NAME", "STATE", "KIND", "FLAGS"];
     if full {
-        header.extend(["SIZE", "DESCRIPTION"]);
+        header.extend(["ON DISK", "MEMORY", "DESCRIPTION"]);
     }
     let cells: Vec<Vec<String>> = rows
         .iter()
@@ -614,6 +615,12 @@ pub(crate) fn database_table(rows: &[&Value], full: bool) -> Vec<String> {
             if full {
                 cells.push(
                     row["sizeBytes"]
+                        .as_u64()
+                        .map(text::bytes)
+                        .unwrap_or_default(),
+                );
+                cells.push(
+                    row["memoryBytes"]
                         .as_u64()
                         .map(text::bytes)
                         .unwrap_or_default(),
@@ -1130,7 +1137,7 @@ mod tests {
             "databases": [
                 {"name": "acme", "state": "loaded", "kind": "plain", "role": "normal",
                  "readOnly": false, "autoLoad": true, "description": "Acme graph",
-                 "sizeBytes": 9_728},
+                 "sizeBytes": 9_728, "memoryBytes": 4096},
                 {"name": "broken", "state": "failed", "kind": "plain", "role": "normal",
                  "readOnly": false, "autoLoad": false, "description": "", "sizeBytes": 100,
                  "reason": "Error: 'srv/databases/broken/store' is not a Graphersal store\nHelp: \
@@ -1148,8 +1155,8 @@ mod tests {
         let text = render(&DbCommand::List, &answer, &dir());
         let expected = [
             format!("── Databases (4) {}", "─".repeat(61)),
-            "  NAME    STATE        KIND   FLAGS      SIZE     DESCRIPTION".to_string(),
-            "  acme    loaded       plain  auto-load  9.5 KiB  Acme graph".to_string(),
+            "  NAME    STATE        KIND   FLAGS      ON DISK  MEMORY   DESCRIPTION".to_string(),
+            "  acme    loaded       plain  auto-load  9.5 KiB  4.0 KiB  Acme graph".to_string(),
             "  broken  failed       plain             100 B".to_string(),
             "  emb     needs-model  plain             2.0 KiB".to_string(),
             "  prod    loading      base   read-only  1 B".to_string(),

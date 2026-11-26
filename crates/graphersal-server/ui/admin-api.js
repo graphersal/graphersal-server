@@ -179,7 +179,7 @@ const based = (request, revision) => (typeof revision === 'string' && revision ?
  * run id is unique within its database only), the users and grants: users, addUser(name,
  * admin?) (its answer carries the new token, shown once), removeUser(name), newToken(name),
  * revokeToken(name), setAdmin(name, value), grant(subject, database, level), revokeGrant(subject,
- * database). The changes of a shared object take its `revision` last (optional: readOnly,
+ * database), server (the running server: version, uptime, the memory summary). The changes of a shared object take its `revision` last (optional: readOnly,
  * autoLoad, setAlias, removeAlias, renameAlias, removeUser, newToken, revokeToken, setAdmin,
  * grant, revokeGrant): the request then carries `ifMatch` and `sendAdmin` sends it as the
  * `If-Match` header, so a change based on a stale page is refused (`isConflict`). The transfers that are not JSON requests are
@@ -222,6 +222,7 @@ export const adminRequest = Object.freeze({
   grant: (subject, database, level, revision) => based({ method: 'POST', path: 'api/admin/grants', body: { subject, database, level } }, revision),
   revokeGrant: (subject, database, revision) => based({ method: 'DELETE', path: `api/admin/grants/${seg(subject)}/${seg(database)}` }, revision),
   runs: (name) => ({ method: 'GET', path: name ? `api/admin/databases/${seg(name)}/runs` : 'api/admin/runs' }),
+  server: () => ({ method: 'GET', path: 'api/admin/server' }),
   cancelRun: (name, id) => ({ method: 'POST', path: `api/admin/databases/${seg(name)}/runs/cancel`, body: { id } }),
 });
 
@@ -547,6 +548,13 @@ export async function loadAndWatch(admin, name, {
     onState(entry);
   }
   return entry;
+}
+
+/** A byte count exactly (`1,572,864 bytes`, the tooltip of a `bytesText`), or '' for a missing value. */
+export function exactBytes(n) {
+  if (typeof n !== 'number' || !Number.isFinite(n) || n < 0) return '';
+  const digits = String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  return `${digits} byte${n === 1 ? '' : 's'}`;
 }
 
 /** A byte count as text (`1.5 MB`), or '' for a missing value. */

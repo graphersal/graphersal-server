@@ -20,6 +20,10 @@
 .notice.srv-error { background: var(--danger-soft); color: var(--danger); }
 .notice.srv-warn-notice { background: var(--warn-soft); color: var(--warn); }
 .srv-help { margin: 4px 0 0; color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere; }
+.srv-memory { display: flex; flex-wrap: wrap; gap: 6px 18px; margin: 6px 0 10px; font-size: 12.5px; }
+.srv-memory > div { display: flex; gap: 6px; }
+.srv-memory dt { color: var(--text-muted); }
+.srv-memory dd { margin: 0; font-variant-numeric: tabular-nums; }
 .srv-problems { margin: 10px 0 0; padding-left: 18px; color: var(--danger); font-size: 12.5px; }
 p.srv-problems { padding-left: 0; }
 .srv-warn { color: var(--warn); }

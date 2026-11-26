@@ -43,9 +43,14 @@ tracing-subscriber = { workspace = true }
 ctrlc = { workspace = true }
 
 # The server directory's owner check and the OS user name of audit records (`security`); the
-# plain `fsync(2)` of a directory after an atomic write (`layout::sync_dir`).
+# plain `fsync(2)` of a directory after an atomic write (`layout::sync_dir`); the process's
+# resident memory and the machine's memory on macOS and Linux (`usage`).
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
+
+# The process's and the machine's memory on Windows (`usage`).
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true }
 
 [dev-dependencies]
 # The h2c test's client (hyper's HTTP/2 client connection; no new crate).

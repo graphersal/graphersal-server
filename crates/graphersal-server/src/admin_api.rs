@@ -113,9 +113,13 @@
 //! holding it, so the sum over databases is more than the disk use), `pooled: true` +
 //! `pooledBy: [layer...]` (a base held in the loader's pool by its loaded layers or itself) and
 //! `linkWarning` (some of its model blobs are copies, not links). Every entry with a readable
-//! configuration carries `revision` (of its `database.toml`). `memoryBytes` is not given:
-//! a loaded database's memory is known only inside its session thread, which a listing does
-//! not wait for.
+//! configuration carries `revision` (of its `database.toml`). `sizeBytes` is measured at most
+//! once per 5 seconds per database (`usage::disk_bytes`). Round 3 B5: `memoryBytes` (every
+//! row): the engine's memory footprint of a loaded database's graph (a plain database: its
+//! graph; a layer: its own changes; a base: the frozen base graph), `null` when it is not
+//! loaded (or was never measurable: a writer held it from the start); a layer adds
+//! `sharedMemoryBytes`, its base's memory, shared with the base and the other layers
+//! (`Loader::memory`, never waiting for a graph).
 //!
 //! An entry: `name`, `state` (`unloaded` | `loading` | `loaded` | `needs-model` | `failed`),
 //! `kind` (`plain` | `layer`), `role` (`normal` | `base`), `readOnly` (a base is always
@@ -1375,6 +1379,7 @@ fn one(admin: &Admin, name: &str) -> Option<Value> {
 struct Extras {
     pooled: BTreeMap<String, Vec<String>>,
     models: crate::models::ModelsDir,
+    memory: crate::loader::LoadedMemory,
 }
 
 impl Extras {
@@ -1382,13 +1387,20 @@ impl Extras {
         Self {
             pooled: admin.pooled_bases(),
             models: admin.models(),
+            memory: admin.loaded_memory(),
         }
     }
 
-    /// A listing row: [`entry_json`] + `sizeBytes`, `pooled`/`pooledBy`, `linkWarning`.
+    /// A listing row: [`entry_json`] + `sizeBytes`, `memoryBytes` (+ `sharedMemoryBytes`),
+    /// `pooled`/`pooledBy`, `linkWarning`.
     fn row(&self, entry: &DatabaseEntry, alias: Option<&str>) -> Value {
         let mut row = entry_json(entry, alias);
-        row["sizeBytes"] = json!(crate::layout::dir_bytes(&entry.dir));
+        row["sizeBytes"] = json!(crate::usage::disk_bytes(&entry.dir));
+        let memory = self.memory.databases.get(&entry.name);
+        row["memoryBytes"] = json!(memory.and_then(|m| m.bytes));
+        if let Some(shared) = memory.and_then(|m| m.shared_bytes) {
+            row["sharedMemoryBytes"] = json!(shared);
+        }
         if let Some(users) = self.pooled.get(&entry.name) {
             row["pooled"] = Value::Bool(true);
             let layers: Vec<&String> = users.iter().filter(|u| **u != entry.name).collect();

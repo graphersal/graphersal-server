@@ -92,7 +92,9 @@ start shows the last lines of its log. `stop` asks the server to stop through it
 (`POST /api/admin/shutdown` with the run's operator token: the same clean stop as Ctrl+C; on
 Unix SIGTERM when the API cannot be reached) and waits until `server.lock` is free; without a
 server it prints `not running` and exits 0 (removing a stale `server.run`). `status` shows the
-pid, address, version, uptime, the databases (the loaded ones by name) and memory; a stale
+pid, address, version, uptime, the databases (the loaded ones by name) and memory (the process's
+resident memory, the loaded databases', the machine's total and available memory, the memory
+limit with where it comes from and the `[limits]` settings, and what is free under it); a stale
 `server.run` left by a crash is reported. Under a service manager (systemd, launchd) run
 `serve` in the foreground instead: [Running as a service](docs/server-dir.md#running-as-a-service).
 
@@ -146,7 +148,7 @@ databases and missing models. Paths and commands are never wrapped.
 |---|---|
 | `start [serve options] [--timeout SECS]` | `serve` in the background (log `DIR/logs/server.log`); waits until ready, prints the start block and the address |
 | `stop [--timeout SECS]` | stops the running server cleanly and waits; `not running` (exit 0) when none runs |
-| `status [--json]` | running or stopped: pid, address, version, uptime, databases, memory, the log; exit code 0 running, 3 stopped |
+| `status [--json]` | running or stopped: pid, address, version, uptime, databases, memory (process, loaded databases, machine, limit, free), the log; exit code 0 running, 3 stopped |
 | `db list` | the databases and aliases with their states |
 | `db create NAME [--base BASE] [--kind plain\|layer] [--role normal\|base] [--schema FILE.json] [--description TEXT] [--auto-load] [--read-only]` | a new empty database; `--base` makes a layer over a `role = base` database |
 | `db delete NAME` | an unloaded database, moved to `DIR/trash/`; every grant on it is removed (a restore does not bring them back) |
@@ -232,6 +234,14 @@ ascending, a second click descending; natural text order (`db2` before `db10`), 
 durations and ids by number, dates by time, missing values last; the sort is stable, and each
 table keeps its choice in the browser's localStorage. Until the first click a table keeps the
 server's order.
+
+The Databases tab shows two size columns, "On disk" (the database's directory: Store
+snapshots, journal, models) and "In memory" (a loaded database's graph; a layer's own changes,
+its shared base in the tooltip), human-readable with the exact bytes in a tooltip, and above
+the table a memory summary: the server process, the loaded databases (each graph once), the
+machine's available and total memory, the memory limit (`server.toml [limits] memory_limit`,
+by default 80 % of the machine or a container's limit minus `memory_headroom`) and what is free
+under it (without a limit: on the machine). `db list` has the same two columns.
 
 The Databases tab explains bases and layers: the Kind column's tooltips, a "Bases and layers"
 box under the table, and the confirmation of "Promote to base…" say what a base is (a frozen,
@@ -337,8 +347,9 @@ directories and file names below `databases/<name>/`, and a path over 260 charac
   -C <model dir> .`, `tar -czf model.tar.gz ...`); zstd, bzip2, xz and `.zip` are not taken.
 - A **layer `.gsnap` export carries no models** (an engine rule); export the layer with
   `materialize=true` (`--materialize`) for a standalone snapshot with the models.
-- **No memory figures** in the database listing (only `sizeBytes` on disk): a loaded database's
-  memory is known only inside its session thread.
+- **Memory figures are the engine's estimates** of each graph's data (loaded embedding models
+  are not in a database's figure, but in the process's resident memory). The process's
+  resident memory is read on Linux, macOS and Windows only (`null` elsewhere).
 - No admin tools over MCP. Browser and MCP sessions survive a restart (`sessions/`, hashes
   only; `docs/server-dir.md`).
 - **Windows: no permission check of the server directory** (unix only): its ACL is the

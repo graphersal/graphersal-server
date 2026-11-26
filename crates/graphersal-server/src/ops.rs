@@ -300,6 +300,14 @@ impl Admin {
             .unwrap_or_default()
     }
 
+    /// The memory of the loaded databases (empty offline: nothing is loaded).
+    pub(crate) fn loaded_memory(&self) -> crate::loader::LoadedMemory {
+        self.loader
+            .as_ref()
+            .map(|loader| loader.memory())
+            .unwrap_or_default()
+    }
+
     /// The databases using the pooled base `base` (empty when it is not in the pool).
     pub(crate) fn pooled_users(&self, base: &str) -> Vec<String> {
         self.pooled_bases().remove(base).unwrap_or_default()

@@ -3,9 +3,11 @@
 //!
 //! - `GET /api/admin/server`: the running server itself (any admin): `version`, `pid`,
 //!   `address`, `url`, `directory`, `startedAtMs` (Unix milliseconds), `uptimeSecs`,
-//!   `databases {total, loaded, loading}` (names), `aliases` (count), `memory {liveBytes,
-//!   limitBytes, availableBytes}` (each `null` when the process does not know it: the live heap
-//!   is measured only with a tracking allocator, which this binary does not install).
+//!   `databases {total, loaded, loading}` (names), `aliases` (count), `memory` (round 3 B5:
+//!   the process's resident memory, the loaded databases' memory, the machine's total and
+//!   available memory, the engine's memory ceiling with its source and the configured
+//!   `[limits] memory_limit`/`memory_headroom`, and "free under the limit"; the fields and how
+//!   each is measured: [`crate::usage`]; a figure the process does not know is `null`).
 //! - `POST /api/admin/shutdown`: the server answers `202 {"stopping": true, "pid"}` and then
 //!   stops exactly as on Ctrl+C or SIGTERM (the same graceful path in the process that owns
 //!   it: [`crate::serve::StopHook`]). Only the operator (the token of `server.run`) or a user
@@ -24,6 +26,7 @@ use crate::audit::AuditEvent;
 use crate::loader::Loader;
 use crate::registry::DbState;
 use crate::serve::StopHook;
+use crate::usage::{MemoryFigures, MemorySettings, memory_json};
 
 /// The admin endpoint of the server itself (below `/api/admin/`).
 pub(crate) const SERVER: &str = "server";
@@ -41,6 +44,9 @@ pub(crate) struct ServerFacts {
     pub(crate) started: SystemTime,
     /// When the server started (monotonic, for the uptime).
     pub(crate) started_instant: Instant,
+    /// `server.toml`'s memory settings as applied at start (`None`: not known, a router of
+    /// the unit tests).
+    pub(crate) memory: Option<MemorySettings>,
 }
 
 impl ServerFacts {
@@ -51,7 +57,15 @@ impl ServerFacts {
             url,
             started: SystemTime::now(),
             started_instant: Instant::now(),
+            memory: None,
         }
+    }
+
+    /// The facts with `server.toml`'s memory settings (`[limits] memory_limit`,
+    /// `memory_headroom`).
+    pub(crate) fn with_memory(mut self, settings: MemorySettings) -> Self {
+        self.memory = Some(settings);
+        self
     }
 
     /// The start time in Unix milliseconds.
@@ -101,7 +115,7 @@ fn server_json(facts: Option<&ServerFacts>, loader: &Loader) -> Value {
     };
     let loaded = names(|state| matches!(state, DbState::Loaded));
     let loading = names(|state| matches!(state, DbState::Loading));
-    let room = graphersal::exec::memory_room().ok();
+    let figures = MemoryFigures::now(loader.memory().total_bytes);
     json!({
         "server": crate::router::SERVER_NAME,
         "version": env!("CARGO_PKG_VERSION"),
@@ -117,11 +131,7 @@ fn server_json(facts: Option<&ServerFacts>, loader: &Loader) -> Value {
             "loading": loading,
         },
         "aliases": registry.aliases().len(),
-        "memory": {
-            "liveBytes": room.as_ref().and_then(|r| r.live_bytes()),
-            "limitBytes": room.as_ref().and_then(|r| r.limit()),
-            "availableBytes": room.as_ref().and_then(|r| r.available()),
-        },
+        "memory": memory_json(facts.and_then(|f| f.memory.as_ref()), &figures),
     })
 }
 
