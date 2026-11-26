@@ -10,7 +10,11 @@
 // confirmation that explains bases and layers (`promoteAction` gives the reason it is disabled
 // on every other row; the Kind column's tooltips and the "Bases and layers" help say what the
 // kinds mean). The list is read again on every visit of the tab and when the window gets the
-// focus back (./shared.js `useFreshData`); both tables sort by any column (`useSort`).
+// focus back (./shared.js `useFreshData`); both tables sort by any column (`useSort`). Two size
+// columns: "On disk" (the database's directory) and "In memory" (a loaded database's graph), each
+// human-readable with the exact bytes in its tooltip; above the table a memory summary from
+// `GET api/admin/server` (process, loaded databases, machine, the memory limit and what is free
+// under it: ./databases.js `memoryRows`), read with the list.
 
 import { reactive, ref, computed, nextTick } from 'vue';
 import {
@@ -20,6 +24,7 @@ import {
 import {
   admin, list, reload, patchRow, errorNotice, noticeClass, pageHref, useFreshData, useSort, SortTh,
 } from './shared.js';
+import { diskTitle, memoryText, memoryTitle, memoryRows, SIZE_COLUMNS } from './databases.js';
 
 /** The kind column's text: the kind, and "base" for a base. */
 const kindText = (row) => [row.kind, row.role === 'base' ? 'base' : ''].filter(Boolean).join(' · ');
@@ -31,8 +36,7 @@ const DATABASE_COLUMNS = Object.freeze({
   kind: { type: 'text', value: kindText },
   readOnly: { type: 'bool' },
   autoLoad: { type: 'bool' },
-  size: { type: 'number', value: (r) => r.sizeBytes },
-  memory: { type: 'number', value: (r) => (r.state === 'loaded' ? r.memoryBytes : null) },
+  ...SIZE_COLUMNS,
 });
 
 /** The sortable columns of the alias table. */
@@ -79,7 +83,16 @@ export default {
     const databaseNames = computed(() => realRows(list.rows).map((r) => r.name));
     const bases = computed(() => baseNames(list.rows));
     const showSize = computed(() => list.rows.some((r) => r.sizeBytes !== null));
-    const showMemory = computed(() => list.rows.some((r) => r.memoryBytes !== null));
+    const showMemory = computed(() => list.rows.some((r) => r.memoryReported || r.memoryBytes !== null));
+    const memory = ref([]);
+    /** The memory summary (`GET api/admin/server`); an older server or a failure shows none. */
+    async function readMemory() {
+      try {
+        memory.value = memoryRows(await admin.server());
+      } catch {
+        memory.value = [];
+      }
+    }
 
     const loadDb = (row) => run(row.name, 'load', () => loadAndWatch(admin, row.name, { onState: patchRow }));
     function unloadDb(row) {
@@ -188,10 +201,10 @@ export default {
       run(a.alias, 'removeAlias', () => admin.removeAlias(a.alias, list.aliasesRevision));
     }
 
-    useFreshData(reload);
+    useFreshData(() => Promise.all([reload(), readMemory()]));
 
     return {
-      list, rows, aliases, dbSort, aliasSort, kindHelp, baseHelp: BASE_HELP, promoteHelp: PROMOTE_HELP, kindHelpOf: KIND_HELP, busy, notice, dlg, dialog, acts, more, promo, bases, databaseNames, showSize, showMemory,
+      list, rows, aliases, memory, diskTitle, memoryText, memoryTitle, dbSort, aliasSort, kindHelp, baseHelp: BASE_HELP, promoteHelp: PROMOTE_HELP, kindHelpOf: KIND_HELP, busy, notice, dlg, dialog, acts, more, promo, bases, databaseNames, showSize, showMemory,
       bytesText, needsModelHint, poolText, noticeClass, href: pageHref, reload, nameHint: NAME_HINT,
       loadDb, unloadDb, deleteDb, promoteDb, setFlag, openCreate, openClone, openAlias, openRename, closeDialog, submitDialog, removeAlias,
       openBackups: (name) => props.api.navigate('backups', name ? { db: name } : {}),
@@ -228,6 +241,9 @@ export default {
         <p v-if="list.error.help" class="srv-help">{{ list.error.help }}</p></div>
     </div>
     <p v-else-if="list.loaded && !rows.length" class="muted">This server has no databases yet.</p>
+    <dl v-if="memory.length" class="srv-memory" aria-label="Memory">
+      <div v-for="m in memory" :key="m.key" :data-memory="m.key" :title="m.title || null"><dt>{{ m.label }}</dt><dd>{{ m.text }}</dd></div>
+    </dl>
     <ul v-if="list.problems.length" class="srv-problems">
       <li v-for="p in list.problems" :key="p">{{ p }}</li>
     </ul>
@@ -238,7 +254,7 @@ export default {
         <sort-th :s="dbSort" k="kind" title="Plain: stores all its data itself. Layer: stores only its own changes over a base. Base: frozen and read-only; layers are built over it.">Kind</sort-th>
         <sort-th :s="dbSort" k="readOnly" title="Every write to the database is refused">Read-only</sort-th>
         <sort-th :s="dbSort" k="autoLoad" title="Loaded when the server starts">Auto-load</sort-th>
-        <sort-th v-if="showSize" :s="dbSort" k="size" num>Size</sort-th><sort-th v-if="showMemory" :s="dbSort" k="memory" num>Memory</sort-th>
+        <sort-th v-if="showSize" :s="dbSort" k="size" num title="The database's directory on disk: Store snapshots, journal, models">On disk</sort-th><sort-th v-if="showMemory" :s="dbSort" k="memory" num title="A loaded database's graph in memory (a layer: its own changes; its base is shared)">In memory</sort-th>
         <th><span class="sr-only">Actions</span></th>
       </tr></thead>
       <tbody>
@@ -256,8 +272,8 @@ export default {
                      :aria-label="'Read-only: ' + row.name" @change="setFlag(row, 'readOnly', $event)"></td>
           <td><input type="checkbox" :checked="row.autoLoad" :disabled="!acts(row).autoLoad.enabled" :title="acts(row).autoLoad.title"
                      :aria-label="'Auto-load: ' + row.name" @change="setFlag(row, 'autoLoad', $event)"></td>
-          <td v-if="showSize" class="num">{{ bytesText(row.sizeBytes) }}</td>
-          <td v-if="showMemory" class="num">{{ row.state === 'loaded' ? bytesText(row.memoryBytes) : '' }}</td>
+          <td v-if="showSize" class="num" :title="diskTitle(row) || null">{{ bytesText(row.sizeBytes) }}</td>
+          <td v-if="showMemory" class="num" :title="memoryTitle(row) || null">{{ memoryText(row) }}</td>
           <td class="srv-actions">
             <template v-if="!row.aliasOf">
               <button v-if="row.state === 'loaded'" type="button" class="btn small" :disabled="!acts(row).unload.enabled" :title="acts(row).unload.title" @click="unloadDb(row)">Unload…</button>

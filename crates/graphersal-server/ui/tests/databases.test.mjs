@@ -91,3 +91,89 @@ test('hostInfo: the root info from api.info.host, {} when the playground passes 
   assert.deepEqual(hostInfo({ info: {} }), {});
   assert.deepEqual(hostInfo(undefined), {});
 });
+
+test('sizes: on disk and in memory, human-readable with the exact bytes in the tooltip', async () => {
+  const { exactBytes } = await import('../admin-api.js');
+  const { diskTitle, memoryText, memoryTitle } = await import('../databases.js');
+  assert.equal(exactBytes(0), '0 bytes');
+  assert.equal(exactBytes(1), '1 byte');
+  assert.equal(exactBytes(1572864), '1,572,864 bytes');
+  assert.equal(exactBytes(null), '');
+  const { rows } = databaseRows({
+    databases: [
+      { name: 'acme', state: 'loaded', kind: 'plain', sizeBytes: 9728, memoryBytes: 1572864 },
+      { name: 'idle', state: 'unloaded', kind: 'plain', sizeBytes: 100, memoryBytes: null },
+      { name: 'l1', state: 'loaded', kind: 'layer', base: 'prod', sizeBytes: 50, memoryBytes: 2048, sharedMemoryBytes: 4096 },
+      { name: 'old', state: 'loaded', kind: 'plain', sizeBytes: 1 },
+    ],
+  });
+  const by = Object.fromEntries(rows.map((r) => [r.name, r]));
+  assert.equal(by.acme.memoryReported, true);
+  assert.equal(by.idle.memoryReported, true, 'null is still a reported field');
+  assert.equal(by.old.memoryReported, false, 'an older server sends no memory');
+  assert.equal(memoryText(by.acme), '1.5 MB');
+  assert.match(memoryTitle(by.acme), /^1,572,864 bytes: the graph's data/);
+  assert.equal(memoryText(by.idle), '', 'not loaded: no memory');
+  assert.equal(memoryTitle(by.idle), '');
+  assert.equal(by.l1.sharedMemoryBytes, 4096);
+  assert.match(memoryTitle(by.l1), /^2,048 bytes: this layer's own changes; its base "prod" takes 4\.0 KB \(4,096 bytes\)/);
+  assert.match(diskTitle(by.acme), /^9,728 bytes in the database's directory/);
+});
+
+test('sizes: the On disk and In memory columns sort numerically, unloaded last', async () => {
+  const { sortRows } = await import('../sort.js');
+  const { SIZE_COLUMNS } = await import('../databases.js');
+  const { rows } = databaseRows({
+    databases: [
+      { name: 'a', state: 'loaded', sizeBytes: 1048576, memoryBytes: 10 },
+      { name: 'b', state: 'unloaded', sizeBytes: 9, memoryBytes: null },
+      { name: 'c', state: 'loaded', sizeBytes: 2048, memoryBytes: 1048576 },
+      { name: 'd', state: 'loaded', sizeBytes: 100, memoryBytes: 900 },
+    ],
+  });
+  const names = (key, dir) => sortRows(rows, { key, dir }, SIZE_COLUMNS).map((r) => r.name);
+  assert.deepEqual(names('size', 'asc'), ['b', 'd', 'c', 'a']);
+  assert.deepEqual(names('size', 'desc'), ['a', 'c', 'd', 'b']);
+  assert.deepEqual(names('memory', 'asc'), ['a', 'd', 'c', 'b']);
+  assert.deepEqual(names('memory', 'desc'), ['c', 'd', 'a', 'b'], 'not loaded: last both ways');
+});
+
+test('memoryRows: the server memory summary, free under the limit or on the machine', async () => {
+  const { memoryRows } = await import('../databases.js');
+  assert.deepEqual(memoryRows({}), []);
+  assert.deepEqual(memoryRows(null), []);
+  const GiB = 1024 ** 3;
+  const rows = memoryRows({
+    memory: {
+      processBytes: 150 * 1024 * 1024, liveBytes: null, databasesBytes: 2 * 1024 * 1024,
+      machineTotalBytes: 16 * GiB, machineAvailableBytes: 8 * GiB,
+      limitBytes: 12 * GiB, limitSource: 'physical', configuredLimit: null, headroomBytes: null,
+      availableBytes: 12 * GiB, freeBytes: 12 * GiB - 150 * 1024 * 1024, freeBasis: 'limit',
+    },
+  });
+  assert.deepEqual(rows.map((r) => r.key), ['process', 'databases', 'machine', 'limit', 'free']);
+  const by = Object.fromEntries(rows.map((r) => [r.key, r]));
+  assert.equal(by.process.text, '150 MB');
+  assert.match(by.process.title, /^157,286,400 bytes: the resident memory/);
+  assert.equal(by.databases.text, '2.0 MB');
+  assert.equal(by.machine.text, '8.0 GB available of 16 GB');
+  assert.equal(by.limit.text, "12 GB (80 % of the machine's memory)");
+  assert.match(by.limit.title, /memory_limit not set \("auto"\)\.$/);
+  assert.match(by.free.text, / under the limit$/);
+
+  const none = Object.fromEntries(memoryRows({
+    memory: {
+      processBytes: null, databasesBytes: 0, machineTotalBytes: null, machineAvailableBytes: 4096,
+      limitBytes: null, limitSource: 'none', configuredLimit: 'none', headroomBytes: 1024,
+      freeBytes: 4096, freeBasis: 'machine',
+    },
+  }).map((r) => [r.key, r]));
+  assert.equal(none.process.text, 'unknown');
+  assert.match(none.process.title, /not known on this platform/);
+  assert.equal(none.machine.text, '4.0 KB available of unknown');
+  assert.equal(none.limit.text, 'none');
+  assert.match(none.limit.title, /memory_limit = "none", memory_headroom = 1024\.$/);
+  assert.equal(none.free.text, '4.0 KB on the machine');
+  assert.equal(memoryRows({ memory: { configuredLimit: 8589934592, limitBytes: 8589934592, limitSource: 'configured' } })
+    .find((r) => r.key === 'limit').text, '8.0 GB (set in server.toml)');
+});

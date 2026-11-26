@@ -126,7 +126,9 @@ from published files). When this file disagrees with the code, the code wins: sa
   lock; `status(dir)` (stale run file reported, not removed; `GET /api/admin/server`);
   `stop_with_token`/`status_with_token` through an address; texts in `console/service.rs`;
   `main.rs` exit 3 = status stopped, stop of a stopped dir exit 0), `control` (round 3 B2,
-  private: `GET /api/admin/server` facts (`ServerFacts` in the `Router`) and `POST
+  private: `GET /api/admin/server` facts (`ServerFacts` in the `Router`, with the
+  `[limits]` memory settings `usage::MemorySettings` from `serve::start`; its `memory` object =
+  `usage::memory_json`) and `POST
   /api/admin/shutdown`: operator or admin user, `everyone` 403, no `StopHook` 409, audited
   `AuditEvent::ShutdownRequested`; the hook (`ServeOptions::with_stop_hook`) feeds `serve`'s
   Ctrl+C channel, never stops the server on its own thread), `serve` (`start` -> `Running`, the
@@ -183,9 +185,12 @@ from published files). When this file disagrees with the code, the code wins: sa
   `Databases` takes `loader.context(header)` and the request holds that `Arc` only for its
   duration; `DatabaseInfo` hooks add `database` (real name), `home: "/"` (the playground's link back to the server UI;
   no `admin`) to the per-DB `/api/info`), `admin_api` (`GET /api/admin/databases` `{databases, aliases, problems}`, alias
-  rows carry `aliasOf`; listing rows (`Extras`) add `sizeBytes` (`layout::dir_bytes`),
-  `pooled`/`pooledBy` (`Admin::pooled_bases`), `linkWarning`; no `memoryBytes` (only the session
-  thread knows it); `GET|POST models` (POST JSON `{path|repo}`, or the upload form
+  rows carry `aliasOf`; listing rows (`Extras`) add `sizeBytes` (`usage::disk_bytes`: `layout::dir_bytes`
+  cached 5 s per directory), `memoryBytes` (+ a layer's `sharedMemoryBytes`; round 3 B5:
+  `Admin::loaded_memory` -> `Loader::memory`: handles cloned under the loader lock, then each
+  graph's `memory_footprint_bytes` through `try_read`, a busy graph answers its last figure
+  (`memory_seen`), a base row = the pooled base, the sum counts each pooled base once; `null`
+  when not loaded), `pooled`/`pooledBy` (`Admin::pooled_bases`), `linkWarning`; `GET|POST models` (POST JSON `{path|repo}`, or the upload form
   `POST models?repo=&license=&format=gsnap|tar` with the file as the body: `receive_upload`
   (shared with the import upload) into `tmp/`, kind checked by `ModelFileFormat::of`, then
   `model_add` of that path), `DELETE models/<repo...>`; 409 helps: name taken,
@@ -310,7 +315,14 @@ from published files). When this file disagrees with the code, the code wins: sa
   clear text, https = only the proxy should reach it), the Server rows access / scheme (with the
   cookie's `Max-Age`) / allowed hosts (`mode_rows`), sections
   Server / Databases / Problems / Embedding models / MCP; `address_line` = the one stdout line;
-  stop lines)), `text` (crate-private: the graphersal CLI's layout, copied from its
+  stop lines)), `usage` (round 3 B5, private: `disk_bytes` (TTL cache), `process_resident_bytes`
+  (Linux `/proc/self/statm`, macOS `proc_pidinfo` via `libc`, Windows `GetProcessMemoryInfo` via
+  `windows-sys` (windows-only dependency, already in the tree), else `None`), `machine_memory`
+  (`/proc/meminfo`; `hw.memsize` + `host_statistics64`; `GlobalMemoryStatusEx`), `memory_json`
+  (the summary's fields, module docs; "free" = limit - RSS, else machine available); the
+  console's `status` rows in `console/service.rs` `memory_rows`, `db list`'s ON DISK/MEMORY
+  columns in `console/render.rs`; UI: `databases.js` `memoryRows`, `memoryText`/`memoryTitle`,
+  `diskTitle`, `SIZE_COLUMNS`, `admin-api.js` `exactBytes`, `adminRequest.server`), `text` (crate-private: the graphersal CLI's layout, copied from its
   `sections.rs` + `Note`: `Section`/`render` (`── Title ───` headings at 78, `key: value` in
   one column, wrapped; `unwrapped` for paths/commands; `note`; `lines` + `table` for aligned
   columns), `Note` (headline, aligned details, commands under `# comment`, never wrapped),

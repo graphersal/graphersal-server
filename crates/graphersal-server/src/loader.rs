@@ -52,7 +52,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use graphersal::persist::{ModelInfo, ModelState, Store};
-use graphersal::prelude::Graph;
+use graphersal::prelude::{Graph, GraphStorage};
 use graphersal::storage::{LayerBase, LayeredGraph};
 use graphersal_mcp::{Mcp, Profile};
 use graphersal_serve::{
@@ -138,6 +138,12 @@ struct State {
     pool: BTreeMap<String, PoolEntry>,
 }
 
+/// The engine's footprint of `graph` without waiting (`None` while a writer holds it, or when
+/// the storage reports no figures).
+fn footprint<S: GraphStorage>(graph: &Graph<S>) -> Option<u64> {
+    graph.try_read()?.memory_footprint_bytes().ok().flatten()
+}
+
 /// Why a background load did not serve the database.
 enum LoadFailure {
     NeedsModel(String),
@@ -171,6 +177,35 @@ pub struct Loader {
     /// (`ContextBuilder::file_root`), and the root the stored jobs of a loaded database are
     /// checked against (`None`: no confinement, the unit tests).
     backup_root: Option<PathBuf>,
+    /// The last memory figure measured per graph (a loaded database's own graph by its folded
+    /// name, a pooled base by `base:<name>`): answered while a writer holds the graph's lock
+    /// ([`Loader::memory`]).
+    memory_seen: Mutex<BTreeMap<String, u64>>,
+}
+
+/// The memory of the loaded databases ([`Loader::memory`]): the engine's footprint of each
+/// graph (`GraphStorage::memory_footprint_bytes`: the graph's own data, cached by the engine
+/// per commit, so an unchanged graph is not walked again; loaded embedding models and the
+/// workload statistics are not part of it).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct LoadedMemory {
+    /// Per loaded database (folded name): its memory. A plain database: its graph; a layer:
+    /// its own changes (the delta over the base); a base: the frozen base graph.
+    pub(crate) databases: BTreeMap<String, DatabaseMemory>,
+    /// Every loaded graph once: the plain databases, the layers' deltas and each pooled base
+    /// once (a base shared by several layers and its own reading context counts one time).
+    pub(crate) total_bytes: u64,
+}
+
+/// One loaded database's memory ([`LoadedMemory`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct DatabaseMemory {
+    /// Its own memory (`None`: not measured: the graph was busy from the start, or the storage
+    /// reports no figures).
+    pub(crate) bytes: Option<u64>,
+    /// A layer: the memory of its base, shared with the base and the other layers over it (not
+    /// part of `bytes`).
+    pub(crate) shared_bytes: Option<u64>,
 }
 
 impl std::fmt::Debug for Loader {
@@ -223,6 +258,7 @@ impl Loader {
             unload_wait: UNLOAD_WAIT,
             mcp,
             backup_root,
+            memory_seen: Mutex::new(BTreeMap::new()),
         })
     }
 
@@ -248,6 +284,97 @@ impl Loader {
     /// The names of the loaded databases.
     pub fn loaded(&self) -> Vec<String> {
         self.lock().loaded.keys().cloned().collect()
+    }
+
+    /// The memory of the loaded databases and their sum ([`LoadedMemory`]). Never waits for a
+    /// graph: the handles are cloned under the loader's lock, then each graph is asked with a
+    /// `try_read`; a graph a writer holds answers its last measured figure (`None` before the
+    /// first). A frozen base is never written, so it always answers.
+    pub(crate) fn memory(&self) -> LoadedMemory {
+        enum Handle {
+            Plain(Arc<Store>),
+            Layer(Arc<Store<LayeredGraph>>),
+            Base,
+        }
+        let (dbs, bases) = {
+            let state = self.lock();
+            let dbs: Vec<(String, Handle, Option<String>)> = state
+                .loaded
+                .values()
+                .map(|db| {
+                    let handle = match (db.kind, &db.store, &db.layer_store) {
+                        (Kind::Plain, Some(store), _) => Handle::Plain(store.clone()),
+                        (Kind::Layer, _, Some(store)) => Handle::Layer(store.clone()),
+                        _ => Handle::Base,
+                    };
+                    (db.name.clone(), handle, db.base.clone())
+                })
+                .collect();
+            let bases: BTreeMap<String, LayerBase> = state
+                .pool
+                .iter()
+                .map(|(name, entry)| (name.clone(), entry.base.clone()))
+                .collect();
+            (dbs, bases)
+        };
+        let base_bytes: BTreeMap<String, Option<u64>> = bases
+            .iter()
+            .map(|(name, base)| {
+                let bytes = base.graph().memory_footprint_bytes().ok().flatten();
+                (name.clone(), self.seen(format!("base:{name}"), bytes))
+            })
+            .collect();
+        let mut memory = LoadedMemory::default();
+        for (name, handle, base) in dbs {
+            let shared = base
+                .as_ref()
+                .and_then(|b| base_bytes.get(b).copied().flatten());
+            // A base's own row is the pooled base, counted once below.
+            let is_base = matches!(handle, Handle::Base);
+            let one = match handle {
+                Handle::Plain(store) => DatabaseMemory {
+                    bytes: self.seen(name.clone(), footprint(store.graph())),
+                    shared_bytes: None,
+                },
+                Handle::Layer(store) => DatabaseMemory {
+                    bytes: self.seen(name.clone(), footprint(store.graph())),
+                    shared_bytes: shared,
+                },
+                Handle::Base => DatabaseMemory {
+                    bytes: shared,
+                    shared_bytes: None,
+                },
+            };
+            if !is_base {
+                memory.total_bytes = memory.total_bytes.saturating_add(one.bytes.unwrap_or(0));
+            }
+            memory.databases.insert(name, one);
+        }
+        for bytes in base_bytes.values() {
+            memory.total_bytes = memory.total_bytes.saturating_add(bytes.unwrap_or(0));
+        }
+        // Forget the figures of graphs no longer loaded.
+        if let Ok(mut seen) = self.memory_seen.lock() {
+            seen.retain(|key, _| match key.strip_prefix("base:") {
+                Some(base) => base_bytes.contains_key(base),
+                None => memory.databases.contains_key(key),
+            });
+        }
+        memory
+    }
+
+    /// `bytes` when measured (remembered as the last figure of `key`), else the last figure.
+    fn seen(&self, key: String, bytes: Option<u64>) -> Option<u64> {
+        let Ok(mut seen) = self.memory_seen.lock() else {
+            return bytes;
+        };
+        match bytes {
+            Some(bytes) => {
+                seen.insert(key, bytes);
+                Some(bytes)
+            }
+            None => seen.get(&key).copied(),
+        }
     }
 
     /// Every base in the pool with the databases using it (its layers, and the base itself

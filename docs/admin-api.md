@@ -106,15 +106,16 @@ The object describing one database (listing rows, and the answer of most actions
 | `model` | string | `needs-model` | the missing model's repository |
 | `aliasOf` | string | alias rows | the database the alias names (other fields are that database's) |
 | `import` | object | import answers | see Import |
-| `sizeBytes` | number | listing rows | the database's directory on disk (every file once; a model blob linked from `models/` counts in full in each database holding it, so the sum over databases exceeds the disk use) |
+| `sizeBytes` | number | listing rows | the database's directory on disk (every file once: Store snapshots, journal, models, settings; a model blob linked from `models/` counts in full in each database holding it, so the sum over databases exceeds the disk use); measured at most once per 5 s per database |
+| `memoryBytes` | number \| null | listing rows | a loaded database's graph in memory: the engine's footprint (`memory_footprint_bytes`: the graph's own data, cached by the engine per commit; loaded embedding models and workload statistics not included). A plain database: its graph; a layer: its own changes; a base loaded for reading: the frozen base graph. `null` when it is not loaded (or a writer held it since its load, so it was never measured: a busy graph answers its last figure) |
+| `sharedMemoryBytes` | number | listing rows of a loaded layer | its base's memory, shared with the base and every other layer over it (not part of `memoryBytes`) |
 | `pooled` | bool | listing rows of a pooled base | `true`: the base is held in memory in the shared pool (by its loaded layers or itself) |
 | `pooledBy` | [string] | with `pooled` | the loaded layers holding it (empty: only the base itself, loaded for reading) |
 | `linkWarning` | string | listing rows | some of its model blobs are copies, not hard links to `models/` (the file system has no links there: correct, no disk saving; unix only) |
 | `revision` | string | config readable | the revision of its settings (`database.toml`): send it with a read-only or auto-load change ([Revisions](#revisions-concurrent-changes)) |
 
 Listing rows are the answers of `GET /api/admin/databases` and `GET /api/admin/databases/<name>`.
-There is no `memoryBytes`: a loaded database's memory is known only inside its session thread,
-which a listing does not wait for.
+A listing never waits for a graph: a database a writer holds answers its last measured memory.
 
 A `failed` database whose `database.toml` cannot be read has only `name`, `state`, `reason`.
 
@@ -161,7 +162,7 @@ A `failed` database whose `database.toml` cannot be read has only `name`, `state
 | GET | `/api/admin/grants` | | `200 {"grants": [grant...], "revision"}` (`ETag`: the revision) |
 | POST | `/api/admin/grants` | `{"subject", "database", "level", "revision"?}` | `200` grant (new, or its level replaced) |
 | DELETE | `/api/admin/grants/<subject>/<database>` | | `200 {"subject", "database", "revoked": bool}` |
-| GET | `/api/admin/server` | | `200 {"server", "version", "pid", "address", "url", "directory", "startedAtMs", "uptimeSecs", "databases": {"total", "loaded": [name...], "loading": [name...]}, "aliases", "memory": {"liveBytes", "limitBytes", "availableBytes"}}` (see Server) |
+| GET | `/api/admin/server` | | `200 {"server", "version", "pid", "address", "url", "directory", "startedAtMs", "uptimeSecs", "databases": {"total", "loaded": [name...], "loading": [name...]}, "aliases", "memory": {"processBytes", "liveBytes", "databasesBytes", "machineTotalBytes", "machineAvailableBytes", "limitBytes", "limitSource", "configuredLimit", "headroomBytes", "availableBytes", "freeBytes", "freeBasis"}}` (see Server) |
 | POST | `/api/admin/shutdown` | | `202 {"stopping": true, "pid"}`, then the server stops (see Server) |
 
 ### Revisions (concurrent changes)
@@ -606,9 +607,22 @@ as the operator); the web UI's Users tab uses them too.
 `GET /api/admin/server` describes the running server itself (`graphersal-server status`):
 version, process id, the bound address and its URL, the server directory, the start time
 (Unix milliseconds) and uptime in seconds, the number of databases with the names of the
-loaded and loading ones, the number of aliases, and memory (`liveBytes`: the live heap, `null`
-in this build, which installs no tracking allocator; `limitBytes`/`availableBytes`: the
-process memory ceiling and what is left below it, `null` without one).
+loaded and loading ones, the number of aliases, and the memory summary `memory` (the web UI's
+Databases tab shows it above the table; `status` prints it). A figure the server cannot know is
+`null`, never `0`:
+
+| Field | Meaning |
+|---|---|
+| `processBytes` | the server process's resident memory (RSS): Linux `/proc/self/statm`, macOS `proc_pidinfo`, Windows `GetProcessMemoryInfo` (working set); `null` on other platforms |
+| `liveBytes` | the engine's tracked live heap: `null` in this build, which installs no tracking allocator |
+| `databasesBytes` | the loaded databases' graphs, each once: plain databases, the layers' own changes, and each base in the pool once (however many layers share it) |
+| `machineTotalBytes`, `machineAvailableBytes` | the machine's physical memory and what it can give without swapping: Linux `/proc/meminfo` (`MemTotal`, `MemAvailable`), macOS `hw.memsize` and the VM statistics (free + inactive + purgeable pages, an approximation), Windows `GlobalMemoryStatusEx`; inside a container these are the host's |
+| `limitBytes` | the engine's process memory ceiling in effect (`graphersal::exec::memory_room()`): a query, import or write that would take the process over it is refused; `null`: no ceiling |
+| `limitSource` | where the ceiling comes from: `configured` (a number in `server.toml`), `cgroup` (a container's limit minus the headroom), `physical` (80 % of the machine's memory), `none` (`memory_limit = "none"`), `unknown` |
+| `configuredLimit` | `server.toml [limits] memory_limit` as written: a number of bytes, `"auto"`, `"none"`, or `null` when not set (the engine default, `auto`) |
+| `headroomBytes` | `[limits] memory_headroom` (what `auto` keeps free below a cgroup limit), `null` when not set (a tenth of the cgroup limit, at least 64 MiB) |
+| `availableBytes` | the engine's room below the ceiling (the whole ceiling without a tracking allocator), `null` without one |
+| `freeBytes`, `freeBasis` | "free under the limit": `limitBytes` minus the process's memory (`processBytes`, else `databasesBytes`) with `freeBasis: "limit"` when a ceiling is in effect; else the machine's available memory, `freeBasis: "machine"` |
 
 `POST /api/admin/shutdown` stops the server (`graphersal-server stop`): it answers `202
 {"stopping": true, "pid"}` and the server then stops exactly as on Ctrl+C or SIGTERM (running

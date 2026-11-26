@@ -9,11 +9,13 @@
 //   "aliasesRevision", "problems": [text]}` with `state` one of `DATABASE_STATES`; each entry
 //   also carries its settings' `revision`. Checked by `databaseRows`; a
 //   malformed entry is skipped and counted, never shown half. The optional byte counts
-//   `sizeBytes` (on disk) and `memoryBytes` (when loaded) are shown when the server sends them;
+//   `sizeBytes` (on disk) and `memoryBytes` (when loaded; `null` when not: `memoryReported`
+//   tells a server that sends the field from an older one) with a layer's `sharedMemoryBytes`
+//   (its base's memory, shared) are shown when the server sends them;
 //   `pooled` + `pooledBy` (a base held in the shared pool by its loaded layers) and
 //   `linkWarning` (model blobs copied, not hard-linked) are optional too.
 
-import { aliasRows } from './admin-api.js';
+import { aliasRows, bytesText, exactBytes } from './admin-api.js';
 
 /** The database states of the server, in the words the list shows. */
 export const DATABASE_STATES = Object.freeze({
@@ -44,8 +46,8 @@ export function databaseHref(name) {
 /**
  * The list's rows from a `GET /api/admin/databases` answer:
  * `{rows: [{name, href, state, stateText, tone, kind, role, readOnly, autoLoad, description,
- * base, created, aliasOf, reason, model, sizeBytes, memoryBytes, pooled, pooledBy, linkWarning,
- * revision}], skipped, aliases: [{alias, target}], aliasesRevision, problems: [text]}`, sorted by
+ * base, created, aliasOf, reason, model, sizeBytes, memoryBytes, memoryReported, sharedMemoryBytes,
+ * pooled, pooledBy, linkWarning, revision}], skipped, aliases: [{alias, target}], aliasesRevision, problems: [text]}`, sorted by
  * name (`revision`, `aliasesRevision`: what a change of the row's settings or of the aliases
  * sends, '' from an older server); `skipped` counts the
  * malformed entries. An unknown `state` is shown as it is (a newer server). Throws an Error when
@@ -80,6 +82,8 @@ export function databaseRows(answer) {
       model: typeof d.model === 'string' ? d.model : '',
       sizeBytes: byteCount(d.sizeBytes),
       memoryBytes: byteCount(d.memoryBytes),
+      memoryReported: Object.prototype.hasOwnProperty.call(d, 'memoryBytes'),
+      sharedMemoryBytes: byteCount(d.sharedMemoryBytes),
       pooled: d.pooled === true,
       pooledBy: Array.isArray(d.pooledBy) ? d.pooledBy.filter((x) => typeof x === 'string' && x) : [],
       linkWarning: typeof d.linkWarning === 'string' ? d.linkWarning : '',
@@ -94,6 +98,92 @@ export function databaseRows(answer) {
 
 function byteCount(n) {
   return typeof n === 'number' && Number.isFinite(n) && n >= 0 ? n : null;
+}
+
+/**
+ * The sortable size columns of the database table (./sort.js definitions): `size` (on disk) and
+ * `memory` (in memory; a row that is not loaded has none and sorts last both ways).
+ */
+export const SIZE_COLUMNS = Object.freeze({
+  size: Object.freeze({ type: 'number', value: (r) => r.sizeBytes }),
+  memory: Object.freeze({ type: 'number', value: (r) => (r.state === 'loaded' ? r.memoryBytes : null) }),
+});
+
+/** The tooltip of a row's "On disk" cell: the exact bytes and what they count. */
+export function diskTitle(row) {
+  if (!row || row.sizeBytes === null) return '';
+  return `${exactBytes(row.sizeBytes)} in the database's directory (Store snapshots, journal, models)`;
+}
+
+/** The "In memory" cell of a row: '' when it is not loaded (or not measured). */
+export function memoryText(row) {
+  return row && row.state === 'loaded' && row.memoryBytes !== null ? bytesText(row.memoryBytes) : '';
+}
+
+/** The tooltip of a row's "In memory" cell: the exact bytes; a layer adds its shared base. */
+export function memoryTitle(row) {
+  if (!memoryText(row)) return '';
+  const own = exactBytes(row.memoryBytes);
+  if (row.sharedMemoryBytes !== null) {
+    return `${own}: this layer's own changes; its base "${row.base || ''}" takes ${bytesText(row.sharedMemoryBytes)} (${exactBytes(row.sharedMemoryBytes)}), shared with the base and its other layers`;
+  }
+  return `${own}: the graph's data in memory (the engine's estimate; loaded embedding models not included)`;
+}
+
+/**
+ * The memory summary of `GET api/admin/server` (its `memory`, docs/admin-api.md): rows
+ * `[{key, label, text, title}]` in the order process, databases, machine, limit, free; a
+ * figure the server does not know reads "unknown". `[]` without a `memory` object (an older
+ * server).
+ */
+export function memoryRows(server) {
+  const m = server && typeof server === 'object' ? server.memory : null;
+  if (!m || typeof m !== 'object') return [];
+  const n = (key) => byteCount(m[key]);
+  const shown = (v) => (v === null ? 'unknown' : bytesText(v));
+  const exact = (v) => (v === null ? '' : exactBytes(v));
+  const rows = [];
+  const process = n('processBytes');
+  rows.push({
+    key: 'process', label: 'Process', text: shown(process),
+    title: process === null
+      ? 'The resident memory of the server process is not known on this platform.'
+      : `${exact(process)}: the resident memory (RSS) of the server process, every database and the engine included`,
+  });
+  const dbs = n('databasesBytes');
+  rows.push({
+    key: 'databases', label: 'Loaded databases', text: shown(dbs),
+    title: `${exact(dbs)}: the graphs of the loaded databases, each once (a base shared by layers counts one time); the engine's estimate`,
+  });
+  const total = n('machineTotalBytes');
+  const avail = n('machineAvailableBytes');
+  rows.push({
+    key: 'machine', label: 'Machine', text: `${shown(avail)} available of ${shown(total)}`,
+    title: `available ${exact(avail) || 'unknown'}, total ${exact(total) || 'unknown'} (the machine's physical memory; inside a container the host's)`,
+  });
+  const limit = n('limitBytes');
+  const source = typeof m.limitSource === 'string' ? m.limitSource : '';
+  const configured = m.configuredLimit;
+  const setting = typeof configured === 'number'
+    ? `memory_limit = ${configured}`
+    : typeof configured === 'string' ? `memory_limit = "${configured}"` : 'memory_limit not set ("auto")';
+  const headroom = n('headroomBytes');
+  const why = { configured: 'set in server.toml', cgroup: "the container's cgroup limit minus the headroom", physical: "80 % of the machine's memory" }[source] || '';
+  rows.push({
+    key: 'limit', label: 'Memory limit',
+    text: limit === null ? 'none' : `${bytesText(limit)}${why ? ` (${why})` : ''}`,
+    title: `${limit === null ? 'No ceiling: the process may grow until the system stops it.' : `${exact(limit)}: the engine's process memory ceiling; a query, import or write that would go over it is refused.`} server.toml [limits] ${setting}${headroom !== null ? `, memory_headroom = ${headroom}` : ''}.`,
+  });
+  const free = n('freeBytes');
+  const basis = m.freeBasis === 'limit' ? 'limit' : 'machine';
+  rows.push({
+    key: 'free', label: 'Free',
+    text: free === null ? 'unknown' : `${bytesText(free)} ${basis === 'limit' ? 'under the limit' : 'on the machine'}`,
+    title: free === null ? '' : basis === 'limit'
+      ? `${exact(free)}: the limit minus the process's memory`
+      : `${exact(free)}: no limit is set, so the machine's available memory`,
+  });
+  return rows;
 }
 
 /** Whether the list should be reloaded soon (a database is loading). */

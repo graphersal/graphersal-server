@@ -221,3 +221,23 @@ A server in the background without hunting for its pid:
   only its own changes), that promotion is one way and forever, and when to use it; the
   Databases tab's Kind column and the Backups tab's Kind column explain each kind in a tooltip,
   and a "Bases and layers" box under the database table sums it up.
+
+## Disk and memory in the Databases tab, `db list` and `status`
+
+- **Two size columns.** The Databases tab and `db list` show "On disk" (the database's
+  directory: Store snapshots, journal, models; measured at most once per 5 seconds per
+  database) and "In memory" (a loaded database's graph: the engine's footprint; a layer's own
+  changes, its shared base in the tooltip). Both sort numerically (a database that is not
+  loaded sorts last); the cells read `1.5 MB` with the exact bytes in the tooltip. The listing
+  rows of the admin API gain `memoryBytes` (`null` when not loaded) and, for a loaded layer,
+  `sharedMemoryBytes`. Before, the listing had only `sizeBytes`.
+- **A memory summary** above the database table, in `graphersal-server status` (and its
+  `--json`) and in `GET /api/admin/server`'s `memory`: the server process's resident memory
+  (RSS; Linux, macOS and Windows), the loaded databases (each graph once: a base shared by
+  layers counts one time), the machine's total and available memory, the memory limit in
+  effect with where it comes from (`configured`, a container's `cgroup` limit, 80 % of the
+  `physical` memory, `none`) and the `[limits] memory_limit`/`memory_headroom` settings, and
+  what is free: the limit minus the process's memory, or the machine's available memory
+  without a limit. Before, `status` showed only the limit (`liveBytes`, `limitBytes` and
+  `availableBytes` stay in the answer). No new dependency on Linux and macOS (`libc`);
+  `windows-sys`, already in the tree, gives the Windows figures.

@@ -385,7 +385,12 @@ pub fn start(
     let host_check = HostCheck::new(exposure, address.port(), &url)
         .with_allowed_hosts(config.http.allowed_hosts.clone())
         .with_hint(host_hint(&url));
-    let facts = crate::control::ServerFacts::now(address, url.clone());
+    let facts = crate::control::ServerFacts::now(address, url.clone()).with_memory(
+        crate::usage::MemorySettings {
+            limit: config.limits.memory_limit,
+            headroom: config.limits.memory_headroom,
+        },
+    );
     let shared = Arc::new(Shared {
         router: Router::new(host_check.clone())
             .with_modes(Modes::of(&config))
