@@ -247,6 +247,9 @@ pub enum DbCommand {
         /// Offer the new database to MCP (`--mcp`: `Some(true)`, `--no-mcp`: `Some(false)`; `None`:
         /// the server's default, `mcp.toml`'s `expose_new`).
         mcp: Option<bool>,
+        /// `--rebase-jobs`: rewrite the backup jobs writing outside the backup root under it
+        /// ([`crate::ops::Admin::rebasing_jobs`]).
+        rebase_jobs: bool,
     },
     /// `import DIR --inbox FILE --name NAME [--base BASE] [--format F] [--description TEXT]
     /// [--role normal|base]`: the entry `file` of the import inbox `DIR/imports/` (read where
@@ -267,6 +270,9 @@ pub enum DbCommand {
         /// Offer the new database to MCP (`--mcp`: `Some(true)`, `--no-mcp`: `Some(false)`; `None`:
         /// the server's default, `mcp.toml`'s `expose_new`).
         mcp: Option<bool>,
+        /// `--rebase-jobs`: rewrite the backup jobs writing outside the backup root under it
+        /// ([`crate::ops::Admin::rebasing_jobs`]).
+        rebase_jobs: bool,
     },
     /// `import DIR --list`: the entries of the import inbox `DIR/imports/`.
     InboxList,
@@ -283,6 +289,14 @@ pub enum DbCommand {
         repo: Option<String>,
         /// The licence of a directory that does not state it.
         license: Option<String>,
+    },
+    /// `models default NAME MODEL` / `models default NAME --none`: the default embedding model
+    /// of the plain database `name` (one commit of its Store; [`crate::ops::Admin::set_default_model`]).
+    ModelsDefault {
+        /// The database.
+        name: String,
+        /// The model's repository; `None`: no default.
+        model: Option<String>,
     },
     /// `models remove REPO`.
     ModelsRemove {
@@ -579,10 +593,12 @@ impl DbCommand {
                 description,
                 role,
                 mcp,
+                rebase_jobs,
             } => {
                 let source = ("path", json!(source.to_string_lossy()));
                 let body = import_body(source, name, base, format, description, *role);
-                (Method::Post, "import".into(), Some(with_mcp(body, *mcp)))
+                let body = with_rebase(with_mcp(body, *mcp), *rebase_jobs);
+                (Method::Post, "import".into(), Some(body))
             }
             DbCommand::ImportInbox {
                 file,
@@ -592,10 +608,12 @@ impl DbCommand {
                 description,
                 role,
                 mcp,
+                rebase_jobs,
             } => {
                 let source = ("inbox", json!(file));
                 let body = import_body(source, name, base, format, description, *role);
-                (Method::Post, "import".into(), Some(with_mcp(body, *mcp)))
+                let body = with_rebase(with_mcp(body, *mcp), *rebase_jobs);
+                (Method::Post, "import".into(), Some(body))
             }
             DbCommand::InboxList => (Method::Get, "imports".into(), None),
             DbCommand::ModelsList => (Method::Get, "models".into(), None),
@@ -617,6 +635,11 @@ impl DbCommand {
                 (Method::Post, "models".into(), Some(Value::Object(body)))
             }
             DbCommand::ModelsRemove { model } => (Method::Delete, format!("models/{model}"), None),
+            DbCommand::ModelsDefault { name, model } => (
+                Method::Put,
+                format!("databases/{name}/default-model"),
+                Some(json!({ "model": model })),
+            ),
             DbCommand::ModelsDownload { repo, revision } => {
                 let mut body = json!({ "repo": repo });
                 if let Some(revision) = revision {
@@ -1111,6 +1134,14 @@ pub(crate) fn answer_of(status: u16, json: Value) -> Result<Value, ServerError> 
 fn with_mcp(mut body: Value, mcp: Option<bool>) -> Value {
     if let Some(mcp) = mcp {
         body["mcp"] = json!(mcp);
+    }
+    body
+}
+
+/// `body` with `"rebaseJobs": true` when `rebase` (left out otherwise).
+fn with_rebase(mut body: Value, rebase: bool) -> Value {
+    if rebase {
+        body["rebaseJobs"] = Value::Bool(true);
     }
     body
 }

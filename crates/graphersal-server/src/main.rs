@@ -140,10 +140,10 @@ Usage:
             is frozen forever; nothing turns it back into an ordinary database.
         db reset-layer NAME --yes
             Discards every change of the layer database NAME over its base (the base and
-            other layers are untouched): a new empty layer over the same base takes its
-            place, the old layer moves to DIR/trash/ (recoverable by hand). Name, base,
+            other layers are untouched) in one commit of its own Store (its history keeps
+            the state before: a backup or store rollback goes back). Name, base,
             description, flags, query limits, grants, aliases, MCP settings and scheduled
-            job definitions stay. A loaded layer is unloaded and loaded again.
+            job definitions stay. A loaded layer is reset in place and stays loaded.
         db read-only NAME on|off
         db auto-load NAME on|off
         db info NAME             everything about NAME (or the database an alias names):
@@ -188,7 +188,8 @@ Usage:
             models) unless --materialize (a standalone full snapshot).
       --json prints the admin API's JSON answer instead of text.
   graphersal-server import DIR SOURCE --name NAME [--base BASE] [--format FORMAT]
-                    [--description TEXT] [--role normal|base] [--mcp|--no-mcp] [--json]
+                    [--description TEXT] [--role normal|base] [--mcp|--no-mcp]
+                    [--rebase-jobs] [--json]
       Import SOURCE into DIR as the new database NAME: a packed snapshot (.gsnap; a layer
       snapshot needs a role=base database with its base identity, --base names it), a Store
       directory or .gstore file (copied into a directory Store; a model blob it lacks is
@@ -200,8 +201,13 @@ Usage:
       frozen for good) of a plain source (not of a layer, nor of a source naming a model
       neither it nor the shared models carry). Through a running server the server reads
       SOURCE itself (same machine). --mcp offers the new database to MCP (see db create).
+      Stored scheduled jobs writing outside the backup root (server.toml [jobs]
+      backup_root; e.g. an absolute path of the CLI dev server era) are listed: they never
+      run here (each load drops them). --rebase-jobs rewrites each such backup job to
+      <backup root>/NAME/<job> in the new database first, so it runs there.
   graphersal-server import DIR --inbox FILE --name NAME [--base BASE] [--format FORMAT]
-                    [--description TEXT] [--role normal|base] [--json]
+                    [--description TEXT] [--role normal|base] [--mcp|--no-mcp]
+                    [--rebase-jobs] [--json]
       The same from the import inbox DIR/imports/: FILE is one file or Store directory
       name there (no path; a link leading outside the inbox is refused).
   graphersal-server import DIR --list [--json]
@@ -217,6 +223,14 @@ Usage:
             name them), or the repository of a model the shared models hold. Every needs-model database whose model is then there
             gets it and can be loaded.
         models remove REPO       refused while a database uses it
+        models default NAME MODEL | models default NAME --none
+            Makes the embedding model MODEL (its repository; the database must hold it)
+            the default model of the plain database NAME (the one embed() and text
+            queries use without a model name), or with --none clears the default. One
+            commit of NAME's Store: a loaded database changes at once (its next queries
+            use the new default; a model already loaded stays loaded), an unloaded one
+            is changed on disk. Refused for a layer (its base's models serve it), a
+            base (frozen) and a read-only database.
         models download REPO [--revision REV]
             Downloads the Model2Vec model REPO (owner/name; REV: branch, tag or commit,
             default main) from Hugging Face into the shared models, then resolves the
@@ -253,6 +267,17 @@ Usage:
         mcp db NAME on|off       offer a database or alias to MCP, or hide it
         mcp db NAME read-only on|off
             MCP sessions only read NAME, whatever their grant.
+        mcp profile show [NAME]  the MCP profile of the database or alias NAME (and where
+                                 the one that applies comes from), or without NAME the
+                                 server default profile
+        mcp profile set FILE [NAME]
+            Sets the MCP profile of NAME (or the server default) from FILE, a graphersal
+            --mcp-config file (its instructions file is read and kept inline).
+        mcp profile clear [NAME] removes it: NAME falls back to its database's profile,
+                                 the server default or the built-in one
+        mcp profile preview [NAME] [--read]
+            What an agent sees (instructions, tools) on /db/NAME/mcp, or on /mcp without
+            NAME; --read as a caller that may only read.
   graphersal-server config COMMAND ... --dir DIR [--json] [--token TOKEN --server ADDR]
       The keys of DIR/server.toml (dotted: listen, limits.upload_bytes, limits.query.timeout_ms,
       defaults.auto_load, ...). Through a running server (like db) the keys that can apply
@@ -1043,6 +1068,7 @@ fn import_command(args: &[String]) -> ExitCode {
     let mut values: Vec<(String, String)> = Vec::new();
     let mut json = false;
     let mut list = false;
+    let mut rebase_jobs = false;
     let mut mcp: Option<bool> = None;
     let mut rest = args.iter();
     while let Some(arg) = rest.next() {
@@ -1067,6 +1093,7 @@ fn import_command(args: &[String]) -> ExitCode {
             }
             "--json" if inline.is_none() => json = true,
             "--list" if inline.is_none() => list = true,
+            "--rebase-jobs" if inline.is_none() => rebase_jobs = true,
             "--mcp" | "--no-mcp" if inline.is_none() => {
                 if mcp.replace(flag == "--mcp").is_some() {
                     return usage_error("import: give --mcp or --no-mcp once");
@@ -1086,6 +1113,7 @@ fn import_command(args: &[String]) -> ExitCode {
             return usage_error("import --list takes one argument: the server directory");
         };
         if mcp.is_some()
+            || rebase_jobs
             || values
                 .iter()
                 .any(|(flag, _)| flag != "--token" && flag != "--server")
@@ -1133,6 +1161,7 @@ fn import_command(args: &[String]) -> ExitCode {
                     format: value("--format"),
                     description: value("--description"),
                     mcp,
+                    rebase_jobs,
                 }
             }
             None => DbCommand::ImportInbox {
@@ -1143,6 +1172,7 @@ fn import_command(args: &[String]) -> ExitCode {
                 format: value("--format"),
                 description: value("--description"),
                 mcp,
+                rebase_jobs,
             },
         };
         (dir, command)
@@ -1154,12 +1184,13 @@ fn import_command(args: &[String]) -> ExitCode {
     print_outcome(dir, &command, json, remote)
 }
 
-/// `models list|add|remove|download ... --dir DIR`.
+/// `models list|add|remove|default|download ... --dir DIR`.
 fn models_command(args: &[String]) -> ExitCode {
     let mut positional: Vec<&String> = Vec::new();
     let mut values: Vec<(String, String)> = Vec::new();
     let mut json = false;
     let mut cancel = false;
+    let mut none = false;
     let mut rest = args.iter();
     while let Some(arg) = rest.next() {
         if !arg.starts_with("--") {
@@ -1182,6 +1213,7 @@ fn models_command(args: &[String]) -> ExitCode {
             }
             "--json" if inline.is_none() => json = true,
             "--cancel" if inline.is_none() => cancel = true,
+            "--none" if inline.is_none() => none = true,
             _ => return usage_error(&format!("models: unknown argument {arg:?}")),
         }
     }
@@ -1200,7 +1232,18 @@ fn models_command(args: &[String]) -> ExitCode {
     if (revision.is_some() || cancel) && words.first() != Some(&"download") {
         return usage_error("--revision and --cancel belong to models download");
     }
+    if none && words.first() != Some(&"default") {
+        return usage_error("--none belongs to models default");
+    }
     let command = match words.as_slice() {
+        ["default", name] if none && !add_flags => DbCommand::ModelsDefault {
+            name: name.to_string(),
+            model: None,
+        },
+        ["default", name, model] if !none && !add_flags => DbCommand::ModelsDefault {
+            name: name.to_string(),
+            model: Some(model.to_string()),
+        },
         ["download"] if cancel && !add_flags && revision.is_none() => {
             DbCommand::ModelsDownloadCancel
         }
@@ -1240,7 +1283,8 @@ fn models_command(args: &[String]) -> ExitCode {
         _ => {
             return usage_error(&format!(
                 "unknown command or wrong arguments: models {} (list, add SOURCE [--repo R] \
-                 [--license L], remove REPO, download REPO [--revision REV], download --cancel)",
+                 [--license L], remove REPO, default NAME MODEL, default NAME --none, download \
+                 REPO [--revision REV], download --cancel)",
                 words.join(" ")
             ));
         }
@@ -2064,5 +2108,121 @@ fn restore_command(args: &[String]) -> ExitCode {
             exit(0)
         }
         Err(error) => failure(&error),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::USAGE;
+
+    /// This file's source: the dispatch tables the help must cover.
+    const SOURCE: &str = include_str!("main.rs");
+
+    /// The body of `fn name(` in [`SOURCE`] (up to the next top-level `fn`).
+    fn body_of(name: &str) -> &'static str {
+        let start = SOURCE
+            .find(&format!("\nfn {name}("))
+            .unwrap_or_else(|| panic!("fn {name} not found"));
+        let rest = &SOURCE[start + 1..];
+        let end = rest[1..].find("\nfn ").map_or(rest.len(), |at| at + 1);
+        &rest[..end]
+    }
+
+    /// The commands a match arm of `body` dispatches: the leading string literals of each
+    /// slice pattern (`["profile", "show", name @ ..] =>` -> `profile show`).
+    fn commands_of(body: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        for line in body.lines() {
+            let line = line.trim_start();
+            let Some(pattern) = line.strip_prefix('[') else {
+                continue;
+            };
+            if !line.contains("=>") {
+                continue;
+            }
+            let mut words = Vec::new();
+            for element in pattern.split(',') {
+                let element = element.trim().trim_end_matches(']').trim();
+                match element.strip_prefix('"').and_then(|e| e.split('"').next()) {
+                    Some(word) if !element.contains(" @ ") => words.push(word.to_string()),
+                    _ => break,
+                }
+            }
+            if !words.is_empty() {
+                out.push(words.join(" "));
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_dispatched_command_is_in_the_help() {
+        let groups = [
+            ("db", "parse_db"),
+            ("models", "models_command"),
+            ("user", "user_command"),
+            ("mcp", "mcp_command"),
+            ("config", "config_command"),
+        ];
+        let mut missing = Vec::new();
+        let mut seen = 0;
+        for (group, function) in groups {
+            for command in commands_of(body_of(function)) {
+                seen += 1;
+                let text = format!("{group} {command}");
+                if !USAGE.contains(&text) {
+                    missing.push(text);
+                }
+            }
+        }
+        // The top-level commands of `main`.
+        for line in body_of("main").lines() {
+            if let Some(rest) = line.trim_start().strip_prefix("Some(\"")
+                && let Some((command, _)) = rest.split_once('"')
+                && !command.starts_with('-')
+                && command != "help"
+            {
+                seen += 1;
+                if !USAGE.contains(&format!("graphersal-server {command} ")) {
+                    missing.push(command.to_string());
+                }
+            }
+        }
+        assert!(seen > 50, "the scan found only {seen} commands");
+        assert!(missing.is_empty(), "not in --help: {missing:?}");
+    }
+
+    #[test]
+    fn every_flag_the_console_parses_is_in_the_help() {
+        let mut missing = Vec::new();
+        for piece in SOURCE.split('"').skip(1).step_by(2) {
+            let flag = piece.split('=').next().unwrap_or_default();
+            if flag.len() > 2
+                && flag.starts_with("--")
+                && flag[2..]
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c == '-')
+                && !USAGE.contains(flag)
+                && !missing.contains(&flag)
+            {
+                missing.push(flag);
+            }
+        }
+        assert!(missing.is_empty(), "not in --help: {missing:?}");
+    }
+
+    #[test]
+    fn the_mcp_profile_and_default_model_commands_are_in_the_help() {
+        for command in [
+            "mcp profile show [NAME]",
+            "mcp profile set FILE [NAME]",
+            "mcp profile clear [NAME]",
+            "mcp profile preview [NAME] [--read]",
+            "models default NAME MODEL",
+            "models default NAME --none",
+            "[--rebase-jobs]",
+        ] {
+            assert!(USAGE.contains(command), "{command}");
+        }
     }
 }

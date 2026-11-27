@@ -120,6 +120,35 @@ import. The Settings tab shows the last verify and the missing model.
 that neither it nor `models/` carries is refused. Add the model first and import again, or
 import it as an ordinary database, add the model, then promote it.
 
+## The default model
+
+A database's Store may hold several models; one of them can be its **default model**, the one
+`embed(text)` and text queries use when they name no model. Without a default, `embed()` without
+a name uses the built-in `hash-ngram/1`, and the load log says so ("... none is the default").
+Make a model the default, or clear it:
+
+```bash
+graphersal-server models default acme org/model --dir ./srv
+graphersal-server models default acme --none --dir ./srv
+```
+
+In the web UI: Databases tab, the row's "…" menu, "Default model…" (it lists the models the
+database's Store holds). `db info acme` shows them and the default under "Store".
+
+- MODEL is the repository of a model the database's Store holds; another is refused (`400`) and
+  the refusal names the ones it holds.
+- The change is one commit of the database's own Store, so it follows the Store's history
+  (a rollback or a restored backup brings the earlier default back).
+- A **loaded** database changes at once: its next queries use the new default. A model already
+  loaded stays loaded; nothing is unloaded or loaded by the change. An **unloaded** database
+  (also one that is `needs-model`) is changed on disk without loading it; it uses the new default
+  from its next load.
+- Refused for a layer (its base's models serve it, with the base's default), for a base (frozen
+  for good) and for a read-only database (turn read-only off, set the default, turn it on
+  again); also while the database is being loaded or unloaded.
+- The admin API: `PUT /api/admin/databases/<name>/default-model` with `{"model": "org/model"}`
+  or `{"model": null}` ([Admin API](../reference/admin_api.md#the-default-model)).
+
 ## Remove a model
 
 ```bash

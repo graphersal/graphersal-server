@@ -49,6 +49,11 @@ pub(crate) struct StoreFacts {
     pub(crate) wal_bytes: u64,
     /// Whether the last close was clean (`false` while a writer has it open).
     pub(crate) clean: bool,
+    /// The repositories of the embedding models its catalog holds (a layer: none; it serves
+    /// its base's).
+    pub(crate) models: Vec<String>,
+    /// The repository of the default model, when one is the default.
+    pub(crate) default_model: Option<String>,
 }
 
 /// Microseconds since the Unix epoch as RFC 3339 UTC; `None` for `0` or less.
@@ -162,6 +167,8 @@ impl Admin {
             snapshots: info.snapshots.len(),
             wal_bytes: info.wal_bytes,
             clean: info.clean,
+            models: info.models.iter().map(|m| m.repo.clone()).collect(),
+            default_model: info.default_model.clone(),
         })
     }
 

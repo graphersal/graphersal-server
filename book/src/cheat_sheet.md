@@ -104,6 +104,7 @@ graphersal-server import ./srv /data/products.gsnap --name products --role base 
 graphersal-server import ./srv /data/acme.gsnap --name acme --description "Acme"
 graphersal-server import ./srv --list                                            # the import inbox ./srv/imports/
 graphersal-server import ./srv --inbox acme.gsnap --name acme                    # import one inbox entry
+graphersal-server import ./srv /data/acme-store --name acme --rebase-jobs        # move its backup jobs under the backup root
 ```
 
 ## Backups and restore
@@ -139,6 +140,8 @@ graphersal-server models add /models/model.tar.gz --repo org/model --license mit
 graphersal-server models add /data/with-models.gsnap --dir ./srv                 # the models a .gsnap carries
 graphersal-server models add org/model --dir ./srv                               # a model models/ already holds
 graphersal-server models remove org/model --dir ./srv                            # refused while a database uses it
+graphersal-server models default acme org/model --dir ./srv                     # the default model of the database acme
+graphersal-server models default acme --none --dir ./srv                         # no default model
 graphersal-server models download minishlab/potion-base-8M --dir ./srv          # from Hugging Face, by the server; shows the licence
 graphersal-server models download --cancel --dir ./srv                          # stop a running download
 ```

@@ -1416,18 +1416,42 @@ fn missing_model(models: &[ModelInfo]) -> Option<String> {
 /// Logs what an open found.
 fn log_notes(name: &str, notes: &[OpenNote]) {
     for note in notes {
-        let mut text = format!("database '{name}': {}", note.headline);
-        for (key, value) in &note.details {
-            text.push_str(&format!("; {key}: {value}"));
-        }
-        for (why, command) in &note.commands {
-            text.push_str(&format!("; {why}: {command}"));
-        }
+        let text = note_text(name, &note.headline, &note.details, &note.commands);
         match note.level {
             NoteLevel::Warning => tracing::warn!(target: "graphersal_server", "{text}"),
             _ => tracing::info!(target: "graphersal_server", "{text}"),
         }
     }
+}
+
+/// The log line of an open's note of the database `name`. The engine names its own CLI's
+/// `graphersal store models default <store> <repo>` (a closed store) for a Store whose models
+/// have no default; the server's command replaces it (KBFIX: it works while the database is
+/// loaded, and the server holds the Store's lock, so the engine's command would be refused).
+fn note_text(
+    name: &str,
+    headline: &str,
+    details: &[(String, String)],
+    commands: &[(String, String)],
+) -> String {
+    let mut text = format!("database '{name}': {headline}");
+    for (key, value) in details {
+        text.push_str(&format!("; {key}: {value}"));
+    }
+    for (why, command) in commands {
+        match command.strip_prefix("graphersal store models default ") {
+            Some(args) => {
+                let repo = args.split_whitespace().last().unwrap_or("<repo>");
+                text.push_str(&format!(
+                    "; or make one the default (it may stay loaded): graphersal-server models \
+                     default {name} {repo} --dir <server directory> (or Default model... on the \
+                     Databases tab)"
+                ));
+            }
+            None => text.push_str(&format!("; {why}: {command}")),
+        }
+    }
+    text
 }
 
 fn refused(name: &str, message: &str) -> ServerError {

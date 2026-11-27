@@ -8,7 +8,11 @@
 //! `POST databases/<n>/restore` (`{"backup", "name"?}`), `POST verify`, `POST
 //! databases/<n>/verify|repair|swap` (`{"name"}`, `{"with"}`), `GET databases/<n>/export?...`, `GET|PUT databases/<n>/settings`, `PUT|DELETE aliases/<a>`, `GET models`, `POST models`
 //! (`{"path"}` or `{"repo"}`), `POST import?name=&role=`, `GET imports`, `GET users`, `POST users`
-//! (`{"name", "admin"}`), `POST|DELETE users/<n>/token`, `PUT users/<n>/admin` (`{"admin"}`).
+//! (`{"name", "admin"}`), `POST|DELETE users/<n>/token`, `PUT users/<n>/admin` (`{"admin"}`),
+//! `PUT databases/<n>/read-only` (`{"readOnly"}`), `PUT databases/<n>/default-model`
+//! (`{"model"}`), `GET mcp`, `PUT mcp` (`{"enabled"}`), `PUT mcp/databases/<n>` (`{"exposed"}`
+//! or `{"readOnly"}`), `GET|PUT|DELETE mcp/profile` and `mcp/databases/<n>/profile`, `POST
+//! mcp/preview` (`{"name"?}`).
 
 use serde_json::Value;
 
@@ -85,6 +89,11 @@ fn command(method: &str, path: &str, body: Option<&Value>, dir_arg: &str) -> Opt
     let db = |args: String| Some(format!("{BIN} db {args} --dir {dir_arg}"));
     let models = |args: String| Some(format!("{BIN} models {args} --dir {dir_arg}"));
     let user = |args: String| Some(format!("{BIN} user {args} --dir {dir_arg}"));
+    let mcp = |args: String| Some(format!("{BIN} mcp {args} --dir {dir_arg}"));
+    let on_off = |key: &str| match body.and_then(|b| b[key].as_bool()) {
+        Some(false) => "off",
+        _ => "on",
+    };
     let flag = |key: &str| body.and_then(|b| b[key].as_bool());
     match (method, segments.as_slice()) {
         ("GET", ["databases"]) => db("list".to_string()),
@@ -120,6 +129,14 @@ fn command(method: &str, path: &str, body: Option<&Value>, dir_arg: &str) -> Opt
         ("POST", ["databases", name, "reset-layer"]) => {
             db(format!("reset-layer {} --yes", word(name)))
         }
+        ("PUT", ["databases", name, "read-only"]) => {
+            db(format!("read-only {} {}", word(name), on_off("readOnly")))
+        }
+        ("PUT", ["databases", name, "default-model"]) => match body.map(|b| &b["model"]) {
+            Some(Value::Null) => models(format!("default {} --none", word(name))),
+            Some(Value::String(repo)) => models(format!("default {} {}", word(name), word(repo))),
+            _ => models(format!("default {} MODEL", word(name))),
+        },
         ("GET", ["databases", name, "settings"]) => db(format!("info {}", word(name))),
         ("PUT", ["databases", name, "settings"]) => db(format!("set {} ...", word(name))),
         ("GET", ["databases", name, "export"]) => {
@@ -168,6 +185,35 @@ fn command(method: &str, path: &str, body: Option<&Value>, dir_arg: &str) -> Opt
             };
             user(format!("admin {} {on}", word(name)))
         }
+        ("GET", ["mcp"]) => mcp("status".to_string()),
+        ("PUT", ["mcp"]) if body.is_some_and(|b| b["enabled"].is_boolean()) => {
+            mcp(on_off("enabled").to_string())
+        }
+        ("PUT", ["mcp", "databases", name]) => {
+            match body
+                .and_then(|b| b["readOnly"].as_bool())
+                .map(|_| on_off("readOnly"))
+            {
+                Some(on) => mcp(format!("db {} read-only {on}", word(name))),
+                None => mcp(format!("db {} {}", word(name), on_off("exposed"))),
+            }
+        }
+        ("GET", ["mcp", "profile"]) => mcp("profile show".to_string()),
+        ("PUT", ["mcp", "profile"]) => mcp("profile set FILE".to_string()),
+        ("DELETE", ["mcp", "profile"]) => mcp("profile clear".to_string()),
+        ("GET", ["mcp", "databases", name, "profile"]) => {
+            mcp(format!("profile show {}", word(name)))
+        }
+        ("PUT", ["mcp", "databases", name, "profile"]) => {
+            mcp(format!("profile set FILE {}", word(name)))
+        }
+        ("DELETE", ["mcp", "databases", name, "profile"]) => {
+            mcp(format!("profile clear {}", word(name)))
+        }
+        ("POST", ["mcp", "preview"]) => match field("name") {
+            Some(name) => mcp(format!("profile preview {name}")),
+            None => mcp("profile preview".to_string()),
+        },
         ("GET", ["imports"]) => Some(format!("{BIN} import {dir_arg} --list")),
         ("POST", ["import"]) => {
             let name = param("name")
@@ -279,6 +325,63 @@ mod tests {
             (
                 "load it: POST /api/admin/databases/acme/load",
                 "load it: graphersal-server db load acme --dir srv",
+            ),
+        ];
+        for (http, console) in cases {
+            assert_eq!(console_help(http, "srv"), console, "{http}");
+        }
+    }
+
+    #[test]
+    fn mcp_and_default_model_routes_become_their_console_commands() {
+        let cases = [
+            (
+                "GET /api/admin/mcp lists them",
+                "graphersal-server mcp status --dir srv lists them",
+            ),
+            (
+                "PUT /api/admin/mcp {\"enabled\": true}",
+                "graphersal-server mcp on --dir srv",
+            ),
+            (
+                "PUT /api/admin/mcp/databases/kb {\"exposed\": false}",
+                "graphersal-server mcp db kb off --dir srv",
+            ),
+            (
+                "PUT /api/admin/mcp/databases/kb {\"readOnly\": true}",
+                "graphersal-server mcp db kb read-only on --dir srv",
+            ),
+            (
+                "GET /api/admin/mcp/profile",
+                "graphersal-server mcp profile show --dir srv",
+            ),
+            (
+                "GET /api/admin/mcp/databases/kb/profile",
+                "graphersal-server mcp profile show kb --dir srv",
+            ),
+            (
+                "PUT /api/admin/mcp/databases/kb/profile",
+                "graphersal-server mcp profile set FILE kb --dir srv",
+            ),
+            (
+                "DELETE /api/admin/mcp/profile",
+                "graphersal-server mcp profile clear --dir srv",
+            ),
+            (
+                "POST /api/admin/mcp/preview {\"name\": \"kb\"}",
+                "graphersal-server mcp profile preview kb --dir srv",
+            ),
+            (
+                "PUT /api/admin/databases/kb/default-model {\"model\": \"acme/tiny\"}",
+                "graphersal-server models default kb acme/tiny --dir srv",
+            ),
+            (
+                "PUT /api/admin/databases/kb/default-model {\"model\": null}",
+                "graphersal-server models default kb --none --dir srv",
+            ),
+            (
+                "PUT /api/admin/databases/kb/read-only {\"readOnly\": false}",
+                "graphersal-server db read-only kb off --dir srv",
             ),
         ];
         for (http, console) in cases {

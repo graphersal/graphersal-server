@@ -781,6 +781,25 @@ cited from tracked files). When this file disagrees with the code, the code wins
   must not panic). stdout = results (`serve`: the address line only), stderr =
   diagnostics/log; exit codes 0 ok, 1 failed, 2 usage, 3 `status` stopped, 141 stdout closed.
   `serve` logs to stderr; `start` appends the detached server's output to `logs/server.log`.
+  `main.rs` tests (`every_dispatched_command_is_in_the_help`, `every_flag_the_console_parses_is_in_the_help`)
+  scan its own source: every dispatched command (the leading literals of each slice pattern of
+  `parse_db`/`models_command`/`user_command`/`mcp_command`/`config_command`, the top-level
+  commands of `main`) and every `--flag` literal must appear in `USAGE`.
+- KBFIX (0.3.1): `ops_model_default.rs` (`Admin::set_default_model(name, Option<repo>)` ->
+  `DefaultModelSet`: plain non-base non-read-only only; loaded = the open Store's
+  `Store::set_default_model` (the commit rebuilds the graph's model registry: next queries use
+  it, a loaded model stays), else `Store::set_default_model_dir` under `Loader::while_idle`;
+  audited `DefaultModelSet`; `PUT databases/<n>/default-model {"model"}`, console `models default
+  NAME MODEL|--none` (`DbCommand::ModelsDefault`), UI "Default model…" (`defaultModelAction`,
+  `defaultModelChoices` from the settings view's `store.models`/`store.defaultModel`); tests at
+  the end of `models_tests.rs`). `ops_import_jobs.rs` (`Admin::check_import_jobs`, called by
+  `import_as` before `commit_new`: when `Store::inspect` counts jobs, the build is opened
+  (read-only, or writable with `Admin::rebasing_jobs`) and `jobs_outside_file_root` lists the
+  jobs outside the backup root -> `Imported::jobs_outside` (`JobOutside`), notes, answer
+  `import.jobsOutside`; rebase = backup jobs rewritten to `<root>/<db>/<job>` in one unit
+  (payload kept, path + file effects replaced); import option `--rebase-jobs` /
+  `rebaseJobs`; tests at the end of `ops_import_tests.rs`). `loader::note_text` replaces the
+  engine's `graphersal store models default` hint with the server's command.
 - `crates/graphersal-server/ui/`: the server's web UI, the playground UI profile `server`
   (the graphersal-memory `memory` profile's pattern; the engine's playground mechanism: its
   `playground/CLAUDE.md` "UI profiles"): `profile.json` (the admin's: module tabs Databases, Backups, Import,

@@ -1710,3 +1710,200 @@ fn another_model_of_the_repository_does_not_resolve_the_database() {
     assert_eq!(models.len(), 1);
     assert_eq!(models[0].blob_hash, wanted);
 }
+
+// ---------------------------------------------------------------- KBFIX: the default model
+
+/// The plain database `name` holding the tiny models `acme/tiny` and `acme/other`, none of
+/// them the default.
+fn db_with_two_models(admin: &Admin, name: &str) -> crate::registry::DatabaseEntry {
+    let entry = admin.create(name, &CreateSpec::plain()).unwrap();
+    let store = Store::open(entry.store_dir(), StoreOptions::new()).unwrap();
+    for (seed, repo) in [(1, "acme/tiny"), (2, "acme/other")] {
+        store
+            .import_model(
+                ModelSource::Files(crate::test_models::tiny_model(seed, repo)),
+                ImportModelOptions::new(),
+            )
+            .unwrap();
+    }
+    store.set_default_model(None).unwrap();
+    store.close().unwrap();
+    entry
+}
+
+/// The default model of the database `name`, read from its files.
+fn default_on_disk(admin: &Admin, name: &str) -> Option<String> {
+    let entry = admin.registry().get(name).unwrap();
+    Store::inspect(entry.store_dir()).unwrap().default_model
+}
+
+#[test]
+fn the_default_model_of_an_unloaded_database_is_set_and_cleared_on_its_closed_store() {
+    let temp = TempDir::new("models-default-offline");
+    let dir = server(&temp);
+    let admin = offline(&dir);
+    db_with_two_models(&admin, "kb");
+    assert_eq!(default_on_disk(&admin, "kb"), None);
+
+    let done = admin.set_default_model("kb", Some("acme/tiny")).unwrap();
+    assert!(done.changed);
+    assert!(!done.loaded);
+    assert_eq!(done.previous, None);
+    assert_eq!(done.model.as_deref(), Some("acme/tiny"));
+    assert_eq!(done.models.len(), 2, "{:?}", done.models);
+    assert_eq!(default_on_disk(&admin, "kb").as_deref(), Some("acme/tiny"));
+    // The same again: nothing to commit.
+    let again = admin.set_default_model("KB", Some("acme/tiny")).unwrap();
+    assert!(!again.changed);
+    assert_eq!(again.previous.as_deref(), Some("acme/tiny"));
+
+    // Over HTTP: another model, then none.
+    let (status, answer) = route(
+        &admin,
+        Method::Put,
+        "databases/kb/default-model",
+        Some(json!({"model": "acme/other"})),
+    );
+    assert_eq!(status, 200, "{answer}");
+    assert_eq!(answer["defaultModel"], "acme/other");
+    assert_eq!(answer["previousDefaultModel"], "acme/tiny");
+    assert_eq!(answer["changed"], true);
+    assert_eq!(answer["loaded"], false);
+    assert_eq!(answer["name"], "kb");
+    let (status, answer) = route(
+        &admin,
+        Method::Put,
+        "databases/kb/default-model",
+        Some(json!({"model": null})),
+    );
+    assert_eq!(status, 200, "{answer}");
+    assert_eq!(answer["defaultModel"], Value::Null);
+    assert_eq!(default_on_disk(&admin, "kb"), None);
+
+    // A model it does not hold: 400 naming the ones it holds; nothing changed.
+    let (status, answer) = route(
+        &admin,
+        Method::Put,
+        "databases/kb/default-model",
+        Some(json!({"model": "acme/missing"})),
+    );
+    assert_eq!(status, 400, "{answer}");
+    let error = answer["error"].as_str().unwrap();
+    assert!(error.contains("acme/missing"), "{answer}");
+    assert!(
+        error.contains("acme/tiny") && error.contains("acme/other"),
+        "{answer}"
+    );
+    assert!(
+        answer["help"].as_str().unwrap().contains("settings"),
+        "{answer}"
+    );
+    // A body without "model", or of another type: 400.
+    for body in [
+        json!({}),
+        json!({"model": 3}),
+        json!({"model": "acme/tiny", "x": 1}),
+    ] {
+        let (status, answer) = route(
+            &admin,
+            Method::Put,
+            "databases/kb/default-model",
+            Some(body),
+        );
+        assert_eq!(status, 400, "{answer}");
+    }
+    let (status, _) = route(
+        &admin,
+        Method::Put,
+        "databases/nope/default-model",
+        Some(json!({"model": null})),
+    );
+    assert_eq!(status, 404);
+    // The settings view lists the models and the default.
+    admin.set_default_model("kb", Some("acme/tiny")).unwrap();
+    let (status, view) = route(&admin, Method::Get, "databases/kb/settings", None);
+    assert_eq!(status, 200, "{view}");
+    assert_eq!(view["store"]["defaultModel"], "acme/tiny", "{view}");
+    assert_eq!(
+        view["store"]["models"].as_array().unwrap().len(),
+        2,
+        "{view}"
+    );
+}
+
+#[test]
+fn the_default_model_is_refused_for_a_layer_a_base_and_a_read_only_database() {
+    let temp = TempDir::new("models-default-refused");
+    let dir = server(&temp);
+    let admin = offline(&dir);
+    db_with_two_models(&admin, "kb");
+    admin.set_read_only("kb", true).unwrap();
+    let err = admin
+        .set_default_model("kb", Some("acme/tiny"))
+        .unwrap_err();
+    assert!(matches!(err, ServerError::Refused { .. }), "{err}");
+    assert!(err.to_string().contains("read-only"), "{err}");
+    let (status, answer) = route(
+        &admin,
+        Method::Put,
+        "databases/kb/default-model",
+        Some(json!({"model": "acme/tiny"})),
+    );
+    assert_eq!(status, 409, "{answer}");
+    assert!(
+        answer["help"].as_str().unwrap().contains("/read-only"),
+        "{answer}"
+    );
+    assert_eq!(default_on_disk(&admin, "kb"), None);
+
+    admin
+        .create("frozen", &CreateSpec::plain().with_role(DatabaseRole::Base))
+        .unwrap();
+    let err = admin.set_default_model("frozen", None).unwrap_err();
+    assert!(err.to_string().contains("base"), "{err}");
+    admin.create("lay", &CreateSpec::layer("frozen")).unwrap();
+    let err = admin.set_default_model("lay", None).unwrap_err();
+    assert!(err.to_string().contains("layer"), "{err}");
+}
+
+#[test]
+fn the_default_model_of_a_loaded_database_changes_at_once_on_its_open_store() {
+    let temp = TempDir::new("models-default-loaded");
+    let dir = server(&temp);
+    db_with_two_models(&offline(&dir), "kb");
+    let loader = loader_of(&dir);
+    let online = Admin::online(loader.clone());
+    loader.load("kb").unwrap();
+    assert_eq!(loader.wait("kb", WAIT).unwrap(), DbState::Loaded);
+
+    let done = online.set_default_model("kb", Some("acme/other")).unwrap();
+    assert!(done.changed);
+    assert!(done.loaded);
+    assert_eq!(done.entry.state, DbState::Loaded);
+    // The open Store (the graph's registry) has it now, and the files too.
+    let Some((_context, crate::loader::OpenStoreRef::Plain(store))) = loader.open_store_of("kb")
+    else {
+        panic!("kb is loaded");
+    };
+    let models = store.models().unwrap();
+    let default: Vec<&str> = models
+        .iter()
+        .filter(|m| m.default)
+        .map(|m| m.repo.as_str())
+        .collect();
+    assert_eq!(default, ["acme/other"]);
+    drop(store);
+    assert_eq!(
+        default_on_disk(&online, "kb").as_deref(),
+        Some("acme/other")
+    );
+    // It stays across an unload and a load.
+    loader.unload("kb").unwrap();
+    loader.load("kb").unwrap();
+    assert_eq!(loader.wait("kb", WAIT).unwrap(), DbState::Loaded);
+    assert_eq!(
+        default_on_disk(&online, "kb").as_deref(),
+        Some("acme/other")
+    );
+    loader.shutdown().unwrap();
+}

@@ -96,9 +96,9 @@ pub use loader::{LoadStart, Loader};
 pub use lock::ServerLock;
 pub use models::{Adoption, ModelBlob, ModelsDir, ModelsIndex};
 pub use ops::{
-    Admin, BackupInfo, CreateSpec, Deleted, DiscardedChanges, ExportSpec, Exported, ImportFormat,
-    ImportSource, Imported, LayerResetDone, ModelAddSpec, ModelAdded, ModelDownloadSpec,
-    ModelRemoved, Restored,
+    Admin, BackupInfo, CreateSpec, DefaultModelSet, Deleted, DiscardedChanges, ExportSpec,
+    Exported, ImportFormat, ImportSource, Imported, JobOutside, LayerResetDone, ModelAddSpec,
+    ModelAdded, ModelDownloadSpec, ModelRemoved, Restored,
 };
 pub use registry::{DatabaseEntry, DbState, Registry};
 pub use run_file::RunInfo;

@@ -343,7 +343,8 @@ last user. A base that layers name cannot be deleted, replaced by a restore or m
 - **The backup root** (`[jobs] backup_root`, default `backups/jobs/`) is the only directory
   backup jobs, and the Store panel's fork, attic fork and backup `dir`, write into. Paths are
   relative to it; absolute or escaping paths are refused. Jobs found outside it at load are
-  dropped with a warning. Queries never touch files. The name `jobs` is reserved for databases
+  dropped with a warning; an import lists them first and can move backup jobs under the root
+  (`import ... --rebase-jobs`). Queries never touch files. The name `jobs` is reserved for databases
   and aliases, because admin backups of a database named `jobs` would land in the default
   root.
 - **The import inbox** (`imports/`): files put there by any means (scp, a mounted volume) are
