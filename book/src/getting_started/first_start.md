@@ -87,7 +87,7 @@ graphersal-server status --dir ./srv
   state:        running
   pid:          40483
   address:      http://127.0.0.1:8484/
-  version:      0.3.0
+  version:      0.3.1
   uptime:       11 s (since 2026-11-26T02:16:00Z)
   databases:    0 (0 loaded)
   memory:       process 21.0 MiB resident, loaded databases 0 B

@@ -2,7 +2,7 @@
 # Installs the graphersal-server binary from a GitHub Release (Linux, macOS on Apple silicon).
 #
 #   curl -fsSL https://github.com/graphersal/graphersal-server/releases/latest/download/install.sh | sh
-#   curl -fsSL .../install.sh | sh -s -- --version v0.3.0 --dir /usr/local/bin
+#   curl -fsSL .../install.sh | sh -s -- --version v0.3.1 --dir /usr/local/bin
 #
 # It picks the archive of this platform, checks it against the release's SHA256SUMS, and puts
 # the binary into ~/.local/bin (or --dir). It changes nothing else: no server directory, no

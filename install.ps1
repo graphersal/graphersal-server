@@ -1,7 +1,7 @@
 # Installs the graphersal-server binary from a GitHub Release (Windows).
 #
 #   irm https://github.com/graphersal/graphersal-server/releases/latest/download/install.ps1 | iex
-#   & ([scriptblock]::Create((irm .../install.ps1))) -Version v0.3.0 -Dir C:\Tools
+#   & ([scriptblock]::Create((irm .../install.ps1))) -Version v0.3.1 -Dir C:\Tools
 #
 # It downloads the Windows archive, checks it against the release's SHA256SUMS, and puts
 # graphersal-server.exe into %LOCALAPPDATA%\Programs\graphersal-server (or -Dir). That directory

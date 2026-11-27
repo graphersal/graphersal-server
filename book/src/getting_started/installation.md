@@ -30,7 +30,7 @@ The binary goes to `~/.local/bin`. The installer does not change your `PATH`: it
 that directory is missing from it. A given version or directory:
 
 ```bash
-curl -fsSL https://github.com/graphersal/graphersal-server/releases/latest/download/install.sh | sh -s -- --version v0.3.0 --dir /usr/local/bin
+curl -fsSL https://github.com/graphersal/graphersal-server/releases/latest/download/install.sh | sh -s -- --version v0.3.1 --dir /usr/local/bin
 ```
 
 On an Intel Mac the installer stops and names the Cargo command instead. A shell running under
@@ -48,7 +48,7 @@ the current window's, so `graphersal-server` runs there and in every new window.
 or directory, without touching `PATH`:
 
 ```powershell
-& ([scriptblock]::Create((irm https://github.com/graphersal/graphersal-server/releases/latest/download/install.ps1))) -Version v0.3.0 -Dir C:\Tools -NoPathUpdate
+& ([scriptblock]::Create((irm https://github.com/graphersal/graphersal-server/releases/latest/download/install.ps1))) -Version v0.3.1 -Dir C:\Tools -NoPathUpdate
 ```
 
 ### Options
@@ -117,21 +117,21 @@ archive holds the binary with `LICENSE-APACHE`, `NOTICE`, `README.md` and
    Windows (PowerShell): compare the output with the archive's line in `SHA256SUMS`:
 
    ```powershell
-   (Get-FileHash graphersal-server-v0.3.0-windows-x86_64.zip -Algorithm SHA256).Hash.ToLower()
+   (Get-FileHash graphersal-server-v0.3.1-windows-x86_64.zip -Algorithm SHA256).Hash.ToLower()
    ```
 
 3. Verify the build provenance. The release workflow attests every archive and installer on
    GitHub; check it with the [GitHub CLI](https://cli.github.com/):
 
    ```bash
-   gh attestation verify graphersal-server-v0.3.0-linux-x86_64.tar.gz -R graphersal/graphersal-server
+   gh attestation verify graphersal-server-v0.3.1-linux-x86_64.tar.gz -R graphersal/graphersal-server
    ```
 
 4. Unpack it and put `graphersal-server` (Windows: `graphersal-server.exe`) on your `PATH`:
 
    ```bash
-   tar -xzf graphersal-server-v0.3.0-linux-x86_64.tar.gz
-   sudo install -m 755 graphersal-server-v0.3.0-linux-x86_64/graphersal-server /usr/local/bin/
+   tar -xzf graphersal-server-v0.3.1-linux-x86_64.tar.gz
+   sudo install -m 755 graphersal-server-v0.3.1-linux-x86_64/graphersal-server /usr/local/bin/
    ```
 
 The Linux binaries are static (musl): they run on every distribution, with no system library.

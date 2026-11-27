@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/graphersal-server"]
 
 [workspace.package]
-version = "0.3.0"
+version = "0.3.1"
 authors = ["Aleksandr Dederer <aleks@graphersal.dev>"]
 repository = "https://github.com/graphersal/graphersal-server"
 license = "Apache-2.0"
