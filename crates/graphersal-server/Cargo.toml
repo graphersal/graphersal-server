@@ -4,7 +4,6 @@ version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-homepage.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 description = "EXPERIMENTAL server for many Graphersal graph databases in one server directory, over HTTP, with a web UI and MCP"
