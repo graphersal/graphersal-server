@@ -18,10 +18,9 @@ cited from tracked files). When this file disagrees with the code, the code wins
   context a host of the shared MCP endpoint); graphersal-mcp (the endpoint, directory mode).
 - The four Graphersal crates (graphersal, graphersal-serve, graphersal-session, graphersal-mcp)
   from crates.io, pinned exactly (EXPERIMENTAL crates, exact pin during 0.x), all on the same
-  version; `Cargo.lock` is committed and CI builds `--locked`. TEMPORARY (series S1, local
-  only): path dependencies on a sibling graphersal checkout `../graphersal` (its unreleased
-  0.9.0 work), marked in the root `Cargo.toml`; they go back to `=0.9.0` from crates.io before
-  any push or release (task S2). graphersal also with `model-download` (S1: the server-side
+  version (today `=0.9.0`); `Cargo.lock` is committed and CI builds `--locked`. Never commit
+  path dependencies or a `[patch]` section (`cargo publish` and `cargo deny` refuse them).
+  graphersal also with `model-download` (S1: the server-side
   Hugging Face download; it brings `model2vec`, so the server runs the models it stores). The embedded playground
   is the `ui/` of the published graphersal-serve crate. Moving to a new Graphersal version:
   bump the four pins together, `cargo update -p graphersal ...`, commit the lock. Never edit the
@@ -601,7 +600,12 @@ cited from tracked files). When this file disagrees with the code, the code wins
   file is another inode (unix), `waiting` = `needs_model` markers), rebuilt at every listing
   and model change, never read back. `resolve(store_dir, repos)`: `Store::restore_blobs_from(..,
   BlobSource::store(models/))` when a definition's blob is missing; a repo without a definition
-  -> its blob unpacked into `tmp/` + `Store::import_model_dir`; then adopt. `copied_blobs` feeds
+  -> its blob unpacked into `tmp/` (its manifest as `graphersal-embed-model.json`, so revision
+  and commit survive) + `Store::import_model_dir`; a definition still `Missing` after that and a
+  `models/` blob with the SAME identity (repo + the three model files' hashes; another revision
+  string, card or licence = other blob bytes) -> the same import, which the engine plans as
+  `ImportPlan::Restore` (definition rewritten under its name); another identity never resolves
+  (S2, tests `a_download_*` in `models_tests.rs`); then adopt. `copied_blobs` feeds
   the listing's `linkWarning`. S1 model download (`model_download.rs`, private: `Downloads` on the
   loader = ONE download slot, a leaf mutex; `DownloadStatus` running|done|failed|cancelled,
   progress from the engine's `DownloadEvent`s, `ReportFacts` of `ModelDownloadReport`;
@@ -798,8 +802,8 @@ cited from tracked files). When this file disagrees with the code, the code wins
   `book/src/cheat_sheet.md` (every console command: a new command or option goes there and into
   `reference/console.md`), and the release notes `book/src/release_notes/<version>.md`
   (release.yml uses the page of the tagged version as the release text; 0.2.0 = the access
-  series, on Graphersal 0.8.0; 0.3.0 = the unreleased draft of round 3, extended by every
-  change).
+  series, on Graphersal 0.8.0; 0.3.0 = the first public release, on Graphersal 0.9.0; a new
+  version's page starts as a draft extended by every change).
 - `scripts/smoke.sh`: the end-to-end smoke test (bash + curl + python3 only): builds, inits a
   temp server dir, serves on `127.0.0.1:0` (URL from `server.run`), walks create/load/execute/
   alias/read-only/backup/restore/export/upload import/promote + layer/models/MCP/unload/delete,

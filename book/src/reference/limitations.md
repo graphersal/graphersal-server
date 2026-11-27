@@ -30,7 +30,7 @@ What this version does not do, or does differently than you might expect.
   afterwards use the new ones. A hand edit of a limit in a file applies at the next load. The
   Store's creation parameters are shown read-only; the server creates every
   database with the engine's defaults, and a backend's container version is not reported by the
-  engine (0.8.0).
+  engine (0.9.0).
 - **Memory figures are the engine's estimates** of each graph's data (loaded embedding models
   are not in a database's figure, but in the process's resident memory). The process's
   resident memory is read on Linux, macOS and Windows only (`null` elsewhere).

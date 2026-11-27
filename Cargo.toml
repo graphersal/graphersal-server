@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/graphersal-server"]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 authors = ["Aleksandr Dederer <aleks@graphersal.dev>"]
 repository = "https://github.com/graphersal/graphersal-server"
 homepage = "https://github.com/graphersal/graphersal-server"
@@ -16,18 +16,15 @@ rust-version = "1.88"
 # Graphersal's hosting pieces. graphersal-serve, graphersal-session and graphersal-mcp are
 # EXPERIMENTAL crates: exact pin (`=`) from crates.io during 0.x, all four on the same version
 # (graphersal-serve ships the playground UI it embeds in its `ui/`).
-# LOCAL ONLY, TEMPORARY (series S1): path dependencies on the unreleased engine in a sibling
-# checkout `../graphersal`. Before any release or push they go back to `version = "=0.9.0"` from
-# crates.io (task S2); `cargo publish` refuses path dependencies without a version anyway.
-graphersal = { path = "../graphersal/crates/graphersal" }
-graphersal-serve = { path = "../graphersal/crates/graphersal-serve" }
+graphersal = { version = "=0.9.0" }
+graphersal-serve = { version = "=0.9.0" }
 # The session a served database runs in: `graphersal_serve::launch` takes its `SessionPresets`,
 # and `Context::call` jobs receive its `Session` (already in the tree through graphersal-serve).
-graphersal-session = { path = "../graphersal/crates/graphersal-session" }
+graphersal-session = { version = "=0.9.0" }
 # The MCP endpoint: `/mcp` over every database of the registry (its directory mode,
 # `Mcp::handle_directory`) and `/db/<name>/mcp` per loaded database, one shared `Mcp` (sessions,
 # token, statistics); already in the tree through graphersal-serve's `mcp` feature.
-graphersal-mcp = { path = "../graphersal/crates/graphersal-mcp" }
+graphersal-mcp = { version = "=0.9.0" }
 
 # `server.toml` and the run file: the TOML reader/writer (serde based).
 toml = "1"
