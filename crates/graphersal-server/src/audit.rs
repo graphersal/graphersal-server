@@ -349,6 +349,17 @@ pub enum AuditEvent {
         /// Its base database.
         base: String,
     },
+    /// The default embedding model of a database changed (`models default`): one commit of its
+    /// Store.
+    #[non_exhaustive]
+    DefaultModelSet {
+        /// The database.
+        name: String,
+        /// The default model's repository now (`None`: no default).
+        model: Option<String>,
+        /// The default before.
+        previous: Option<String>,
+    },
     /// A model download from Hugging Face started (S1, `models download`).
     #[non_exhaustive]
     ModelDownloadStarted {
@@ -602,6 +613,16 @@ impl fmt::Display for AuditEvent {
                 revision,
                 reason,
             } => write!(f, "model download of {repo} ({revision}) failed: {reason}"),
+            AuditEvent::DefaultModelSet {
+                name,
+                model,
+                previous,
+            } => write!(
+                f,
+                "database '{name}': default embedding model {} (was {})",
+                model.as_deref().unwrap_or("none"),
+                previous.as_deref().unwrap_or("none")
+            ),
             AuditEvent::LayerReset { name, base } => write!(
                 f,
                 "layer database '{name}' reset to its base '{base}' (its Store keeps the history \

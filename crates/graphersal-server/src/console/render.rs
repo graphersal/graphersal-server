@@ -299,6 +299,7 @@ fn render_with(command: &DbCommand, answer: &Value, dir: &Path, server: Option<&
         DbCommand::ModelsAdd { .. } => render_models_add(answer, &dir_arg),
         DbCommand::ModelsDownload { .. } => render_models_download(&answer["download"], &dir_arg),
         DbCommand::ModelsDownloadCancel => render_download_cancel(answer),
+        DbCommand::ModelsDefault { .. } => render_default_model(answer),
         DbCommand::ModelsRemove { .. } => Note::new(format!(
             "Removed model '{}' from the shared models",
             s("model")
@@ -1388,6 +1389,14 @@ fn render_info(answer: &Value, dir_arg: &str) -> String {
         if let Some(base) = info["layerBase"].as_str() {
             store.row("layer base", base);
         }
+        if let Some(models) = info["models"].as_array().filter(|m| !m.is_empty()) {
+            let names: Vec<&str> = models.iter().filter_map(Value::as_str).collect();
+            store.row("embedding models", names.join(", "));
+            store.row(
+                "default model",
+                info["defaultModel"].as_str().unwrap_or("none"),
+            );
+        }
     }
     // Round 3 B-CRASH: the damage state and this database's unclean-shutdown check; B-VERIFY:
     // the needs-model state and the last verify (always a row: "never verified").
@@ -1926,11 +1935,42 @@ fn render_import(source: &Path, answer: &Value, dir_arg: &str) -> String {
     if !notes.is_empty() {
         note = note.detail("notes", notes.join("\n"));
     }
+    let jobs = import["jobsOutside"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    if !jobs.is_empty() {
+        let rows: Vec<String> = jobs
+            .iter()
+            .map(|job| {
+                let name = job["job"].as_str().unwrap_or_default();
+                match job["rebasedTo"].as_str() {
+                    Some(to) => format!("{name}: outside the backup root, rebased to {to} (runs)"),
+                    None => format!(
+                        "{name}: writes {} outside the backup root (never runs: dropped at the first load)",
+                        job["path"].as_str().unwrap_or_default()
+                    ),
+                }
+            })
+            .collect();
+        note = note.detail("jobs", rows.join("\n"));
+    }
     let mut note = leftover_note(note, answer);
     if !missing.is_empty() {
         note = note.command(
             "add the missing model to the shared models, then load it",
             format!("{BIN} models add <model directory or .gsnap> --dir {dir_arg}"),
+        );
+    }
+    if jobs.iter().any(|job| job["willRun"] != Value::Bool(true)) {
+        note = note.command(
+            "to keep those backup jobs, import again with them rebased under the backup root \
+             (delete this database first, before its first load)",
+            format!(
+                "{BIN} db delete {name} --dir {dir_arg}\n{BIN} import {dir_arg} {} --name {name} \
+                 --rebase-jobs",
+                shell_word(source)
+            ),
         );
     }
     note.text()
@@ -2334,6 +2374,39 @@ fn render_reset_layer(answer: &Value, dir_arg: &str) -> String {
     .text()
 }
 
+/// `models default NAME MODEL|--none`.
+fn render_default_model(answer: &Value) -> String {
+    let name = answer["name"].as_str().unwrap_or_default();
+    let model = answer["defaultModel"].as_str();
+    let headline = match (model, answer["changed"] == Value::Bool(true)) {
+        (Some(model), true) => format!("The default model of '{name}' is now {model}"),
+        (Some(model), false) => format!("{model} is the default model of '{name}' already"),
+        (None, true) => format!("'{name}' has no default model now"),
+        (None, false) => format!("'{name}' has no default model (nothing changed)"),
+    };
+    let previous = answer["previousDefaultModel"].as_str().unwrap_or("none");
+    let models: Vec<&str> = answer["models"]
+        .as_array()
+        .map(|m| m.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    let mut note = Note::new(headline).detail("before", previous);
+    if !models.is_empty() {
+        note = note.detail("models", models.join(", "));
+    }
+    let applies = if answer["loaded"] == Value::Bool(true) {
+        "at once: its next queries use it (a model already loaded stays loaded)"
+    } else {
+        "at its next load"
+    };
+    if answer["changed"] == Value::Bool(true) {
+        note = note.detail("applies", applies);
+    }
+    if model.is_none() {
+        note = note.detail("embed()", "without a model name uses hash-ngram/1");
+    }
+    note.text()
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -2549,6 +2622,7 @@ mod tests {
             description: None,
             role: crate::database::DatabaseRole::Normal,
             mcp: None,
+            rebase_jobs: false,
         };
         assert_eq!(
             render(&command, &answer, &dir()),
@@ -2558,6 +2632,80 @@ mod tests {
              two\n  # add the missing model to the shared models, then load it\n  \
              graphersal-server models add <model directory or .gsnap> --dir srv"
         );
+    }
+
+    #[test]
+    fn an_import_lists_the_jobs_outside_the_backup_root_and_how_to_rebase_them() {
+        let answer = json!({
+            "name": "kb", "state": "unloaded", "kind": "plain", "role": "normal",
+            "readOnly": false, "autoLoad": false, "description": "",
+            "import": {"format": "store", "modelsMissing": [], "modelsResolved": [],
+                       "skipped": 0, "notes": [],
+                       "jobsOutside": [
+                           {"job": "nightly", "path": "/old/kb", "reason": "outside",
+                            "rebasedTo": null, "willRun": false},
+                       ]},
+        });
+        let command = DbCommand::Import {
+            source: PathBuf::from("/data/kb"),
+            name: "kb".to_string(),
+            base: None,
+            format: None,
+            description: None,
+            role: crate::database::DatabaseRole::Normal,
+            mcp: None,
+            rebase_jobs: false,
+        };
+        let text = render(&command, &answer, &dir());
+        assert!(
+            text.contains(
+                "jobs:   nightly: writes /old/kb outside the backup root (never runs: dropped at \
+                 the first load)"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.ends_with(
+                "  graphersal-server db delete kb --dir srv\n  graphersal-server import srv \
+                 /data/kb --name kb --rebase-jobs"
+            ),
+            "{text}"
+        );
+        // Rebased: it runs, no command.
+        let mut rebased = answer.clone();
+        rebased["import"]["jobsOutside"][0]["rebasedTo"] = json!("/srv/backups/jobs/kb/nightly");
+        rebased["import"]["jobsOutside"][0]["willRun"] = json!(true);
+        let text = render(&command, &rebased, &dir());
+        assert!(
+            text.contains(
+                "nightly: outside the backup root, rebased to /srv/backups/jobs/kb/nightly (runs)"
+            ),
+            "{text}"
+        );
+        assert!(!text.contains("--rebase-jobs"), "{text}");
+    }
+
+    #[test]
+    fn the_default_model_answer_says_what_changed_and_when_it_applies() {
+        let command = DbCommand::ModelsDefault {
+            name: "kb".to_string(),
+            model: Some("acme/tiny".to_string()),
+        };
+        let answer = json!({"name": "kb", "defaultModel": "acme/tiny",
+            "previousDefaultModel": null, "changed": true, "loaded": true,
+            "models": ["acme/tiny", "acme/other"]});
+        assert_eq!(
+            render(&command, &answer, &dir()),
+            "The default model of 'kb' is now acme/tiny\n  before:  none\n  models:  acme/tiny, \
+             acme/other\n  applies: at once: its next queries use it (a model already loaded \
+             stays loaded)"
+        );
+        let cleared = json!({"name": "kb", "defaultModel": null,
+            "previousDefaultModel": "acme/tiny", "changed": true, "loaded": false, "models": []});
+        let text = render(&command, &cleared, &dir());
+        assert!(text.starts_with("'kb' has no default model now"), "{text}");
+        assert!(text.contains("at its next load"), "{text}");
+        assert!(text.contains("hash-ngram/1"), "{text}");
     }
 
     #[test]

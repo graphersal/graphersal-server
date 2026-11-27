@@ -238,6 +238,12 @@ import takes it from there. Otherwise the database is created in the state `need
 loads once the model is added ([Embedding Models](models.md)). As a base such a source is
 refused: a base cannot get a model later.
 
+**Scheduled jobs.** A Store or snapshot from elsewhere may carry backup jobs writing outside
+this server's backup root (an absolute path of the old machine). The import lists them under
+`jobs:` with whether they run; such a job never runs here. `--rebase-jobs` moves each such backup
+job under the backup root, so it keeps running ([Jobs from an imported
+store](backups.md#jobs-from-an-imported-store)).
+
 **From another machine.** Two ways:
 
 - Upload in the web UI's Import tab ("A file from this computer"), with a progress bar. The

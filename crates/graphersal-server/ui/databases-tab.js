@@ -29,18 +29,24 @@
 // (./shared.js `ActionMenu`), so the table fits its width without a horizontal scroll; the
 // table sorts by name until another column is chosen; outcomes and failures of row actions are
 // toasts (./shared.js `notify`), a dialog's error shows under its own buttons (`FormError`).
+// KBFIX: "Default model…" (plain, not base rows; `defaultModelAction`) picks which of the models
+// the database's Store holds (read from its settings view) is the default, or none
+// (`PUT api/admin/databases/<name>/default-model`).
 
 import { reactive, ref, computed, nextTick } from 'vue';
 import {
   createBody, nameProblem, existingNameProblem, renameProblem, NAME_HINT, rowActions, confirmText, outcomeText, outcomeTone, loadAndWatch, baseNames, realRows,
   bytesText, transferActions, needsModelHint, poolText, promoteAction, resetLayerAction, isConflict, kindHelp, kindCell, BASE_HELP, PROMOTE_HELP, KIND_HELP,
   isOpenState, damageActions, verifyText, verifyVerdict, verifyHelp, verifyAllText, verifyAllLabel, runVerifyAll, verifyBadge, repairSummary, repairedName, uncleanRows, REPAIR_HELP, RESTORE_HINT,
-  MCP_NEW_HELP,
+  MCP_NEW_HELP, defaultModelAction, defaultModelChoices,
 } from './admin-api.js';
+import { createSettings } from './settings-api.js';
 import {
-  admin, list, reload, patchRow, errorNotice, notify, pageHref, openapiHref, useFreshData, useSort, SortTh, ActionMenu, FormError,
+  admin, list, reload, patchRow, errorNotice, notify, pageHref, openapiHref, useFreshData, useSort, SortTh, ActionMenu, FormError, requestOptions,
 } from './shared.js';
 import { diskTitle, memoryText, memoryTitle, memoryRows, SIZE_COLUMNS } from './databases.js';
+
+const settings = createSettings(requestOptions);
 
 
 /** The sortable columns of the database table. */
@@ -67,7 +73,7 @@ const newDefaults = () => {
   const d = list.newDatabases || {};
   return { readOnly: d.readOnly === true, autoLoad: d.autoLoad === true, mcp: d.mcp === true };
 };
-const freshDialog = () => ({ mode: null, source: '', form: emptyCreate(), alias: '', target: '', newName: '', existing: false, mcp: false, problems: [], error: null, busy: false, repaired: null });
+const freshDialog = () => ({ mode: null, source: '', form: emptyCreate(), alias: '', target: '', newName: '', existing: false, mcp: false, problems: [], error: null, busy: false, repaired: null, models: [], current: '', loadingModels: false });
 
 export default {
   components: { SortTh, ActionMenu, FormError },
@@ -104,6 +110,7 @@ export default {
     const promo = (row) => promoteAction(row, { busy: !!busy[row.name] });
     const resetAct = (row) => resetLayerAction(row, { busy: !!busy[row.name] });
     const dmg = (row) => damageActions(row, { busy: !!busy[row.name] });
+    const defAct = (row) => defaultModelAction(row, { busy: !!busy[row.name] });
     const databaseNames = computed(() => realRows(list.rows).map((r) => r.name));
     const bases = computed(() => baseNames(list.rows));
     const showSize = computed(() => list.rows.some((r) => r.sizeBytes !== null));
@@ -245,6 +252,20 @@ export default {
       ? { alias: alias.alias, target: alias.target, existing: true }
       : { target: databaseNames.value[0] || '' });
     const openRename = (alias) => openDialog('rename', { alias: alias.alias, target: alias.target, newName: alias.alias });
+    /** "Default model…": the dialog lists the models its Store holds (the settings view's `store`). */
+    async function openDefaultModel(row) {
+      await openDialog('defaultModel', { source: row.name, loadingModels: true });
+      try {
+        const choices = defaultModelChoices(await settings.view(row.name));
+        if (dialog.mode !== 'defaultModel' || dialog.source !== row.name) return;
+        Object.assign(dialog, { models: choices.models, current: choices.current, target: choices.current });
+        if (choices.error) dialog.error = { text: `Its Store cannot be read: ${choices.error}`, help: '' };
+      } catch (err) {
+        dialog.error = errorNotice(err);
+      } finally {
+        dialog.loadingModels = false;
+      }
+    }
 
     /** The request of the open dialog, or `{problems}` (shown in the dialog, nothing sent). */
     function dialogRequest() {
@@ -280,6 +301,12 @@ export default {
         const subject = dialog.newName.trim().toLowerCase();
         const source = dialog.source;
         return { subject, action: 'repair', keepOpen: true, send: () => admin.repair(source, subject) };
+      }
+      if (dialog.mode === 'defaultModel') {
+        if (dialog.loadingModels) return { problems: ['Wait until its models are read.'] };
+        const subject = dialog.source;
+        const model = dialog.target || null;
+        return { subject, action: 'defaultModel', send: () => admin.defaultModel(subject, model) };
       }
       if (dialog.mode === 'rename') {
         const problem = renameProblem(dialog.alias, dialog.newName);
@@ -346,6 +373,7 @@ export default {
         { key: 'sep-store', separator: true },
         { key: 'verify', text: 'Verify', enabled: d.verify.enabled, title: d.verify.title, run: () => verifyDb(row) },
         { key: 'repair', text: 'Repair…', enabled: d.repair.enabled, title: d.repair.title, run: () => openRepair(row) },
+        ...(row.kind === 'layer' || row.role === 'base' ? [] : [{ key: 'defaultModel', text: 'Default model…', enabled: defAct(row).enabled, title: defAct(row).title, run: () => openDefaultModel(row) }]),
         { key: 'promote', text: 'Promote to base…', enabled: p.enabled, title: p.title, run: () => promoteDb(row) },
         ...(row.kind === 'layer' ? [{ key: 'resetLayer', text: 'Reset layer…', danger: true, enabled: r.enabled, title: r.title, run: () => resetLayerDb(row) }] : []),
         { key: 'sep-api', separator: true },
@@ -390,6 +418,7 @@ export default {
         clone: `Clone "${dialog.source}"`,
         alias: dialog.existing ? `Alias "${dialog.alias}"` : 'New alias',
         rename: `Rename alias "${dialog.alias}"`,
+        defaultModel: `Default model of "${dialog.source}"`,
         repair: dialog.repaired ? `Repaired "${dialog.source}"` : `Repair "${dialog.source}"`,
       })[dialog.mode] || ''),
     };
@@ -544,6 +573,16 @@ export default {
             <p>Let "{{ dialog.repaired.name }}" take the name "{{ dialog.source }}" (the damaged one moves to the trash/ directory; its grants, aliases and settings stay with the name), or keep both databases.</p>
             <p class="muted">{{ restoreHint }}</p>
           </template>
+          <template v-else-if="dialog.mode === 'defaultModel'">
+            <p>The embedding model that <span class="mono">embed()</span> and text queries use when they name no model. One commit of the database's Store: a loaded database uses it from its next query on (a model already loaded stays loaded), an unloaded one at its next load.</p>
+            <p v-if="dialog.loadingModels" class="muted">Reading its models…</p>
+            <p v-else-if="!dialog.models.length && !dialog.error" class="muted">Its Store holds no embedding model. A model comes with an import or a restore, or is added to its Store by the engine's tools.</p>
+            <label v-else-if="dialog.models.length">Default model
+              <select v-model="dialog.target" name="model" data-default-model>
+                <option value="">(none: embed() without a name uses hash-ngram/1)</option>
+                <option v-for="m in dialog.models" :key="m" :value="m">{{ m }}{{ m === dialog.current ? ' (current)' : '' }}</option>
+              </select></label>
+          </template>
           <template v-else-if="dialog.mode === 'rename'">
             <p>The alias "{{ dialog.alias }}" (database "{{ dialog.target }}") gets a new name. Links to db/{{ dialog.alias }}/ stop working; open MCP sessions that selected it move to the new name.</p>
             <label>New name <input v-model="dialog.newName" name="newName" class="mono" autocomplete="off" spellcheck="false"><small class="srv-field-hint">{{ nameHint }}</small></label>
@@ -553,7 +592,7 @@ export default {
             <button type="button" class="btn" data-keep :disabled="dialog.busy" @click="keepBoth">Keep both</button>
           </div>
           <div v-else class="store-dialog-buttons">
-            <button type="submit" class="btn primary" :disabled="dialog.busy">{{ dialog.busy ? 'Working…' : dialog.mode === 'create' ? 'Create' : dialog.mode === 'clone' ? 'Clone' : dialog.mode === 'rename' ? 'Rename' : dialog.mode === 'repair' ? 'Repair' : 'Save' }}</button>
+            <button type="submit" class="btn primary" :disabled="dialog.busy">{{ dialog.busy ? 'Working…' : dialog.mode === 'create' ? 'Create' : dialog.mode === 'clone' ? 'Clone' : dialog.mode === 'rename' ? 'Rename' : dialog.mode === 'repair' ? 'Repair' : dialog.mode === 'defaultModel' ? 'Set' : 'Save' }}</button>
             <button type="button" class="btn" :disabled="dialog.busy" @click="closeDialog">Cancel</button>
           </div>
           <form-error :error="dialog.error" :problems="dialog.problems"></form-error>

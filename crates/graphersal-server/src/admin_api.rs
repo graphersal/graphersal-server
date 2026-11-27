@@ -12,6 +12,7 @@
 //! | POST | `databases/<name>/unload` | | `200` entry + `"unloaded": bool` |
 //! | POST | `databases/<name>/promote` | | `200` entry (now `role: base`, read-only; one way) |
 //! | POST | `databases/<name>/reset-layer` | `{"confirm": true}` | `200` entry + `"base"`, `"discarded"` (`{"added", "modified", "removed"}`, each `{"vertices", "edges"}`), `"schemaReset"`, `"definitionsReset"`, `"jobsKept"`, `"inPlace"`: a layer's changes discarded in one commit of its own Store ([`crate::ops::Admin::reset_layer`]); `400` without the confirmation, `409` for a plain, base or failed database |
+//! | PUT | `databases/<name>/default-model` | `{"model": "<repo>" \| null}` | `200` entry + `"defaultModel"`, `"previousDefaultModel"`, `"changed"` (`false`: it was the default already), `"loaded"` (a loaded database's next queries use it at once), `"models"` (the repositories its Store holds): the default embedding model of a plain database, one commit of its Store ([`crate::ops::Admin::set_default_model`]); `400` a model it does not hold, `409` a layer, base, read-only database or one being loaded |
 //! | PUT | `databases/<name>/read-only` | `{"readOnly": bool, "revision"?}` | `200` entry |
 //! | PUT | `databases/<name>/auto-load` | `{"autoLoad": bool, "revision"?}` | `200` entry |
 //! | POST | `databases/<name>/backup` | | `201` backup |
@@ -19,8 +20,8 @@
 //! | POST | `databases/<name>/restore` | `{"backup", "name"?, "mcp"?}` | `201` entry + `"restoredFrom": {"database", "backup"}`, `"replaced"`, `"trash"?` |
 //! | GET | `databases/<name>/export?models=true\|false&materialize=true\|false` | | `200` the `.gsnap` file (download) |
 //! | GET | `server-backup?withDatabases=1` | | `200` the server backup ZIP (download, [`crate::server_backup`]); the operator and admin users only (`everyone` `403`, answered by the router), audited |
-//! | POST | `import?name=<n>&base=<b>&format=<f>&description=<d>&role=<normal\|base>&mcp=<true\|false>` | the file itself (any content type but JSON) | `201` entry + `"import"` |
-//! | POST | `import` | JSON `{"path" \| "inbox", "name", "base"?, "format"?, "description"?, "role"?, "mcp"?}` (`path`: a file or directory on the server's machine, absolute; `inbox`: an entry name of the import inbox `imports/`) | `201` entry + `"import"` |
+//! | POST | `import?name=<n>&base=<b>&format=<f>&description=<d>&role=<normal\|base>&mcp=<true\|false>&rebaseJobs=<true\|false>` | the file itself (any content type but JSON) | `201` entry + `"import"` |
+//! | POST | `import` | JSON `{"path" \| "inbox", "name", "base"?, "format"?, "description"?, "role"?, "mcp"?, "rebaseJobs"?}` (`path`: a file or directory on the server's machine, absolute; `inbox`: an entry name of the import inbox `imports/`) | `201` entry + `"import"` |
 //! | GET | `imports` | | `200 {"dir", "imports": [{"name", "kind", "directory", "bytes", "modified"}...]}`: the import inbox |
 //! | GET | `models` | | `200 {"models": [model...], "missing": [{"database", "model"}...]}` (rebuilds `models/models.toml`) |
 //! | POST | `models` | `{"path"?, "repo"?, "license"?}` (`path`: a Model2Vec directory or a `.gsnap`, absolute, on the server's machine; `repo` alone: a model `models/` holds) | `201` (from a path) / `200` `{"added": [model...], "resolved": [database...], "stillMissing": [{"database", "model"}...], "notes": [text...]}` |
@@ -95,7 +96,11 @@
 //!
 //! `"import"` of the answer: `{"format": "snapshot" | "store" | "graphson" | "graphml",
 //! "layerBase"?, "modelsMissing": [repo...], "modelsResolved": [repo...], "skipped": n,
-//! "notes": [text...]}`; a model the source names without carrying it is taken from the shared
+//! "notes": [text...], "jobsOutside": [{"job", "path", "reason", "rebasedTo", "willRun"}...]}`
+//! (`jobsOutside`: the stored jobs writing outside the backup root `server.toml [jobs]
+//! backup_root`; `willRun: false` = dropped at the first load, never run; with `rebaseJobs`
+//! each such backup job is rewritten to `<backup root>/<name>/<job>` first: `rebasedTo`,
+//! `willRun: true`; [`crate::ops::JobOutside`]); a model the source names without carrying it is taken from the shared
 //! `models/` when that holds it (`modelsResolved`), else the database has the state
 //! `needs-model` (`modelsMissing`). A Store (directory or `.gstore`) lacking a model blob gets
 //! it filled from `models/` (hard-linked afterwards; its model in `modelsResolved`, a note
@@ -316,6 +321,26 @@ pub(crate) fn route(
                 .map(|done| Response::json(200, &reset_layer_json(&done)))
                 .map_err(|err| {
                     let help = reset_layer_help(registry, name, &err);
+                    (err, help)
+                })
+        }
+        (Method::Put, ["databases", name, "default-model"]) => {
+            let body: DefaultModelBody = body_of(request)?;
+            let model = match &body.model {
+                Value::Null => None,
+                Value::String(repo) if !repo.trim().is_empty() => Some(repo.trim()),
+                _ => {
+                    return Err(HttpError::bad_request(
+                        "default-model: \"model\" is a model's repository (owner/name) or null \
+                         (no default)",
+                    ));
+                }
+            };
+            admin
+                .set_default_model(name, model)
+                .map(|done| Response::json(200, &default_model_json(&done)))
+                .map_err(|err| {
+                    let help = default_model_help(name, &err);
                     (err, help)
                 })
         }
@@ -540,7 +565,7 @@ pub(crate) fn route(
                 "databases",
                 _,
                 "clone" | "load" | "unload" | "promote" | "read-only" | "auto-load" | "backup"
-                | "backups" | "restore" | "export" | "runs" | "reset-layer",
+                | "backups" | "restore" | "export" | "runs" | "reset-layer" | "default-model",
             ],
         )
         | (_, ["databases", _, "runs", "cancel"])
@@ -613,7 +638,10 @@ fn import_path(admin: &Admin, request: &mut Request<'_>) -> Result<Response, Htt
     let role = parse_role(body.role.as_deref())?;
     let source = ImportSource::new(path).with_format(format);
     Ok(import_answer(
-        &admin.clone().exposing(body.mcp),
+        &admin
+            .clone()
+            .exposing(body.mcp)
+            .rebasing_jobs(body.rebase_jobs),
         &source,
         &body.name,
         body.base.as_deref(),
@@ -627,7 +655,15 @@ fn import_upload(admin: &Admin, request: &mut Request<'_>) -> Result<Response, H
     let mut params = query_params(
         request.url(),
         "import",
-        &["name", "base", "format", "description", "role", "mcp"],
+        &[
+            "name",
+            "base",
+            "format",
+            "description",
+            "role",
+            "mcp",
+            "rebaseJobs",
+        ],
     )?;
     let Some(name) = params.remove("name").filter(|n| !n.is_empty()) else {
         return Err(HttpError::bad_request(
@@ -640,7 +676,11 @@ fn import_upload(admin: &Admin, request: &mut Request<'_>) -> Result<Response, H
     let format = parse_format(params.remove("format").as_deref())?;
     let role = parse_role(params.remove("role").as_deref())?;
     let mcp = parse_mcp(params.remove("mcp").as_deref())?;
-    let admin = &admin.clone().exposing(mcp);
+    let rebase_jobs = parse_flag("rebaseJobs", params.remove("rebaseJobs").as_deref())?;
+    let admin = &admin
+        .clone()
+        .exposing(mcp)
+        .rebasing_jobs(rebase_jobs.unwrap_or(false));
     // The quick refusals before the body is read (the listener drains it).
     let key = fold(&name);
     if let Err(err) = crate::names::validate_new_name(&key) {
@@ -767,12 +807,17 @@ fn parse_format(hint: Option<&str>) -> Result<Option<ImportFormat>, HttpError> {
 /// The `mcp` parameter of an import upload: `true`/`false` (`400` for another value; none:
 /// the server's default, `mcp.toml`'s `expose_new`).
 fn parse_mcp(value: Option<&str>) -> Result<Option<bool>, HttpError> {
+    parse_flag("mcp", value)
+}
+
+/// A `true`/`false` parameter `key` of an import upload (`400` for another value).
+fn parse_flag(key: &str, value: Option<&str>) -> Result<Option<bool>, HttpError> {
     match value.filter(|v| !v.is_empty()) {
         None => Ok(None),
         Some("true" | "1" | "on" | "yes") => Ok(Some(true)),
         Some("false" | "0" | "off" | "no") => Ok(Some(false)),
         Some(other) => Err(HttpError::bad_request(format!(
-            "import: mcp is true or false, not {other:?}"
+            "import: {key} is true or false, not {other:?}"
         ))),
     }
 }
@@ -845,6 +890,13 @@ fn import_answer(
                 "modelsResolved": imported.models_resolved,
                 "skipped": imported.skipped,
                 "notes": imported.notes,
+                "jobsOutside": imported.jobs_outside.iter().map(|job| json!({
+                    "job": job.job,
+                    "path": job.path.to_string_lossy(),
+                    "reason": job.reason,
+                    "rebasedTo": job.rebased_to.as_ref().map(|p| p.to_string_lossy()),
+                    "willRun": job.rebased_to.is_some(),
+                })).collect::<Vec<_>>(),
             });
             if let Some(layer_base) = &imported.layer_base {
                 details["layerBase"] = json!(layer_base);
@@ -920,6 +972,9 @@ struct ImportBody {
     /// Offer the new database to MCP (`None`: the server's default).
     #[serde(default)]
     mcp: Option<bool>,
+    /// Rewrite the backup jobs writing outside the backup root under it (KBFIX).
+    #[serde(default, rename = "rebaseJobs")]
+    rebase_jobs: bool,
 }
 
 /// The JSON body of `request` as `T` (`400` for a body that does not parse or fit).
@@ -1009,6 +1064,13 @@ struct CloneBody {
 struct ResetLayerBody {
     #[serde(default)]
     confirm: bool,
+}
+
+/// `PUT databases/<name>/default-model`: `model` is required (a repository, or `null`).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct DefaultModelBody {
+    model: Value,
 }
 
 #[derive(Deserialize)]
@@ -1224,6 +1286,40 @@ fn unload_help(admin: &Admin, name: &str, err: &ServerError) -> Option<String> {
 /// The answer of a layer reset: the entry + `"base"`, `"discarded"` (`{"added", "modified",
 /// "removed"}`, each `{"vertices", "edges"}`), `"schemaReset"`, `"definitionsReset"`,
 /// `"jobsKept"`, `"inPlace"` (it was loaded: reset on its open Store).
+/// The answer of `PUT databases/<name>/default-model`: the entry + `defaultModel`,
+/// `previousDefaultModel`, `changed`, `loaded`, `models`.
+fn default_model_json(done: &crate::ops::DefaultModelSet) -> Value {
+    let mut entry = entry_json(&done.entry, None);
+    entry["defaultModel"] = json!(done.model);
+    entry["previousDefaultModel"] = json!(done.previous);
+    entry["changed"] = json!(done.changed);
+    entry["loaded"] = json!(done.loaded);
+    entry["models"] = json!(done.models);
+    entry
+}
+
+/// The help of a refused default-model change.
+fn default_model_help(name: &str, err: &ServerError) -> Option<String> {
+    match err {
+        ServerError::InvalidInput { .. } => Some(format!(
+            "GET /api/admin/databases/{}/settings lists the models its Store holds",
+            fold(name)
+        )),
+        ServerError::Refused { message, .. } if message.starts_with("it is read-only") => {
+            Some(format!(
+                "PUT /api/admin/databases/{}/read-only {{\"readOnly\": false}}",
+                fold(name)
+            ))
+        }
+        ServerError::Refused { message, .. } if message.contains("loaded") => Some(format!(
+            "try again once it is loaded or unloaded: GET /api/admin/databases/{} answers its \
+             state",
+            fold(name)
+        )),
+        _ => None,
+    }
+}
+
 fn reset_layer_json(done: &crate::ops::LayerResetDone) -> Value {
     let counts = |(vertices, edges): (u64, u64)| json!({ "vertices": vertices, "edges": edges });
     let mut entry = entry_json(&done.entry, None);

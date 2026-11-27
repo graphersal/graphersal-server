@@ -87,7 +87,37 @@ mounted storage):
 - at load, a stored job writing outside the root (an imported, restored or cloned store, or
   a root moved in `server.toml`) is **dropped** from the database's catalog before the
   database is served, with a warning on stderr naming the job and its path: define it again
-  with a path inside the root.
+  with a path inside the root. So no job ever writes outside the root.
+
+### Jobs from an imported store
+
+A Store or snapshot made elsewhere (by the graphersal CLI's dev server, another server) may
+carry backup jobs with an absolute path of that machine. Such a job never runs here: the first
+load drops it. The import tells you up front: its answer lists every stored job writing outside
+the backup root (`jobs:` in the console's output, a warning in the web UI, `jobsOutside` in the
+admin API), with whether it will run.
+
+```text
+Imported database 'kb'
+  ...
+  jobs:   nightly: writes /home/me/kb-backups outside the backup root (never runs: dropped at the first load)
+  # to keep those backup jobs, import again with them rebased under the backup root (delete this database first, before its first load)
+  graphersal-server db delete kb --dir ./srv
+  graphersal-server import ./srv /data/kb-store --name kb --rebase-jobs
+```
+
+To keep them, import with `--rebase-jobs` (web UI: "Move backup jobs under the backup root";
+API: `"rebaseJobs": true` or `rebaseJobs=true`). Each such **backup** job is rewritten in the
+new database's Store before the database appears: its path becomes
+`<backup root>/<database>/<job>` (the job name with characters other than letters, digits, `.`,
+`_`, `-` as `_`), the directory a job defined now with the relative path `<database>/<job>`
+writes. Its schedule, enabled flag, limits and description stay; it runs there from the first
+load on. A job of another kind that writes outside the root is not rewritten (it is dropped at
+load). A base runs no jobs, so its import checks none.
+
+Reading the jobs costs one more load of the imported graph, and only when its catalog holds
+jobs. A Store that cannot be opened at import (`needs-model`) is not checked: a note says so,
+and its first load drops what writes outside the root.
 
 Queries (the playground's `execute`, the MCP tools) never touch files: they cannot define a
 backup job at all. The admin backups above (`backups/<name>/`) are the server's own and are not

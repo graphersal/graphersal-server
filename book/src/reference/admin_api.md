@@ -145,14 +145,15 @@ A `failed` database whose `database.toml` cannot be read has only `name`, `state
 | POST | `/api/admin/databases/<name>/reset-layer` | `{"confirm": true}` | `200` entry + `"base"`, `"discarded"`, `"schemaReset"`, `"definitionsReset"`, `"jobsKept"`, `"inPlace"` (a layer's changes discarded: [Reset a layer](#reset-a-layer)) |
 | PUT | `/api/admin/databases/<name>/read-only` | `{"readOnly": bool, "revision"?}` | `200` entry (with its new `revision`) |
 | PUT | `/api/admin/databases/<name>/auto-load` | `{"autoLoad": bool, "revision"?}` | `200` entry (with its new `revision`) |
+| PUT | `/api/admin/databases/<name>/default-model` | `{"model": "<repo>" \| null}` | `200` entry + `"defaultModel"`, `"previousDefaultModel"`, `"changed"`, `"loaded"`, `"models"` ([The default model](#the-default-model)) |
 | GET | `/api/admin/databases/<name>/settings` | | `200` the settings: everything about the database (see Database settings; `<name>` may be an alias; `ETag`: its `revision`) |
 | PUT | `/api/admin/databases/<name>/settings` | `{"description"?, "readOnly"?, "autoLoad"?, "limits"?: {key: n \| null}, "revision"?}` | `200` the settings + `"changed": [field...]` |
 | POST | `/api/admin/databases/<name>/backup` | | `201` backup |
 | GET | `/api/admin/databases/<name>/backups` | | `200 {"database", "backups": [backup...]}` (oldest first; also for the name of a deleted database) |
 | POST | `/api/admin/databases/<name>/restore` | `{"backup", "name"?, "mcp"?}` | `201` entry + `"restoredFrom": {"database", "backup"}`, `"replaced": bool`, `"trash"` (when replaced), `"mcpExposed"` |
 | GET | `/api/admin/databases/<name>/export?models=true\|false&materialize=true\|false` | | `200` the `.gsnap` file as a download |
-| POST | `/api/admin/import?name=<n>&base=<b>&format=<f>&description=<d>&role=<normal\|base>&mcp=<true\|false>` | the file itself (`Content-Type: application/octet-stream`, or anything but JSON) | `201` entry + `"import"`, `"mcpExposed"` |
-| POST | `/api/admin/import` | JSON `{"path" \| "inbox", "name", "base"?, "format"?, "description"?, "role"?, "mcp"?}` | `201` entry + `"import"`, `"mcpExposed"` |
+| POST | `/api/admin/import?name=<n>&base=<b>&format=<f>&description=<d>&role=<normal\|base>&mcp=<true\|false>&rebaseJobs=<true\|false>` | the file itself (`Content-Type: application/octet-stream`, or anything but JSON) | `201` entry + `"import"`, `"mcpExposed"` |
+| POST | `/api/admin/import` | JSON `{"path" \| "inbox", "name", "base"?, "format"?, "description"?, "role"?, "mcp"?, "rebaseJobs"?}` | `201` entry + `"import"`, `"mcpExposed"` |
 | GET | `/api/admin/imports` | | `200 {"dir", "imports": [{"name", "kind", "directory", "bytes", "modified"}...]}`: the import inbox |
 | GET | `/api/admin/models` | | `200 {"models": [model...], "missing": [{"database", "model"}...]}` |
 | POST | `/api/admin/models` | `{"path"?, "repo"?, "license"?}` | `201` (from a path) or `200` (a repository) `{"added": [model...], "resolved": [database...], "stillMissing": [{"database", "model"}...], "notes": [string...]}` |
@@ -352,6 +353,30 @@ create it again; nothing changed). Audited as `LayerReset`.
 applied at once: writes through its API and MCP endpoint are refused with a read-only error;
 a running request finishes. A base refuses `false` (`409`). `auto-load` is persisted only.
 
+### The default model
+
+`PUT /api/admin/databases/<name>/default-model` with `{"model": "<repo>"}` makes that embedding
+model the database's default (the one `embed(text)` and text queries use without a model name);
+`{"model": null}` clears it (then `embed()` without a name uses `hash-ngram/1`). `model` is
+required. The change is ONE commit of the database's own Store (it follows the Store's history);
+nothing is committed when it is the default already (`"changed": false`).
+
+- A loaded database is changed through its open Store: its next queries use the new default
+  (`"loaded": true`); a model already loaded stays loaded, nothing is unloaded or loaded.
+- An unloaded database (also `needs-model`, or offline through the console) is changed on its
+  closed Store, without loading its graph (a commit appended to its journal); it uses the new
+  default from its next load.
+
+| Status | When |
+|---|---|
+| `200` | the entry + `defaultModel` (now), `previousDefaultModel`, `changed`, `loaded`, `models` (the repositories its Store holds) |
+| `400` | `model` missing or neither a string nor `null`; a model its Store does not hold (the error names the ones it holds; help: the settings list them) |
+| `404` | no such database |
+| `409` | a layer (its base's models serve it), a base (frozen), a read-only database (help: `PUT .../read-only {"readOnly": false}` first), one being loaded or unloaded |
+
+Audited: `database '<n>': default embedding model <repo> (was <repo>)`. The console: `models
+default NAME MODEL` / `models default NAME --none`.
+
 ### Database settings
 
 `GET /api/admin/databases/<name>/settings` answers everything about one database (the web UI's
@@ -370,7 +395,7 @@ Settings tab, `graphersal-server db info NAME`); `<name>` may be an alias (then
 | `grants` | the grants that reach it: `{"subject", "database", "level", "via": "database" \| "alias" \| "all"}` (on its name, on an alias naming it: only through that alias, on `*`) |
 | `admins` | the users with the admin role: they reach every database |
 | `backups` | `count`, `bytes`, `latest` (the newest backup row, or `null`) |
-| `store`, `storeError` | the Store's creation parameters (fixed for its life) and position, read with the engine's `Store::inspect` (works while it is loaded): `storeId`, `graphId`, `damagePolicy` (`maintenance` \| `continue`), `chunkBytes`, `createdAt` (RFC 3339 UTC), `formatVersion`, `backend` (`directory`), `commitSeq`, `lastCommitAt`, `layerBase` (a layer Store's base identity), `snapshots`, `walBytes`, `clean`; read-only. `storeError` instead when the Store cannot be read |
+| `store`, `storeError` | the Store's creation parameters (fixed for its life) and position, read with the engine's `Store::inspect` (works while it is loaded): `storeId`, `graphId`, `damagePolicy` (`maintenance` \| `continue`), `chunkBytes`, `createdAt` (RFC 3339 UTC), `formatVersion`, `backend` (`directory`), `commitSeq`, `lastCommitAt`, `layerBase` (a layer Store's base identity), `snapshots`, `walBytes`, `clean`, `models` (the repositories of the embedding models its catalog holds; a layer: none), `defaultModel` (the default one's repository, or `null`); read-only. `storeError` instead when the Store cannot be read |
 | `serverDefaults` | round 4: what a NEW database starts with, shown beside the database's own values: `autoLoad`, `readOnly`, `chunkBytes`, `damagePolicy` (`server.toml [defaults]`), `mcpExposeNew` (`mcp.toml`); or `{"error"}` |
 | `recovery` | round 3: `maintenance` (bool), `damage` (the damage report of a database in maintenance, else `null`), `needsModel` (the missing model's repository of a `needs-model` database, else `null`), `lastVerify` (`null` = never verified, or the last verify: `version`, `atMs`, `verdict`, `how`, `problemCount`, `problems` (the first 100, as in a verify result), `modelsMissing`, `error` (verdict `failed`), `headline` (in words)), `help` (in maintenance: repair or restore), `uncleanShutdown` (`null`, or `{"detectedAtMs", "previousPid", "check"}` when the last unclean shutdown's check covered this database: `check` is its entry of `uncleanShutdown.databases`, see Server) |
 
@@ -527,7 +552,7 @@ A new database from another one, in three forms:
   `Content-Length`. Query parameters (URL-encoded): `name` (required), `base` (a layer's base
   database), `format` (`snapshot`, `store`, `graphson`, `graphml`; default: detected),
   `description`, `role` (`normal`, the default, or `base`; anything else `400` before the body
-  is read); any other parameter `400`. The body is streamed into `tmp/upload-*.bin`, never
+  is read), `mcp` and `rebaseJobs` (`true`/`false`, see below); any other parameter `400`. The body is streamed into `tmp/upload-*.bin`, never
   held in memory, imported, then removed. Its size limit is `server.toml`'s
   `[limits] upload_bytes` (default 4 GiB), announced as `uploadBytes` by the root
   `GET /api/info`: check the file's size against it before sending. A body over the limit is
@@ -541,7 +566,7 @@ A new database from another one, in three forms:
   itself runs within the request (the answer comes when the database is written).
 - **Path** (the console while a server runs): `POST /api/admin/import` with
   `Content-Type: application/json` and `{"path": "/absolute/path", "name", "base"?, "format"?,
-  "description"?, "role"?}`: the server reads the file or directory on its own machine. A relative path
+  "description"?, "role"?, "mcp"?, "rebaseJobs"?}`: the server reads the file or directory on its own machine. A relative path
   is `400`, a missing one `404`.
 - **Inbox** (the web UI's Import tab, the console's `import DIR --inbox FILE`): the same JSON
   form with `{"inbox": "<entry name>"}` instead of `"path"` (exactly one of the two, else
@@ -593,7 +618,20 @@ The answer is the new entry (state `unloaded`, or `needs-model`) with `"import"`
 | `modelsMissing` | [string] | always | the models (repositories) named but not carried, and `models/` lacks them (the database is `needs-model`) |
 | `modelsResolved` | [string] | always | the models taken from `models/` at the import: named but not carried (a snapshot), or whose blob a Store lacked (filled into the copy) |
 | `skipped` | number | always | values, entries or elements the import skipped (GraphSON) |
-| `notes` | [string] | always | what was skipped or converted, missing models |
+| `notes` | [string] | always | what was skipped or converted, missing models, the jobs below in words |
+| `jobsOutside` | [object] | always | the stored jobs writing outside the backup root (`server.toml [jobs] backup_root`): `job`, `path` (as stored), `reason`, `rebasedTo` (the path under the root it was rewritten to, or `null`), `willRun` (`false`: dropped at the database's first load, never run) |
+
+**Stored jobs.** A Store or snapshot made elsewhere may carry scheduled jobs writing outside this
+server's backup root (an absolute path of another machine, typically). The server never runs
+them: every load drops them before the database serves. The import lists them in `jobsOutside`.
+With `rebaseJobs` (`true`) each such BACKUP job is rewritten in the new Store before the database
+appears: its path (and its file effect) becomes `<backup root>/<name>/<job>` (the job name with
+characters other than `A-Z a-z 0-9 . _ -` as `_`), its other fields stay, and it runs there
+(`willRun: true`). A job of another action writing outside the root is not rewritten. The jobs
+are read only when the Store's catalog holds any (one more load of the graph); a Store that
+cannot be opened at the import (`needs-model`) is not checked (a note says so; its first load
+drops what writes outside). A base checks none (a base runs no jobs); GraphSON and GraphML carry
+none. See [Jobs from an imported store](../guide/backups.md#jobs-from-an-imported-store).
 
 The database is built in `tmp/` and renamed into `databases/` in one step: a failed import
 leaves nothing behind.
@@ -1044,13 +1082,15 @@ graphersal-server db alias set ALIAS DATABASE | alias remove ALIAS | alias renam
 graphersal-server db backup NAME | backups NAME | restore NAME BACKUP [--name NEW] --dir DIR [--json]
 graphersal-server db verify NAME | verify --all | repair NAME [--name NEW] | swap NAME WITH --yes --dir DIR [--json]
 graphersal-server db export NAME --out FILE [--no-models] [--materialize] --dir DIR [--json]
-graphersal-server import DIR SOURCE --name NAME [--base BASE] [--format F] [--description TEXT] [--role normal|base] [--json]
-graphersal-server import DIR --inbox FILE --name NAME [--base BASE] [--format F] [--description TEXT] [--role normal|base] [--json]
+graphersal-server import DIR SOURCE --name NAME [--base BASE] [--format F] [--description TEXT] [--role normal|base] [--rebase-jobs] [--json]
+graphersal-server import DIR --inbox FILE --name NAME [--base BASE] [--format F] [--description TEXT] [--role normal|base] [--rebase-jobs] [--json]
 graphersal-server import DIR --list [--json]
 graphersal-server models list | add SOURCE [--repo R] [--license L] | remove REPO --dir DIR [--json]
+graphersal-server models default NAME MODEL | default NAME --none --dir DIR [--json]
 graphersal-server user list | add NAME [--admin] | token NAME [--revoke] | remove NAME --dir DIR [--json]
 graphersal-server user admin NAME on|off | grant SUBJECT DATABASE read|write | revoke SUBJECT DATABASE --dir DIR [--json]
 graphersal-server mcp status | on | off | db NAME on|off | db NAME read-only on|off --dir DIR [--json]
+graphersal-server mcp profile show [NAME] | profile set FILE [NAME] | profile clear [NAME] | profile preview [NAME] [--read] --dir DIR [--json]
 graphersal-server backup --dir DIR [--out FILE] [--with-databases] [--json]
 graphersal-server restore FILE --dir NEWDIR [--force-version] [--json]
 ```
@@ -1095,7 +1135,11 @@ writes it, through a server the console streams the download. Its `--json` answe
 `import` takes the server directory first (as the design's command line does). Offline the
 admin core imports `SOURCE` itself; through a running server the console sends the path form
 with `SOURCE` made absolute (the server reads it; no upload). Its answer is the import answer
-above; the text names the format, the kind and the state, and lists the notes.
+above; the text names the format, the kind and the state, lists the notes and, under `jobs:`,
+each stored job writing outside the backup root with whether it runs; `--rebase-jobs` sends
+`"rebaseJobs": true` (when a job will not run, the text prints the `db delete` and `import
+... --rebase-jobs` commands that keep it). `models default NAME MODEL|--none` is `PUT
+databases/NAME/default-model` (`{"model": MODEL|null}`).
 `import DIR --inbox FILE` sends the inbox form (`{"inbox": FILE}`), `import DIR --list` is
 `GET /api/admin/imports` (a table of name, size, kind, modified).
 

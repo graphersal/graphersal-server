@@ -26,7 +26,8 @@
 //! `null`), `store` (the Store's creation parameters and position from the engine's
 //! `Store::inspect`: `storeId`, `graphId`, `damagePolicy`, `chunkBytes`, `createdAt`,
 //! `formatVersion`, `backend`, `commitSeq`, `lastCommitAt`, `layerBase`, `snapshots`,
-//! `walBytes`, `clean`; read-only) or `storeError`, and `recovery` (round 3 B-CRASH:
+//! `walBytes`, `clean`, `models` (the repositories of the embedding models its catalog holds),
+//! `defaultModel` (the default one's repository or `null`); read-only) or `storeError`, and `recovery` (round 3 B-CRASH:
 //! `maintenance` (bool), `damage` (the damage report of a database in maintenance, else
 //! `null`), `needsModel` (B-VERIFY: the missing model's repository of a `needs-model`
 //! database, else `null`), `lastVerify` (B-VERIFY: `null` = never verified, or the last verify
@@ -232,6 +233,8 @@ pub(crate) fn view(admin: &Admin, name: &str) -> Option<Value> {
                 "snapshots": facts.snapshots,
                 "walBytes": facts.wal_bytes,
                 "clean": facts.clean,
+                "models": facts.models,
+                "defaultModel": facts.default_model,
             });
         }
         Err(reason) => out["storeError"] = json!(reason),
