@@ -166,6 +166,119 @@ A tool's answer is the JSON-RPC `result` with `content[0].text` (the tool's answ
 `list_graphs` and `use_graph` answer JSON text) and `isError` (`true` for a tool error, such as
 a database that is not loaded).
 
+## Profiles
+
+A **profile** decides what an agent sees on an MCP endpoint: which built-in tools it is offered
+and their descriptions, the instructions it gets at `initialize`, saved queries as tools of
+their own, the resources, the server name and title, and the answer limit. It is the format of
+the graphersal CLI's `--mcp-config FILE` (graphersal-mcp's configuration), with one difference:
+the server keeps the instructions text inside the profile (`"instructions": {"mode": "replace",
+"text": "..."}`), never an instructions `file`.
+
+Every database and every alias can have its own profile, and the server can have a default
+profile. Which one applies (whole profiles, never merged key by key):
+
+| Endpoint | Profile |
+|---|---|
+| `/db/<name>/mcp` | the name's own profile; else, for an alias, its database's; else the server default; else the built-in one |
+| `/mcp` | the server default (else the built-in one) for everything: the instructions (after the text on `list_graphs`/`use_graph`), `tools/list`, `resources/list` and the tools a call may use, on every database |
+
+The **built-in profile** (no profile set) offers every tool with its built-in description and
+the built-in instructions, as before.
+
+**When a change applies:** at the next request to the endpoint, also inside an MCP session
+opened before (every request is served under the profile of that moment). An agent that keeps
+the tool list of its session start sees new tools after it reconnects: over HTTP the server
+cannot push `notifications/tools/list_changed`.
+
+**Access stays the caller's.** The profile says what is offered, the caller's effective level
+what may run. An agent that may only read (a `read` grant, a read-only database or a base, MCP
+read-only) gets only the reading tools a profile names; the writing ones are simply not offered,
+never an error at request time. Saving a profile that names writing tools answers a warning
+saying who will not get them.
+
+**Saved queries as tools** (`saved_query_tools`: folders with their subfolders, names, exclude,
+`paging_params`, `write_note`) work on `/db/<name>/mcp`: each selected saved query is a tool with
+its own name, description and parameters. On `/mcp` saved queries are never tools of their own
+(agents run them with `run_saved_query` and `graph`), whatever the profile says.
+
+**Where profiles live:** in `mcp.toml` ([Configuration Reference](../reference/configuration.md#mcptoml)),
+beside the other MCP settings of the name: a renamed alias keeps its profile, a deleted database
+or removed alias loses it (a new database of that name starts without one), a server backup
+carries every profile to a new machine. A profile graphersal-mcp refuses is never saved: the
+error names the key, with a did-you-mean (`unknown key "tools.inclde" (did you mean
+"tools.include"?)`).
+
+### Editing a profile in the web UI
+
+In the **MCP** tab, "Edit…" beside "Server default profile" or on a database's row opens the
+profile editor:
+
+- the built-in tools as checkboxes (badges `writes`: never offered to a reader; `opt-in`: not
+  offered unless checked), each description in a text field that starts from the built-in text;
+  a changed description is saved as an override, "Reset to built-in" brings the built-in text
+  back;
+- the instructions: built-in, append (your notes after the built-in text) or replace (a text
+  field that starts from the built-in instructions);
+- saved queries as tools: every saved query, or folders (picked from the loaded database's
+  folders) and names, with exclusions, paging arguments and the note of writing queries;
+- the resources, the server name and title, the answer limit;
+- the JSON that will be saved (editable, "Apply to the form"), Import (a graphersal
+  `--mcp-config` file; choose its instructions file together with it) and Export;
+- Preview as reader / as writer (`/mcp` for the server default): the instructions and tools an
+  agent would get with the profile in the form, from the endpoint itself, before saving.
+
+Save sends the profile with the revision it was read at: a change someone made meanwhile is
+refused and the form is kept. The Profile column of the databases table shows where each
+name's profile comes from (`own`, `database`, `default`, `built-in`).
+
+### The console and the admin API
+
+```bash
+graphersal-server mcp profile show acme --dir DIR             # where it comes from, the JSON
+graphersal-server mcp profile set mcp-config.json acme --dir DIR   # a --mcp-config file
+graphersal-server mcp profile preview acme --read --dir DIR   # what a reader's agent sees
+graphersal-server mcp profile clear acme --dir DIR            # back to the next in line
+graphersal-server mcp profile set default.json --dir DIR      # the server default (no NAME)
+```
+
+`set` reads a graphersal `--mcp-config` file and puts the text of the instructions `file` it
+names (relative to the configuration file) into the profile. The admin API routes are
+`GET|PUT|DELETE /api/admin/mcp/profile` (the server default), `GET|PUT|DELETE
+/api/admin/mcp/databases/<name>/profile`, `GET /api/admin/mcp/builtin` (the built-in texts) and
+`POST /api/admin/mcp/preview` ([Admin API](../reference/admin_api.md#mcp-profiles)). Every change
+is audited (`MCP profile of '<name>' set|cleared`, `server default MCP profile set|cleared`).
+
+### Serve an existing graphersal --mcp-config setup from the server
+
+A graph served by `graphersal --server --mcp --mcp-config mcp-config.json` (with an
+instructions file beside the configuration) moves onto the server like this:
+
+1. Import the graph as a database (a Store directory or `.gstore`; [Databases](databases.md)),
+   offered to MCP:
+
+   ```bash
+   graphersal-server import ./srv /path/to/kb.gstore --name kb --mcp
+   ```
+
+2. Give it the configuration as its profile (the instructions file is read now and kept in the
+   profile):
+
+   ```bash
+   graphersal-server mcp profile set /path/to/mcp-config.json kb --dir ./srv
+   ```
+
+3. Load it (`graphersal-server db load kb --dir ./srv`, or `db auto-load kb on`), give the agent
+   a user with a grant on `kb` ([Users, Tokens and Grants](access.md)), and point the agent at
+   `http://127.0.0.1:8484/db/kb/mcp` with that user's token.
+
+`/db/kb/mcp` then answers `initialize`, `tools/list` and `resources/list` as the CLI did with
+that configuration: the same instructions, the same tools (saved queries of the configured
+folders included) and the same descriptions. `mcp profile preview kb` shows it without an agent.
+The CLI's shorthand flags have no counterpart: write `--mcp-instructions` as `instructions` with
+mode `append`, `--mcp-query-tools` as `"saved_query_tools": {}`, `--mcp-max-chars` as
+`answer_limit_chars`; a read-only setup is a `read` grant or `mcp db kb read-only on`.
+
 ## The flow on `/mcp`
 
 1. `initialize` starts an MCP session (`Mcp-Session-Id` in the answer); its instructions explain
@@ -196,8 +309,9 @@ a database that is not loaded).
 5. Without a selection and without `graph`, a tool call fails with an error naming
    `list_graphs` and `use_graph`.
 
-Saved queries are not tools of their own (on neither kind of endpoint in this version); run them
-with `run_saved_query` (and `graph` on `/mcp` when needed).
+Saved queries are not tools of their own on `/mcp`; run them with `run_saved_query` (and
+`graph` when needed). On `/db/<name>/mcp` a profile can make them tools of their own
+([Profiles](#profiles)).
 
 ### Sessions follow their alias
 

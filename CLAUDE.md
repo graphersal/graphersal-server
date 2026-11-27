@@ -658,8 +658,47 @@ cited from tracked files). When this file disagrees with the code, the code wins
   `mcp_profile()`; else `McpError::Unavailable` with the state's text, `...; ask an operator to
   load it`). `route` adapts the request (as graphersal-serve's `mcp.rs`) to
   `Mcp::handle_directory` (POST/DELETE; GET 405). `/db/<name>/mcp` is graphersal-serve's own
-  route behind the mount, on the same `Mcp`. The endpoint never loads/unloads. Contract:
+  route behind the mount, on the same `Mcp` (MCPPROF: answered by the router itself under the
+  name's profile, see `mcp_profiles`). The endpoint never loads/unloads. Contract:
   `book/src/guide/mcp.md`. E2E in `tests/server_tests.rs` (`mcp_*`).
+- `mcp_profiles` (MCPPROF, private; module docs = the contract): MCP profiles = the graphersal
+  CLI's `--mcp-config` JSON (graphersal-mcp `McpConfig`), instructions INLINE (`check`: nulls
+  dropped, <= `MAX_PROFILE_BYTES`, `McpConfig::parse` with a read callback that refuses a
+  `file`; `inline_from_disk` for the console's `mcp profile set FILE`, via the public
+  `console::read_mcp_profile`), `warnings` (writing tools a reader never gets,
+  `saved_query_tools` on `/mcp`), `builtin()` (`GET /api/admin/mcp/builtin`: graphersal-mcp's
+  `instructions()` + every tool's write/read description from a throwaway endpoint's
+  `directory_tool_listings`, the opt-in `usage_statistics` asked by name), `preview_database`
+  / `preview_directory` (a throwaway `Mcp` answers `initialize`/`tools/list`/`resources/list`
+  over the loaded context, else `empty_host()` = a OnceLock context over `Sample("empty")`),
+  `saved_queries(context)` (`Session::list_queries`), `rewrite_directory_answer` (`/mcp`: the
+  `result` of `initialize`/`tools/list`/`resources/list` replaced by a throwaway directory
+  endpoint's for the server default profile; the real endpoint is built with the built-in
+  profile and keeps the sessions), `ProfileSource` (own/database/default/builtin). Storage:
+  `mcp.toml` `[default_profile]` and `NameSettings::profile` (`[databases.<n>.profile]`, so
+  rename/forget/claim_new/server backup carry or drop them; `NameSettings` is no longer `Copy`);
+  `McpSettings::profiles()` parses them (a bad one = `Config` at open, `InvalidInput` on
+  change), cached in `McpControl::profiles` (replaced under the settings' write lock);
+  `McpControl::profile_for(requested, real)` = own -> alias's database -> default -> built-in
+  (whole profiles). Applied: `/db/<name>/mcp` is answered by the ROUTER (`mcp::route_database`
+  = `Mcp::handle_with_profile` on the database's context, `mcp::database_profile` per request:
+  the context's profile (read-only for a base) `.with_config`, read-only for a read grant or MCP
+  read-only), no longer forwarded to graphersal-serve (whose `ContextBuilder::mcp_profile` is
+  fixed at load); `/mcp`: `Directory::host` gives the default config, `mcp::route` rewrites the
+  answers. Admin: `Admin::mcp_profile_set(name|None, Some|None)` in `ops_mcp.rs` (audited
+  `McpProfileSet`), `Admin::loaded_context`; routes in `admin_api_mcp.rs` (`mcp/builtin`,
+  `mcp/profile`, `mcp/databases/<n>/profile`, `mcp/preview`; the MCP state's `defaultProfile`
+  and rows' `profile`); console `mcp profile show|set FILE|clear|preview [NAME] [--read]`
+  (`DbCommand::McpProfile*`, `render_profile*`, `render_preview`); UI `mcp-profile-editor.js`
+  over `mcp-profile-api.js` (form <-> profile writes only what differs from the built-in texts;
+  `importConfigFiles` inlines the instructions file chosen with the config). Tests:
+  `mcp_profiles::tests`, `mcp_control::tests::profiles_round_trip_*`, `router_access_tests.rs`
+  `mcp_profiles_apply_*`, `saved_query_tools_of_a_profile_*`,
+  `a_cli_mcp_config_imports_and_answers_as_graphersal_mcp_does` (the KB-like config gives the
+  same `initialize`/`tools/list`/`resources/list` as graphersal-mcp with it), `server_tests.rs`
+  `mcp_profiles_by_console_offline_through_a_server_and_in_a_server_backup`,
+  `ui/tests/mcp-profile.test.mjs`. Docs: `book/src/guide/mcp.md` "Profiles". By hand:
+  `scripts/mcp-profile-demo.sh DIR [PORT]` (a demo directory, started in the background).
 - `mcp_control` (round 3 B6, private): the runtime MCP switches in `mcp.toml`
   (`McpSettings {enabled, expose_new, databases: {name: NameSettings {exposed, read_only}}}`, names folded,
   defaults not written, canonical text + `revision`; round 4 B-MCPDEF: `ServerDir::init` (new

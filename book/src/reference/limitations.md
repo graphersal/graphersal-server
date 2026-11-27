@@ -34,6 +34,14 @@ What this version does not do, or does differently than you might expect.
 - **Memory figures are the engine's estimates** of each graph's data (loaded embedding models
   are not in a database's figure, but in the process's resident memory). The process's
   resident memory is read on Linux, macOS and Windows only (`null` elsewhere).
+- **MCP profiles reach a connected agent at its next request**, but the server cannot push
+  `notifications/tools/list_changed` over HTTP: an agent that keeps the tool list of its session
+  start sees new tools after it reconnects. On `/mcp` saved queries are never tools of their own
+  (graphersal-mcp's directory mode), and the per-name profiles apply only on `/db/<name>/mcp`
+  (`/mcp` serves the server default profile). A tool's `graph_info` answer on `/db/<name>/mcp`
+  may say `mcpReadOnly: false` for a reader whose `readOnly` is `true` (the server serves the
+  endpoint itself; graphersal-serve sets that field from its own request state); the
+  `readOnly` field and the tools offered are right.
 - No admin tools over MCP. Browser and MCP sessions survive a restart (`sessions/`, hashes
   only; [sessions/](server_directory.md#sessions)). The MCP usage statistics live in memory and start again at every
   restart.

@@ -23,7 +23,7 @@ const PROFILE: &str = include_str!("../ui/profile.json");
 const VIEWS: &str = include_str!("../ui/profile-views.json");
 
 /// The files under [`FILES_PREFIX`]: name and bytes.
-const FILES: [(&str, &[u8]); 27] = [
+const FILES: [(&str, &[u8]); 29] = [
     ("profile.json", PROFILE.as_bytes()),
     ("profile-views.json", VIEWS.as_bytes()),
     ("access-api.js", include_bytes!("../ui/access-api.js")),
@@ -47,6 +47,14 @@ const FILES: [(&str, &[u8]); 27] = [
     ("runs-tab.js", include_bytes!("../ui/runs-tab.js")),
     ("mcp-api.js", include_bytes!("../ui/mcp-api.js")),
     ("mcp-tab.js", include_bytes!("../ui/mcp-tab.js")),
+    (
+        "mcp-profile-api.js",
+        include_bytes!("../ui/mcp-profile-api.js"),
+    ),
+    (
+        "mcp-profile-editor.js",
+        include_bytes!("../ui/mcp-profile-editor.js"),
+    ),
     (
         "server-settings-api.js",
         include_bytes!("../ui/server-settings-api.js"),

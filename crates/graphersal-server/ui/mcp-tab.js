@@ -10,13 +10,18 @@
 // read on every visit of the tab and when the window gets the focus back (./shared.js
 // `useFreshData`); every table sorts by any column, the databases by name until another column
 // is chosen. Outcomes and failures of the switches are toasts (./shared.js `notify`). Requests,
-// rows and texts: ./mcp-api.js.
+// rows and texts: ./mcp-api.js. MCP profiles (MCPPROF): the "Profiles" section names the server
+// default profile and every row its profile's source; "Edit…" opens the profile editor
+// (./mcp-profile-editor.js) above the tables, which reads its own data and keeps its form
+// through the tab's refreshes.
 
 import { reactive, ref, computed } from 'vue';
 import {
   createMcp, statusOf, mcpRows, usageOf, usageText, exposedTitle, readOnlyTitle, readOnlyCell, connectInfo, MCP_OFF_CONFIRM,
-  exposeNewOf, EXPOSE_NEW_HELP,
+  exposeNewOf, EXPOSE_NEW_HELP, defaultProfileOf,
 } from './mcp-api.js';
+import { sourceBadge, sourceTitle } from './mcp-profile-api.js';
+import ProfileEditor from './mcp-profile-editor.js';
 import {
   ROOT, requestOptions, errorNotice, notify, noticeClass, useFreshData, useSort, SortTh,
 } from './shared.js';
@@ -29,6 +34,7 @@ const DB_COLUMNS = Object.freeze({
   name: { type: 'text', value: (r) => r.nameText },
   exposed: { type: 'bool', value: (r) => r.effectiveExposed },
   readOnly: { type: 'bool', value: (r) => r.effectiveReadOnly },
+  profile: { type: 'text' },
   sessions: { type: 'number' },
   calls: { type: 'number' },
   errors: { type: 'number' },
@@ -54,12 +60,14 @@ const ERROR_COLUMNS = Object.freeze({
 });
 
 export default {
-  components: { SortTh },
+  components: { SortTh, ProfileEditor },
   props: { api: { type: Object, required: true }, params: { type: Object, default: () => ({}) } },
   setup() {
     const s = reactive({ answer: null, revision: '', read: false, error: null });
     const busy = reactive({});
     const copied = ref('');
+    /** The profile being edited: `{name, kind, target}` (`name` null: the server default), or null. */
+    const editing = ref(null);
 
     const status = computed(() => statusOf(s.answer || {}));
     const rows = computed(() => mcpRows(s.answer || {}));
@@ -119,6 +127,15 @@ export default {
     const toggleReadOnly = (r) => run(r.name, `${r.name}: ${r.readOnly ? 'writable' : 'read-only'} for MCP.`,
       () => mcp.setName(r.name, { readOnly: !r.readOnly }, s.revision));
 
+    function editProfile(row) {
+      editing.value = row ? { name: row.name, kind: row.kind, target: row.target } : { name: null, kind: 'default', target: '' };
+      // The editor opens above the tables.
+      setTimeout(() => {
+        const panel = document.querySelector('[data-mcp-profile-editor]');
+        if (panel && panel.scrollIntoView) panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }, 0);
+    }
+
     async function copy(text, key) {
       try {
         await navigator.clipboard.writeText(text);
@@ -134,6 +151,7 @@ export default {
       s, busy, copied, status, rows, usage, connect, databases, tools, users, sessions, errors,
       dbSort, toolSort, userSort, sessionSort, errorSort, noticeClass, usageText, exposedTitle, readOnlyTitle, readOnlyCell,
       exposeNewOf, EXPOSE_NEW_HELP, refresh, toggleMcp, toggleExposeNew, toggleExposed, toggleReadOnly, copy,
+      editing, editProfile, defaultProfileOf, sourceBadge, sourceTitle,
     };
   },
   template: `
@@ -157,18 +175,25 @@ export default {
       <button type="button" class="btn small" :class="s.answer.enabled === false ? 'primary' : 'danger'" :disabled="!!busy.global" data-mcp-switch @click="toggleMcp">{{ s.answer.enabled === false ? 'Switch MCP on' : 'Switch MCP off…' }}</button>
     </div>
 
+    <profile-editor v-if="editing" :key="editing.name || ':default'" :name="editing.name" :kind="editing.kind" :target="editing.target" @close="editing = null" @saved="refresh"></profile-editor>
+
+    <div class="srv-head"><h2>Profiles</h2></div>
+    <p class="muted">A profile sets what agents see: the tools and their descriptions, the instructions, saved queries as tools, the resources. Each database or alias can have its own (its row's "Edit…" below); the server default applies to <span class="mono">/mcp</span> and to every name without one.</p>
+    <p data-mcp-default-profile>Server default profile: <strong>{{ defaultProfileOf(s.answer) ? 'set' : 'none (the built-in profile)' }}</strong> <button type="button" class="btn small" data-mcp-default-profile-edit @click="editProfile(null)">Edit…</button></p>
+
     <div class="srv-head"><h2>Databases</h2></div>
     <label class="inline srv-expose-new" :title="EXPOSE_NEW_HELP"><input type="checkbox" :checked="exposeNewOf(s.answer)" :disabled="!!busy.exposeNew" data-mcp-expose-new @change="toggleExposeNew"> Expose new databases and aliases</label>
     <p class="muted">A database or alias hidden from MCP is not listed to agents and answers like an unknown name. Read-only for MCP: agents only read it, whatever their grant (the HTTP API still follows the grant). An alias can narrow its database, never widen it. Sessions and calls count since the server started.</p>
     <p v-if="!rows.length" class="muted">No databases.</p>
     <div v-else class="srv-table-wrap">
     <table class="data-table srv-table srv-mcp-databases">
-      <thead><tr><sort-th :s="dbSort" k="name">Name</sort-th><sort-th :s="dbSort" k="exposed">Offered</sort-th><sort-th :s="dbSort" k="readOnly">Read-only</sort-th><sort-th :s="dbSort" k="sessions" num>Sessions</sort-th><sort-th :s="dbSort" k="calls" num>Calls</sort-th><sort-th :s="dbSort" k="errors" num>Errors</sort-th></tr></thead>
+      <thead><tr><sort-th :s="dbSort" k="name">Name</sort-th><sort-th :s="dbSort" k="exposed">Offered</sort-th><sort-th :s="dbSort" k="readOnly">Read-only</sort-th><sort-th :s="dbSort" k="profile">Profile</sort-th><sort-th :s="dbSort" k="sessions" num>Sessions</sort-th><sort-th :s="dbSort" k="calls" num>Calls</sort-th><sort-th :s="dbSort" k="errors" num>Errors</sort-th></tr></thead>
       <tbody>
         <tr v-for="r in databases" :key="r.name" :data-mcp-db="r.name">
           <td class="mono">{{ r.nameText }} <span v-if="r.kind === 'alias'" class="badge">alias</span></td>
           <td :title="exposedTitle(r)"><label class="inline"><input type="checkbox" :checked="r.exposed" :disabled="!!busy[r.name]" data-mcp-exposed @change="toggleExposed(r)"> {{ r.effectiveExposed ? 'yes' : 'no' }}</label></td>
           <td :title="readOnlyTitle(r)"><label class="inline"><input type="checkbox" :checked="readOnlyCell(r).checked" :disabled="!!busy[r.name] || readOnlyCell(r).disabled" data-mcp-read-only @change="toggleReadOnly(r)"> {{ readOnlyCell(r).text }}</label></td>
+          <td :title="sourceTitle(r.profile)"><span class="badge" data-mcp-profile-source>{{ sourceBadge(r.profile) }}</span> <button v-if="r.kind !== 'missing'" type="button" class="btn small" data-mcp-profile-edit @click="editProfile(r)">Edit…</button></td>
           <td class="num">{{ r.sessions }}</td>
           <td class="num">{{ r.calls }}</td>
           <td class="num">{{ r.errors }}</td>

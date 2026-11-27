@@ -19,7 +19,7 @@ another user or open to group or others ([Security Model](../guide/security.md#t
   server.open          the databases the running server has open (removed at a clean stop)
   recovery.json        the last unclean shutdown and its check of each database
   aliases.toml         alias -> database
-  mcp.toml             the MCP switches (written by the server; missing = the defaults)
+  mcp.toml             the MCP switches and profiles (written by the server; missing = the defaults)
   databases/
     <name>/
       database.toml    the database's configuration
@@ -291,7 +291,7 @@ What writes which file at runtime, and under which lock:
 | `recovery.json` | the unclean-shutdown check at start (one write per database checked) | its report's mutex (a leaf) |
 | `access.toml` | user and grant changes (admin API, console), alias rename/remove and database delete (grants follow), a new name taking leftover grants, the first admin (`init`, `serve`: created new, never replaced) | the access file's lock (`Access`), online; offline the server lock (one console command) |
 | `aliases.toml` | alias set/flip, rename, remove | the registry's write lock |
-| `mcp.toml` | the MCP switches (admin API, MCP tab, console `mcp`), alias rename (settings move) and remove, database delete and a new name (settings dropped) | the MCP settings' write lock (a leaf: it takes no other lock; a change of a name's settings holds the registry's read lock around it while the name must exist) |
+| `mcp.toml` | the MCP switches and profiles (admin API, MCP tab, console `mcp`), alias rename (settings move) and remove, database delete and a new name (settings dropped) | the MCP settings' write lock (a leaf: it takes no other lock; a change of a name's settings holds the registry's read lock around it while the name must exist) |
 | `databases/<name>/database.toml` | read-only, auto-load, promote, the `needs_model` marker, the settings change (description, read-only, auto-load and the `[limits.query]` overrides in ONE write: `PUT /api/admin/databases/<name>/settings`, `db set`, the Settings tab); a new database's file is written in its build in `tmp/` before the rename into `databases/` | the registry's write lock, held across the revision check, the read of the file's current limits, the write and the memory update (read-only, also through the settings, also the loader's flip lock, taken before the registry) |
 | `databases/<name>/verify.json` | every verify of the database (the last one replaces it) | none needed: each write is one whole file (`write_atomic`), the last verify wins |
 | `databases/<name>/store/` | the graphersal engine (the Store, its WAL, the database's job definitions); a layer reset (`db reset-layer`, `POST .../reset-layer`) is one commit of it | the engine's own (one open Store per database; the reset holds the graph's write lock; an unloaded layer's reset also the loader's lock, so nothing loads it meanwhile) |
