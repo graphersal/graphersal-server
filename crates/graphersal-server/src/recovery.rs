@@ -72,7 +72,7 @@ impl OpenFile {
     /// Reads `server.open` of `dir`: `None` when there is none.
     pub fn read(dir: &ServerDir) -> Result<Option<Self>, ServerError> {
         let path = dir.open_path();
-        let text = match fs::read_to_string(&path) {
+        let text = match crate::layout::read_replaced(&path) {
             Ok(text) => text,
             Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(err) => return Err(ServerError::io("read", &path, err)),
@@ -729,7 +729,7 @@ impl LastVerify {
     /// verified (or the file cannot be read: a warning).
     pub fn read(db_dir: &std::path::Path) -> Option<Self> {
         let path = db_dir.join(LAST_VERIFY_FILE);
-        let text = match fs::read_to_string(&path) {
+        let text = match crate::layout::read_replaced(&path) {
             Ok(text) => text,
             Err(err) if err.kind() == io::ErrorKind::NotFound => return None,
             Err(err) => {
@@ -881,7 +881,7 @@ impl UncleanShutdown {
 /// the file cannot be read: a warning).
 pub fn read_report(dir: &ServerDir) -> Option<UncleanShutdown> {
     let path = dir.recovery_path();
-    let text = match fs::read_to_string(&path) {
+    let text = match crate::layout::read_replaced(&path) {
         Ok(text) => text,
         Err(err) if err.kind() == io::ErrorKind::NotFound => return None,
         Err(err) => {

@@ -85,7 +85,7 @@ impl RunInfo {
     /// Reads the run file of `dir`: `None` when there is none.
     pub fn read(dir: &ServerDir) -> Result<Option<Self>, ServerError> {
         let path = dir.run_path();
-        let text = match fs::read_to_string(&path) {
+        let text = match crate::layout::read_replaced(&path) {
             Ok(text) => text,
             Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(err) => return Err(ServerError::io("read", &path, err)),

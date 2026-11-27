@@ -242,8 +242,8 @@ impl DatabaseConfig {
     /// Reads `<dir>/database.toml`.
     pub fn read(dir: &Path) -> Result<Self, ServerError> {
         let path = dir.join(DATABASE_FILE);
-        let text =
-            std::fs::read_to_string(&path).map_err(|err| ServerError::io("read", &path, err))?;
+        let text = crate::layout::read_replaced(&path)
+            .map_err(|err| ServerError::io("read", &path, err))?;
         Self::parse(&text, &path)
     }
 

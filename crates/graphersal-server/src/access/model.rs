@@ -342,7 +342,7 @@ impl AccessFile {
     /// Reads `access.toml` of `dir`: `None` when there is none.
     pub fn read(dir: &ServerDir) -> Result<Option<Self>, ServerError> {
         let path = dir.access_path();
-        match fs::read_to_string(&path) {
+        match crate::layout::read_replaced(&path) {
             Ok(text) => Self::parse(&text, &path).map(Some),
             Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(err) => Err(ServerError::io("read", &path, err)),

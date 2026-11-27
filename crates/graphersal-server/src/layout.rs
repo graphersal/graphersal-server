@@ -389,7 +389,8 @@ impl ServerDir {
     /// Reads and checks `server.toml`.
     pub fn load_config(&self) -> Result<ServerConfig, ServerError> {
         let path = self.config_path();
-        let text = fs::read_to_string(&path).map_err(|err| ServerError::io("read", &path, err))?;
+        let text = crate::layout::read_replaced(&path)
+            .map_err(|err| ServerError::io("read", &path, err))?;
         ServerConfig::parse(&text, &path)
     }
 }
@@ -558,12 +559,31 @@ fn write_atomic_file(path: &Path, bytes: &[u8], private: bool) -> Result<(), Ser
 /// `fs::read_to_string`, another writer's rename in flight); such a handle is short-lived, so
 /// the rename is retried for up to about two seconds before the error is returned.
 fn rename_replacing(from: &Path, to: &Path) -> io::Result<()> {
+    retry_denied(|| fs::rename(from, to))
+}
+
+/// `fs::read_to_string(path)` of a file [`write_atomic`] replaces. On Windows, opening it fails
+/// with "Access is denied" while another writer's rename over it is in flight (the old file is
+/// pending deletion); that lasts only moments, so the read is retried for up to about two
+/// seconds, like [`rename_replacing`]. Elsewhere a plain read.
+pub(crate) fn read_replaced(path: &Path) -> io::Result<String> {
+    retry_denied(|| fs::read_to_string(path))
+}
+
+/// [`read_replaced`] as bytes.
+pub(crate) fn read_replaced_bytes(path: &Path) -> io::Result<Vec<u8>> {
+    retry_denied(|| fs::read(path))
+}
+
+/// Runs `op`; on Windows retries it while it fails with `PermissionDenied`, for up to about
+/// two seconds (the transient state of a file being replaced by a rename).
+fn retry_denied<T>(mut op: impl FnMut() -> io::Result<T>) -> io::Result<T> {
     #[cfg(windows)]
     {
         let mut delay = std::time::Duration::from_millis(1);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         loop {
-            match fs::rename(from, to) {
+            match op() {
                 Err(err)
                     if err.kind() == io::ErrorKind::PermissionDenied
                         && std::time::Instant::now() < deadline =>
@@ -576,7 +596,7 @@ fn rename_replacing(from: &Path, to: &Path) -> io::Result<()> {
         }
     }
     #[cfg(not(windows))]
-    fs::rename(from, to)
+    op()
 }
 
 /// The file names this server writes atomically (the legacy temporary names of earlier
@@ -826,7 +846,7 @@ mod tests {
             let reader = scope.spawn(|| {
                 let mut reads = 0usize;
                 while !done.load(std::sync::atomic::Ordering::Relaxed) {
-                    let text = fs::read_to_string(&path).unwrap();
+                    let text = read_replaced(&path).unwrap();
                     assert!(parse_payload(&text).is_some(), "a torn file: {text:?}");
                     reads += 1;
                 }

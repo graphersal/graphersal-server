@@ -306,7 +306,7 @@ impl McpControl {
     /// `Err`: [`ServerError::Config`] for a file that does not parse, [`ServerError::Io`].
     pub(crate) fn open(dir: &ServerDir) -> Result<Self, ServerError> {
         let path = dir.mcp_settings_path();
-        let settings = match std::fs::read_to_string(&path) {
+        let settings = match crate::layout::read_replaced(&path) {
             Ok(text) => McpSettings::parse(&text, &path)?,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => McpSettings::default(),
             Err(err) => return Err(ServerError::io("read", &path, err)),

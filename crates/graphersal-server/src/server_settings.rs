@@ -933,7 +933,7 @@ fn is_set(table: &toml::Table, name: &str) -> bool {
 ///
 /// `Err`: [`ServerError::Io`].
 pub fn read_text(path: &Path) -> Result<String, ServerError> {
-    std::fs::read_to_string(path).map_err(|err| ServerError::io("read", path, err))
+    crate::layout::read_replaced(path).map_err(|err| ServerError::io("read", path, err))
 }
 
 /// Checks the text of a `server.toml` (`graphersal-server config check`, `init --config`):

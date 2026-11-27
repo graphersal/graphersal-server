@@ -52,7 +52,7 @@ impl<W: Write> Write for Counting<W> {
 
 /// The bytes of `path`, `None` when it does not exist.
 fn read_optional(path: &Path) -> Result<Option<Vec<u8>>, ServerError> {
-    match fs::read(path) {
+    match crate::layout::read_replaced_bytes(path) {
         Ok(bytes) => Ok(Some(bytes)),
         Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(err) => Err(ServerError::io("read", path, err)),

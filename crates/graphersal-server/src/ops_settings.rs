@@ -249,5 +249,5 @@ impl Admin {
 
 /// The text of `server.toml` at `path`.
 fn read_config(path: &std::path::Path) -> Result<String, ServerError> {
-    std::fs::read_to_string(path).map_err(|err| ServerError::io("read", path, err))
+    crate::layout::read_replaced(path).map_err(|err| ServerError::io("read", path, err))
 }

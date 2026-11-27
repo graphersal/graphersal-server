@@ -750,8 +750,8 @@ impl Registry {
             ));
         }
         let config_path = old.dir.join(crate::database::DATABASE_FILE);
-        let config_bytes =
-            fs::read(&config_path).map_err(|err| ServerError::io("read", &config_path, err))?;
+        let config_bytes = crate::layout::read_replaced_bytes(&config_path)
+            .map_err(|err| ServerError::io("read", &config_path, err))?;
         let trash = self.trash_target(&key)?;
         fs::rename(&old.dir, &trash).map_err(|err| ServerError::io("rename", &old.dir, err))?;
         if let Err(err) = fs::rename(&new.dir, &old.dir) {

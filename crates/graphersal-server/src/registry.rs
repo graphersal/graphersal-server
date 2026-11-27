@@ -412,7 +412,7 @@ fn scan_entry(name: String, dir: PathBuf) -> DatabaseEntry {
 /// Reads `aliases.toml` into `inner.aliases`: an alias whose name is invalid or taken by a
 /// database, or whose target is not a database, is dropped (listed in `inner.problems`).
 fn scan_aliases(path: &Path, inner: &mut Inner) {
-    let text = match fs::read_to_string(path) {
+    let text = match crate::layout::read_replaced(path) {
         Ok(text) => text,
         Err(err) if err.kind() == io::ErrorKind::NotFound => return,
         Err(err) => {

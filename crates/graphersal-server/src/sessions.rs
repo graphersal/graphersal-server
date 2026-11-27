@@ -22,7 +22,6 @@
 //! ([`McpSessionFile::forget_identity`]).
 
 use std::collections::HashMap;
-use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
@@ -54,7 +53,7 @@ fn unix_s(time: SystemTime) -> u64 {
 
 /// The text of `path`: `None` when it is missing or cannot be read (a warning).
 fn read_text(path: &Path, what: &str) -> Option<String> {
-    match fs::read_to_string(path) {
+    match crate::layout::read_replaced(path) {
         Ok(text) => Some(text),
         Err(err) if err.kind() == io::ErrorKind::NotFound => None,
         Err(err) => {
@@ -427,6 +426,7 @@ impl SessionStore for McpSessionFile {
 mod tests {
     use super::*;
     use crate::test_support::TempDir;
+    use std::fs;
 
     fn server_dir(temp: &TempDir) -> ServerDir {
         ServerDir::new(temp.path())
