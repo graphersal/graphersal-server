@@ -1146,7 +1146,17 @@ fn render_preview(answer: &Value) -> String {
         .collect();
     let mut tools = Section::new(format!("Tools ({})", rows.len()));
     tools.lines(table(&["TOOL", "DESCRIPTION"], &rows));
-    text::render(&[status, instructions, tools])
+    let mut sections = vec![status, instructions, tools];
+    // What /mcp tells about the name (after use_graph, or the first call naming it).
+    if let Some(block) = answer["directoryBlock"].as_str() {
+        let mut on_mcp = Section::new(format!(
+            "On /mcp: after use_graph {}",
+            answer["name"].as_str().unwrap_or_default()
+        ));
+        on_mcp.lines(block.lines().map(str::to_string));
+        sections.push(on_mcp);
+    }
+    text::render(&sections)
 }
 
 /// A limit value for people: `5000`, `0 (no limit)`, `-` (not set).
@@ -2407,6 +2417,24 @@ mod tests {
 
     fn dir() -> PathBuf {
         PathBuf::from("srv")
+    }
+
+    #[test]
+    fn mcp_profile_preview_shows_what_mcp_tells_about_the_name() {
+        let answer = json!({
+            "endpoint": "/db/kb/mcp", "name": "kb", "readOnly": true,
+            "serverInfo": {"name": "kb"}, "instructions": "Only kb.", "tools": [],
+            "notes": [], "warnings": [],
+            "directoryBlock": "--- Instructions for this database \"kb\" ---\nTools available on \"kb\" for you: gql.",
+        });
+        let text = render_preview(&answer);
+        assert!(text.contains("On /mcp: after use_graph kb"), "{text}");
+        assert!(
+            text.contains("Tools available on \"kb\" for you: gql."),
+            "{text}"
+        );
+        let without = render_preview(&json!({"endpoint": "/mcp", "directoryBlock": null}));
+        assert!(!without.contains("On /mcp:"), "{without}");
     }
 
     #[test]

@@ -37,8 +37,12 @@ What this version does not do, or does differently than you might expect.
 - **MCP profiles reach a connected agent at its next request**, but the server cannot push
   `notifications/tools/list_changed` over HTTP: an agent that keeps the tool list of its session
   start sees new tools after it reconnects. On `/mcp` saved queries are never tools of their own
-  (graphersal-mcp's directory mode), and the per-name profiles apply only on `/db/<name>/mcp`
-  (`/mcp` serves the server default profile). A tool's `graph_info` answer on `/db/<name>/mcp`
+  (graphersal-mcp's directory mode), and `initialize`, `tools/list` and `resources/list` serve
+  the server default profile for the whole session: a database's own profile (its instructions,
+  its tools, its saved-query tools) reaches the agent only as tool-result text, the block
+  "Instructions for this database" after `use_graph` and on the first call on that database
+  ([On /mcp](../guide/mcp.md#on-mcp)); a tool only that database's profile offers is callable
+  there but not in the session's tool list. A tool's `graph_info` answer on `/db/<name>/mcp`
   may say `mcpReadOnly: false` for a reader whose `readOnly` is `true` (the server serves the
   endpoint itself; graphersal-serve sets that field from its own request state); the
   `readOnly` field and the tools offered are right.

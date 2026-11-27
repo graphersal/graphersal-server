@@ -28,7 +28,10 @@
 //! database's context when it is loaded (else an empty graph), at `level` (default `write`;
 //! a read-only database is read for everyone) or for `/mcp` (`endpoint` `server`, the default
 //! without `name`): `{instructions, serverInfo, tools, resources, endpoint, name, level,
-//! readOnly, loaded, source, notes, warnings}`.
+//! readOnly, loaded, source, notes, warnings, directoryBlock}`. `directoryBlock` (with a
+//! `name`, else null) is the text "Instructions for this database" that `/mcp` gives a caller
+//! at `level` for that name after `use_graph` ([`crate::mcp_guidance`]), with the previewed
+//! profile in place: the name's own (`endpoint` `database`) or the server default (`server`).
 //!
 //! The MCP state: `enabled` (the switch of `mcp.toml`), `exposeNew` (whether a new database
 //! or alias is offered to MCP when its creator does not say; `mcp.toml`'s `expose_new`,
@@ -146,28 +149,6 @@ fn mcp_read_only_of(admin: &Admin, settings: &McpSettings, key: &str, real: &str
     mode || settings.read_only(key, real)
 }
 
-/// The effective profile of `key` (resolving to `real`) by the settings and where it comes
-/// from (own, its database's, the default, built-in).
-fn effective_of(
-    settings: &McpSettings,
-    key: &str,
-    real: &str,
-) -> (Option<Value>, crate::mcp_profiles::ProfileSource) {
-    use crate::mcp_profiles::ProfileSource;
-    if let Some(profile) = settings.of(key).profile {
-        return (Some(profile), ProfileSource::Own);
-    }
-    if key != real
-        && let Some(profile) = settings.of(real).profile
-    {
-        return (Some(profile), ProfileSource::Database);
-    }
-    match &settings.default_profile {
-        Some(profile) => (Some(profile.clone()), ProfileSource::Default),
-        None => (None, ProfileSource::Builtin),
-    }
-}
-
 /// The profile view of `GET mcp/profile` (`name` `None`: the server default) or `GET
 /// mcp/databases/<name>/profile` (module docs).
 fn profile_view(admin: &Admin, name: Option<&str>) -> Result<Value, ServerError> {
@@ -199,7 +180,7 @@ fn profile_view(admin: &Admin, name: Option<&str>) -> Result<Value, ServerError>
         return Err(ServerError::NotFound { name: key });
     };
     let real = target.clone().unwrap_or_else(|| key.clone());
-    let (effective, source) = effective_of(&settings, &key, &real);
+    let (effective, source) = settings.effective_profile(&key, &real);
     let read_only = mcp_read_only_of(admin, &settings, &key, &real);
     let context = admin.loaded_context(&real);
     let saved = context
@@ -282,7 +263,7 @@ fn preview(admin: &Admin, body: &Value) -> Result<Result<Value, Response>, Serve
         Some(profile) => (Some(profile.clone()), "body"),
         None => match (endpoint, &key, &real) {
             ("database", Some(key), Some(real)) => {
-                let (profile, source) = effective_of(&settings, key, real);
+                let (profile, source) = settings.effective_profile(key, real);
                 (profile, source.as_str())
             }
             _ => match &settings.default_profile {
@@ -311,12 +292,13 @@ fn preview(admin: &Admin, body: &Value) -> Result<Result<Value, Response>, Serve
     };
     let (seen, read_only, loaded) = if endpoint == "server" {
         notes.push(
-            "on /mcp every caller sees this list; a call of a writing tool on a database the \
-             caller may only read is refused"
+            "on /mcp every caller sees this list; a call runs under the profile of the database \
+             it names and the caller's level (a tool not offered there is refused): \
+             directoryBlock is what /mcp tells about a chosen database (name, level)"
                 .to_string(),
         );
         (
-            crate::mcp_profiles::preview_directory(config).map_err(failed)?,
+            crate::mcp_profiles::preview_directory(config.clone()).map_err(failed)?,
             false,
             None,
         )
@@ -325,7 +307,7 @@ fn preview(admin: &Admin, body: &Value) -> Result<Result<Value, Response>, Serve
         let context = real.as_deref().and_then(|real| admin.loaded_context(real));
         let seen = match &context {
             Some(context) => {
-                crate::mcp_profiles::preview_database(config, context.as_ref(), read_only)
+                crate::mcp_profiles::preview_database(config.clone(), context.as_ref(), read_only)
             }
             None => {
                 if key.is_some() {
@@ -336,7 +318,7 @@ fn preview(admin: &Admin, body: &Value) -> Result<Result<Value, Response>, Serve
                     );
                 }
                 let host = crate::mcp_profiles::empty_host().map_err(failed)?;
-                crate::mcp_profiles::preview_database(config, host.as_ref(), read_only)
+                crate::mcp_profiles::preview_database(config.clone(), host.as_ref(), read_only)
             }
         }
         .map_err(failed)?;
@@ -354,6 +336,27 @@ fn preview(admin: &Admin, body: &Value) -> Result<Result<Value, Response>, Serve
         .map(|p| crate::mcp_profiles::warnings(p, mode_read_only, endpoint == "server"))
         .unwrap_or_default();
     let mut out = seen;
+    out["directoryBlock"] = match (&key, &real) {
+        (Some(key), Some(real)) => {
+            let previewed = match (fields.get("profile"), &profile, &config) {
+                (None, _, _) => Previewed::Settings,
+                (Some(_), Some(profile), Some(config)) => {
+                    Previewed::Body(Some(Box::new((profile.clone(), config.clone()))))
+                }
+                (Some(_), _, _) => Previewed::Body(None),
+            };
+            json!(directory_block(
+                admin,
+                &settings,
+                key,
+                real,
+                level == "read",
+                endpoint == "server",
+                previewed,
+            )?)
+        }
+        _ => Value::Null,
+    };
     out["endpoint"] = json!(if endpoint == "server" {
         crate::mcp::ENDPOINT.to_string()
     } else {
@@ -367,6 +370,84 @@ fn preview(admin: &Admin, body: &Value) -> Result<Result<Value, Response>, Serve
     out["notes"] = json!(notes);
     out["warnings"] = json!(warnings);
     Ok(Ok(out))
+}
+
+/// The profile a preview previews.
+enum Previewed {
+    /// The one the settings give (the body has no `profile`).
+    Settings,
+    /// The body's (`None`: `"profile": null`, the built-in one).
+    Body(Option<Box<(Value, graphersal_mcp::McpConfig)>>),
+}
+
+/// The block "Instructions for this database" ([`crate::mcp_guidance`]) that `/mcp` gives a
+/// caller (`read`: one that may only read) for the name `key` (resolving to `real`), with the
+/// previewed profile in place of the server default (`server_wide`) or of the name's own.
+///
+/// `Err`: the preview's empty graph cannot be served (a database that is not loaded).
+fn directory_block(
+    admin: &Admin,
+    settings: &McpSettings,
+    key: &str,
+    real: &str,
+    read: bool,
+    server_wide: bool,
+    previewed: Previewed,
+) -> Result<String, ServerError> {
+    use crate::mcp_profiles::ProfileSource;
+    let parse = |profile: &Value| crate::mcp_profiles::config_of(profile).ok();
+    let saved_default = settings.default_profile.as_ref().and_then(parse);
+    let (effective, source) = settings.effective_profile(key, real);
+    let has_own = matches!(source, ProfileSource::Own | ProfileSource::Database);
+    // (the database's own profile, the configuration its calls run under, the session list's)
+    let (own, config, session) = match previewed {
+        Previewed::Settings => {
+            let config = effective.as_ref().and_then(parse);
+            (effective.filter(|_| has_own), config, saved_default)
+        }
+        // The name's own profile previewed (null: none of its own, the default applies).
+        Previewed::Body(Some(body)) if !server_wide => {
+            let (profile, config) = *body;
+            (Some(profile), Some(config), saved_default)
+        }
+        Previewed::Body(None) if !server_wide => (None, saved_default.clone(), saved_default),
+        // The server default previewed: it applies to a name without a profile of its own.
+        Previewed::Body(body) => {
+            let body = body.map(|body| body.1);
+            if has_own {
+                let config = effective.as_ref().and_then(parse);
+                (effective, config, body)
+            } else {
+                (None, body.clone(), body)
+            }
+        }
+    };
+    let entry = admin.registry().list().into_iter().find(|e| e.name == real);
+    let mode = entry.as_ref().and_then(|e| e.config.as_ref());
+    let read_only = crate::mcp_guidance::ReadOnlyWhy::first(
+        read,
+        mode.is_some_and(|c| c.role == DatabaseRole::Base),
+        settings.read_only(key, real),
+    );
+    let failed = |message: String| ServerError::Serve {
+        name: "MCP preview".to_string(),
+        message,
+    };
+    let context = admin.loaded_context(real);
+    let host: std::sync::Arc<dyn graphersal_mcp::Host> = match context {
+        Some(context) => context,
+        None => crate::mcp_profiles::empty_host().map_err(failed)?,
+    };
+    Ok(crate::mcp_guidance::block(&crate::mcp_guidance::Facts {
+        requested: key,
+        real,
+        own_profile: own.as_ref(),
+        config: config.as_ref(),
+        read_only,
+        flag: mode.is_some_and(|c| c.read_only),
+        session_config: session.as_ref(),
+        host: host.as_ref(),
+    }))
 }
 
 /// Answers `method mcp...` (`segments`: the endpoint split at `/`); `None` when the path is
@@ -588,7 +669,7 @@ fn rows(
             "effectiveExposed": settings.exposed(name, real),
             "effectiveReadOnly": settings.read_only(name, real) || forced.is_some(),
             "readOnlyReason": forced,
-            "profile": effective_of(settings, name, real).1.as_str(),
+            "profile": settings.effective_profile(name, real).1.as_str(),
             "sessions": sessions,
             "calls": calls,
             "errors": errors,

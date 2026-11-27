@@ -15,9 +15,12 @@
 //!   graphersal-serve's own `/mcp` route would) under the name's MCP profile of that request
 //!   ([`database_profile`], [`crate::mcp_profiles`]); the router refuses it like every other
 //!   route of the database and serves it read-only to a reader.
-//! - `/mcp` serves the server default MCP profile: [`Directory::host`] gives it to every call,
-//!   and [`route`] replaces the answers of `initialize`, `tools/list` and `resources/list`
-//!   ([`crate::mcp_profiles::rewrite_directory_answer`]).
+//! - `/mcp` serves the server default MCP profile in `initialize`, `tools/list` and
+//!   `resources/list` ([`route`] replaces their answers:
+//!   [`crate::mcp_profiles::rewrite_directory_answer`]); a call runs under the profile of the
+//!   database it names ([`Directory::serving`]: its own, an alias's database's, else the server
+//!   default), whose guidance reaches the agent as tool-result text
+//!   ([`crate::mcp_guidance`]).
 //!
 //! The runtime switches of `mcp.toml` ([`crate::mcp_control`]) apply to both: off = `503`
 //! ([`switched_off`], checked by the router), a hidden name is unknown to the [`Directory`]
@@ -47,6 +50,7 @@ use crate::database::{DatabaseKind, DatabaseRole};
 use crate::layout::ServerDir;
 use crate::loader::Loader;
 use crate::mcp_control::{McpUsage, ObservedRequest, ObservedSessions};
+use crate::mcp_guidance::ReadOnlyWhy;
 use crate::registry::{DatabaseEntry, DbState};
 use crate::sessions::McpSessionFile;
 
@@ -208,6 +212,37 @@ impl GraphDirectory for Directory<'_> {
     }
 
     fn host(&self, route: &str) -> Result<(Arc<dyn Host>, Profile), McpError> {
+        let serving = self.serving(route)?;
+        let host: Arc<dyn Host> = serving.context;
+        Ok((host, serving.profile))
+    }
+}
+
+/// What serves a call on a route of the [`Directory`] ([`Directory::serving`]).
+pub(crate) struct Serving {
+    /// The real database.
+    pub(crate) entry: DatabaseEntry,
+    /// Its loaded context.
+    pub(crate) context: Arc<graphersal_serve::Context>,
+    /// The profile the calls run under.
+    pub(crate) profile: Profile,
+    /// The configuration of that profile (`None`: the built-in one).
+    pub(crate) config: Option<Arc<graphersal_mcp::McpConfig>>,
+    /// Why the calls run read-only, if they do.
+    pub(crate) read_only: Option<ReadOnlyWhy>,
+    /// Whether the database's read-only flag is on (the tools stay, every write is refused).
+    pub(crate) flag: bool,
+}
+
+impl Directory<'_> {
+    /// What serves a call on `route` (a route [`GraphDirectory::resolve`] answered): the
+    /// database, its context and the profile its calls run under: the profile of the name
+    /// ([`crate::mcp_control::McpControl::profile_for`]: its own, an alias's database's, the
+    /// server default, else the built-in one), read-only for a reader, a base and MCP
+    /// read-only (a database's read-only flag keeps the tools: its gate refuses every write).
+    ///
+    /// `Err`: the name is unknown or hidden from the caller, or the database is not loaded.
+    pub(crate) fn serving(&self, route: &str) -> Result<Serving, McpError> {
         let Some((entry, level)) = self
             .access
             .reach(self.loader.registry(), self.principal, route)
@@ -217,22 +252,38 @@ impl GraphDirectory for Directory<'_> {
         if !self.exposed(route, &entry.name) {
             return Err(Self::unknown(route));
         }
-        if let Some(context) = self.loader.context(&entry.name) {
-            // `/mcp` serves the server default profile (crate::mcp_profiles), on every graph.
-            let profile = context.mcp_profile().cloned().unwrap_or_default();
-            let profile = match self.loader.mcp_control().and_then(|c| c.default_profile()) {
-                Some(config) => profile.with_config((*config).clone()),
-                None => profile,
-            };
-            let profile = if level == Level::Read || self.mcp_read_only(route, &entry.name) {
-                profile.with_read_only(true)
-            } else {
-                profile
-            };
-            let host: Arc<dyn Host> = context;
-            return Ok((host, profile));
-        }
-        Err(McpError::Unavailable(not_loaded_text(&entry)))
+        let Some(context) = self.loader.context(&entry.name) else {
+            return Err(McpError::Unavailable(not_loaded_text(&entry)));
+        };
+        let config = self
+            .loader
+            .mcp_control()
+            .and_then(|control| control.profile_for(route, &entry.name).0);
+        let mode = entry.config.as_ref();
+        let read_only = ReadOnlyWhy::first(
+            level == Level::Read,
+            mode.is_some_and(|c| c.role == DatabaseRole::Base),
+            self.mcp_read_only(route, &entry.name),
+        );
+        let flag = mode.is_some_and(|c| c.read_only);
+        let profile = context.mcp_profile().cloned().unwrap_or_default();
+        let profile = match &config {
+            Some(config) => profile.with_config((**config).clone()),
+            None => profile,
+        };
+        let profile = if read_only.is_some() && !profile.read_only() {
+            profile.with_read_only(true)
+        } else {
+            profile
+        };
+        Ok(Serving {
+            entry,
+            context,
+            profile,
+            config,
+            read_only,
+            flag,
+        })
     }
 }
 
@@ -345,8 +396,22 @@ pub(crate) fn route(mcp: &Mcp, directory: &Directory<'_>, request: &mut Request<
     {
         body = rewritten;
     }
+    // Each database's own guidance as tool-result text (crate::mcp_guidance).
+    let session = header_of(&headers, SESSION_HEADER);
+    if let Some(control) = directory.loader.mcp_control() {
+        if status == 200
+            && let Some(sent) = &buffered
+        {
+            body =
+                crate::mcp_guidance::annotate(directory, control, session.as_deref(), sent, body);
+        }
+        if method == "DELETE"
+            && let Some(session) = &session
+        {
+            control.shown().forget(session);
+        }
+    }
     if let (Some(usage), Some(sent)) = (&usage, &buffered) {
-        let session = header_of(&headers, SESSION_HEADER);
         if let Some(new_session) = header_of(&answer_headers, SESSION_HEADER)
             && session.as_deref() != Some(new_session.as_str())
         {

@@ -20,8 +20,11 @@
 //! never merged key by key: on `/db/<name>/mcp` the name's own profile, else (an alias) its
 //! database's, else the server default, else the built-in one (no profile: every tool of the
 //! mode with its built-in description, the built-in instructions). On `/mcp` the server default
-//! (else the built-in one) for everything: its instructions, `tools/list` and `resources/list`
-//! ([`rewrite_directory_answer`]) and the tools a call may use; saved queries are never tools of
+//! (else the built-in one) for the session: its instructions, `tools/list` and
+//! `resources/list` ([`rewrite_directory_answer`]); a call runs under the profile of the name it
+//! targets (as on `/db/<name>/mcp`), and that profile's guidance (its instructions, the tools
+//! available there, its saved-query tools) reaches the agent as tool-result text, the block
+//! "Instructions for this database" ([`crate::mcp_guidance`]); saved queries are never tools of
 //! their own on `/mcp` (graphersal-mcp's directory mode), whatever the profile says.
 //!
 //! **When a change applies**: at the next request of every endpoint (every request is served
@@ -205,9 +208,9 @@ pub(crate) fn warnings(profile: &Value, read_only: bool, server_wide: bool) -> V
     }
     if server_wide && profile.get("saved_query_tools").is_some() {
         out.push(
-            "saved_query_tools has no effect on /mcp (saved queries are never tools of their \
-             own there: agents run them with run_saved_query); it applies on /db/<name>/mcp to \
-             the names without a profile of their own"
+            "saved_query_tools makes no tools of their own on /mcp (agents run saved queries \
+             with run_saved_query there; the block \"Instructions for this database\" lists the \
+             selected ones); it applies to the names without a profile of their own"
                 .to_string(),
         );
     }
@@ -234,7 +237,7 @@ impl GraphDirectory for NoGraphs {
 /// One JSON-RPC request through `serve` (an endpoint's `handle*`), in the MCP session
 /// `session`: the new session id (an `initialize`) and the `result`. `Err`: the endpoint's
 /// error text.
-fn rpc(
+pub(crate) fn rpc(
     serve: &dyn Fn(McpRequest<'_>) -> McpResponse,
     id: u64,
     method: &str,
@@ -264,7 +267,7 @@ fn rpc(
 }
 
 /// The `initialize` params of a preview.
-fn initialize_params() -> Value {
+pub(crate) fn initialize_params() -> Value {
     json!({
         "protocolVersion": PREVIEW_PROTOCOL,
         "capabilities": {},
@@ -273,7 +276,7 @@ fn initialize_params() -> Value {
 }
 
 /// A throwaway endpoint serving `profile` by default (no sessions kept beyond it).
-fn throwaway(profile: Profile) -> Mcp {
+pub(crate) fn throwaway(profile: Profile) -> Mcp {
     Mcp::new(false, None, false).with_profile(profile)
 }
 
@@ -369,6 +372,15 @@ pub(crate) fn saved_queries(context: &graphersal_serve::Context) -> Result<Vec<V
             }))
         })
         .collect())
+}
+
+/// The names of every built-in data tool (the opt-in ones included; not `list_graphs` and
+/// `use_graph`).
+pub(crate) fn builtin_tool_names() -> Vec<String> {
+    builtin_tools()
+        .iter()
+        .map(|tool| tool.name.clone())
+        .collect()
 }
 
 /// The names of the built-in tools offered to a reader.

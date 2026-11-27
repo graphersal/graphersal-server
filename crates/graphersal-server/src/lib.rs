@@ -51,6 +51,7 @@ pub mod loader;
 pub mod lock;
 mod mcp;
 mod mcp_control;
+mod mcp_guidance;
 mod mcp_profiles;
 mod model_archive;
 mod model_download;

@@ -20,7 +20,7 @@ import {
   createMcp, statusOf, mcpRows, usageOf, usageText, exposedTitle, readOnlyTitle, readOnlyCell, connectInfo, MCP_OFF_CONFIRM,
   exposeNewOf, EXPOSE_NEW_HELP, defaultProfileOf,
 } from './mcp-api.js';
-import { sourceBadge, sourceTitle } from './mcp-profile-api.js';
+import { sourceBadge, sourceTitle, previewDatabases } from './mcp-profile-api.js';
 import ProfileEditor from './mcp-profile-editor.js';
 import {
   ROOT, requestOptions, errorNotice, notify, noticeClass, useFreshData, useSort, SortTh,
@@ -151,7 +151,7 @@ export default {
       s, busy, copied, status, rows, usage, connect, databases, tools, users, sessions, errors,
       dbSort, toolSort, userSort, sessionSort, errorSort, noticeClass, usageText, exposedTitle, readOnlyTitle, readOnlyCell,
       exposeNewOf, EXPOSE_NEW_HELP, refresh, toggleMcp, toggleExposeNew, toggleExposed, toggleReadOnly, copy,
-      editing, editProfile, defaultProfileOf, sourceBadge, sourceTitle,
+      editing, editProfile, defaultProfileOf, sourceBadge, sourceTitle, previewDatabases,
     };
   },
   template: `
@@ -175,7 +175,7 @@ export default {
       <button type="button" class="btn small" :class="s.answer.enabled === false ? 'primary' : 'danger'" :disabled="!!busy.global" data-mcp-switch @click="toggleMcp">{{ s.answer.enabled === false ? 'Switch MCP on' : 'Switch MCP off…' }}</button>
     </div>
 
-    <profile-editor v-if="editing" :key="editing.name || ':default'" :name="editing.name" :kind="editing.kind" :target="editing.target" @close="editing = null" @saved="refresh"></profile-editor>
+    <profile-editor v-if="editing" :key="editing.name || ':default'" :name="editing.name" :kind="editing.kind" :target="editing.target" :databases="previewDatabases(rows)" @close="editing = null" @saved="refresh"></profile-editor>
 
     <div class="srv-head"><h2>Profiles</h2></div>
     <p class="muted">A profile sets what agents see: the tools and their descriptions, the instructions, saved queries as tools, the resources. Each database or alias can have its own (its row's "Edit…" below); the server default applies to <span class="mono">/mcp</span> and to every name without one.</p>

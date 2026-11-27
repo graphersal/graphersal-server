@@ -684,8 +684,11 @@ cited from tracked files). When this file disagrees with the code, the code wins
   = `Mcp::handle_with_profile` on the database's context, `mcp::database_profile` per request:
   the context's profile (read-only for a base) `.with_config`, read-only for a read grant or MCP
   read-only), no longer forwarded to graphersal-serve (whose `ContextBuilder::mcp_profile` is
-  fixed at load); `/mcp`: `Directory::host` gives the default config, `mcp::route` rewrites the
-  answers. Admin: `Admin::mcp_profile_set(name|None, Some|None)` in `ops_mcp.rs` (audited
+  fixed at load); `/mcp`: `mcp::route` rewrites the answers of `initialize`/`tools/list`/
+  `resources/list` for the server default; a CALL runs under its database's profile
+  (`Directory::serving` -> `Serving {entry, context, profile, config, read_only: ReadOnlyWhy
+  (grant|base|MCP read-only), flag}`: `profile_for(route, real)`; a read-only flag keeps the
+  tools; `Directory::host` = its context + profile), whose guidance `mcp_guidance` adds. Admin: `Admin::mcp_profile_set(name|None, Some|None)` in `ops_mcp.rs` (audited
   `McpProfileSet`), `Admin::loaded_context`; routes in `admin_api_mcp.rs` (`mcp/builtin`,
   `mcp/profile`, `mcp/databases/<n>/profile`, `mcp/preview`; the MCP state's `defaultProfile`
   and rows' `profile`); console `mcp profile show|set FILE|clear|preview [NAME] [--read]`
@@ -699,6 +702,26 @@ cited from tracked files). When this file disagrees with the code, the code wins
   `mcp_profiles_by_console_offline_through_a_server_and_in_a_server_backup`,
   `ui/tests/mcp-profile.test.mjs`. Docs: `book/src/guide/mcp.md` "Profiles". By hand:
   `scripts/mcp-profile-demo.sh DIR [PORT]` (a demo directory, started in the background).
+- `mcp_guidance` (MCPDB 0.3.1, private; module docs = the contract): each database's guidance
+  on `/mcp` as tool-result text. `block(Facts)` = "--- Instructions for this database "<name>"
+  [(alias of "<db>")] ---" + the own profile's instructions (`instructions_of`: append notes /
+  replace text; source own|database only, `McpSettings::effective_profile`, also used by
+  `admin_api_mcp`) + the tools available (`available_tools`: a throwaway endpoint's
+  `directory_tool_listings` under the call's profile) + the session list's others with the
+  reason + the `saved_query_tools` (a throwaway `tools/list` on the context) for
+  `run_saved_query`; at most the profile's `max_chars` (queries cut first, note naming
+  `list_saved_queries`, then the instructions). `annotate` (called by `mcp::route` after the
+  rewrite, on a single `tools/call`): `use_graph` success -> block always; a built-in tool on a
+  database (`graph` or `McpUsage::selected`) -> block when `Shown::show(session, name,
+  Fingerprint {real, config, read_only, flag})` says new (always without a session); a
+  graphersal-mcp `unknown tool` error -> the available tools appended; `list_graphs` ->
+  `"hasInstructions": true` (entries rebuilt in graphersal-mcp's key order, `ordered`). `Shown`
+  lives in `McpControl::shown()` (in memory, `MAX_SESSIONS` 4096, a `DELETE /mcp` forgets).
+  Preview: `admin_api_mcp::directory_block` (`directoryBlock` of `POST mcp/preview` with a name),
+  console `render_preview` section "On /mcp", UI `previewBody`/`directoryBlockOf`/
+  `previewDatabases` (`mcp-profile-api.js`). Tests: `mcp_guidance::tests`,
+  `router_access_tests.rs` `mcp_directory_*`, `render::tests::mcp_profile_preview_*`,
+  `ui/tests/mcp-profile.test.mjs`. Docs: `book/src/guide/mcp.md` "On /mcp".
 - `mcp_control` (round 3 B6, private): the runtime MCP switches in `mcp.toml`
   (`McpSettings {enabled, expose_new, databases: {name: NameSettings {exposed, read_only}}}`, names folded,
   defaults not written, canonical text + `revision`; round 4 B-MCPDEF: `ServerDir::init` (new

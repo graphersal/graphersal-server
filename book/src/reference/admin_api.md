@@ -417,8 +417,8 @@ a bad description or an unknown body field; `404`; `409` (stale revision, a base
 a failed database). The answer is the settings (with the new `revision`) plus `"changed"`:
 the fields in body order (`description`, `readOnly`, `autoLoad`, `limits.<key>`). Each field
 is audited: `database '<n>' description set to "..."` (or `cleared`), `read-only on|off`,
-`auto-load on|off`, `query limit <key> = <n> (applies at its next load)` or `query limit <key>
-cleared`.
+`auto-load on|off`, `query limit <key> = <n> (applies to its new runs)` or `query limit <key>
+cleared (the server's default applies to its new runs)`.
 
 ### Aliases
 
@@ -886,7 +886,7 @@ The profile view:
 | `endpoint` | `/mcp` or `/db/<name>/mcp` |
 | `readOnly` | MCP serves the name read-only whatever the grant (a base, the read-only flag, MCP read-only) |
 | `loaded`, `savedQueries` | whether the database is loaded; its saved queries `[{name, folder, description, writes}]` (else `null`) |
-| `warnings` | writing tools the profile names that readers never get; `saved_query_tools` on `/mcp` |
+| `warnings` | writing tools the profile names that readers never get; `saved_query_tools` in the server default (no tools of their own on `/mcp`) |
 | `revision` | of `mcp.toml` |
 
 A profile graphersal-mcp refuses is `400 {"error": "the MCP profile is not valid: <its
@@ -901,7 +901,11 @@ context when it is loaded (else an empty graph: its saved queries are not listed
 at `level` (default `write`; a read-only database is read for everyone), or on `/mcp`
 (`endpoint` `server`, the default without `name`). Answer: `instructions`, `serverInfo`, `tools`
 (the `tools/list` entries), `resources`, `endpoint`, `name`, `level`, `readOnly`, `loaded`,
-`source`, `notes`, `warnings`.
+`source`, `notes`, `warnings`, `directoryBlock`. With a `name`, `directoryBlock` is the text
+"Instructions for this database" that `/mcp` gives a caller at `level` for that name after
+`use_graph` ([On /mcp](../guide/mcp.md#on-mcp)), with the previewed profile in place of the
+name's own (`endpoint` `database`) or of the server default (`endpoint` `server`: the name's own
+profile, when it has one, stays); without a `name` it is `null`.
 
 ### Server
 

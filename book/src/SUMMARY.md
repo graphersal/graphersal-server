@@ -35,6 +35,7 @@
 # Project
 
 - [Release Notes](release_notes/index.md)
+  - [0.3.1 (unreleased)](release_notes/0.3.1.md)
   - [0.3.0](release_notes/0.3.0.md)
   - [0.2.0](release_notes/0.2.0.md)
   - [0.1.0](release_notes/0.1.0.md)

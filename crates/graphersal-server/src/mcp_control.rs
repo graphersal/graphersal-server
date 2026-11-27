@@ -179,6 +179,29 @@ impl McpSettings {
         self.of(requested).read_only || self.of(real).read_only
     }
 
+    /// The effective profile (JSON) of a request naming `key` that resolves to the database
+    /// `real`, and where it comes from: the name's own, else (an alias) its database's, else the
+    /// server default; `None`: the built-in one (the same choice as [`Profiles::of`]).
+    pub(crate) fn effective_profile(
+        &self,
+        key: &str,
+        real: &str,
+    ) -> (Option<Value>, ProfileSource) {
+        let (key, real) = (crate::names::fold(key), crate::names::fold(real));
+        if let Some(profile) = self.databases.get(&key).and_then(|s| s.profile.clone()) {
+            return (Some(profile), ProfileSource::Own);
+        }
+        if key != real
+            && let Some(profile) = self.databases.get(&real).and_then(|s| s.profile.clone())
+        {
+            return (Some(profile), ProfileSource::Database);
+        }
+        match &self.default_profile {
+            Some(profile) => (Some(profile.clone()), ProfileSource::Default),
+            None => (None, ProfileSource::Builtin),
+        }
+    }
+
     /// The canonical text of the file.
     pub(crate) fn text(&self) -> Result<String, String> {
         let mut text = String::from(
@@ -298,6 +321,8 @@ pub(crate) struct McpControl {
     /// its own, read per MCP request).
     profiles: RwLock<Profiles>,
     usage: Arc<McpUsage>,
+    /// Which databases' guidance each `/mcp` session was shown ([`crate::mcp_guidance`]).
+    shown: crate::mcp_guidance::Shown,
 }
 
 impl McpControl {
@@ -320,6 +345,7 @@ impl McpControl {
             settings: RwLock::new(settings),
             profiles: RwLock::new(profiles),
             usage: Arc::new(McpUsage::new()),
+            shown: crate::mcp_guidance::Shown::default(),
         })
     }
 
@@ -341,6 +367,20 @@ impl McpControl {
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .default_profile()
+    }
+
+    /// [`McpSettings::effective_profile`] now (the profile's JSON, for its instructions).
+    pub(crate) fn effective_profile(
+        &self,
+        requested: &str,
+        real: &str,
+    ) -> (Option<Value>, ProfileSource) {
+        self.read().effective_profile(requested, real)
+    }
+
+    /// Which databases' guidance each `/mcp` session was shown.
+    pub(crate) fn shown(&self) -> &crate::mcp_guidance::Shown {
+        &self.shown
     }
 
     /// The usage statistics.

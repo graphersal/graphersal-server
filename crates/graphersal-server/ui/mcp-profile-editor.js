@@ -8,14 +8,17 @@
 // saved (and takes edited JSON back), Import reads a graphersal `--mcp-config` file with its
 // instructions file, Export downloads the profile; Preview shows what an agent sees (the
 // server's own `initialize` and `tools/list` for the profile in the form, as a reader or a
-// writer, nothing saved). Save sends the profile with the revision it was read at: a change made
-// meanwhile is refused (409) and the form is kept. Data is read when the editor opens; the
+// writer, nothing saved; with the block "Instructions for this database" that /mcp gives after
+// use_graph: for the name, or for a database chosen beside "Preview /mcp"). Save sends the
+// profile with the revision it was read at: a change made meanwhile is refused (409) and the
+// form is kept. Data is read when the editor opens; the
 // tab's refreshes never touch the form. Requests, form and texts: ./mcp-profile-api.js.
 
 import { reactive, computed, onMounted } from 'vue';
 import {
   createProfiles, builtinOf, formFromProfile, profileFromForm, isOverridden, defaultTools, importConfigFiles,
   folderChoices, selectedQueries, exportFileName, profileText, previewTools, clearQuestion, sourceTitle,
+  previewBody, directoryBlockOf,
   INSTRUCTIONS_MODES, PROFILE_SOURCES, APPLIES_TEXT,
 } from './mcp-profile-api.js';
 import { isConflict } from './admin-api.js';
@@ -35,13 +38,15 @@ export default {
     name: { type: String, default: null },
     kind: { type: String, default: 'database' },
     target: { type: String, default: '' },
+    /** The databases and aliases a server-default preview may show the /mcp block of. */
+    databases: { type: Array, default: () => [] },
   },
   emits: ['close', 'saved'],
   setup(props, { emit }) {
     const st = reactive({
       builtin: null, view: null, form: null, revision: '', read: false, readError: null,
       error: null, busy: false, json: '', jsonOpen: false, jsonError: '', preview: null, previewError: null,
-      importError: '', startedFrom: '',
+      importError: '', startedFrom: '', previewDb: '', previewLevel: 'write',
     });
 
     const built = computed(() => (st.form && st.builtin ? profileFromForm(st.form, st.builtin) : { profile: {}, problems: [] }));
@@ -51,6 +56,7 @@ export default {
     const title = computed(() => (props.name ? `MCP profile of ${props.name}` : 'Server default MCP profile'));
     const endpoint = computed(() => (props.name ? `/db/${props.name}/mcp` : '/mcp'));
     const previewList = computed(() => previewTools(st.preview || {}));
+    const previewBlock = computed(() => directoryBlockOf(st.preview || {}));
     const instructionsLength = computed(() => {
       if (!st.form) return 0;
       return (st.form.instructionsMode === 'append' ? st.form.appendText : st.form.replaceText).trim().length;
@@ -120,9 +126,7 @@ export default {
     async function preview(level) {
       st.previewError = null;
       st.preview = null;
-      const body = props.name
-        ? { name: props.name, endpoint: 'database', level, profile: built.value.profile }
-        : { endpoint: 'server', profile: built.value.profile };
+      const body = previewBody(props.name, level, built.value.profile, st.previewDb);
       try {
         st.preview = await profiles.preview(body);
       } catch (err) {
@@ -189,7 +193,7 @@ export default {
     onMounted(() => load());
 
     return {
-      st, built, shownJson, folders, chosenQueries, title, endpoint, previewList, instructionsLength,
+      st, built, shownJson, folders, chosenQueries, title, endpoint, previewList, previewBlock, instructionsLength,
       INSTRUCTIONS_MODES, PROFILE_SOURCES, APPLIES_TEXT, isOverridden, sourceTitle,
       save, clear, preview, startFromBuiltin, resetTool, resetInstructions, toggleFolder, openJson, applyJson,
       importFiles, exportProfile, defaultTools, load, close: () => emit('close'),
@@ -305,7 +309,11 @@ export default {
           <button type="button" class="btn" data-profile-preview-read @click="preview('read')">Preview as reader</button>
           <button type="button" class="btn" data-profile-preview-write @click="preview('write')">Preview as writer</button>
         </template>
-        <button v-else type="button" class="btn" data-profile-preview-server @click="preview('write')">Preview /mcp</button>
+        <template v-else>
+          <label class="inline" title="The block &quot;Instructions for this database&quot; /mcp gives after use_graph">for <select v-model="st.previewDb" data-profile-preview-db><option value="">no database</option><option v-for="d in databases" :key="d" :value="d">{{ d }}</option></select></label>
+          <label class="inline">as <select v-model="st.previewLevel" :disabled="!st.previewDb" data-profile-preview-level><option value="write">writer</option><option value="read">reader</option></select></label>
+          <button type="button" class="btn" data-profile-preview-server @click="preview(st.previewLevel)">Preview /mcp</button>
+        </template>
       </div>
       <form-error :error="st.error" :problems="built.problems"></form-error>
       <small class="srv-field-hint">{{ APPLIES_TEXT }}</small>
@@ -322,6 +330,11 @@ export default {
       <table class="data-table srv-table"><tbody>
         <tr v-for="t in previewList" :key="t.name" :data-profile-preview-tool="t.name"><td class="mono">{{ t.name }}</td><td>{{ t.description }}</td></tr>
       </tbody></table>
+      <template v-if="previewBlock">
+        <h4>On /mcp: after use_graph {{ st.preview.name }} ({{ st.preview.level === 'read' ? 'may only read' : 'may write' }})</h4>
+        <p class="muted">The text /mcp appends to the answer of use_graph and of the first call on this database in a session: its own instructions, the tools available there for the caller, its saved queries.</p>
+        <pre class="srv-pre" data-profile-preview-block>{{ previewBlock }}</pre>
+      </template>
     </div>
     </template>
     <p v-else-if="st.read && !st.readError" class="muted">No answer.</p>

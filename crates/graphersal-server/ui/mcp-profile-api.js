@@ -312,6 +312,30 @@ export function previewTools(answer = {}) {
   }));
 }
 
+/**
+ * The body of a preview of the profile in the form (`profile`): of the name `name` on its own
+ * endpoint (`/db/<name>/mcp`) at `level`, or (`name` null) of the server default on `/mcp`, with
+ * `database` (a name, or empty) chosen for the block "Instructions for this database" that
+ * `/mcp` gives at `level` after use_graph (MCPDB, answered as `directoryBlock`).
+ */
+export function previewBody(name, level, profile, database = '') {
+  if (name) return { name, endpoint: 'database', level, profile };
+  const body = { endpoint: 'server', level, profile };
+  if (typeof database === 'string' && database.trim()) body.name = database.trim();
+  return body;
+}
+
+/** The block "Instructions for this database" of a preview answer (`''`: none). */
+export const directoryBlockOf = (answer = {}) => str(isObject(answer) ? answer.directoryBlock : '');
+
+/** The names a server-default preview may choose a database from: the databases and aliases of the MCP state's rows. */
+export function previewDatabases(rows) {
+  return (Array.isArray(rows) ? rows : [])
+    .filter((r) => isObject(r) && typeof r.name === 'string' && (r.kind === 'database' || r.kind === 'alias'))
+    .map((r) => r.name)
+    .sort((a, b) => a.localeCompare(b));
+}
+
 /** The question before a profile is cleared. */
 export function clearQuestion(name, kind) {
   const next = kind === 'alias' ? "its database's profile, else the server default, else the built-in one" : name ? 'the server default profile, else the built-in one' : 'the built-in profile';
