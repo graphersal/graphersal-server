@@ -60,6 +60,7 @@ use serde_json::{Value, json};
 
 use crate::error::ServerError;
 use crate::layout::{ServerDir, write_atomic};
+use crate::mcp_profiles::ProfileSource;
 use crate::sessions::McpSessionFile;
 
 /// How many recent tool errors [`McpUsage`] keeps.
@@ -80,7 +81,7 @@ pub(crate) const SWITCHED_OFF_HELP: &str = "an admin switches it on again in the
      tab, with PUT /api/admin/mcp {\"enabled\": true}, or with graphersal-server mcp on --dir DIR";
 
 /// The MCP settings of one database or alias name.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct NameSettings {
     /// Whether MCP offers the name (default `true`).
@@ -89,6 +90,10 @@ pub(crate) struct NameSettings {
     /// Whether MCP serves it read-only (default `false`).
     #[serde(default)]
     pub(crate) read_only: bool,
+    /// The name's MCP profile ([`crate::mcp_profiles`]: the `--mcp-config` format, instructions
+    /// inline), `None`: none of its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) profile: Option<Value>,
 }
 
 impl Default for NameSettings {
@@ -96,6 +101,7 @@ impl Default for NameSettings {
         Self {
             exposed: true,
             read_only: false,
+            profile: None,
         }
     }
 }
@@ -116,6 +122,10 @@ pub(crate) struct McpSettings {
     /// (default `false`; [`McpSettings::new_name`]).
     #[serde(default)]
     pub(crate) expose_new: bool,
+    /// The server-wide default MCP profile ([`crate::mcp_profiles`]): `/mcp`, and every name
+    /// without a profile of its own (an alias: nor its database); `None`: the built-in one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) default_profile: Option<Value>,
     /// The settings per (folded) database or alias name; a name with the defaults is not kept.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub(crate) databases: BTreeMap<String, NameSettings>,
@@ -126,6 +136,7 @@ impl Default for McpSettings {
         Self {
             enabled: true,
             expose_new: false,
+            default_profile: None,
             databases: BTreeMap::new(),
         }
     }
@@ -146,6 +157,7 @@ impl McpSettings {
         NameSettings {
             exposed: expose.unwrap_or(self.expose_new),
             read_only: false,
+            profile: None,
         }
     }
 
@@ -153,7 +165,7 @@ impl McpSettings {
     pub(crate) fn of(&self, name: &str) -> NameSettings {
         self.databases
             .get(&crate::names::fold(name))
-            .copied()
+            .cloned()
             .unwrap_or_default()
     }
 
@@ -175,7 +187,9 @@ impl McpSettings {
              # expose_new: whether a new database or alias is offered to MCP (each new name\n\
              # gets its own entry below; a name without an entry is offered).\n\
              # [databases.<name>] exposed = false hides a database or alias from MCP;\n\
-             # read_only = true serves it read-only to MCP whatever the caller's grant.\n",
+             # read_only = true serves it read-only to MCP whatever the caller's grant.\n\
+             # [default_profile] / [databases.<name>.profile]: MCP profiles (the format of\n\
+             # graphersal's --mcp-config file, instructions inline; the MCP tab edits them).\n",
         );
         text.push_str(&toml::to_string(self).map_err(|err| err.to_string())?);
         Ok(text)
@@ -198,7 +212,78 @@ impl McpSettings {
             .map(|(name, value)| (crate::names::fold(&name), value))
             .filter(|(_, value)| *value != NameSettings::default())
             .collect();
+        settings.profiles().map_err(|message| ServerError::Config {
+            path: path.to_path_buf(),
+            message,
+        })?;
         Ok(settings)
+    }
+
+    /// The configurations of the profiles (each checked as when it is saved, so a hand edit
+    /// that graphersal-mcp refuses stops `serve` with the key named).
+    ///
+    /// `Err`: which profile is wrong, and why.
+    pub(crate) fn profiles(&self) -> Result<Profiles, String> {
+        let config = |profile: &Value, key: &str| {
+            crate::mcp_profiles::config_of(profile)
+                .map(Arc::new)
+                .map_err(|message| format!("{key}: {message}"))
+        };
+        let default = self
+            .default_profile
+            .as_ref()
+            .map(|profile| config(profile, "default_profile"))
+            .transpose()?;
+        let mut names = BTreeMap::new();
+        for (name, value) in &self.databases {
+            if let Some(profile) = &value.profile {
+                names.insert(
+                    name.clone(),
+                    config(profile, &format!("databases.{name}.profile"))?,
+                );
+            }
+        }
+        Ok(Profiles { default, names })
+    }
+}
+
+/// The parsed MCP profiles of [`McpSettings`] (kept beside them by [`McpControl`], so no request
+/// parses a profile).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Profiles {
+    /// The server default.
+    default: Option<Arc<graphersal_mcp::McpConfig>>,
+    /// Per folded name.
+    names: BTreeMap<String, Arc<graphersal_mcp::McpConfig>>,
+}
+
+impl Profiles {
+    /// The profile of a request naming `requested` that resolves to the database `real`, and
+    /// where it comes from: the name's own, else (an alias) its database's, else the server
+    /// default; `None`: the built-in one.
+    pub(crate) fn of(
+        &self,
+        requested: &str,
+        real: &str,
+    ) -> (Option<Arc<graphersal_mcp::McpConfig>>, ProfileSource) {
+        let (requested, real) = (crate::names::fold(requested), crate::names::fold(real));
+        if let Some(config) = self.names.get(&requested) {
+            return (Some(config.clone()), ProfileSource::Own);
+        }
+        if requested != real
+            && let Some(config) = self.names.get(&real)
+        {
+            return (Some(config.clone()), ProfileSource::Database);
+        }
+        match &self.default {
+            Some(config) => (Some(config.clone()), ProfileSource::Default),
+            None => (None, ProfileSource::Builtin),
+        }
+    }
+
+    /// The server default profile (`/mcp`), `None`: the built-in one.
+    pub(crate) fn default_profile(&self) -> Option<Arc<graphersal_mcp::McpConfig>> {
+        self.default.clone()
     }
 }
 
@@ -209,6 +294,9 @@ impl McpSettings {
 pub(crate) struct McpControl {
     path: PathBuf,
     settings: RwLock<McpSettings>,
+    /// The parsed profiles of `settings`, replaced under the settings' write lock (a leaf of
+    /// its own, read per MCP request).
+    profiles: RwLock<Profiles>,
     usage: Arc<McpUsage>,
 }
 
@@ -223,11 +311,36 @@ impl McpControl {
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => McpSettings::default(),
             Err(err) => return Err(ServerError::io("read", &path, err)),
         };
+        let profiles = settings.profiles().map_err(|message| ServerError::Config {
+            path: path.clone(),
+            message,
+        })?;
         Ok(Self {
             path,
             settings: RwLock::new(settings),
+            profiles: RwLock::new(profiles),
             usage: Arc::new(McpUsage::new()),
         })
+    }
+
+    /// [`Profiles::of`] now.
+    pub(crate) fn profile_for(
+        &self,
+        requested: &str,
+        real: &str,
+    ) -> (Option<Arc<graphersal_mcp::McpConfig>>, ProfileSource) {
+        self.profiles
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .of(requested, real)
+    }
+
+    /// The server default profile now (`None`: the built-in one).
+    pub(crate) fn default_profile(&self) -> Option<Arc<graphersal_mcp::McpConfig>> {
+        self.profiles
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .default_profile()
     }
 
     /// The usage statistics.
@@ -292,12 +405,22 @@ impl McpControl {
         next.databases
             .retain(|_, value| *value != NameSettings::default());
         if next != *current {
+            let profiles = next
+                .profiles()
+                .map_err(|message| ServerError::InvalidInput {
+                    name: "MCP profile".to_string(),
+                    message,
+                })?;
             let text = next.text().map_err(|message| ServerError::Config {
                 path: self.path.clone(),
                 message,
             })?;
             write_atomic(&self.path, text.as_bytes())?;
             *current = next.clone();
+            *self
+                .profiles
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = profiles;
         }
         Ok(next)
     }
@@ -335,7 +458,7 @@ impl McpControl {
         let mut given = NameSettings::default();
         self.change(None, |settings| {
             given = settings.new_name(expose);
-            settings.databases.insert(key.clone(), given);
+            settings.databases.insert(key.clone(), given.clone());
             Ok(())
         })?;
         Ok(given)
@@ -840,6 +963,7 @@ mod tests {
                     NameSettings {
                         exposed: false,
                         read_only: true,
+                        profile: None,
                     },
                 );
                 s.databases.insert("plain".into(), NameSettings::default());
@@ -912,6 +1036,7 @@ mod tests {
                     NameSettings {
                         exposed: false,
                         read_only: true,
+                        profile: None,
                     },
                 );
                 Ok(())
@@ -926,6 +1051,89 @@ mod tests {
     }
 
     #[test]
+    fn profiles_round_trip_through_mcp_toml_and_a_bad_one_is_refused() {
+        let temp = TempDir::new("mcp-settings-profiles");
+        let dir = dir(&temp);
+        let control = McpControl::open(&dir).unwrap();
+        let profile = json!({
+            "_comment": "kb",
+            "server_name": "graphersal-kb",
+            "instructions": {"mode": "replace", "text": "Line one.\n\n- recall(text)\n\"quoted\""},
+            "tools": {"include": ["gql", "query"], "overrides": {"gql": {"description": "Ask."}}},
+            "saved_query_tools": {"folders": ["kb", "memory"], "paging_params": false},
+            "answer_limit_chars": 20000,
+        });
+        control
+            .change(None, |s| {
+                s.default_profile = Some(json!({"tools": {"include": ["gql"]}}));
+                let mut kb = s.of("kb");
+                kb.profile = Some(profile.clone());
+                s.databases.insert("kb".into(), kb);
+                Ok(())
+            })
+            .unwrap();
+        let text = std::fs::read_to_string(dir.mcp_settings_path()).unwrap();
+        assert!(text.contains("[default_profile"), "{text}");
+        assert!(text.contains("[databases.kb.profile"), "{text}");
+        let reopened = McpControl::open(&dir).unwrap();
+        assert_eq!(reopened.settings().of("kb").profile, Some(profile));
+        let (config, source) = reopened.profile_for("kb", "kb");
+        assert_eq!(source, ProfileSource::Own);
+        assert_eq!(config.unwrap().answer_limit_chars(), Some(20000));
+        assert_eq!(
+            reopened.profile_for("prod", "kb").1,
+            ProfileSource::Database
+        );
+        assert_eq!(
+            reopened.profile_for("other", "other").1,
+            ProfileSource::Default
+        );
+        assert!(reopened.default_profile().is_some());
+        // A profile graphersal-mcp refuses is never written ...
+        let err = reopened.change(None, |s| {
+            s.default_profile = Some(json!({"tools": {"exclde": []}}));
+            Ok(())
+        });
+        assert!(
+            matches!(err, Err(ServerError::InvalidInput { .. })),
+            "{err:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.mcp_settings_path()).unwrap(),
+            text
+        );
+        // ... and a hand edit that breaks one stops the start, naming it.
+        std::fs::write(
+            dir.mcp_settings_path(),
+            "[databases.kb.profile.tools]\ninclude = [\"gqll\"]\n",
+        )
+        .unwrap();
+        let err = McpControl::open(&dir).err().unwrap().to_string();
+        assert!(err.contains("databases.kb.profile"), "{err}");
+        assert!(err.contains("did you mean \"gql\""), "{err}");
+        // A deleted name loses its profile with its settings; a new name starts without one.
+        std::fs::write(dir.mcp_settings_path(), text).unwrap();
+        let control = McpControl::open(&dir).unwrap();
+        assert!(control.forget_name("kb"));
+        assert_eq!(control.profile_for("kb", "kb").1, ProfileSource::Default);
+        control
+            .change(None, |s| {
+                let mut kb = s.of("kb");
+                kb.profile = Some(json!({}));
+                s.databases.insert("kb".into(), kb);
+                Ok(())
+            })
+            .unwrap();
+        assert!(
+            control
+                .claim_new("kb", Some(true))
+                .unwrap()
+                .profile
+                .is_none()
+        );
+    }
+
+    #[test]
     fn names_are_forgotten_and_renamed() {
         let temp = TempDir::new("mcp-settings-names");
         let control = McpControl::open(&dir(&temp)).unwrap();
@@ -936,6 +1144,7 @@ mod tests {
                     NameSettings {
                         exposed: true,
                         read_only: true,
+                        profile: None,
                     },
                 );
                 Ok(())

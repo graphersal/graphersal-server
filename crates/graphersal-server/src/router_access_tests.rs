@@ -4390,3 +4390,583 @@ fn the_model_download_routes_are_for_admins_only() {
         "the refused request started nothing"
     );
 }
+
+// MCP profiles (MCPPROF, crate::mcp_profiles).
+
+/// `initialize` on `path` as `who`: (session id, its `result`).
+fn mcp_initialize_result(fx: &Fixture, who: Who<'_>, path: &str) -> (String, Value) {
+    let answer = mcp(
+        fx,
+        who,
+        path,
+        None,
+        json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "protocolVersion": "2025-06-18", "capabilities": {},
+            "clientInfo": {"name": "t", "version": "1"}}}),
+    );
+    assert_eq!(
+        answer.status(),
+        200,
+        "{}",
+        String::from_utf8_lossy(answer.body())
+    );
+    let session = header(&answer, "Mcp-Session-Id").unwrap().to_string();
+    (session, json_of(&answer)["result"].clone())
+}
+
+/// The `tools/list` entries on `path` in `session` as `who`.
+fn mcp_tool_list(fx: &Fixture, who: Who<'_>, path: &str, session: &str) -> Vec<Value> {
+    let answer = mcp(
+        fx,
+        who,
+        path,
+        Some(session),
+        json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}),
+    );
+    assert_eq!(
+        answer.status(),
+        200,
+        "{}",
+        String::from_utf8_lossy(answer.body())
+    );
+    json_of(&answer)["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .clone()
+}
+
+fn names_of(tools: &[Value]) -> Vec<String> {
+    tools
+        .iter()
+        .map(|t| t["name"].as_str().unwrap().to_string())
+        .collect()
+}
+
+#[test]
+fn mcp_profiles_apply_per_name_at_once_follow_aliases_and_are_checked() {
+    let fx = fixture("access-mcp-profiles");
+    let (alice, bob) = (fx.alice.as_str(), fx.bob.as_str());
+    let open = mcp_initialize(&fx, Who::Bearer(bob), "/db/w/mcp");
+    let before = names_of(&mcp_tool_list(&fx, Who::Bearer(bob), "/db/w/mcp", &open));
+    assert!(before.len() > 10, "{before:?}");
+    let profile = json!({
+        "_comment": "w for agents",
+        "server_name": "w-kb",
+        "instructions": {"mode": "replace", "text": "Only the w graph."},
+        "tools": {"include": ["gql", "query", "set_schema"],
+                  "overrides": {"gql": {"description": "Ask w in GQL."}}},
+    });
+    // Admins only.
+    let refused = put(
+        &fx,
+        Who::Bearer(bob),
+        "/api/admin/mcp/databases/w/profile",
+        json!({"profile": profile}),
+    );
+    assert_eq!(refused.status(), 404);
+    let set = put(
+        &fx,
+        Who::Bearer(alice),
+        "/api/admin/mcp/databases/w/profile",
+        json!({"profile": profile}),
+    );
+    assert_eq!(set.status(), 200, "{}", String::from_utf8_lossy(set.body()));
+    let view = json_of(&set);
+    assert_eq!(view["source"], "own");
+    assert_eq!(view["profile"]["server_name"], "w-kb");
+    assert_eq!(view["loaded"], true);
+    assert!(
+        fx.audit
+            .lines()
+            .iter()
+            .any(|l| l.contains("MCP profile of 'w' set")),
+        "{:?}",
+        fx.audit.lines()
+    );
+    // At once, also in the session opened before.
+    let tools = mcp_tool_list(&fx, Who::Bearer(bob), "/db/w/mcp", &open);
+    assert_eq!(names_of(&tools), ["query", "gql", "set_schema"]);
+    assert_eq!(
+        tools.iter().find(|t| t["name"] == "gql").unwrap()["description"],
+        "Ask w in GQL."
+    );
+    let (_, init) = mcp_initialize_result(&fx, Who::Bearer(bob), "/db/w/mcp");
+    assert_eq!(init["instructions"], "Only the w graph.");
+    assert_eq!(init["serverInfo"]["name"], "w-kb");
+    // A tool the profile leaves out is refused; one it names runs.
+    let (text, error) = mcp_tool(
+        &fx,
+        Who::Bearer(bob),
+        "/db/w/mcp",
+        &open,
+        "gql",
+        json!({"query": "MATCH (p:person) RETURN count(p) AS n"}),
+    );
+    assert!(!error, "{text}");
+    let refused = mcp(
+        &fx,
+        Who::Bearer(bob),
+        "/db/w/mcp",
+        Some(&open),
+        json!({"jsonrpc": "2.0",
+        "id": 4, "method": "tools/call", "params": {"name": "statistics", "arguments": {}}}),
+    );
+    let body = String::from_utf8_lossy(refused.body()).to_string();
+    assert!(
+        body.contains("error") && !body.contains("\"isError\":false"),
+        "{body}"
+    );
+
+    // A reader never gets the writing tool a profile names, and no error at request time.
+    let put_r = put(
+        &fx,
+        Who::Bearer(alice),
+        "/api/admin/mcp/databases/r/profile",
+        json!({"profile": profile}),
+    );
+    assert_eq!(put_r.status(), 200);
+    assert!(
+        json_of(&put_r)["warnings"][0]
+            .as_str()
+            .unwrap()
+            .contains("set_schema"),
+        "{}",
+        String::from_utf8_lossy(put_r.body())
+    );
+    let reader = mcp_initialize(&fx, Who::Bearer(bob), "/db/r/mcp");
+    assert_eq!(
+        names_of(&mcp_tool_list(&fx, Who::Bearer(bob), "/db/r/mcp", &reader)),
+        ["query", "gql"]
+    );
+    let writer = mcp_initialize(&fx, Who::Bearer(alice), "/db/r/mcp");
+    assert_eq!(
+        names_of(&mcp_tool_list(
+            &fx,
+            Who::Bearer(alice),
+            "/db/r/mcp",
+            &writer
+        )),
+        ["query", "gql", "set_schema"]
+    );
+    // An alias without a profile of its own is served its database's; with one, its own.
+    let alias = get(
+        &fx,
+        Who::Bearer(alice),
+        "/api/admin/mcp/databases/cur/profile",
+    );
+    assert_eq!(json_of(&alias)["source"], "database");
+    let cur = mcp_initialize(&fx, Who::Bearer(bob), "/db/cur/mcp");
+    assert_eq!(
+        names_of(&mcp_tool_list(&fx, Who::Bearer(bob), "/db/cur/mcp", &cur)),
+        ["query", "gql"]
+    );
+    let own = json!({"tools": {"include": ["get_schema"]}});
+    assert_eq!(
+        put(
+            &fx,
+            Who::Bearer(alice),
+            "/api/admin/mcp/databases/cur/profile",
+            json!({"profile": own})
+        )
+        .status(),
+        200
+    );
+    assert_eq!(
+        names_of(&mcp_tool_list(&fx, Who::Bearer(bob), "/db/cur/mcp", &cur)),
+        ["get_schema"]
+    );
+    // A renamed alias keeps its profile; a removed one loses it.
+    let renamed = post(
+        &fx,
+        Who::Bearer(alice),
+        "/api/admin/aliases/cur/rename",
+        json!({"name": "now"}),
+    );
+    assert_eq!(
+        renamed.status(),
+        200,
+        "{}",
+        String::from_utf8_lossy(renamed.body())
+    );
+    let moved = get(
+        &fx,
+        Who::Bearer(alice),
+        "/api/admin/mcp/databases/now/profile",
+    );
+    assert_eq!(json_of(&moved)["source"], "own");
+    assert_eq!(json_of(&moved)["profile"], own);
+    assert_eq!(
+        delete(&fx, Who::Bearer(alice), "/api/admin/aliases/now").status(),
+        200
+    );
+    assert_eq!(
+        get(
+            &fx,
+            Who::Bearer(alice),
+            "/api/admin/mcp/databases/now/profile"
+        )
+        .status(),
+        404
+    );
+    let again = put(
+        &fx,
+        Who::Bearer(alice),
+        "/api/admin/aliases/now",
+        json!({"target": "r"}),
+    );
+    assert_eq!(
+        again.status(),
+        200,
+        "{}",
+        String::from_utf8_lossy(again.body())
+    );
+    assert_eq!(
+        json_of(&get(
+            &fx,
+            Who::Bearer(alice),
+            "/api/admin/mcp/databases/now/profile"
+        ))["source"],
+        "database"
+    );
+
+    // Structural mistakes are refused when saving, with graphersal-mcp's message.
+    let typo = put(
+        &fx,
+        Who::Bearer(alice),
+        "/api/admin/mcp/databases/w/profile",
+        json!({"profile": {"tools": {"inclde": ["gql"]}}}),
+    );
+    assert_eq!(typo.status(), 400);
+    let error = json_of(&typo)["error"].as_str().unwrap().to_string();
+    assert!(error.contains("did you mean \"tools.include\""), "{error}");
+    let file = put(
+        &fx,
+        Who::Bearer(alice),
+        "/api/admin/mcp/databases/w/profile",
+        json!({"profile": {"instructions": {"mode": "replace", "file": "notes.md"}}}),
+    );
+    assert_eq!(file.status(), 400);
+    assert_eq!(
+        put(
+            &fx,
+            Who::Bearer(alice),
+            "/api/admin/mcp/databases/zz/profile",
+            json!({"profile": {}})
+        )
+        .status(),
+        404
+    );
+    // A stale revision is refused.
+    let stale = put(
+        &fx,
+        Who::Bearer(alice),
+        "/api/admin/mcp/databases/w/profile",
+        json!({"profile": {}, "revision": "0000000000000000"}),
+    );
+    assert_eq!(stale.status(), 409);
+
+    // The server default: names without a profile of their own, and /mcp for everything.
+    let default =
+        json!({"server_name": "acme-mcp", "tools": {"include": ["gql", "list_saved_queries"]}});
+    let set = put(
+        &fx,
+        Who::Bearer(alice),
+        "/api/admin/mcp/profile",
+        json!({"profile": default}),
+    );
+    assert_eq!(set.status(), 200, "{}", String::from_utf8_lossy(set.body()));
+    assert!(
+        fx.audit
+            .lines()
+            .iter()
+            .any(|l| l.contains("server default MCP profile set"))
+    );
+    let state = json_of(&get(&fx, Who::Bearer(alice), "/api/admin/mcp"));
+    assert_eq!(state["defaultProfile"], true);
+    let row = |name: &str| {
+        state["databases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["name"] == name)
+            .unwrap()["profile"]
+            .clone()
+    };
+    assert_eq!(row("w"), "own");
+    assert_eq!(row("h"), "default");
+    let hs = mcp_initialize(&fx, Who::Bearer(alice), "/db/h/mcp");
+    assert_eq!(
+        names_of(&mcp_tool_list(&fx, Who::Bearer(alice), "/db/h/mcp", &hs)),
+        ["gql", "list_saved_queries"]
+    );
+    let (session, init) = mcp_initialize_result(&fx, Who::Bearer(bob), "/mcp");
+    assert_eq!(init["serverInfo"]["name"], "acme-mcp");
+    assert!(init["instructions"].as_str().unwrap().contains("use_graph"));
+    assert_eq!(
+        names_of(&mcp_tool_list(&fx, Who::Bearer(bob), "/mcp", &session)),
+        ["list_graphs", "use_graph", "gql", "list_saved_queries"]
+    );
+    let (text, error) = mcp_tool(
+        &fx,
+        Who::Bearer(bob),
+        "/mcp",
+        &session,
+        "gql",
+        json!({"query": "MATCH (p:person) RETURN count(p) AS n", "graph": "w"}),
+    );
+    assert!(!error, "{text}");
+    let refused = mcp(
+        &fx,
+        Who::Bearer(bob),
+        "/mcp",
+        Some(&session),
+        json!({"jsonrpc": "2.0",
+        "id": 4, "method": "tools/call", "params": {"name": "query", "arguments": {"script": "1", "graph": "w"}}}),
+    );
+    let body = String::from_utf8_lossy(refused.body()).to_string();
+    assert!(
+        body.contains("error") || body.contains("\"isError\":true"),
+        "{body}"
+    );
+    // Cleared: back to the built-in profile at once.
+    assert_eq!(
+        delete(&fx, Who::Bearer(alice), "/api/admin/mcp/profile").status(),
+        200
+    );
+    assert!(mcp_tool_list(&fx, Who::Bearer(bob), "/mcp", &session).len() > 10);
+    let cleared = delete(
+        &fx,
+        Who::Bearer(alice),
+        "/api/admin/mcp/databases/w/profile",
+    );
+    assert_eq!(json_of(&cleared)["source"], "builtin");
+    assert_eq!(
+        names_of(&mcp_tool_list(&fx, Who::Bearer(bob), "/db/w/mcp", &open)),
+        before
+    );
+    assert!(
+        fx.audit
+            .lines()
+            .iter()
+            .any(|l| l.contains("MCP profile of 'w' cleared"))
+    );
+}
+
+#[test]
+fn saved_query_tools_of_a_profile_are_listed_run_and_previewed() {
+    let fx = fixture("access-mcp-profile-queries");
+    let alice = fx.alice.as_str();
+    for (name, folder) in [("people", "kb"), ("deep", "kb/sub"), ("other", "misc")] {
+        let script = format!(
+            "g.define_query(#{{name: \"{name}\", folder: \"{folder}\", description: \"The {name}.\", \
+             body: \"fn {name}() {{ g.v().has_label(\\\"person\\\").values(\\\"name\\\") }}\"}})"
+        );
+        execute(&fx, Who::Bearer(OPERATOR), "w", &script);
+    }
+    let view = json_of(&get(
+        &fx,
+        Who::Bearer(alice),
+        "/api/admin/mcp/databases/w/profile",
+    ));
+    let saved = view["savedQueries"].as_array().unwrap();
+    assert_eq!(saved.len(), 3, "{saved:?}");
+    assert!(
+        saved
+            .iter()
+            .any(|q| q["name"] == "deep" && q["folder"] == "kb/sub"),
+        "{saved:?}"
+    );
+    let profile = json!({"tools": {"include": ["gql"]}, "saved_query_tools": {"folders": ["kb"]}});
+    // The preview before saving: what an agent would see.
+    let preview = post(
+        &fx,
+        Who::Bearer(alice),
+        "/api/admin/mcp/preview",
+        json!({"name": "w", "profile": profile}),
+    );
+    assert_eq!(
+        preview.status(),
+        200,
+        "{}",
+        String::from_utf8_lossy(preview.body())
+    );
+    let preview = json_of(&preview);
+    assert_eq!(
+        names_of(preview["tools"].as_array().unwrap()),
+        ["gql", "deep", "people"]
+    );
+    assert_eq!(preview["endpoint"], "/db/w/mcp");
+    assert_eq!(preview["loaded"], true);
+    assert_eq!(
+        put(
+            &fx,
+            Who::Bearer(alice),
+            "/api/admin/mcp/databases/w/profile",
+            json!({"profile": profile})
+        )
+        .status(),
+        200
+    );
+    let session = mcp_initialize(&fx, Who::Bearer(alice), "/db/w/mcp");
+    assert_eq!(
+        names_of(&mcp_tool_list(
+            &fx,
+            Who::Bearer(alice),
+            "/db/w/mcp",
+            &session
+        )),
+        ["gql", "deep", "people"]
+    );
+    let (text, error) = mcp_tool(
+        &fx,
+        Who::Bearer(alice),
+        "/db/w/mcp",
+        &session,
+        "people",
+        json!({}),
+    );
+    assert!(!error && text.contains("marko"), "{text}");
+    // An invalid preview profile is a 400 with the message; the built-in texts are there.
+    let bad = post(
+        &fx,
+        Who::Bearer(alice),
+        "/api/admin/mcp/preview",
+        json!({"profile": {"resources": ["schemaa"]}}),
+    );
+    assert_eq!(bad.status(), 400);
+    assert!(
+        json_of(&bad)["error"]
+            .as_str()
+            .unwrap()
+            .contains("did you mean \"schema\"")
+    );
+    let builtin = json_of(&get(&fx, Who::Bearer(alice), "/api/admin/mcp/builtin"));
+    assert_eq!(builtin["instructions"], graphersal_mcp::instructions());
+    // A reader's preview of a read-only name.
+    let reader = json_of(&post(
+        &fx,
+        Who::Bearer(alice),
+        "/api/admin/mcp/preview",
+        json!({"name": "r", "level": "read", "profile": {"tools": {"include": ["gql", "set_schema"]}}}),
+    ));
+    assert_eq!(names_of(reader["tools"].as_array().unwrap()), ["gql"]);
+    assert_eq!(reader["readOnly"], true);
+}
+
+/// The knowledge-base configuration of the graphersal CLI (`--mcp-config FILE` with an
+/// instructions file beside it) imports cleanly and gives the same `initialize` and
+/// `tools/list` as graphersal-mcp serving that configuration itself (what the CLI dev server
+/// does), on a synthetic graph with saved queries in folders like the knowledge base's.
+#[test]
+fn a_cli_mcp_config_imports_and_answers_as_graphersal_mcp_does() {
+    let fx = fixture("access-mcp-profile-cli");
+    let alice = fx.alice.as_str();
+    for (name, folder) in [
+        ("recall", "kb"),
+        ("symbol", "kb"),
+        ("outline", "kb/code"),
+        ("memories", "memory"),
+        ("sessions", "memory"),
+        ("maintenance", "admin"),
+    ] {
+        let script = format!(
+            "g.define_query(#{{name: \"{name}\", folder: \"{folder}\", description: \"Finds {name}.\", \
+             params: #{{text: #{{schema: #{{type: \"string\"}}, default: \"\"}}}}, \
+             body: \"fn {name}(text) {{ g.v().has_label(\\\"person\\\").values(\\\"name\\\") }}\"}})"
+        );
+        execute(&fx, Who::Bearer(OPERATOR), "w", &script);
+    }
+    let temp = TempDir::new("access-mcp-profile-cli-files");
+    let config_text = r#"{
+  "_comment": "Profile of a knowledge-base server: only the saved queries of folders kb and memory",
+  "server_name": "graphersal-kb",
+  "instructions": { "mode": "replace", "file": "mcp-instructions.md" },
+  "descriptions": "short",
+  "tools": { "include": ["gql", "query", "get_schema", "run_saved_query"] },
+  "saved_query_tools": { "folders": ["kb", "memory"], "paging_params": false },
+  "resources": ["schema", "saved-queries", "gql-reference", "dsl-reference"]
+}"#;
+    let instructions = "kb: the knowledge graph of a repository.\n\nProject (folder kb):\n- recall(text)\n\nMemory (folder memory):\n- memories(text)\n";
+    std::fs::write(temp.path().join("mcp-config.json"), config_text).unwrap();
+    std::fs::write(temp.path().join("mcp-instructions.md"), instructions).unwrap();
+    let profile = crate::console::read_mcp_profile(&temp.path().join("mcp-config.json")).unwrap();
+    assert_eq!(profile["instructions"]["text"], instructions);
+    let set = put(
+        &fx,
+        Who::Bearer(alice),
+        "/api/admin/mcp/databases/w/profile",
+        json!({"profile": profile}),
+    );
+    assert_eq!(set.status(), 200, "{}", String::from_utf8_lossy(set.body()));
+    assert!(
+        json_of(&set)["warnings"].as_array().unwrap().is_empty(),
+        "{}",
+        String::from_utf8_lossy(set.body())
+    );
+
+    // What the server answers on /db/w/mcp.
+    let (session, served_init) = mcp_initialize_result(&fx, Who::Bearer(alice), "/db/w/mcp");
+    let served_tools = mcp_tool_list(&fx, Who::Bearer(alice), "/db/w/mcp", &session);
+    let resources = mcp(
+        &fx,
+        Who::Bearer(alice),
+        "/db/w/mcp",
+        Some(&session),
+        json!({"jsonrpc": "2.0", "id": 5, "method": "resources/list"}),
+    );
+    let served_resources = json_of(&resources)["result"]["resources"].clone();
+
+    // What graphersal-mcp answers with the CLI's reading of the same file, on the same graph.
+    let dir = temp.path().to_path_buf();
+    let config = graphersal_mcp::McpConfig::parse(config_text, &mut |file| {
+        std::fs::read_to_string(dir.join(file)).map_err(|err| err.to_string())
+    })
+    .unwrap();
+    let cli = graphersal_mcp::Mcp::new(false, None, false).with_config(config);
+    let context = fx.loader.context("w").unwrap();
+    let ask = |id: u64, method: &str, params: Value, session: Option<&str>| {
+        let body =
+            json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}).to_string();
+        let mut request = graphersal_mcp::McpRequest::new("POST", body.as_bytes())
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json, text/event-stream");
+        if let Some(session) = session {
+            request = request.header("Mcp-Session-Id", session);
+        }
+        let answer = cli.handle(context.as_ref(), request);
+        let session = answer.header("Mcp-Session-Id").map(str::to_string);
+        (
+            session,
+            serde_json::from_slice::<Value>(answer.body()).unwrap()["result"].clone(),
+        )
+    };
+    let (cli_session, cli_init) = ask(
+        1,
+        "initialize",
+        json!({"protocolVersion": "2025-06-18",
+        "capabilities": {}, "clientInfo": {"name": "t", "version": "1"}}),
+        None,
+    );
+    let (_, cli_tools) = ask(2, "tools/list", json!({}), cli_session.as_deref());
+    let (_, cli_resources) = ask(3, "resources/list", json!({}), cli_session.as_deref());
+
+    assert_eq!(served_init, cli_init);
+    assert_eq!(served_init["instructions"], instructions.trim());
+    assert_eq!(served_init["serverInfo"]["name"], "graphersal-kb");
+    assert_eq!(Value::Array(served_tools.clone()), cli_tools["tools"]);
+    assert_eq!(served_resources, cli_resources["resources"]);
+    assert_eq!(
+        names_of(&served_tools),
+        [
+            "query",
+            "gql",
+            "run_saved_query",
+            "get_schema",
+            "memories",
+            "outline",
+            "recall",
+            "sessions",
+            "symbol"
+        ]
+    );
+}

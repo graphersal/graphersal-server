@@ -3802,6 +3802,460 @@
         }
       }
     },
+    "/api/admin/mcp/profile": {
+      "get": {
+        "operationId": "getMcpDefaultProfile",
+        "summary": "Read the server default MCP profile",
+        "description": "Read the server default MCP profile (`/mcp`, and every name without a profile of its own): the profile set, where the one that applies comes from (`own`, `database`, `default`, `builtin`), warnings, and for a loaded database its saved queries (the editor's picker).",
+        "tags": [
+          "mcp"
+        ],
+        "x-graphersal-access": "admin",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "The profile view.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/McpProfileView"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/HostRefused"
+          },
+          "404": {
+            "$ref": "#/components/responses/AdminNotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/Failure"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      },
+      "put": {
+        "operationId": "setMcpDefaultProfile",
+        "summary": "Set the server default MCP profile",
+        "description": "Set the server default MCP profile (`/mcp`, and every name without a profile of its own). The profile is the JSON of graphersal's `--mcp-config` file with the instructions inline; graphersal-mcp checks it (`400` names the key, with a did-you-mean). The endpoints serve it from their next request on. Audited.",
+        "tags": [
+          "mcp"
+        ],
+        "x-graphersal-access": "admin",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IfMatch"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "profile"
+                ],
+                "properties": {
+                  "profile": {
+                    "$ref": "#/components/schemas/McpProfile"
+                  },
+                  "revision": {
+                    "type": "string",
+                    "description": "The revision this change is based on (else the `If-Match` header; neither: no check). A stale one is `409 RevisionConflict`, nothing changed."
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The profile view plus `changed`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/McpProfileView"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/HostRefused"
+          },
+          "404": {
+            "$ref": "#/components/responses/AdminNotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/RevisionConflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/Failure"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "clearMcpDefaultProfile",
+        "summary": "Clear the server default MCP profile",
+        "description": "Remove the server default MCP profile (`/mcp`, and every name without a profile of its own): the next profile in line applies (an alias's database's, the server default, the built-in one). Audited.",
+        "tags": [
+          "mcp"
+        ],
+        "x-graphersal-access": "admin",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IfMatch"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The profile view plus `changed`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/McpProfileView"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/HostRefused"
+          },
+          "404": {
+            "$ref": "#/components/responses/AdminNotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/RevisionConflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/Failure"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/api/admin/mcp/databases/{name}/profile": {
+      "get": {
+        "operationId": "getMcpProfile",
+        "summary": "Read a name's MCP profile",
+        "description": "Read the MCP profile of a database or alias (`/db/<name>/mcp`): the profile set, where the one that applies comes from (`own`, `database`, `default`, `builtin`), warnings, and for a loaded database its saved queries (the editor's picker).",
+        "tags": [
+          "mcp"
+        ],
+        "x-graphersal-access": "admin",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "A database's or alias's name (also a name with MCP settings that names nothing now, to clear what it left)."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The profile view.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/McpProfileView"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/HostRefused"
+          },
+          "404": {
+            "$ref": "#/components/responses/AdminNotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/Failure"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      },
+      "put": {
+        "operationId": "setMcpProfile",
+        "summary": "Set a name's MCP profile",
+        "description": "Set the MCP profile of a database or alias (`/db/<name>/mcp`). The profile is the JSON of graphersal's `--mcp-config` file with the instructions inline; graphersal-mcp checks it (`400` names the key, with a did-you-mean). The endpoints serve it from their next request on. Audited.",
+        "tags": [
+          "mcp"
+        ],
+        "x-graphersal-access": "admin",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "A database's or alias's name (also a name with MCP settings that names nothing now, to clear what it left)."
+          },
+          {
+            "$ref": "#/components/parameters/IfMatch"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "profile"
+                ],
+                "properties": {
+                  "profile": {
+                    "$ref": "#/components/schemas/McpProfile"
+                  },
+                  "revision": {
+                    "type": "string",
+                    "description": "The revision this change is based on (else the `If-Match` header; neither: no check). A stale one is `409 RevisionConflict`, nothing changed."
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The profile view plus `changed`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/McpProfileView"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/HostRefused"
+          },
+          "404": {
+            "$ref": "#/components/responses/AdminNotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/RevisionConflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/Failure"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "clearMcpProfile",
+        "summary": "Clear a name's MCP profile",
+        "description": "Remove the MCP profile of a database or alias (`/db/<name>/mcp`): the next profile in line applies (an alias's database's, the server default, the built-in one). Audited.",
+        "tags": [
+          "mcp"
+        ],
+        "x-graphersal-access": "admin",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "A database's or alias's name (also a name with MCP settings that names nothing now, to clear what it left)."
+          },
+          {
+            "$ref": "#/components/parameters/IfMatch"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The profile view plus `changed`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/McpProfileView"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/HostRefused"
+          },
+          "404": {
+            "$ref": "#/components/responses/AdminNotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/RevisionConflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/Failure"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/api/admin/mcp/builtin": {
+      "get": {
+        "operationId": "getMcpBuiltin",
+        "summary": "The built-in MCP texts",
+        "description": "What a profile starts from: graphersal-mcp's built-in instructions, every built-in tool with its description (and the one a reader gets), the resources, the server name and the limits.",
+        "tags": [
+          "mcp"
+        ],
+        "x-graphersal-access": "admin",
+        "responses": {
+          "200": {
+            "description": "The built-in texts.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/McpBuiltin"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/HostRefused"
+          },
+          "404": {
+            "$ref": "#/components/responses/AdminNotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/Failure"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/api/admin/mcp/preview": {
+      "post": {
+        "operationId": "previewMcpProfile",
+        "summary": "What an agent sees",
+        "description": "Runs graphersal-mcp's own `initialize`, `tools/list` and `resources/list` for a profile (absent: the name's effective one; null: the built-in one) on the database's context when it is loaded (else an empty graph), at a level (`read` or `write`), or for `/mcp` (`endpoint` `server`). Nothing is saved.",
+        "tags": [
+          "mcp"
+        ],
+        "x-graphersal-access": "admin",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "profile": {
+                    "oneOf": [
+                      {
+                        "$ref": "#/components/schemas/McpProfile"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "name": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "endpoint": {
+                    "enum": [
+                      "database",
+                      "server"
+                    ]
+                  },
+                  "level": {
+                    "enum": [
+                      "read",
+                      "write"
+                    ]
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "What an agent sees.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/McpPreview"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/HostRefused"
+          },
+          "404": {
+            "$ref": "#/components/responses/AdminNotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/Failure"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
     "/api/admin/databases/{name}/verify": {
       "post": {
         "operationId": "verifyDatabase",
@@ -5400,6 +5854,10 @@
               "object",
               "null"
             ]
+          },
+          "defaultProfile": {
+            "type": "boolean",
+            "description": "Whether a server default MCP profile is set."
           }
         }
       },
@@ -5846,6 +6304,192 @@
             ]
           },
           "notes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "McpProfile": {
+        "type": "object",
+        "description": "An MCP profile: the JSON of graphersal's `--mcp-config` file (`tools.include`/`exclude`/`overrides`, `instructions {mode, text}`, `saved_query_tools`, `resources`, `server_name`, `server_title`, `answer_limit_chars`, `descriptions`; keys starting with `_` are comments), the instructions inline (an instructions `file` is refused).",
+        "additionalProperties": true
+      },
+      "McpProfileView": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "kind": {
+            "enum": [
+              "default",
+              "database",
+              "alias",
+              "missing"
+            ]
+          },
+          "target": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "profile": {
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "source": {
+            "enum": [
+              "own",
+              "database",
+              "default",
+              "builtin"
+            ]
+          },
+          "effective": {
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "endpoint": {
+            "type": "string"
+          },
+          "readOnly": {
+            "type": "boolean"
+          },
+          "loaded": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "savedQueries": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "object"
+            }
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "revision": {
+            "type": "string"
+          },
+          "changed": {
+            "type": "boolean"
+          }
+        }
+      },
+      "McpBuiltin": {
+        "type": "object",
+        "properties": {
+          "instructions": {
+            "type": "string"
+          },
+          "directoryInstructions": {
+            "type": "string"
+          },
+          "tools": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "resources": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "serverName": {
+            "type": "string"
+          },
+          "serverTitle": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          },
+          "answerLimitChars": {
+            "type": "integer"
+          },
+          "minAnswerChars": {
+            "type": "integer"
+          },
+          "maxInstructionsChars": {
+            "type": "integer"
+          }
+        }
+      },
+      "McpPreview": {
+        "type": "object",
+        "properties": {
+          "instructions": {
+            "type": "string"
+          },
+          "serverInfo": {
+            "type": "object"
+          },
+          "tools": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "resources": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "endpoint": {
+            "type": "string"
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "level": {
+            "enum": [
+              "read",
+              "write"
+            ]
+          },
+          "readOnly": {
+            "type": "boolean"
+          },
+          "loaded": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "source": {
+            "type": "string"
+          },
+          "notes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "warnings": {
             "type": "array",
             "items": {
               "type": "string"

@@ -376,6 +376,34 @@ pub enum DbCommand {
         /// Each dotted key with its new value as JSON (`null`: back to its default).
         changes: Vec<(String, Value)>,
     },
+    /// `mcp profile show [NAME]`: the MCP profile of a database or alias (where the one that
+    /// applies comes from), or the server default.
+    McpProfileShow {
+        /// A database or an alias; `None`: the server default profile.
+        name: Option<String>,
+    },
+    /// `mcp profile set FILE [NAME]`: sets the MCP profile from a graphersal `--mcp-config`
+    /// file ([`read_mcp_profile`] reads it and inlines its instructions file).
+    McpProfileSet {
+        /// A database or an alias; `None`: the server default profile.
+        name: Option<String>,
+        /// The profile (JSON, instructions inline).
+        profile: Value,
+    },
+    /// `mcp profile clear [NAME]`: removes the MCP profile (the name falls back to its
+    /// database's, the server default or the built-in one).
+    McpProfileClear {
+        /// A database or an alias; `None`: the server default profile.
+        name: Option<String>,
+    },
+    /// `mcp profile preview [NAME] [--read]`: what an agent sees (instructions, tools) on
+    /// `/db/<NAME>/mcp`, or on `/mcp` without a name.
+    McpProfilePreview {
+        /// A database or an alias; `None`: `/mcp` with the server default profile.
+        name: Option<String>,
+        /// As a caller that may only read.
+        read: bool,
+    },
     /// `mcp db NAME on|off` (exposure) or `mcp db NAME read-only on|off`.
     McpDatabase {
         /// A database or an alias.
@@ -645,6 +673,25 @@ impl DbCommand {
             DbCommand::McpExposeNew { on } => {
                 (Method::Put, "mcp".into(), Some(json!({ "exposeNew": on })))
             }
+            DbCommand::McpProfileShow { name } => (Method::Get, profile_path(name), None),
+            DbCommand::McpProfileSet { name, profile } => (
+                Method::Put,
+                profile_path(name),
+                Some(json!({ "profile": profile })),
+            ),
+            DbCommand::McpProfileClear { name } => (Method::Delete, profile_path(name), None),
+            DbCommand::McpProfilePreview { name, read } => {
+                let mut body = Map::new();
+                if let Some(name) = name {
+                    body.insert("name".into(), json!(name));
+                }
+                body.insert("level".into(), json!(if *read { "read" } else { "write" }));
+                (
+                    Method::Post,
+                    "mcp/preview".into(),
+                    Some(Value::Object(body)),
+                )
+            }
             DbCommand::McpDatabase {
                 name,
                 exposed,
@@ -673,6 +720,29 @@ impl DbCommand {
             ),
         }
     }
+}
+
+/// The admin path of an MCP profile: the server default (`None`) or a name's.
+fn profile_path(name: &Option<String>) -> String {
+    match name {
+        Some(name) => format!("mcp/databases/{}/profile", segment(name)),
+        None => "mcp/profile".to_string(),
+    }
+}
+
+/// Reads an MCP profile from a graphersal `--mcp-config` file at `path` (`mcp profile set
+/// FILE`): its JSON, with the text of the instructions `file` it names (relative to the
+/// configuration file's directory, as the graphersal CLI resolves it) put into
+/// `instructions.text`, since the server keeps the instructions inside the profile. The server
+/// checks the rest when it is saved.
+///
+/// `Err`: the file or its instructions file cannot be read, or it is not JSON.
+pub fn read_mcp_profile(path: &std::path::Path) -> Result<Value, String> {
+    let text = std::fs::read_to_string(path).map_err(|err| format!("{}: {err}", path.display()))?;
+    let mut profile: Value = serde_json::from_str(&text)
+        .map_err(|err| format!("{}: not valid JSON: {err}", path.display()))?;
+    crate::mcp_profiles::inline_from_disk(&mut profile, path)?;
+    Ok(profile)
 }
 
 /// `text` as one path segment: every byte but the URL's unreserved characters as `%XX` (the

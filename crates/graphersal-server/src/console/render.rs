@@ -358,6 +358,11 @@ fn render_with(command: &DbCommand, answer: &Value, dir: &Path, server: Option<&
             };
             note.text()
         }
+        DbCommand::McpProfileShow { .. } => render_profile(answer, &dir_arg),
+        DbCommand::McpProfileSet { .. } | DbCommand::McpProfileClear { .. } => {
+            render_profile_changed(command, answer, &dir_arg)
+        }
+        DbCommand::McpProfilePreview { .. } => render_preview(answer),
         DbCommand::McpDatabase { .. } => {
             let changed = &answer["changed"];
             let name = changed["name"].as_str().unwrap_or_default();
@@ -922,6 +927,14 @@ fn render_mcp(answer: &Value, dir_arg: &str) -> String {
             )
         },
     );
+    status.row(
+        "default profile",
+        if answer["defaultProfile"] == Value::Bool(true) {
+            format!("set (show it: {BIN} mcp profile show --dir {dir_arg})")
+        } else {
+            "none: the built-in profile".to_string()
+        },
+    );
     let usage = &answer["usage"];
     if usage.is_object() {
         status.row(
@@ -958,6 +971,7 @@ fn render_mcp(answer: &Value, dir_arg: &str) -> String {
                         yes_no(&row["effectiveReadOnly"]).to_string(),
                         row["sessions"].as_u64().unwrap_or(0).to_string(),
                         row["calls"].as_u64().unwrap_or(0).to_string(),
+                        row["profile"].as_str().unwrap_or("builtin").to_string(),
                     ]
                 })
                 .collect()
@@ -967,7 +981,14 @@ fn render_mcp(answer: &Value, dir_arg: &str) -> String {
         databases.row("none", "no databases or aliases");
     } else {
         databases.lines(table(
-            &["NAME", "OFFERED", "READ-ONLY", "SESSIONS", "CALLS"],
+            &[
+                "NAME",
+                "OFFERED",
+                "READ-ONLY",
+                "SESSIONS",
+                "CALLS",
+                "PROFILE",
+            ],
             &rows,
         ));
     }
@@ -992,6 +1013,139 @@ fn render_mcp(answer: &Value, dir_arg: &str) -> String {
         sections.push(section);
     }
     text::render(&sections)
+}
+
+/// Where the MCP profile that applies comes from, for people.
+fn profile_source_text(source: &str) -> &'static str {
+    match source {
+        "own" => "its own profile",
+        "database" => "its database's profile (the alias has none of its own)",
+        "default" => "the server default profile (it has none of its own)",
+        _ => "the built-in profile (no profile set)",
+    }
+}
+
+/// `mcp profile show [NAME]`: where the profile comes from and the profile itself.
+fn render_profile(answer: &Value, dir_arg: &str) -> String {
+    let name = answer["name"].as_str();
+    let mut status = Section::new(match name {
+        Some(name) => format!("MCP profile of '{name}'"),
+        None => "Server default MCP profile".to_string(),
+    });
+    status.row("endpoint", answer["endpoint"].as_str().unwrap_or_default());
+    if let Some(target) = answer["target"].as_str() {
+        status.row("alias of", target);
+    }
+    status.row(
+        "applies",
+        profile_source_text(answer["source"].as_str().unwrap_or_default()),
+    );
+    if answer["readOnly"] == Value::Bool(true) {
+        status.row("read-only", "yes: agents get the reading tools only");
+    }
+    for warning in answer["warnings"].as_array().into_iter().flatten() {
+        status.row("note", warning.as_str().unwrap_or_default());
+    }
+    let what = name.map(|n| format!(" {n}")).unwrap_or_default();
+    status.unwrapped(
+        "change",
+        format!("{BIN} mcp profile set FILE{what} --dir {dir_arg}"),
+    );
+    let mut sections = vec![status];
+    let mut profile = Section::new("Profile (JSON)");
+    match &answer["effective"] {
+        Value::Null => profile.row(
+            "none",
+            "every tool with its built-in description, the built-in instructions",
+        ),
+        effective => profile.lines(
+            serde_json::to_string_pretty(effective)
+                .unwrap_or_default()
+                .lines()
+                .map(str::to_string),
+        ),
+    }
+    sections.push(profile);
+    text::render(&sections)
+}
+
+/// `mcp profile set|clear [NAME]`.
+fn render_profile_changed(command: &DbCommand, answer: &Value, dir_arg: &str) -> String {
+    let set = matches!(command, DbCommand::McpProfileSet { .. });
+    let name = answer["name"].as_str();
+    let what = match name {
+        Some(name) => format!("The MCP profile of '{name}'"),
+        None => "The server default MCP profile".to_string(),
+    };
+    let mut note = Note::new(format!("{what} is {}", if set { "set" } else { "cleared" }))
+        .detail(
+            "applies",
+            profile_source_text(answer["source"].as_str().unwrap_or_default()),
+        )
+        .detail(
+            "from",
+            "the next request to the endpoint (agents that keep the tool list of their session \
+             see the new one after they reconnect)",
+        );
+    for warning in answer["warnings"].as_array().into_iter().flatten() {
+        note = note.detail("note", warning.as_str().unwrap_or_default());
+    }
+    let what = name.map(|n| format!(" {n}")).unwrap_or_default();
+    note.command(
+        "what an agent sees",
+        format!("{BIN} mcp profile preview{what} --dir {dir_arg}"),
+    )
+    .text()
+}
+
+/// `mcp profile preview [NAME] [--read]`: the instructions and the tools an agent gets.
+fn render_preview(answer: &Value) -> String {
+    let mut status = Section::new("What an agent sees");
+    status.row("endpoint", answer["endpoint"].as_str().unwrap_or_default());
+    status.row(
+        "as",
+        if answer["readOnly"] == Value::Bool(true) {
+            "a caller that may only read"
+        } else {
+            "a caller that may write"
+        },
+    );
+    status.row(
+        "server",
+        answer["serverInfo"]["name"].as_str().unwrap_or_default(),
+    );
+    for note in answer["notes"].as_array().into_iter().flatten() {
+        status.row("note", note.as_str().unwrap_or_default());
+    }
+    for warning in answer["warnings"].as_array().into_iter().flatten() {
+        status.row("note", warning.as_str().unwrap_or_default());
+    }
+    let mut instructions = Section::new("Instructions");
+    instructions.lines(
+        answer["instructions"]
+            .as_str()
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string),
+    );
+    let rows: Vec<Vec<String>> = answer["tools"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|tool| {
+            let description = tool["description"].as_str().unwrap_or_default();
+            let first: String = description.chars().take(70).collect();
+            let first = if first.len() < description.len() {
+                format!("{first}…")
+            } else {
+                first
+            };
+            vec![tool["name"].as_str().unwrap_or_default().to_string(), first]
+        })
+        .collect();
+    let mut tools = Section::new(format!("Tools ({})", rows.len()));
+    tools.lines(table(&["TOOL", "DESCRIPTION"], &rows));
+    text::render(&[status, instructions, tools])
 }
 
 /// A limit value for people: `5000`, `0 (no limit)`, `-` (not set).

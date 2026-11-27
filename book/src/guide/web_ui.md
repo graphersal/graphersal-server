@@ -158,6 +158,10 @@ without a token.
   and import forms have their own "Expose through MCP" checkbox.
 - Usage since the start: open sessions and tool calls per database, tool calls per tool and per
   user, the recent errors.
+- Profiles: what agents see (tools, descriptions, instructions, saved queries as tools,
+  resources). "Edit…" beside "Server default profile" or on a row opens the profile editor; the
+  Profile column says where each name's profile comes from. See
+  [Editing a profile in the web UI](mcp.md#editing-a-profile-in-the-web-ui).
 - The endpoint URL and the `claude mcp add` command.
 
 More in [MCP](mcp.md).

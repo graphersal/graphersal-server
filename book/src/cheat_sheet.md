@@ -169,6 +169,11 @@ graphersal-server mcp on --dir ./srv                                   # | off: 
 graphersal-server mcp expose-new on --dir ./srv                        # | off: offer NEW databases and aliases (default off)
 graphersal-server mcp db acme off --dir ./srv                          # | on: hide acme from MCP
 graphersal-server mcp db acme read-only on --dir ./srv                 # | off: MCP only reads acme
+graphersal-server mcp profile set mcp-config.json acme --dir ./srv     # acme's MCP profile from a --mcp-config file
+graphersal-server mcp profile set default.json --dir ./srv             # the server default profile (/mcp, names without one)
+graphersal-server mcp profile show acme --dir ./srv                    # where acme's profile comes from, its JSON
+graphersal-server mcp profile preview acme --read --dir ./srv          # what a reader's agent sees on /db/acme/mcp
+graphersal-server mcp profile clear acme --dir ./srv                   # back to the server default / built-in
 claude mcp add --transport http --header "Authorization: Bearer <token>" graphersal http://127.0.0.1:8484/mcp
 claude mcp add --transport http --header "Authorization: Bearer <token>" acme http://127.0.0.1:8484/db/acme/mcp
 ```

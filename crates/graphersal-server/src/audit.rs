@@ -180,6 +180,15 @@ pub enum AuditEvent {
         /// Whether MCP serves it read-only.
         read_only: bool,
     },
+    /// An MCP profile was set or cleared (`mcp.toml`; MCPPROF): a database's or alias's, or
+    /// the server-wide default.
+    #[non_exhaustive]
+    McpProfileSet {
+        /// The database or alias; `None`: the server default profile.
+        name: Option<String>,
+        /// Set (`true`) or cleared.
+        set: bool,
+    },
     /// An alias was renamed.
     #[non_exhaustive]
     AliasRenamed {
@@ -494,6 +503,13 @@ impl fmt::Display for AuditEvent {
                 on_off(*exposed),
                 on_off(*read_only)
             ),
+            AuditEvent::McpProfileSet { name, set } => {
+                let what = match name {
+                    Some(name) => format!("MCP profile of '{name}'"),
+                    None => "server default MCP profile".to_string(),
+                };
+                write!(f, "{what} {}", if *set { "set" } else { "cleared" })
+            }
             AuditEvent::AliasRenamed {
                 old,
                 new,

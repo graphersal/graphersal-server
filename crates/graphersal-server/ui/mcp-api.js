@@ -72,6 +72,9 @@ export function statusOf(answer = {}) {
   return { tone: 'ok', text: 'MCP is on', help: '' };
 }
 
+/** Whether a server default MCP profile is set (`defaultProfile`; MCPPROF). */
+export const defaultProfileOf = (answer = {}) => answer.defaultProfile === true;
+
 /** Whether new databases and aliases are offered to MCP (`exposeNew`; default and missing: no). */
 export const exposeNewOf = (answer = {}) => answer.exposeNew === true;
 
@@ -100,6 +103,7 @@ export function mcpRows(answer = {}) {
         effectiveExposed: r.effectiveExposed !== false,
         effectiveReadOnly: r.effectiveReadOnly === true,
         readOnlyReason: Object.prototype.hasOwnProperty.call(READ_ONLY_REASONS, r.readOnlyReason) ? r.readOnlyReason : '',
+        profile: ['own', 'database', 'default', 'builtin'].includes(r.profile) ? r.profile : 'builtin',
         sessions: num(r.sessions),
         calls: num(r.calls),
         errors: num(r.errors),

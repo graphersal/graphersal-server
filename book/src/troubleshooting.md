@@ -488,6 +488,23 @@ graphersal-server user remove admin --dir ./srv
 
 More in [MCP](guide/mcp.md).
 
+## An MCP profile is refused, or the agent does not see a tool
+
+- `400 "the MCP profile is not valid: unknown key \"tools.inclde\" (did you mean
+  \"tools.include\"?)"`: fix the key the message names (the web UI keeps your form; the JSON view
+  shows what is sent). `... not in a file` means the profile names an instructions `file`: use
+  `mcp profile set FILE` (it reads the file into the profile) or put the text into
+  `instructions.text`.
+- `serve` stops with `mcp.toml: databases.<name>.profile: ...`: a hand edit of `mcp.toml` broke a
+  profile. Fix the key the message names, or remove the `[databases.<name>.profile...]` tables.
+- The agent misses a writing tool the profile names: it may only read (a `read` grant, a
+  read-only database or base, MCP read-only). `graphersal-server mcp profile preview NAME --read
+  --dir ./srv` shows what a reader gets.
+- The agent still shows the old tools: it keeps the list of its session start. Reconnect it (a
+  new MCP session); the server serves the new profile from the next request on.
+- A saved-query tool is missing on `/mcp`: saved queries are tools of their own only on
+  `/db/<name>/mcp`; on `/mcp` the agent runs them with `run_saved_query`.
+
 ## `--token` is refused
 
 - `cannot reach the running graphersal-server at ...`: no server runs, or `--server` names

@@ -125,6 +125,67 @@ impl Admin {
         Ok((key, value, settings))
     }
 
+    /// Sets (`Some`) or clears (`None`) the MCP profile of the database or alias `name`, or with
+    /// `name` `None` the server-wide default profile ([`crate::mcp_profiles`]): the folded name
+    /// and the new settings. The profile is checked first (graphersal-mcp's message, the key
+    /// named); a name must be a database or an alias, or have settings already (to clear what a
+    /// gone name left), and is held while the file is written. The endpoints serve the new
+    /// profile from their next request on.
+    ///
+    /// `Err`: [`ServerError::InvalidInput`] (the profile); [`ServerError::NotFound`];
+    /// [`ServerError::Conflict`] for a stale revision; [`ServerError::Io`].
+    pub(crate) fn mcp_profile_set(
+        &self,
+        name: Option<&str>,
+        profile: Option<serde_json::Value>,
+    ) -> Result<(Option<String>, McpSettings), ServerError> {
+        let profile = profile
+            .map(|profile| {
+                crate::mcp_profiles::check(profile)
+                    .map(|(stored, _)| stored)
+                    .map_err(|message| ServerError::InvalidInput {
+                        name: "MCP profile".to_string(),
+                        message,
+                    })
+            })
+            .transpose()?;
+        let control = self.mcp_control()?;
+        let set = profile.is_some();
+        let Some(name) = name else {
+            let settings = control.change(self.expected(), |settings| {
+                settings.default_profile = profile;
+                Ok(())
+            })?;
+            self.audit
+                .record(AuditEvent::McpProfileSet { name: None, set });
+            return Ok((None, settings));
+        };
+        let key = fold(name);
+        let change = || {
+            control.change(self.expected(), |settings| {
+                let mut value = settings.of(&key);
+                value.profile = profile.clone();
+                settings.databases.insert(key.clone(), value);
+                Ok(())
+            })
+        };
+        let settings = match self.registry.while_named(&key, change) {
+            Err(ServerError::NotFound { .. }) if control.has_own(&key) => change()?,
+            other => other?,
+        };
+        self.audit.record(AuditEvent::McpProfileSet {
+            name: Some(key.clone()),
+            set,
+        });
+        Ok((Some(key), settings))
+    }
+
+    /// The loaded context of the database `name` (`None`: not loaded, or offline), for the MCP
+    /// profile previews and the saved-query picker.
+    pub(crate) fn loaded_context(&self, name: &str) -> Option<Arc<graphersal_serve::Context>> {
+        self.loader.as_ref().and_then(|loader| loader.context(name))
+    }
+
     /// Removes the MCP settings of `name` (a database deleted, an alias removed; under the
     /// registry's write lock, with its grants). A failure only warns.
     pub(crate) fn forget_mcp_settings(&self, name: &str) {

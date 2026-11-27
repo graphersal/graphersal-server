@@ -253,6 +253,42 @@ or it was created with `--mcp` / `"mcp": true` ([MCP](../guide/mcp.md#new-server
 A renamed alias keeps its settings; a deleted database or removed alias loses them. `server.toml [mcp] enabled = false` overrides `enabled = true` here
 (no endpoint at all).
 
+**MCP profiles** ([Profiles](../guide/mcp.md#profiles)) are kept here too: the server default
+under `[default_profile]`, a name's under `[databases.<name>.profile]`, each the JSON of
+graphersal's `--mcp-config` file written as TOML tables, with the instructions inline:
+
+```toml
+[default_profile.tools]
+include = ["gql", "query", "get_schema", "run_saved_query"]
+
+[databases.kb.profile]
+server_name = "graphersal-kb"
+resources = ["schema", "saved-queries", "gql-reference", "dsl-reference"]
+
+[databases.kb.profile.instructions]
+mode = "replace"
+text = """
+graphersal-kb: the knowledge graph of the repository.
+"""
+
+[databases.kb.profile.saved_query_tools]
+folders = ["kb", "memory"]
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `default_profile` | none (the built-in profile) | `/mcp`, and every `/db/<name>/mcp` whose name (and, for an alias, its database) has no profile |
+| `databases.<name>.profile` | none | the profile of that database or alias |
+
+A profile key is one of `server_name`, `server_title`, `instructions` (`mode` `builtin` \|
+`append` \| `replace`, `text`), `descriptions` (only `"short"`), `tools` (`include`, `exclude`,
+`overrides.<tool>.description`), `saved_query_tools` (`folders`, `names`, `exclude`,
+`paging_params`, `write_note`), `resources`, `answer_limit_chars` (at least 1000); a key starting
+with `_` is a comment. An instructions `file` is refused. Each profile is checked by
+graphersal-mcp when the file is read: a profile it refuses stops `serve` and the console with
+the key named. Read at start, then kept in memory; a change through the server applies at the
+next request.
+
 ## `database.toml`
 
 ```toml

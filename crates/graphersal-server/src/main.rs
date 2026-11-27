@@ -1343,6 +1343,7 @@ fn mcp_command(args: &[String]) -> ExitCode {
     let mut token: Option<String> = None;
     let mut server: Option<String> = None;
     let mut json = false;
+    let mut read = false;
     let mut rest = args.iter();
     while let Some(arg) = rest.next() {
         if !arg.starts_with("--") {
@@ -1354,6 +1355,7 @@ fn mcp_command(args: &[String]) -> ExitCode {
             None => (arg.as_str(), None),
         };
         match flag {
+            "--read" if inline.is_none() => read = true,
             "--dir" | "--token" | "--server" => {
                 let Some(value) = inline.or_else(|| rest.next().cloned()) else {
                     return usage_error(&format!("mcp: {flag} needs a value"));
@@ -1388,15 +1390,38 @@ fn mcp_command(args: &[String]) -> ExitCode {
             exposed: None,
             read_only: Some(*on == "on"),
         },
+        ["profile", "show", name @ ..] if name.len() <= 1 => DbCommand::McpProfileShow {
+            name: name.first().map(|n| n.to_string()),
+        },
+        ["profile", "clear", name @ ..] if name.len() <= 1 => DbCommand::McpProfileClear {
+            name: name.first().map(|n| n.to_string()),
+        },
+        ["profile", "preview", name @ ..] if name.len() <= 1 => DbCommand::McpProfilePreview {
+            name: name.first().map(|n| n.to_string()),
+            read,
+        },
+        ["profile", "set", file, name @ ..] if name.len() <= 1 => {
+            match graphersal_server::console::read_mcp_profile(std::path::Path::new(file)) {
+                Ok(profile) => DbCommand::McpProfileSet {
+                    name: name.first().map(|n| n.to_string()),
+                    profile,
+                },
+                Err(message) => return failure_text(&format!("mcp profile set: {message}")),
+            }
+        }
         [] => return usage_error("no mcp command given"),
         _ => {
             return usage_error(&format!(
                 "unknown command or wrong arguments: mcp {} (status, on, off, expose-new \
-                 on|off, db NAME on|off, db NAME read-only on|off)",
+                 on|off, db NAME on|off, db NAME read-only on|off, profile show [NAME], profile \
+                 set FILE [NAME], profile clear [NAME], profile preview [NAME] [--read])",
                 positional.join(" ")
             ));
         }
     };
+    if read && !matches!(command, DbCommand::McpProfilePreview { .. }) {
+        return usage_error("mcp: --read belongs to mcp profile preview");
+    }
     let remote = match Remote::of(token, server) {
         Ok(remote) => remote,
         Err(code) => return code,

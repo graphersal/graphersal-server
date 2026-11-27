@@ -818,6 +818,53 @@ unknown name `404`. The changes are audited (`MCP on|off`, `MCP for '<name>': ex
 read-only ...`). Users are named without the `user:` prefix; `anonymous` for requests without
 a token, `operator` for the console's token.
 
+The MCP state also carries `defaultProfile` (whether a server default profile is set), and each
+`databases` row `profile`: where the name's MCP profile comes from (`own`, `database`,
+`default`, `builtin`; below).
+
+### MCP profiles
+
+What agents see on the MCP endpoints ([Profiles](../guide/mcp.md#profiles)), kept in
+`mcp.toml` (the same `revision` as the switches). A profile is the JSON of graphersal's
+`--mcp-config` file with the instructions inline.
+
+| Method | Path | Body | Answer |
+|---|---|---|---|
+| GET | `mcp/builtin` | | `200` the built-in texts: `instructions`, `directoryInstructions` (what `/mcp` puts before them), `tools` (`[{name, title, description, readDescription (null: not offered to a reader), writes, default}]`), `resources` (`[{name, title, description, uri}]`), `serverName`, `serverTitle`, `version`, `answerLimitChars`, `minAnswerChars`, `maxInstructionsChars` |
+| GET | `mcp/profile` | | `200` the profile view of the server default (+ `ETag`) |
+| PUT | `mcp/profile` | `{"profile": {...}, "revision"?}` | `200` the profile view + `"changed": true` |
+| DELETE | `mcp/profile` | (`If-Match`) | `200` the profile view + `"changed": true` |
+| GET, PUT, DELETE | `mcp/databases/<name>/profile` | as above | the profile view of a database or alias |
+| POST | `mcp/preview` | `{"profile"?: {...} \| null, "name"?, "endpoint"?: "database" \| "server", "level"?: "read" \| "write"}` | `200` what an agent sees |
+
+The profile view:
+
+| Field | Meaning |
+|---|---|
+| `name`, `kind` | the name (`null` for the server default); `default`, `database`, `alias` or `missing` (only settings left on it) |
+| `target` | an alias's database |
+| `profile` | the name's own profile, or `null` |
+| `source`, `effective` | where the profile that applies comes from (`own`, `database`: an alias served its database's, `default`, `builtin`) and that profile (`null`: the built-in one) |
+| `endpoint` | `/mcp` or `/db/<name>/mcp` |
+| `readOnly` | MCP serves the name read-only whatever the grant (a base, the read-only flag, MCP read-only) |
+| `loaded`, `savedQueries` | whether the database is loaded; its saved queries `[{name, folder, description, writes}]` (else `null`) |
+| `warnings` | writing tools the profile names that readers never get; `saved_query_tools` on `/mcp` |
+| `revision` | of `mcp.toml` |
+
+A profile graphersal-mcp refuses is `400 {"error": "the MCP profile is not valid: <its
+message, the key named>", "help"}`; an instructions `file` too (put the text in
+`instructions.text`). An unknown name is `404`, a stale revision `409`. A change applies at the
+next request of every endpoint and is audited (`MCP profile of '<name>' set|cleared`, `server
+default MCP profile set|cleared`).
+
+The preview saves nothing: graphersal-mcp's own `initialize`, `tools/list` and `resources/list`
+for `profile` (absent: the name's effective profile; `null`: the built-in one) on the database's
+context when it is loaded (else an empty graph: its saved queries are not listed), as a caller
+at `level` (default `write`; a read-only database is read for everyone), or on `/mcp`
+(`endpoint` `server`, the default without `name`). Answer: `instructions`, `serverInfo`, `tools`
+(the `tools/list` entries), `resources`, `endpoint`, `name`, `level`, `readOnly`, `loaded`,
+`source`, `notes`, `warnings`.
+
 ### Server
 
 `GET /api/admin/server` describes the running server itself (`graphersal-server status`):

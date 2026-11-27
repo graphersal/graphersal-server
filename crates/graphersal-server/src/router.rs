@@ -591,9 +591,8 @@ impl Router {
         // The per-database MCP endpoint: `mcp.toml`'s switches (off: 503; the name or its
         // database not exposed: 404; read-only: the request marked read-only), and its body
         // kept to count its tool calls.
-        let mcp_control = (rest == "mcp" && loader.mcp().is_some())
-            .then(|| loader.mcp_control())
-            .flatten();
+        let is_mcp = rest == "mcp" && loader.mcp().is_some();
+        let mcp_control = is_mcp.then(|| loader.mcp_control()).flatten();
         let mut mcp_read_only = false;
         if let Some(control) = mcp_control {
             if !control.enabled() {
@@ -613,7 +612,7 @@ impl Router {
                 Ok(body) => Some(body),
                 Err(answer) => return answer,
             }
-        } else if mcp_control.is_some() {
+        } else if is_mcp {
             let (max, strict) = crate::mcp::body_limit(principal);
             match crate::mcp::buffer_body(request, max, strict) {
                 Ok(body) => body,
@@ -640,6 +639,50 @@ impl Router {
             );
         }
         let session = crate::mcp::header_of(request.headers(), crate::mcp::SESSION_HEADER);
+        // The per-database MCP endpoint is answered here, under the name's MCP profile of this
+        // moment (crate::mcp_profiles), on the database's context as its host.
+        if let (true, Some(mcp)) = (is_mcp, loader.mcp()) {
+            let Some(context) = loader.context(&entry.name) else {
+                return mounts::not_loaded(&entry);
+            };
+            let identity = principal.identity();
+            let profile = crate::mcp::database_profile(
+                loader,
+                &context,
+                name,
+                &entry.name,
+                granted == Level::Read || mcp_read_only,
+            );
+            let answer = crate::mcp::route_database(
+                mcp,
+                &context,
+                &profile,
+                request,
+                buffered.as_deref(),
+                identity.as_deref(),
+            );
+            if let (Some(control), Some(sent)) = (mcp_control, &buffered) {
+                let new_session =
+                    crate::mcp::header_of(answer.headers(), crate::mcp::SESSION_HEADER);
+                if let Some(opened) = new_session.as_deref()
+                    && session.as_deref() != Some(opened)
+                {
+                    control.usage().session_opened(opened);
+                }
+                control.usage().observe(
+                    &crate::mcp_control::ObservedRequest {
+                        identity: identity.as_deref(),
+                        mount: Some(name),
+                        session: session.as_deref(),
+                        new_session: new_session.as_deref(),
+                        body: sent,
+                    },
+                    answer.status(),
+                    answer.body(),
+                );
+            }
+            return answer;
+        }
         let mut forwarded = match &buffered {
             Some(body) => mounts::forward_with_body(request, &target, &entry.name, body),
             None => mounts::forward(request, &target, &entry.name),
@@ -647,33 +690,12 @@ impl Router {
         if let Some(identity) = principal.identity() {
             forwarded.set_identity(identity);
         }
-        if granted == Level::Read || mcp_read_only {
+        if granted == Level::Read {
             forwarded.mark_read_only();
         }
-        let identity = forwarded.identity().map(str::to_string);
         // The change feed hides other identities' client ids itself (SEC M3, graphersal-serve
         // keys runs and feed entries by the identity set above).
-        let answer = self.lifecycle.handle(forwarded);
-        if let (Some(control), Some(sent)) = (mcp_control, &buffered) {
-            let new_session = crate::mcp::header_of(answer.headers(), crate::mcp::SESSION_HEADER);
-            if let Some(opened) = new_session.as_deref()
-                && session.as_deref() != Some(opened)
-            {
-                control.usage().session_opened(opened);
-            }
-            control.usage().observe(
-                &crate::mcp_control::ObservedRequest {
-                    identity: identity.as_deref(),
-                    mount: Some(name),
-                    session: session.as_deref(),
-                    new_session: new_session.as_deref(),
-                    body: sent,
-                },
-                answer.status(),
-                answer.body(),
-            );
-        }
-        answer
+        self.lifecycle.handle(forwarded)
     }
 
     /// The base URL of `request` for the API descriptions: `[http] public_scheme` and its

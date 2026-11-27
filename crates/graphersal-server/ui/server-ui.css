@@ -210,3 +210,15 @@ p.srv-problems { padding-left: 0; }
 .srv-download-state { margin-top: 6px; }
 .srv-download-state .srv-progress { max-width: 620px; }
 .srv-download-state ul { margin: 4px 0; padding-left: 18px; }
+
+/* The MCP profile editor (MCPPROF, mcp-profile-editor.js). */
+.srv-profile { margin: 12px 0 18px; padding: 10px 14px; border: 1px solid var(--border); border-radius: 8px; }
+.srv-profile-form { max-width: 980px; }
+.srv-profile-tools td textarea { width: 100%; min-width: 24ch; box-sizing: border-box; }
+.srv-profile-tools td:first-child { width: 3em; text-align: center; }
+.srv-profile-tools td:nth-child(2) { width: 14em; }
+.srv-profile-folders { display: flex; flex-wrap: wrap; gap: 4px 16px; margin: 0 0 8px; }
+.srv-profile-files { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; margin: 8px 0; }
+.srv-profile-json textarea { width: 100%; box-sizing: border-box; }
+.srv-pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 28em; overflow: auto; padding: 8px; border: 1px solid var(--border); border-radius: 6px; font-family: var(--font-mono); font-size: 12px; }
+.srv-profile-preview { margin-top: 12px; }

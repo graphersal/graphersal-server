@@ -4491,7 +4491,7 @@ fn mcp_commands_offline_and_through_a_server() {
     let cells: Vec<&str> = acme.split_whitespace().collect();
     assert_eq!(
         cells,
-        ["acme", "yes", "yes", "0", "0"],
+        ["acme", "yes", "yes", "0", "0", "builtin"],
         "offered and read-only: {acme}"
     );
 
@@ -6544,4 +6544,124 @@ fn models_download_offline_and_through_a_server() {
         "{out}"
     );
     stop_and_wait(&mut server);
+}
+
+/// MCPPROF: `mcp profile set FILE [NAME]` (a graphersal `--mcp-config` file whose instructions
+/// file is inlined), `show`, `preview` and `clear`, offline and through a running server whose
+/// `/db/<name>/mcp` serves the profile at once; a server backup restored into a new directory
+/// carries the profiles.
+#[test]
+fn mcp_profiles_by_console_offline_through_a_server_and_in_a_server_backup() {
+    let temp = TempDir::new("console-mcp-profile");
+    let dir = ServerDir::init(temp.path().join("srv")).unwrap().dir;
+    modern_db(&dir, "kb");
+    let root = dir.root().to_path_buf();
+    std::fs::write(
+        temp.path().join("mcp-config.json"),
+        r#"{"server_name": "graphersal-kb", "instructions": {"mode": "replace", "file": "notes.md"},
+            "tools": {"include": ["gql", "get_schema"]}}"#,
+    )
+    .unwrap();
+    std::fs::write(temp.path().join("notes.md"), "Use gql.\n").unwrap();
+    let file = temp.path().join("mcp-config.json");
+    let file = file.to_str().unwrap();
+    // Offline.
+    let (code, out, err) = mcp_command(&root, &["profile", "set", file, "kb"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.starts_with("The MCP profile of 'kb' is set\n"), "{out}");
+    let settings = std::fs::read_to_string(dir.mcp_settings_path()).unwrap();
+    assert!(settings.contains("[databases.kb.profile"), "{settings}");
+    assert!(settings.contains("Use gql."), "{settings}");
+    let (code, out, err) = mcp_command(&root, &["profile", "show", "kb"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("its own profile"), "{out}");
+    assert!(out.contains("\"server_name\": \"graphersal-kb\""), "{out}");
+    let (code, out, err) = mcp_command(&root, &["profile", "preview", "kb", "--read"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("Use gql."), "{out}");
+    assert!(out.contains("Tools (2)"), "{out}");
+    let (code, _, err) = mcp_command(&root, &["profile", "set", "/no/such/file.json"]);
+    assert_eq!(code, 1, "{err}");
+    let (code, _, err) = mcp_command(&root, &["status", "--read"]);
+    assert_eq!(code, 2, "{err}");
+    std::fs::write(temp.path().join("bad.json"), r#"{"tool": {}}"#).unwrap();
+    let bad = temp.path().join("bad.json");
+    let (code, _, err) = mcp_command(&root, &["profile", "set", bad.to_str().unwrap()]);
+    assert_eq!(code, 1);
+    assert!(err.contains("did you mean \"tools\""), "{err}");
+
+    // Through the server: the profile applies to /db/kb/mcp, a default to /mcp.
+    mcp_command(&root, &["on"]);
+    let (mut server, address) = serve_dir(&root);
+    let (status, _, body) = call(address, "POST", "/api/admin/databases/kb/load", &[], "");
+    assert!(status == 200 || status == 202, "{body}");
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let (_, _, body) = call(address, "GET", "/api/admin/databases/kb", &[], "");
+        if json(&body)["state"] == "loaded" {
+            break;
+        }
+        assert!(Instant::now() < deadline, "never loaded: {body}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let session = mcp_initialize(address, "/db/kb/mcp");
+    assert_eq!(
+        mcp_tools(address, "/db/kb/mcp", &session),
+        ["gql", "get_schema"]
+    );
+    std::fs::write(
+        temp.path().join("default.json"),
+        r#"{"tools": {"include": ["gql"]}}"#,
+    )
+    .unwrap();
+    let default = temp.path().join("default.json");
+    let (code, _, err) = mcp_command(&root, &["profile", "set", default.to_str().unwrap()]);
+    assert_eq!(code, 0, "{err}");
+    assert!(err.contains("sent to its admin API"), "{err}");
+    let directory = mcp_initialize(address, "/mcp");
+    assert_eq!(
+        mcp_tools(address, "/mcp", &directory),
+        ["list_graphs", "use_graph", "gql"]
+    );
+    let (code, _, err) = mcp_command(&root, &["profile", "clear", "kb"]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(
+        mcp_tools(address, "/db/kb/mcp", &session),
+        ["gql"],
+        "the default applies now"
+    );
+    let (code, _, err) = mcp_command(&root, &["profile", "set", file, "kb"]);
+    assert_eq!(code, 0, "{err}");
+
+    // A server backup carries the profiles to a new directory.
+    let archive = temp.path().join("srv.zip");
+    let (code, _, err) = console(
+        &[
+            "backup",
+            "--dir",
+            root.to_str().unwrap(),
+            "--out",
+            archive.to_str().unwrap(),
+        ],
+        &[],
+    );
+    assert_eq!(code, 0, "{err}");
+    stop_and_wait(&mut server);
+    let moved = temp.path().join("moved");
+    let (code, _, err) = console(
+        &[
+            "restore",
+            archive.to_str().unwrap(),
+            "--dir",
+            moved.to_str().unwrap(),
+        ],
+        &[],
+    );
+    assert_eq!(code, 0, "{err}");
+    let (code, out, err) = mcp_command(&moved, &["profile", "show", "kb"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("its own profile"), "{out}");
+    let (code, out, err) = mcp_command(&moved, &["profile", "show"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("\"gql\""), "{out}");
 }

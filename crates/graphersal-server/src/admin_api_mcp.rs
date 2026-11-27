@@ -7,6 +7,28 @@
 //! | GET | `mcp` | | `200` the MCP state (below; + `ETag`) |
 //! | PUT | `mcp` | `{"enabled"?: bool, "exposeNew"?: bool, "revision"?}` (at least one) | `200` the MCP state |
 //! | PUT | `mcp/databases/<name>` | `{"exposed"?: bool, "readOnly"?: bool, "revision"?}` | `200` the MCP state + `"changed": {"name", "exposed", "readOnly"}` |
+//! | GET | `mcp/builtin` | | `200` the built-in texts a profile starts from ([`crate::mcp_profiles::builtin`]) |
+//! | GET | `mcp/profile` | | `200` the profile view of the server default profile (below; + `ETag`) |
+//! | PUT | `mcp/profile` | `{"profile": {...}, "revision"?}` | `200` the profile view + `"changed": true` |
+//! | DELETE | `mcp/profile` | (`If-Match`) | `200` the profile view + `"changed": true` |
+//! | GET, PUT, DELETE | `mcp/databases/<name>/profile` | as for `mcp/profile` | the profile view of the name |
+//! | POST | `mcp/preview` | `{"profile"?: {...} \| null, "name"?, "endpoint"?: "database" \| "server", "level"?: "read" \| "write"}` | `200` what an agent sees (below) |
+//!
+//! MCP profiles (MCPPROF, [`crate::mcp_profiles`]): the profile view is `name` (null for the
+//! server default), `kind` (`default` | `database` | `alias` | `missing`), `target` (an alias's
+//! database), `profile` (the name's own, or null), `source` (`own` | `database` | `default` |
+//! `builtin`: where the profile that applies comes from), `effective` (that profile, null =
+//! built-in), `endpoint`, `readOnly` (MCP serves it read-only whatever the grant: a base, the
+//! read-only flag, MCP read-only), `loaded`, `savedQueries` (`[{name, folder, description,
+//! writes}]` of a loaded database, else null), `warnings` (writing tools a reader never gets,
+//! `saved_query_tools` on `/mcp`), `revision` (of `mcp.toml`, shared with the switches). A
+//! refused profile is `400 {"error": "the MCP profile is not valid: <graphersal-mcp's
+//! message>", "help"}`. The preview runs graphersal-mcp's own `initialize`, `tools/list` and
+//! `resources/list` for the profile (absent: the name's effective one; null: built-in) on the
+//! database's context when it is loaded (else an empty graph), at `level` (default `write`;
+//! a read-only database is read for everyone) or for `/mcp` (`endpoint` `server`, the default
+//! without `name`): `{instructions, serverInfo, tools, resources, endpoint, name, level,
+//! readOnly, loaded, source, notes, warnings}`.
 //!
 //! The MCP state: `enabled` (the switch of `mcp.toml`), `exposeNew` (whether a new database
 //! or alias is offered to MCP when its creator does not say; `mcp.toml`'s `expose_new`,
@@ -23,14 +45,15 @@
 //! (the database's read-only flag), `database` (an alias whose database is read-only for
 //! MCP)), `sessions` (open MCP sessions working on
 //! the name: its selection on `/mcp` or its `/db/<name>/mcp`), `calls`, `errors` (tool calls
-//! since the start)) and `usage` ([`crate::mcp_control::McpUsage::to_json`]: `startedAtMs`,
+//! since the start), `profile` (where its MCP profile comes from: `own` | `database` | `default`
+//! | `builtin`)), `defaultProfile` (whether a server default profile is set) and `usage` ([`crate::mcp_control::McpUsage::to_json`]: `startedAtMs`,
 //! `sessions {open, byUser, byDatabase, withoutDatabase}`, `calls {total, errors, refused}`,
 //! `tools`, `users`, `databases` (`[{name, calls, errors}]`, most calls first),
 //! `recentErrors` (`[{atMs, tool, user, database, message}]`, newest first), or `null`
 //! offline).
 //!
 //! Errors: `400` (a body without `exposed` or `readOnly`; a `PUT mcp` without `enabled` or
-//! `exposeNew`), `404` (no such database or alias),
+//! `exposeNew`; a profile graphersal-mcp refuses), `404` (no such database or alias),
 //! `409` (a stale revision, with the current `revision`), `500` (`mcp.toml` cannot be read or
 //! written).
 
@@ -67,6 +90,283 @@ struct NameBody {
     read_only: Option<bool>,
     #[serde(default)]
     revision: Option<String>,
+}
+
+/// `PUT mcp/profile`, `PUT mcp/databases/<name>/profile`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProfileBody {
+    profile: Value,
+    #[serde(default)]
+    revision: Option<String>,
+}
+
+/// The `400` of a profile graphersal-mcp refuses (its message names the key).
+fn invalid_profile(message: &str) -> Response {
+    Response::json(
+        400,
+        &json!({
+            "error": format!("the MCP profile is not valid: {message}"),
+            "help": crate::mcp_profiles::PROFILE_HELP,
+        }),
+    )
+}
+
+/// What the name `key` is: `database`, `alias` (with its database) or `missing` (only
+/// settings left on it); `None`: nothing of that name.
+fn name_kind(
+    admin: &Admin,
+    settings: &McpSettings,
+    key: &str,
+) -> Option<(&'static str, Option<String>)> {
+    let registry = admin.registry();
+    if registry.list().iter().any(|e| e.name == key) {
+        return Some(("database", None));
+    }
+    if let Some(target) = registry.aliases().get(key) {
+        return Some(("alias", Some(target.clone())));
+    }
+    settings
+        .databases
+        .contains_key(key)
+        .then_some(("missing", None))
+}
+
+/// Whether MCP serves the request naming `key` (resolving to `real`) read-only whatever the
+/// caller's grant: MCP read-only on either name, or the database's own mode (a base, its
+/// read-only flag).
+fn mcp_read_only_of(admin: &Admin, settings: &McpSettings, key: &str, real: &str) -> bool {
+    let mode = admin
+        .registry()
+        .list()
+        .iter()
+        .find(|e| e.name == real)
+        .and_then(|e| e.config.clone())
+        .is_some_and(|c| c.role == DatabaseRole::Base || c.read_only);
+    mode || settings.read_only(key, real)
+}
+
+/// The effective profile of `key` (resolving to `real`) by the settings and where it comes
+/// from (own, its database's, the default, built-in).
+fn effective_of(
+    settings: &McpSettings,
+    key: &str,
+    real: &str,
+) -> (Option<Value>, crate::mcp_profiles::ProfileSource) {
+    use crate::mcp_profiles::ProfileSource;
+    if let Some(profile) = settings.of(key).profile {
+        return (Some(profile), ProfileSource::Own);
+    }
+    if key != real
+        && let Some(profile) = settings.of(real).profile
+    {
+        return (Some(profile), ProfileSource::Database);
+    }
+    match &settings.default_profile {
+        Some(profile) => (Some(profile.clone()), ProfileSource::Default),
+        None => (None, ProfileSource::Builtin),
+    }
+}
+
+/// The profile view of `GET mcp/profile` (`name` `None`: the server default) or `GET
+/// mcp/databases/<name>/profile` (module docs).
+fn profile_view(admin: &Admin, name: Option<&str>) -> Result<Value, ServerError> {
+    let control = admin.mcp_control()?;
+    let settings = control.settings();
+    let revision = settings.revision();
+    let Some(name) = name else {
+        let profile = settings.default_profile.clone();
+        let warnings = profile
+            .as_ref()
+            .map(|p| crate::mcp_profiles::warnings(p, false, true))
+            .unwrap_or_default();
+        return Ok(json!({
+            "name": null,
+            "kind": "default",
+            "profile": profile,
+            "source": if profile.is_some() { "own" } else { "builtin" },
+            "effective": profile,
+            "endpoint": crate::mcp::ENDPOINT,
+            "readOnly": false,
+            "loaded": null,
+            "savedQueries": null,
+            "warnings": warnings,
+            "revision": revision,
+        }));
+    };
+    let key = fold(name);
+    let Some((kind, target)) = name_kind(admin, &settings, &key) else {
+        return Err(ServerError::NotFound { name: key });
+    };
+    let real = target.clone().unwrap_or_else(|| key.clone());
+    let (effective, source) = effective_of(&settings, &key, &real);
+    let read_only = mcp_read_only_of(admin, &settings, &key, &real);
+    let context = admin.loaded_context(&real);
+    let saved = context
+        .as_ref()
+        .and_then(|c| crate::mcp_profiles::saved_queries(c).ok());
+    let warnings = effective
+        .as_ref()
+        .map(|p| crate::mcp_profiles::warnings(p, read_only, false))
+        .unwrap_or_default();
+    Ok(json!({
+        "name": key,
+        "kind": kind,
+        "target": target,
+        "profile": settings.of(&key).profile,
+        "source": source.as_str(),
+        "effective": effective,
+        "endpoint": format!("/db/{key}/mcp"),
+        "readOnly": read_only,
+        "loaded": context.is_some(),
+        "savedQueries": saved,
+        "warnings": warnings,
+        "revision": revision,
+    }))
+}
+
+/// `POST mcp/preview` (module docs): `Ok(Ok(answer))`, `Ok(Err(400))` for a bad body or
+/// profile.
+fn preview(admin: &Admin, body: &Value) -> Result<Result<Value, Response>, ServerError> {
+    let bad = |message: String| Ok(Err(Response::json(400, &json!({"error": message}))));
+    let Some(fields) = body.as_object() else {
+        return bad(
+            "the body is a JSON object: {\"profile\"?, \"name\"?, \"endpoint\"?, \"level\"?}"
+                .into(),
+        );
+    };
+    if let Some(key) = fields
+        .keys()
+        .find(|k| !matches!(k.as_str(), "profile" | "name" | "endpoint" | "level"))
+    {
+        return bad(format!(
+            "unknown field {key:?}: the body takes profile, name, endpoint and level"
+        ));
+    }
+    let name = match fields.get("name") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(name)) if !name.trim().is_empty() => Some(fold(name.trim())),
+        Some(_) => return bad("\"name\" is a database's or alias's name".into()),
+    };
+    let level = match fields.get("level").and_then(Value::as_str) {
+        None | Some("write") => "write",
+        Some("read") => "read",
+        Some(other) => return bad(format!("\"level\" is \"read\" or \"write\", not {other:?}")),
+    };
+    let endpoint = match fields.get("endpoint").and_then(Value::as_str) {
+        None if name.is_some() => "database",
+        None | Some("server") => "server",
+        Some("database") => "database",
+        Some(other) => {
+            return bad(format!(
+                "\"endpoint\" is \"database\" (/db/<name>/mcp) or \"server\" (/mcp), not {other:?}"
+            ));
+        }
+    };
+    let control = admin.mcp_control()?;
+    let settings = control.settings();
+    let (key, kind_target) = match &name {
+        Some(key) => match name_kind(admin, &settings, key) {
+            Some(found) => (Some(key.clone()), Some(found)),
+            None => return Err(ServerError::NotFound { name: key.clone() }),
+        },
+        None => (None, None),
+    };
+    let real = kind_target
+        .as_ref()
+        .and_then(|(_, target)| target.clone())
+        .or_else(|| key.clone());
+    // The profile previewed: the body's (null: the built-in one), else the effective one.
+    let (profile, source) = match fields.get("profile") {
+        Some(Value::Null) => (None, "builtin"),
+        Some(profile) => (Some(profile.clone()), "body"),
+        None => match (endpoint, &key, &real) {
+            ("database", Some(key), Some(real)) => {
+                let (profile, source) = effective_of(&settings, key, real);
+                (profile, source.as_str())
+            }
+            _ => match &settings.default_profile {
+                Some(profile) => (Some(profile.clone()), "default"),
+                None => (None, "builtin"),
+            },
+        },
+    };
+    let config = match &profile {
+        Some(profile) => match crate::mcp_profiles::check(profile.clone()) {
+            Ok((_, config)) => Some(config),
+            Err(message) => return Ok(Err(invalid_profile(&message))),
+        },
+        None => None,
+    };
+    let mut notes: Vec<String> = Vec::new();
+    let failed = |message: String| ServerError::Serve {
+        name: "MCP preview".to_string(),
+        message,
+    };
+    let mode_read_only = match (&key, &real) {
+        (Some(key), Some(real)) if endpoint == "database" => {
+            mcp_read_only_of(admin, &settings, key, real)
+        }
+        _ => false,
+    };
+    let (seen, read_only, loaded) = if endpoint == "server" {
+        notes.push(
+            "on /mcp every caller sees this list; a call of a writing tool on a database the \
+             caller may only read is refused"
+                .to_string(),
+        );
+        (
+            crate::mcp_profiles::preview_directory(config).map_err(failed)?,
+            false,
+            None,
+        )
+    } else {
+        let read_only = level == "read" || mode_read_only;
+        let context = real.as_deref().and_then(|real| admin.loaded_context(real));
+        let seen = match &context {
+            Some(context) => {
+                crate::mcp_profiles::preview_database(config, context.as_ref(), read_only)
+            }
+            None => {
+                if key.is_some() {
+                    notes.push(
+                        "the database is not loaded: this preview runs over an empty graph, so \
+                         its saved queries are not listed as tools (load it to see them)"
+                            .to_string(),
+                    );
+                }
+                let host = crate::mcp_profiles::empty_host().map_err(failed)?;
+                crate::mcp_profiles::preview_database(config, host.as_ref(), read_only)
+            }
+        }
+        .map_err(failed)?;
+        if mode_read_only && level == "write" {
+            notes.push(
+                "the database is read-only for MCP (a base, its read-only flag or MCP \
+                 read-only): every caller gets the reading tools only"
+                    .to_string(),
+            );
+        }
+        (seen, read_only, Some(context.is_some()))
+    };
+    let warnings = profile
+        .as_ref()
+        .map(|p| crate::mcp_profiles::warnings(p, mode_read_only, endpoint == "server"))
+        .unwrap_or_default();
+    let mut out = seen;
+    out["endpoint"] = json!(if endpoint == "server" {
+        crate::mcp::ENDPOINT.to_string()
+    } else {
+        format!("/db/{}/mcp", key.as_deref().unwrap_or("<name>"))
+    });
+    out["name"] = json!(key);
+    out["level"] = json!(level);
+    out["readOnly"] = json!(read_only);
+    out["loaded"] = json!(loaded);
+    out["source"] = json!(source);
+    out["notes"] = json!(notes);
+    out["warnings"] = json!(warnings);
+    Ok(Ok(out))
 }
 
 /// Answers `method mcp...` (`segments`: the endpoint split at `/`); `None` when the path is
@@ -135,7 +435,53 @@ pub(super) fn route(
                     Ok(answer(out))
                 })
         }
-        (_, ["mcp"]) | (_, ["mcp", "databases", _]) => {
+        (_, ["mcp", "builtin"]) if read => Ok(Response::json(200, &crate::mcp_profiles::builtin())),
+        (_, ["mcp", "profile"]) if read => profile_view(admin, None).map(answer),
+        (_, ["mcp", "databases", name, "profile"]) if read && !name.is_empty() => {
+            profile_view(admin, Some(name)).map(answer)
+        }
+        (Method::Put | Method::Delete, ["mcp", "profile"])
+        | (Method::Put | Method::Delete, ["mcp", "databases", _, "profile"]) => {
+            let name = match parts.as_slice() {
+                ["mcp", "databases", name, "profile"] if !name.is_empty() => Some(*name),
+                ["mcp", "profile"] => None,
+                _ => return Some(Err(HttpError::bad_request("the path names no database"))),
+            };
+            let (profile, revision) = if method == &Method::Put {
+                let body: ProfileBody = match body_of(request) {
+                    Ok(body) => body,
+                    Err(err) => return Some(Err(err)),
+                };
+                if let Err(message) = crate::mcp_profiles::check(body.profile.clone()) {
+                    return Some(Ok(invalid_profile(&message)));
+                }
+                (Some(body.profile), body.revision)
+            } else {
+                (None, None)
+            };
+            expecting(revision)
+                .mcp_profile_set(name, profile)
+                .and_then(|(name, _)| {
+                    let mut out = profile_view(admin, name.as_deref())?;
+                    out["changed"] = json!(true);
+                    Ok(answer(out))
+                })
+        }
+        (Method::Post, ["mcp", "preview"]) => {
+            let body = match request.json_body() {
+                Ok(body) => body,
+                Err(err) => return Some(Err(err)),
+            };
+            match preview(admin, &body) {
+                Ok(Ok(value)) => Ok(Response::json(200, &value)),
+                Ok(Err(refused)) => return Some(Ok(refused)),
+                Err(err) => Err(err),
+            }
+        }
+        (_, ["mcp"])
+        | (_, ["mcp", "databases", _])
+        | (_, ["mcp", "builtin" | "profile" | "preview"])
+        | (_, ["mcp", "databases", _, "profile"]) => {
             return Some(Err(HttpError::new(
                 405,
                 format!(
@@ -194,6 +540,7 @@ pub(crate) fn state(admin: &Admin) -> Result<Value, ServerError> {
         "endpoint": crate::mcp::ENDPOINT,
         "maxSessions": max_sessions,
         "revision": settings.revision(),
+        "defaultProfile": settings.default_profile.is_some(),
         "databases": rows(admin, &settings, |name| usage.of_name(name)),
         "usage": admin.is_online().then(|| usage.to_json()),
     }))
@@ -241,6 +588,7 @@ fn rows(
             "effectiveExposed": settings.exposed(name, real),
             "effectiveReadOnly": settings.read_only(name, real) || forced.is_some(),
             "readOnlyReason": forced,
+            "profile": effective_of(settings, name, real).1.as_str(),
             "sessions": sessions,
             "calls": calls,
             "errors": errors,

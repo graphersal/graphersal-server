@@ -10,10 +10,14 @@
 //!   profile. A database that is not loaded is listed with its state; using it is a tool error
 //!   naming the state ("ask an operator to load it"): the MCP endpoint never loads or unloads
 //!   (admin only).
-//! - `/db/<name>/mcp` is the single-graph endpoint of a loaded database (today's tools), served
-//!   by its context (`graphersal_serve`'s `/mcp` route behind the mount), on the same `Mcp`;
-//!   the router refuses it like every other route of the database and marks it read-only for a
-//!   reader.
+//! - `/db/<name>/mcp` is the single-graph endpoint of a loaded database, answered by the router
+//!   on the same `Mcp` with the database's context as the host ([`route_database`], as
+//!   graphersal-serve's own `/mcp` route would) under the name's MCP profile of that request
+//!   ([`database_profile`], [`crate::mcp_profiles`]); the router refuses it like every other
+//!   route of the database and serves it read-only to a reader.
+//! - `/mcp` serves the server default MCP profile: [`Directory::host`] gives it to every call,
+//!   and [`route`] replaces the answers of `initialize`, `tools/list` and `resources/list`
+//!   ([`crate::mcp_profiles::rewrite_directory_answer`]).
 //!
 //! The runtime switches of `mcp.toml` ([`crate::mcp_control`]) apply to both: off = `503`
 //! ([`switched_off`], checked by the router), a hidden name is unknown to the [`Directory`]
@@ -214,7 +218,12 @@ impl GraphDirectory for Directory<'_> {
             return Err(Self::unknown(route));
         }
         if let Some(context) = self.loader.context(&entry.name) {
+            // `/mcp` serves the server default profile (crate::mcp_profiles), on every graph.
             let profile = context.mcp_profile().cloned().unwrap_or_default();
+            let profile = match self.loader.mcp_control().and_then(|c| c.default_profile()) {
+                Some(config) => profile.with_config((*config).clone()),
+                None => profile,
+            };
             let profile = if level == Level::Read || self.mcp_read_only(route, &entry.name) {
                 profile.with_read_only(true)
             } else {
@@ -321,7 +330,21 @@ pub(crate) fn route(mcp: &Mcp, directory: &Directory<'_>, request: &mut Request<
     if let Some(identity) = &identity {
         mcp_request = mcp_request.with_identity(identity);
     }
-    let (status, answer_headers, body) = mcp.handle_directory(directory, mcp_request).into_parts();
+    let (status, answer_headers, mut body) =
+        mcp.handle_directory(directory, mcp_request).into_parts();
+    // The server default profile's instructions, tool and resource lists (crate::mcp_profiles).
+    if status == 200
+        && let (Some(sent), Some(config)) = (
+            &buffered,
+            directory
+                .loader
+                .mcp_control()
+                .and_then(|c| c.default_profile()),
+        )
+        && let Some(rewritten) = crate::mcp_profiles::rewrite_directory_answer(&config, sent, &body)
+    {
+        body = rewritten;
+    }
     if let (Some(usage), Some(sent)) = (&usage, &buffered) {
         let session = header_of(&headers, SESSION_HEADER);
         if let Some(new_session) = header_of(&answer_headers, SESSION_HEADER)
@@ -341,6 +364,67 @@ pub(crate) fn route(mcp: &Mcp, directory: &Directory<'_>, request: &mut Request<
             &body,
         );
     }
+    let mut answer = Response::new(status, body);
+    for (name, value) in &answer_headers {
+        answer = answer.with_header(name, value);
+    }
+    answer
+}
+
+/// The MCP profile of a request to `/db/<requested>/mcp` (resolving to the database `real`,
+/// served by `context`): the context's own profile (read-only for a base) with the name's
+/// configuration ([`crate::mcp_control::McpControl::profile_for`]: its own, its database's, the
+/// server default, else the built-in one), read-only when `read_only` (a `read` grant, MCP
+/// read-only). Asked on every request, so a changed profile applies at once.
+pub(crate) fn database_profile(
+    loader: &Loader,
+    context: &graphersal_serve::Context,
+    requested: &str,
+    real: &str,
+    read_only: bool,
+) -> Profile {
+    let profile = context.mcp_profile().cloned().unwrap_or_default();
+    let profile = match loader
+        .mcp_control()
+        .and_then(|control| control.profile_for(requested, real).0)
+    {
+        Some(config) => profile.with_config((*config).clone()),
+        None => profile,
+    };
+    if read_only && !profile.read_only() {
+        profile.with_read_only(true)
+    } else {
+        profile
+    }
+}
+
+/// Answers a request to `/db/<name>/mcp` on the endpoint `mcp` for the loaded database
+/// `context` under `profile` ([`database_profile`]) as graphersal-serve's own `/mcp` route
+/// would (the context is the endpoint's host), with the request's `identity`; `buffered`: the
+/// body the router read already ([`buffer_body`]), else the request's body is read here.
+pub(crate) fn route_database(
+    mcp: &Mcp,
+    context: &graphersal_serve::Context,
+    profile: &Profile,
+    request: &mut Request<'_>,
+    buffered: Option<&[u8]>,
+    identity: Option<&str>,
+) -> Response {
+    let headers = request.headers().to_vec();
+    let method = request.method().as_str().to_string();
+    let mut mcp_request = match buffered {
+        Some(body) => McpRequest::new(&method, body),
+        None => McpRequest::new(&method, request.body()),
+    };
+    for (name, value) in &headers {
+        mcp_request = mcp_request.header(name, value);
+    }
+    if let Some(identity) = identity {
+        mcp_request = mcp_request.with_identity(identity);
+    }
+    let (status, answer_headers, body) = mcp
+        .handle_with_profile(context, profile, mcp_request)
+        .into_parts();
     let mut answer = Response::new(status, body);
     for (name, value) in &answer_headers {
         answer = answer.with_header(name, value);
