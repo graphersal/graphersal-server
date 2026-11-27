@@ -819,3 +819,201 @@ fn an_import_on_a_taken_name_answers_the_help_by_upload_and_by_path() {
     assert_eq!(answer["help"], help, "{answer}");
     assert_eq!(tmp_count(&dir), 0);
 }
+
+// ---------------------------------------------------------------- KBFIX: stored jobs
+
+/// A graph (the modern sample) carrying the backup job `evil` writing to `outside` (with its
+/// file effect, as `jobs/define` stores it), the backup job `inside` writing into `root`, and
+/// a checkpoint job.
+fn graph_with_jobs(outside: &Path, root: &Path) -> TraversalGraph {
+    use graphersal::auth::{AccessRequest, Action, Resource};
+    use graphersal::catalog::{Definition, JobDefinition, JobTask};
+    use graphersal::prelude::GraphStorage;
+    let mut graph = TraversalGraph::tinkerpop_modern();
+    let backup = |path: &Path| {
+        JobDefinition::new(
+            "0 3 * * *",
+            JobTask::Backup {
+                path: path.display().to_string(),
+            },
+        )
+        .with_effects(vec![
+            AccessRequest::new(Action::Create, Resource::File { path }).to_owned_request(),
+        ])
+    };
+    graph
+        .set_definitions(vec![
+            Definition::job("evil", backup(outside).with_description("old machine")),
+            Definition::job("inside", backup(&root.join("kept"))),
+            Definition::job("cp", JobDefinition::new("0 4 * * *", JobTask::Checkpoint)),
+        ])
+        .unwrap();
+    graph
+}
+
+/// The job definitions of the database `name` (its closed Store opened read-only).
+fn stored_jobs(dir: &ServerDir, name: &str) -> Vec<graphersal::catalog::Definition> {
+    use graphersal::prelude::GraphStorage;
+    let recovered = Store::open_read_only(
+        dir.databases().join(name).join(STORE_DIR),
+        graphersal::persist::RecoveryTarget::Latest,
+    )
+    .unwrap();
+    let graph = recovered.into_graph();
+    let read = graph.read();
+    read.definitions()
+        .unwrap()
+        .filter(|d| d.kind() == graphersal::catalog::DefinitionKind::JOB)
+        .cloned()
+        .collect()
+}
+
+#[test]
+fn an_import_reports_jobs_outside_the_backup_root_and_rebases_them_when_asked() {
+    let temp = TempDir::new("import-jobs");
+    let dir = server(&temp);
+    let root = dir
+        .ensure_backup_root(&dir.backup_root(&dir.load_config().unwrap()))
+        .unwrap();
+    let outside = temp.path().join("elsewhere").join("kb-backups");
+    let source = temp.path().join("source-store");
+    Store::create_with(
+        &source,
+        graph_with_jobs(&outside, &root),
+        StoreOptions::new(),
+    )
+    .unwrap()
+    .close()
+    .unwrap();
+    let admin = offline(&dir);
+
+    // Reported, not rewritten: it will not run.
+    let imported = admin
+        .import(&ImportSource::new(&source), "kb", None, None)
+        .unwrap();
+    assert_eq!(
+        imported.jobs_outside.len(),
+        1,
+        "{:?}",
+        imported.jobs_outside
+    );
+    let job = &imported.jobs_outside[0];
+    assert_eq!(job.job, "evil");
+    assert_eq!(job.path, outside);
+    assert_eq!(job.rebased_to, None);
+    assert!(
+        imported
+            .notes
+            .iter()
+            .any(|n| n.contains("'evil'") && n.contains("dropped at the first load")),
+        "{:?}",
+        imported.notes
+    );
+    assert_eq!(stored_jobs(&dir, "kb").len(), 3);
+
+    // Rebased: the path (and its file effect) under <root>/<name>/<job>, the rest kept.
+    let rebasing = offline(&dir).rebasing_jobs(true);
+    let imported = rebasing
+        .import(&ImportSource::new(&source), "kb2", None, None)
+        .unwrap();
+    let target = root.join("kb2").join("evil");
+    assert_eq!(
+        imported.jobs_outside[0].rebased_to.as_deref(),
+        Some(target.as_path())
+    );
+    assert!(
+        imported.notes.iter().any(|n| n.contains("rebased to")),
+        "{:?}",
+        imported.notes
+    );
+    let jobs = stored_jobs(&dir, "kb2");
+    assert_eq!(jobs.len(), 3);
+    let evil = jobs
+        .iter()
+        .find(|d| d.name() == "evil")
+        .unwrap()
+        .as_job()
+        .unwrap();
+    assert_eq!(
+        evil.action(),
+        &graphersal::catalog::JobTask::Backup {
+            path: target.display().to_string()
+        }
+    );
+    assert_eq!(evil.description(), "old machine");
+    assert!(graphersal_serve::jobs_outside_file_root(&jobs, &root).is_empty());
+
+    // A packed snapshot carries the jobs too; over HTTP with "rebaseJobs".
+    let snapshot = temp.path().join("kb.gsnap");
+    write_graph_snapshot(
+        &Graph::new(graph_with_jobs(&outside, &root)),
+        fs::File::create(&snapshot).unwrap(),
+        &WriteOptions::new(),
+        ModelCopy::Include,
+    )
+    .unwrap();
+    let answer = import_route(
+        &admin,
+        json!({"path": snapshot.display().to_string(), "name": "kb3", "rebaseJobs": true}),
+    );
+    let jobs = &answer["import"]["jobsOutside"];
+    assert_eq!(jobs.as_array().unwrap().len(), 1, "{answer}");
+    assert_eq!(jobs[0]["job"], "evil");
+    assert_eq!(jobs[0]["willRun"], true);
+    assert_eq!(
+        jobs[0]["rebasedTo"],
+        root.join("kb3").join("evil").display().to_string()
+    );
+    let answer = import_route(
+        &admin,
+        json!({"path": snapshot.display().to_string(), "name": "kb4"}),
+    );
+    assert_eq!(
+        answer["import"]["jobsOutside"][0]["willRun"], false,
+        "{answer}"
+    );
+    assert_eq!(answer["import"]["jobsOutside"][0]["rebasedTo"], Value::Null);
+    // A load drops the job that was not rebased, keeps the rebased one: the runner never
+    // writes outside the root.
+    let loader = Loader::with_backup_root(
+        Registry::scan(&dir).unwrap(),
+        HostCheck::new(Exposure::Loopback, 8484, "http://127.0.0.1:8484/"),
+        None,
+        Some(root.clone()),
+    );
+    for name in ["kb", "kb2"] {
+        loader.load(name).unwrap();
+        assert_eq!(loader.wait(name, WAIT).unwrap(), DbState::Loaded);
+    }
+    loader.shutdown().unwrap();
+    let names = |name: &str| -> Vec<String> {
+        let mut names: Vec<String> = stored_jobs(&dir, name)
+            .iter()
+            .map(|d| d.name().to_string())
+            .collect();
+        names.sort();
+        names
+    };
+    assert_eq!(names("kb"), ["cp", "inside"]);
+    assert_eq!(names("kb2"), ["cp", "evil", "inside"]);
+    assert!(!outside.exists());
+}
+
+/// `POST /api/admin/import` with the JSON `body` over `admin`: the `201` answer.
+fn import_route(admin: &Admin, body: Value) -> Value {
+    use graphersal_serve::{Method, Request};
+    let bytes = body.to_string().into_bytes();
+    let length = bytes.len();
+    let mut request = Request::new(
+        Method::Post,
+        "/api/admin/import",
+        std::io::Cursor::new(bytes),
+    )
+    .with_header("Content-Type", "application/json")
+    .with_body_length(Some(length));
+    let response = crate::admin_api::route(admin, &Method::Post, "import", &mut request)
+        .unwrap_or_else(|err| panic!("{}", err.message()));
+    let answer: Value = serde_json::from_slice(response.body()).unwrap();
+    assert_eq!(response.status(), 201, "{answer}");
+    answer
+}

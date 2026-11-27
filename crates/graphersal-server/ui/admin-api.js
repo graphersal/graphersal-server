@@ -177,7 +177,8 @@ const based = (request, revision) => (typeof revision === 'string' && revision ?
  * addModel({path?, repo?, license?}), removeModel(repo or blob hash), modelDownload (the running
  * or last Hugging Face download), startModelDownload(repo, revision?), cancelModelDownload,
  * promote(name) (no body;
- * one way: a base is frozen forever), resetLayer(name) (a layer's changes discarded, confirmed), runs(name?) (one loaded database's queued and running runs,
+ * one way: a base is frozen forever), resetLayer(name) (a layer's changes discarded, confirmed),
+ * defaultModel(name, model) (the default embedding model of a plain database; null/'' = none), runs(name?) (one loaded database's queued and running runs,
  * or every loaded database's without a name), cancelRun(name, id) (the run administration: a
  * run id is unique within its database only), the users and grants: users, addUser(name,
  * admin?) (its answer carries the new token, shown once), removeUser(name), newToken(name),
@@ -231,6 +232,7 @@ export const adminRequest = Object.freeze({
   cancelModelDownload: () => ({ method: 'POST', path: 'api/admin/models/download/cancel' }),
   promote: (name) => ({ method: 'POST', path: `api/admin/databases/${seg(name)}/promote` }),
   resetLayer: (name) => ({ method: 'POST', path: `api/admin/databases/${seg(name)}/reset-layer`, body: { confirm: true } }),
+  defaultModel: (name, model) => ({ method: 'PUT', path: `api/admin/databases/${seg(name)}/default-model`, body: { model: model || null } }),
   users: () => ({ method: 'GET', path: 'api/admin/users' }),
   addUser: (name, isAdmin = false) => ({ method: 'POST', path: 'api/admin/users', body: isAdmin ? { name, admin: true } : { name } }),
   removeUser: (name, revision) => based({ method: 'DELETE', path: `api/admin/users/${seg(name)}` }, revision),
@@ -835,7 +837,7 @@ function baseOutcomeText(action, subject, answer) {
       const imp = answer.import && typeof answer.import === 'object' ? answer.import : {};
       const what = [imp.format, answer.kind, answer.role === 'base' ? 'base' : ''].filter(Boolean).join(', ');
       const state = answer.state === 'needs-model' ? `needs a model${answer.model ? ` (${answer.model})` : ''}` : answer.state || 'unloaded';
-      return `Imported "${answer.name || subject}"${what ? ` (${what})` : ''}: ${state}.`;
+      return `Imported "${answer.name || subject}"${what ? ` (${what})` : ''}: ${state}.${importJobsText(answer)}`;
     }
     case 'addModel': {
       const added = Array.isArray(answer.added) ? answer.added.length : 0;
@@ -849,6 +851,7 @@ function baseOutcomeText(action, subject, answer) {
     case 'promote': return `"${answer.name || subject}" is now a base (read-only, frozen); create layers over it with "New database…".`;
     case 'verify': return verifyText(answer);
     case 'resetLayer': return resetLayerOutcomeText(subject, answer);
+    case 'defaultModel': return defaultModelOutcomeText(subject, answer);
     case 'swap': return `"${answer.swappedWith || ''}" took the name "${answer.name || subject}"; the old one moved to ${answer.trash || "the server's trash/ directory"}${answer.reloaded ? '; loaded again' : ''}.`;
     default: return '';
   }
@@ -1049,7 +1052,8 @@ export const IMPORT_FORMATS = Object.freeze(['', 'snapshot', 'store', 'graphson'
  * as the body of `POST api/admin/import?<query>`), `{request}` (the JSON path form) or
  * `{problems: [text]}`. Form: `{source: 'upload'|'path'|'inbox', file ({size}), path, inbox,
  * name, base, format, description, role: 'normal'|'base', mcp (true: offer it to MCP; sent
- * only then, otherwise the server's default applies)}`; `limit` = `uploadLimit(info)`.
+ * only then, otherwise the server's default applies), rebaseJobs (true: stored backup jobs
+ * writing outside the backup root are moved under it; sent only then)}`; `limit` = `uploadLimit(info)`.
  * `inbox` is one entry name of the server's import inbox (`inboxRows`): the JSON form with
  * `{inbox}` instead of `{path}` (the server refuses anything but one entry of `imports/`). Only documented
  * parameters are sent, and only when set: `role` only as `base` (the server's default is
@@ -1075,6 +1079,7 @@ export function importRequest(form, limit = null) {
   if (description) fields.description = description;
   if (asBase) fields.role = 'base';
   if (f.mcp === true) fields.mcp = true;
+  if (f.rebaseJobs === true) fields.rebaseJobs = true;
   if (f.source === 'inbox') {
     const inbox = typeof f.inbox === 'string' ? f.inbox : '';
     if (!inbox) problems.push('Pick a file of the import inbox.');
@@ -1485,6 +1490,75 @@ export function resetLayerOutcomeText(name, answer = {}) {
     : `discarded ${counted(added, 'added element')}, ${counted(modified, 'changed element')} and ${counted(removed, 'removal')}`;
   const base = answer.base ? ` "${answer.base}"` : '';
   return `"${answer.name || name}" was reset and reads exactly its base${base} now: ${what}; its Store keeps the history before the reset${answer.inPlace ? '; it stayed loaded' : ''}.`;
+}
+
+// ------------------------------------------------------------------ the default model (KBFIX)
+
+/**
+ * Whether a row's default embedding model may be changed (`PUT .../default-model`):
+ * `{enabled, title}`. Only a plain, not base, not read-only database whose config is readable,
+ * loaded or not (a loaded one changes at once); every other row is disabled with the reason
+ * (the server refuses the same with `409`).
+ */
+export function defaultModelAction(row, { busy = false } = {}) {
+  const off = (title) => ({ enabled: false, title });
+  if (row.aliasOf) return off(`An alias of ${row.aliasOf}: use that database's row`);
+  if (busy) return off('Wait until the running action ends');
+  if (row.state === 'failed' || !row.kind) return off('A failed database cannot be changed');
+  if (row.kind === 'layer') return off("A layer keeps no model of its own: its base's models (and their default) serve it");
+  if (row.role === 'base') return off('A base is frozen: its models and their default cannot change');
+  if (row.readOnly) return off('Read-only: turn read-only off first, set the default, then turn it on again');
+  if (row.state === 'loading' || row.state === 'unloading') return off('Try again once it is loaded or unloaded');
+  return { enabled: true, title: 'The embedding model embed() and text queries use without a model name (one of the models its Store holds)' };
+}
+
+/**
+ * The choices of the "Default model" dialog from the settings view (`store.models`,
+ * `store.defaultModel`): `{models: [repo], current: repo | '', error}`.
+ */
+export function defaultModelChoices(view) {
+  const v = view && typeof view === 'object' ? view : {};
+  if (typeof v.storeError === 'string') return { models: [], current: '', error: v.storeError };
+  const store = v.store && typeof v.store === 'object' ? v.store : {};
+  const models = Array.isArray(store.models) ? store.models.filter((m) => typeof m === 'string') : [];
+  const current = typeof store.defaultModel === 'string' ? store.defaultModel : '';
+  return { models, current, error: null };
+}
+
+/** The outcome of a default-model change (`PUT .../default-model` answer). */
+export function defaultModelOutcomeText(name, answer = {}) {
+  const db = answer.name || name;
+  const model = typeof answer.defaultModel === 'string' ? answer.defaultModel : '';
+  if (answer.changed === false) {
+    return model ? `${model} is the default model of "${db}" already.` : `"${db}" has no default model (nothing changed).`;
+  }
+  const when = answer.loaded ? ' Its next queries use it.' : ' It applies at its next load.';
+  return model
+    ? `The default model of "${db}" is now ${model}.${when}`
+    : `"${db}" has no default model now: embed() without a model name uses hash-ngram/1.${answer.loaded ? '' : when}`;
+}
+
+// ------------------------------------------------------------------ stored jobs of an import (KBFIX)
+
+/** The tooltip of the import form's "Move backup jobs under the backup root" checkbox. */
+export const REBASE_JOBS_HELP = 'A Store or snapshot made elsewhere may carry scheduled backup jobs writing to a path outside this server\'s backup root '
+  + '(server.toml [jobs] backup_root), e.g. an absolute path of another machine. Such a job never runs here: every load drops it. '
+  + 'Checked: each such backup job is rewritten to <backup root>/<database>/<job> before the database appears, so it keeps running.';
+
+/**
+ * The stored-jobs part of an import's outcome (`import.jobsOutside`), or '': how many jobs
+ * write outside the backup root and whether they run.
+ */
+export function importJobsText(answer) {
+  const imp = answer && answer.import && typeof answer.import === 'object' ? answer.import : {};
+  const jobs = Array.isArray(imp.jobsOutside) ? imp.jobsOutside.filter((j) => j && typeof j.job === 'string') : [];
+  if (!jobs.length) return '';
+  const moved = jobs.filter((j) => j.willRun === true).length;
+  const dropped = jobs.length - moved;
+  const parts = [];
+  if (moved) parts.push(` ${counted(moved, 'backup job')} moved under the backup root.`);
+  if (dropped) parts.push(` ${counted(dropped, 'stored job')} ${dropped === 1 ? 'writes' : 'write'} outside the backup root and will not run (dropped at the first load; import again with "Move backup jobs under the backup root" to keep ${dropped === 1 ? 'it' : 'them'}).`);
+  return parts.join('');
 }
 
 // ------------------------------------------------------------------ the run administration

@@ -1213,6 +1213,120 @@
         }
       }
     },
+    "/api/admin/databases/{name}/default-model": {
+      "put": {
+        "operationId": "setDefaultModel",
+        "summary": "Set the default embedding model",
+        "description": "The model (one of those the database's Store holds) that `embed()` and text queries use without a model name, or `null` for none: one commit of the database's own Store. A loaded database changes at once (its next queries use it; a model already loaded stays loaded); an unloaded one (also `needs-model`) is changed on disk without loading it. Refused (`409`) for a layer (its base's models serve it), a base (frozen), a read-only database or one being loaded or unloaded; a model its Store does not hold is `400`.",
+        "tags": [
+          "databases"
+        ],
+        "x-graphersal-access": "admin",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "A database's real name (case-insensitive; an alias is not followed unless the operation says so)."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "model": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "The model's repository (`owner/name`), or null: no default."
+                  }
+                },
+                "required": [
+                  "model"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The row with the default model.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Entry"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "defaultModel": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "previousDefaultModel": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "changed": {
+                          "type": "boolean",
+                          "description": "false: it was the default already (no commit)."
+                        },
+                        "loaded": {
+                          "type": "boolean",
+                          "description": "The database is loaded: its next queries use the new default."
+                        },
+                        "models": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          },
+                          "description": "The repositories of the models its Store holds."
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/HostRefused"
+          },
+          "404": {
+            "$ref": "#/components/responses/AdminNotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Refused"
+          },
+          "500": {
+            "$ref": "#/components/responses/Failure"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
     "/api/admin/databases/{name}/auto-load": {
       "put": {
         "operationId": "setAutoLoad",
@@ -1812,7 +1926,7 @@
       "post": {
         "operationId": "importDatabase",
         "summary": "Import a database",
-        "description": "A new database from a packed snapshot (`.gsnap`; a layer snapshot needs its base), a Store (directory or `.gstore`), GraphSON or GraphML. Either the file itself as the body (any content type but JSON; the options in the query; at most `server.toml [limits] upload_bytes`, else `413`), or JSON naming a file on the server's machine (`path`, absolute) or an entry of the import inbox (`inbox`). `role=base` makes a base of a plain source.",
+        "description": "A new database from a packed snapshot (`.gsnap`; a layer snapshot needs its base), a Store (directory or `.gstore`), GraphSON or GraphML. Either the file itself as the body (any content type but JSON; the options in the query; at most `server.toml [limits] upload_bytes`, else `413`), or JSON naming a file on the server's machine (`path`, absolute) or an entry of the import inbox (`inbox`). `role=base` makes a base of a plain source. Stored jobs writing outside the backup root are listed in `import.jobsOutside` (they never run here; each load drops them) unless `rebaseJobs` rewrites them under it.",
         "tags": [
           "import"
         ],
@@ -1865,6 +1979,14 @@
                 "base"
               ]
             }
+          },
+          {
+            "name": "rebaseJobs",
+            "in": "query",
+            "schema": {
+              "type": "boolean"
+            },
+            "description": "Upload: rewrite each stored backup job writing outside the backup root (`server.toml [jobs] backup_root`) to `<backup root>/<name>/<job>` before the database appears (else such jobs are reported in `jobsOutside` and dropped at the first load)."
           }
         ],
         "requestBody": {
@@ -1904,6 +2026,10 @@
                       "normal",
                       "base"
                     ]
+                  },
+                  "rebaseJobs": {
+                    "type": "boolean",
+                    "description": "Rewrite each stored backup job writing outside the backup root to `<backup root>/<name>/<job>` (see the `rebaseJobs` query parameter)."
                   }
                 },
                 "required": [
@@ -5581,6 +5707,43 @@
             "type": "array",
             "items": {
               "type": "string"
+            }
+          },
+          "jobsOutside": {
+            "type": "array",
+            "description": "The stored jobs writing outside the backup root (`server.toml [jobs] backup_root`).",
+            "items": {
+              "type": "object",
+              "properties": {
+                "job": {
+                  "type": "string"
+                },
+                "path": {
+                  "type": "string",
+                  "description": "The path it writes, as stored."
+                },
+                "reason": {
+                  "type": "string"
+                },
+                "rebasedTo": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The path under the backup root it was rewritten to (`rebaseJobs`); null: not rewritten."
+                },
+                "willRun": {
+                  "type": "boolean",
+                  "description": "false: dropped at the database's first load, never run."
+                }
+              },
+              "required": [
+                "job",
+                "path",
+                "reason",
+                "rebasedTo",
+                "willRun"
+              ]
             }
           }
         }

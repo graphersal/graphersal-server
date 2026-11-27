@@ -249,6 +249,9 @@ pub struct Admin {
     /// Whether the names this admin creates are offered to MCP ([`Admin::exposing`]; `None`:
     /// `mcp.toml`'s `expose_new`).
     expose: Option<bool>,
+    /// Whether an import rewrites the backup jobs writing outside the backup root under it
+    /// ([`Admin::rebasing_jobs`]; default off: they are reported and dropped at load).
+    rebase_jobs: bool,
     #[cfg(test)]
     pub(crate) fail: Option<FailPoint>,
     /// Test hook: the shared models' hard links fail (the copy fallback).
@@ -267,6 +270,7 @@ impl Admin {
             principal: crate::access::Principal::operator(),
             expected: None,
             expose: None,
+            rebase_jobs: false,
             #[cfg(test)]
             fail: None,
             #[cfg(test)]
@@ -285,6 +289,7 @@ impl Admin {
             principal: crate::access::Principal::operator(),
             expected: None,
             expose: None,
+            rebase_jobs: false,
             #[cfg(test)]
             fail: None,
             #[cfg(test)]
@@ -326,6 +331,15 @@ impl Admin {
     /// `expose_new` (default off; module `mcp_control`).
     pub fn exposing(mut self, expose: Option<bool>) -> Self {
         self.expose = expose;
+        self
+    }
+
+    /// The admin whose imports rewrite each backup job writing outside the backup root
+    /// (`server.toml [jobs] backup_root`) to a path under it (KBFIX; module docs of the import
+    /// jobs check, [`crate::ops::JobOutside`]); off by default: such jobs are reported by the
+    /// import and dropped at the database's first load.
+    pub fn rebasing_jobs(mut self, rebase: bool) -> Self {
+        self.rebase_jobs = rebase;
         self
     }
 
@@ -888,6 +902,10 @@ pub(crate) use transfer::TmpFile;
 #[path = "ops_import.rs"]
 mod import;
 pub use import::{ImportFormat, ImportSource, Imported};
+
+#[path = "ops_import_jobs.rs"]
+mod import_jobs;
+pub use import_jobs::JobOutside;
 pub use transfer::{BackupInfo, ExportSpec, Exported, Restored};
 
 #[path = "ops_inbox.rs"]
@@ -897,6 +915,10 @@ pub use inbox::InboxFile;
 #[path = "ops_models.rs"]
 mod models;
 pub use models::{ModelAddSpec, ModelAdded, ModelDownloadSpec, ModelRemoved};
+
+#[path = "ops_model_default.rs"]
+mod model_default;
+pub use model_default::DefaultModelSet;
 
 #[path = "ops_runs.rs"]
 mod runs;

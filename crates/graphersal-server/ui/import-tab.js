@@ -10,13 +10,15 @@
 // (only a plain source becomes a base: the server refuses a layer source with `400` and a source
 // missing its model with `409` + help). The database list (bases) and, with the inbox chosen, the
 // inbox are read again on every visit and when the window gets the focus back (./shared.js
-// `useFreshData`; the form keeps its input); the inbox table sorts by any column.
+// `useFreshData`; the form keeps its input); the inbox table sorts by any column. KBFIX: "Move
+// backup jobs under the backup root" sends `rebaseJobs`; the outcome names the stored jobs that
+// write outside the backup root (`import.jobsOutside`: moved, or never run) as a warning.
 
 import { reactive, ref, computed, watch } from 'vue';
 import {
   importRequest, uploadImport, uploadLimit, uploadSizeProblem, progressText, suggestName, NAME_HINT,
   outcomeText, outcomeTone, needsModelHint, bytesText, baseNames, inboxRows, IMPORT_FORMATS, BASE_IS_FROZEN,
-  MCP_NEW_HELP,
+  MCP_NEW_HELP, REBASE_JOBS_HELP,
 } from './admin-api.js';
 import {
   admin, ROOT, headers, list, reload, notify, useFreshData, useSort, SortTh, FormError,
@@ -31,7 +33,7 @@ const INBOX_COLUMNS = Object.freeze({
 });
 import { hostInfo } from './databases.js';
 
-const freshForm = (source = 'upload') => ({ source, file: null, path: '', inbox: '', name: '', base: '', format: '', description: '', role: 'normal', mcp: false });
+const freshForm = (source = 'upload') => ({ source, file: null, path: '', inbox: '', name: '', base: '', format: '', description: '', role: 'normal', mcp: false, rebaseJobs: false });
 
 export default {
   components: { SortTh, FormError },
@@ -91,14 +93,15 @@ export default {
       const imp = answer.import && typeof answer.import === 'object' ? answer.import : {};
       const notes = Array.isArray(imp.notes) ? imp.notes.filter((n) => typeof n === 'string') : [];
       const hint = needsModelHint(answer);
-      const warn = answer.state === 'needs-model';
+      const jobs = Array.isArray(imp.jobsOutside) ? imp.jobsOutside : [];
+      const warn = answer.state === 'needs-model' || jobs.some((j) => j && j.willRun !== true);
       notify({
         tone: warn ? 'warn' : outcomeTone(answer),
         text: outcomeText('import', subject, answer),
         help: [hint, ...notes].filter(Boolean).join('\n'),
         links: [
           { text: 'Databases', run: () => props.api.navigate('databases') },
-          ...(warn ? [{ text: 'Models', run: () => props.api.navigate('models') }] : []),
+          ...(answer.state === 'needs-model' ? [{ text: 'Models', run: () => props.api.navigate('models') }] : []),
         ],
       });
     }
@@ -151,7 +154,7 @@ export default {
 
     return {
       form, s, inbox, inboxSort, inboxList, loadInbox, pickInbox, fileInput, bases, limit, fileProblem, percent, cancel, submit, pickFile, pathChanged,
-      progressText, bytesText, formats: IMPORT_FORMATS, frozen: BASE_IS_FROZEN, nameHint: NAME_HINT, mcpHelp: MCP_NEW_HELP,
+      progressText, bytesText, formats: IMPORT_FORMATS, frozen: BASE_IS_FROZEN, nameHint: NAME_HINT, mcpHelp: MCP_NEW_HELP, rebaseHelp: REBASE_JOBS_HELP,
       touchName: () => { nameTouched = true; },
       openDatabases: () => props.api.navigate('databases'),
       openModels: () => props.api.navigate('models'),
@@ -200,6 +203,7 @@ export default {
           @change="form.role = $event.target.checked ? 'base' : 'normal'">
         Import as a base (from a full snapshot, a plain Store, GraphSON or GraphML; layers are built over it)</label>
       <label class="inline" :title="mcpHelp"><input type="checkbox" name="mcp" v-model="form.mcp" :disabled="s.busy" data-import-mcp> Expose through MCP</label>
+      <label class="inline" :title="rebaseHelp"><input type="checkbox" name="rebaseJobs" v-model="form.rebaseJobs" :disabled="s.busy || form.role === 'base'" data-import-rebase-jobs> Move backup jobs under the backup root (a store from elsewhere may carry jobs writing outside it; they would never run here)</label>
       <p v-if="form.role === 'base'" class="muted srv-sub">{{ frozen }}</p>
       <label v-if="bases.length && form.role !== 'base'">Base (a layer snapshot or layer Store; empty: the base with its identity)
         <select v-model="form.base" name="base" :disabled="s.busy">

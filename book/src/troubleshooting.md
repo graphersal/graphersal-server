@@ -543,7 +543,28 @@ A stored backup job of a database (imported, restored or cloned from elsewhere, 
 backup root moved) wrote outside `server.toml`'s `[jobs] backup_root`. It was removed from the
 database's catalog before the database was served. Define it again in the database's
 playground (Jobs panel) with a path relative to the backup root ([Backup
-jobs](guide/backups.md#backup-jobs)).
+jobs](guide/backups.md#backup-jobs)). For a database you are about to import, `import ...
+--rebase-jobs` keeps such backup jobs by moving them under the backup root ([Jobs from an
+imported store](guide/backups.md#jobs-from-an-imported-store)); for one imported already,
+`db delete` it before its first load and import it again with `--rebase-jobs`.
+
+## The load log says no model is the default
+
+```text
+INFO graphersal_server: database 'kb': the store .../databases/kb/store holds embedding models but none is the default; effect: embed() without a model name uses hash-ngram/1; ...; or make one the default (it may stay loaded): graphersal-server models default kb <repo> --dir <server directory> (or Default model... on the Databases tab)
+```
+
+The database's Store holds embedding models, but none is its default, so `embed(text)` and text
+queries without a model name use `hash-ngram/1`, not the model. Make one the default (the
+database may stay loaded; its next queries use it):
+
+```bash
+graphersal-server models default kb org/model --dir ./srv
+```
+
+Or in the web UI: Databases tab, the row's "…" menu, "Default model…" ([The default
+model](guide/models.md#the-default-model)). A layer takes its base's default; a read-only
+database needs read-only off for the change.
 
 ## Model blobs are copied, not linked
 

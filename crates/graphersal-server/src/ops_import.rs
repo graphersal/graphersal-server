@@ -28,6 +28,12 @@
 //!   database holding the file's graph (the Store gets `server.toml`'s `[defaults]`); data
 //!   GraphSON cannot hold is skipped and listed in the import's notes.
 //!
+//! Stored jobs (KBFIX, the import jobs check): a Store or snapshot carrying scheduled jobs that
+//! write outside the server's backup root (`server.toml [jobs] backup_root`) gets them listed
+//! in [`Imported::jobs_outside`] and the notes; they never run here (each load drops them),
+//! unless the admin rebases jobs ([`Admin::rebasing_jobs`]): then each such backup job is
+//! rewritten to `<backup root>/<database>/<job>` in the new Store before it appears.
+//!
 //! With [`DatabaseRole::Base`] ([`Admin::import_as`]) a PLAIN source (a full snapshot, a plain
 //! Store, GraphSON, GraphML) becomes a base database (`role = "base"`, read-only, frozen for
 //! good: layers are made over it); a layer source is refused (`InvalidInput`), and so is a
@@ -55,6 +61,7 @@ use graphersal::storage::{BaseRef, LayeredGraph};
 
 #[cfg(test)]
 use super::FailPoint;
+use super::import_jobs::{JobOutside, JobsChecked};
 use super::{Admin, store_error};
 use crate::audit::AuditEvent;
 use crate::database::{DatabaseConfig, DatabaseKind, DatabaseRole};
@@ -157,6 +164,10 @@ pub struct Imported {
     /// How many grants left on the name (from a deleted database or alias) were removed
     /// before the new database took it (`Admin::commit_new`).
     pub leftover_grants: usize,
+    /// The stored jobs writing outside the server's backup root (`server.toml [jobs]
+    /// backup_root`): dropped at the first load unless the import rebased them
+    /// ([`Admin::rebasing_jobs`], [`JobOutside::rebased_to`]).
+    pub jobs_outside: Vec<JobOutside>,
 }
 
 /// What a build learned besides the Store.
@@ -310,6 +321,20 @@ impl Admin {
                 ),
             });
         }
+        // KBFIX: the stored jobs writing outside the backup root, reported (and rebased when
+        // asked) before the database appears. A base never runs jobs.
+        let jobs = match (&built.layer, format, as_base) {
+            (_, ImportFormat::GraphSon | ImportFormat::GraphMl, _) | (None, _, true) => {
+                JobsChecked::default()
+            }
+            (Some((_, base_name)), _, _) => {
+                let base = self.base_of(base_name)?;
+                self.check_import_jobs(name, &store_dir, Some(&base))?
+            }
+            (None, _, false) => self.check_import_jobs(name, &store_dir, None)?,
+        };
+        built.notes.extend(jobs.note.clone());
+        built.notes.extend(jobs_notes(&jobs.outside));
         let config = build.config_mut();
         config.needs_model = built.models_missing.first().cloned();
         #[cfg(test)]
@@ -343,6 +368,7 @@ impl Admin {
             skipped: built.skipped,
             notes: built.notes,
             leftover_grants,
+            jobs_outside: jobs.outside,
         })
     }
 
@@ -496,6 +522,30 @@ impl Admin {
             notes,
         })
     }
+}
+
+/// One note per job writing outside the backup root (KBFIX).
+fn jobs_notes(outside: &[JobOutside]) -> Vec<String> {
+    outside
+        .iter()
+        .map(|job| match &job.rebased_to {
+            Some(to) => format!(
+                "the backup job '{}' wrote '{}' outside the backup root: rebased to '{}', it runs \
+                 there",
+                job.job,
+                job.path.display(),
+                to.display()
+            ),
+            None => format!(
+                "the job '{}' writes '{}' outside the backup root ({}): it never runs here and \
+                 is dropped at the first load (import again with the jobs rebased, or define it \
+                 again with a path inside the root)",
+                job.job,
+                job.path.display(),
+                job.reason
+            ),
+        })
+        .collect()
 }
 
 /// The format of the source at `path` (module docs); `hint` is trusted except for a snapshot

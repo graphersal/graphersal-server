@@ -700,3 +700,32 @@ fn a_bad_database_limit_fails_the_database_at_the_scan() {
     assert_eq!(state.as_str(), "failed", "{state}");
     assert!(state.to_string().contains("max_traversers"), "{state}");
 }
+
+#[test]
+fn the_no_default_model_note_names_the_servers_command() {
+    let pair = |a: &str, b: &str| (a.to_string(), b.to_string());
+    let text = super::note_text(
+        "kb",
+        "the store databases/kb/store holds embedding models but none is the default",
+        &[pair(
+            "effect",
+            "embed() without a model name uses hash-ngram/1",
+        )],
+        &[pair(
+            "or make one the default, so embed() without a model name uses it",
+            "graphersal store models default databases/kb/store acme/tiny",
+        )],
+    );
+    assert!(!text.contains("graphersal store"), "{text}");
+    assert!(
+        text.ends_with(
+            "; or make one the default (it may stay loaded): graphersal-server models default kb \
+             acme/tiny --dir <server directory> (or Default model... on the Databases tab)"
+        ),
+        "{text}"
+    );
+    assert!(text.contains("; effect: embed() without"), "{text}");
+    // Other commands stay as they are.
+    let other = super::note_text("kb", "h", &[], &[pair("why", "graphersal store verify x")]);
+    assert_eq!(other, "database 'kb': h; why: graphersal store verify x");
+}
