@@ -1028,12 +1028,19 @@ try {
     Expect ($code -eq 0) "db load: $(Text (W 'load.err'))"
     $openFile = Join-Path $dir "server.open"
     Expect ((Text $openFile).Contains('"crashy"')) "server.open does not name crashy: $(Text $openFile)"
-    Stop-Process -Id $script:bgPid -Force
-    for ($i = 0; $i -lt 100 -and (Test-Running $script:bgPid); $i++) { Start-Sleep -Milliseconds 100 }
+    $killed = $script:bgPid
+    Stop-Process -Id $killed -Force
+    for ($i = 0; $i -lt 100 -and (Test-Running $killed); $i++) { Start-Sleep -Milliseconds 100 }
     $script:bgPid = $null
     Expect (Test-Path (Join-Path $dir "server.run")) "a killed server should leave server.run behind"
-    $code = Run-Bin @("status", "--dir", $dir) "status.out" "status.err"
-    Expect ($code -eq 3) "status after the kill: exit code $code"
+    # Windows releases the file locks of a killed process "after a time that depends on available
+    # system resources" (LockFileEx docs), possibly after the process is gone: wait for that.
+    for ($i = 0; $i -lt 100; $i++) {
+        $code = Run-Bin @("status", "--dir", $dir) "status.out" "status.err"
+        if ($code -ne 0) { break }
+        Start-Sleep -Milliseconds 100
+    }
+    Expect ($code -eq 3) "status after the kill: exit code $code (killed process still there: $(Test-Running $killed)): $(Text (W 'status.out'))"
     Expect (((Text (W "status.out")) + (Text (W "status.err"))).Contains("Last unclean shutdown")) "status: $(Text (W 'status.out'))"
     $code = Run-Bin @("start", "--dir", $dir, "--listen", "127.0.0.1:0") "start3.out" "start3.err"
     Expect ($code -eq 0) "start after the kill: $(Text (W 'start3.err'))"
