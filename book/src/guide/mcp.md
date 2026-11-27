@@ -181,7 +181,7 @@ profile. Which one applies (whole profiles, never merged key by key):
 | Endpoint | Profile |
 |---|---|
 | `/db/<name>/mcp` | the name's own profile; else, for an alias, its database's; else the server default; else the built-in one |
-| `/mcp` | the server default (else the built-in one) for everything: the instructions (after the text on `list_graphs`/`use_graph`), `tools/list`, `resources/list` and the tools a call may use, on every database |
+| `/mcp` | the server default (else the built-in one) for the session: the instructions (after the text on `list_graphs`/`use_graph`), `tools/list` and `resources/list`. A call runs under the profile of the database it names, as on `/db/<name>/mcp`; that profile's guidance reaches the agent as tool-result text ([On /mcp](#on-mcp)) |
 
 The **built-in profile** (no profile set) offers every tool with its built-in description and
 the built-in instructions, as before.
@@ -200,7 +200,9 @@ saying who will not get them.
 **Saved queries as tools** (`saved_query_tools`: folders with their subfolders, names, exclude,
 `paging_params`, `write_note`) work on `/db/<name>/mcp`: each selected saved query is a tool with
 its own name, description and parameters. On `/mcp` saved queries are never tools of their own
-(agents run them with `run_saved_query` and `graph`), whatever the profile says.
+(agents run them with `run_saved_query` and `graph`), whatever the profile says; the block
+"Instructions for this database" lists the selected ones with their descriptions and parameters
+([On /mcp](#on-mcp)).
 
 **Where profiles live:** in `mcp.toml` ([Configuration Reference](../reference/configuration.md#mcptoml)),
 beside the other MCP settings of the name: a renamed alias keeps its profile, a deleted database
@@ -208,6 +210,56 @@ or removed alias loses it (a new database of that name starts without one), a se
 carries every profile to a new machine. A profile graphersal-mcp refuses is never saved: the
 error names the key, with a did-you-mean (`unknown key "tools.inclde" (did you mean
 "tools.include"?)`).
+
+### On /mcp
+
+MCP hands out instructions only at `initialize`, before the agent picks a database, and one
+tool list for the whole session. So `/mcp` answers `initialize`, `tools/list` and
+`resources/list` with the server default profile, and tells the agent about each database in
+tool answers instead: the block **"Instructions for this database"**, appended to the answer
+of
+
+- every successful `use_graph`, and
+- the first tool call of an MCP session on a database (named with `graph`, or the one the
+  session selected). The server remembers per session which databases it showed; it shows the
+  block again when an alias now names another database, the database's profile changed or the
+  caller's grant changed. A request without a session gets it with every call.
+
+The block is made for the caller:
+
+- the database's own instructions: the notes of `append` mode, the whole text of `replace`
+  mode. A database without a profile of its own (an alias: nor its database) has none here: the
+  server default's instructions came with `initialize`;
+- the tools available on that database for this caller: the profile's tools (its own, an
+  alias's database's, else the server default's) that the caller's level allows (a `read`
+  grant, a base, MCP read-only: only the reading tools), and the tools of the session's list that
+  are not available there, with the reason;
+- the saved queries the profile offers as tools (`saved_query_tools`), with their descriptions
+  and parameters, to run with `run_saved_query`.
+
+```text
+--- Instructions for this database "current" (alias of "demo") ---
+demo holds a few people. Ask with the kb queries first.
+
+Tools available on "current" for you: query, gql, list_saved_queries, run_saved_query, get_schema.
+Not available on "current", though the session's tool list has them: list_compressions, ..., graph_info (not offered by the database's MCP profile); set_schema (your access to this database is read-only).
+Saved queries this database offers (run one with run_saved_query {"name": "...", "params": {...}, "graph": "current"}):
+- older_than: People older than min. Parameters: min (integer, default 30).
+- people: The names of all people.
+```
+
+- `list_graphs` marks each database and alias that has a profile of its own (an alias: also its
+  database's) with `"hasInstructions": true`, so the agent knows to select it first.
+- A call of a tool the database does not offer to the caller is refused, naming the tools that
+  are available there and pointing to the block: `unknown tool "set_schema" (graph "demo" is
+  read-only for MCP: only reading tools). On "current" you can use: query, gql, ...`.
+- A database whose read-only flag is on keeps its tools (as on `/db/<name>/mcp`); the block
+  says that every write is refused until an operator turns the flag off.
+- The block is at most the profile's answer limit (`answer_limit_chars`): a long list of saved
+  queries is cut first, with a note naming `list_saved_queries`, then the instructions.
+
+To see the block without an agent: `graphersal-server mcp profile preview NAME [--read]` ends
+with it ("On /mcp: after use_graph NAME"), and the web UI's previews show it (below).
 
 ### Editing a profile in the web UI
 
@@ -226,7 +278,10 @@ profile editor:
 - the JSON that will be saved (editable, "Apply to the form"), Import (a graphersal
   `--mcp-config` file; choose its instructions file together with it) and Export;
 - Preview as reader / as writer (`/mcp` for the server default): the instructions and tools an
-  agent would get with the profile in the form, from the endpoint itself, before saving.
+  agent would get with the profile in the form, from the endpoint itself, before saving. A
+  name's preview also shows the block "Instructions for this database" that `/mcp` gives after
+  `use_graph`; for the server default, choose a database and reader or writer beside "Preview
+  /mcp" to see its block with the default profile in the form.
 
 Save sends the profile with the revision it was read at: a change someone made meanwhile is
 refused and the form is kept. The Profile column of the databases table shows where each
@@ -237,7 +292,7 @@ name's profile comes from (`own`, `database`, `default`, `built-in`).
 ```bash
 graphersal-server mcp profile show acme --dir DIR             # where it comes from, the JSON
 graphersal-server mcp profile set mcp-config.json acme --dir DIR   # a --mcp-config file
-graphersal-server mcp profile preview acme --read --dir DIR   # what a reader's agent sees
+graphersal-server mcp profile preview acme --read --dir DIR   # what a reader's agent sees (also on /mcp)
 graphersal-server mcp profile clear acme --dir DIR            # back to the next in line
 graphersal-server mcp profile set default.json --dir DIR      # the server default (no NAME)
 ```
@@ -311,7 +366,9 @@ mode `append`, `--mcp-query-tools` as `"saved_query_tools": {}`, `--mcp-max-char
 
 Saved queries are not tools of their own on `/mcp`; run them with `run_saved_query` (and
 `graph` when needed). On `/db/<name>/mcp` a profile can make them tools of their own
-([Profiles](#profiles)).
+([Profiles](#profiles)). The answer of `use_graph` (and of the first call on a database) ends
+with the block "Instructions for this database" ([On /mcp](#on-mcp)); `list_graphs` marks the
+databases that have one of their own with `"hasInstructions": true`.
 
 ### Sessions follow their alias
 

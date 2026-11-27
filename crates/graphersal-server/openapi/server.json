@@ -4178,7 +4178,7 @@
       "post": {
         "operationId": "previewMcpProfile",
         "summary": "What an agent sees",
-        "description": "Runs graphersal-mcp's own `initialize`, `tools/list` and `resources/list` for a profile (absent: the name's effective one; null: the built-in one) on the database's context when it is loaded (else an empty graph), at a level (`read` or `write`), or for `/mcp` (`endpoint` `server`). Nothing is saved.",
+        "description": "Runs graphersal-mcp's own `initialize`, `tools/list` and `resources/list` for a profile (absent: the name's effective one; null: the built-in one) on the database's context when it is loaded (else an empty graph), at a level (`read` or `write`), or for `/mcp` (`endpoint` `server`). With a `name` the answer's `directoryBlock` is the text \"Instructions for this database\" that `/mcp` gives a caller at that level after `use_graph` (the previewed profile in place of the name's own, or of the server default for `server`). Nothing is saved.",
         "tags": [
           "mcp"
         ],

@@ -13,6 +13,7 @@ import {
   profileRequest, profilePath, createProfiles, builtinOf, formFromProfile, profileFromForm, isOverridden,
   defaultTools, importConfigFiles, folderChoices, selectedQueries, exportFileName, profileText, previewTools,
   clearQuestion, sourceBadge, sourceTitle, listOf, PROFILE_SOURCES, INSTRUCTIONS_MODES,
+  previewBody, directoryBlockOf, previewDatabases,
 } from '../mcp-profile-api.js';
 import { mcpRows, defaultProfileOf } from '../mcp-api.js';
 import { isConflict } from '../admin-api.js';
@@ -264,4 +265,23 @@ test('templates: the editor offers save, clear, previews, JSON, import and expor
   for (const marker of ['data-mcp-default-profile-edit', 'data-mcp-profile-edit', 'data-mcp-profile-source', '<profile-editor', 'k="profile"']) {
     assert.ok(tab.includes(marker), marker);
   }
+});
+
+test('the /mcp block in previews: the body for a name or the server default with a database, the block, the names to choose from', () => {
+  const profile = { tools: { include: ['gql'] } };
+  assert.deepEqual(previewBody('kb', 'read', profile, 'ignored'), { name: 'kb', endpoint: 'database', level: 'read', profile });
+  assert.deepEqual(previewBody(null, 'write', profile, ''), { endpoint: 'server', level: 'write', profile });
+  assert.deepEqual(previewBody(null, 'read', profile, ' kb '), { endpoint: 'server', level: 'read', profile, name: 'kb' });
+  assert.equal(directoryBlockOf({ directoryBlock: '--- Instructions for this database "kb" ---' }), '--- Instructions for this database "kb" ---');
+  assert.equal(directoryBlockOf({ directoryBlock: null }), '');
+  assert.equal(directoryBlockOf(null), '');
+  assert.deepEqual(previewDatabases([
+    { name: 'w', kind: 'database' }, { name: 'cur', kind: 'alias' }, { name: 'gone', kind: 'missing' }, { x: 1 },
+  ]), ['cur', 'w']);
+  const editor = readFileSync(new URL('../mcp-profile-editor.js', import.meta.url), 'utf8');
+  for (const marker of ['data-profile-preview-db', 'data-profile-preview-level', 'data-profile-preview-block']) {
+    assert.ok(editor.includes(marker), marker);
+  }
+  const tab = readFileSync(new URL('../mcp-tab.js', import.meta.url), 'utf8');
+  assert.ok(tab.includes(':databases="previewDatabases(rows)"'));
 });

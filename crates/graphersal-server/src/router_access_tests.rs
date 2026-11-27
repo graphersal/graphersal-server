@@ -1760,8 +1760,13 @@ fn mcp_person_count(fx: &Fixture, who: Who<'_>, session: &str) -> (String, bool)
     (result_line(&text), error)
 }
 
-/// The last line of a tool answer (the result, without the timing line).
+/// The last line of a tool answer (the result, without the timing line), before the block
+/// "Instructions for this database" a first call on `/mcp` gets (0.3.1).
 fn result_line(text: &str) -> String {
+    let text = text
+        .split("\n\n--- Instructions for this database")
+        .next()
+        .unwrap_or_default();
     text.lines().last().unwrap_or_default().to_string()
 }
 
@@ -4715,13 +4720,15 @@ fn mcp_profiles_apply_per_name_at_once_follow_aliases_and_are_checked() {
         json!({"query": "MATCH (p:person) RETURN count(p) AS n", "graph": "w"}),
     );
     assert!(!error, "{text}");
+    // A call runs under the profile of its database (0.3.1): w's own profile leaves out
+    // statistics.
     let refused = mcp(
         &fx,
         Who::Bearer(bob),
         "/mcp",
         Some(&session),
         json!({"jsonrpc": "2.0",
-        "id": 4, "method": "tools/call", "params": {"name": "query", "arguments": {"script": "1", "graph": "w"}}}),
+        "id": 4, "method": "tools/call", "params": {"name": "statistics", "arguments": {"graph": "w"}}}),
     );
     let body = String::from_utf8_lossy(refused.body()).to_string();
     assert!(
@@ -4968,5 +4975,392 @@ fn a_cli_mcp_config_imports_and_answers_as_graphersal_mcp_does() {
             "sessions",
             "symbol"
         ]
+    );
+}
+
+// Per-database guidance on /mcp (MCPDB, crate::mcp_guidance).
+
+/// The block "Instructions for this database" at the end of a tool answer, if any.
+fn guidance_of(text: &str) -> Option<String> {
+    text.find("--- Instructions for this database")
+        .map(|at| text[at..].to_string())
+}
+
+/// Calls `name` with `args` on `/mcp` in `session` as `who`: (text, isError).
+fn directory_tool(
+    fx: &Fixture,
+    who: Who<'_>,
+    session: &str,
+    name: &str,
+    args: Value,
+) -> (String, bool) {
+    mcp_tool(fx, who, "/mcp", session, name, args)
+}
+
+/// Defines the saved query `name` in `folder` of the database `db`.
+fn define_saved_query(fx: &Fixture, db: &str, name: &str, folder: &str, description: &str) {
+    let script = format!(
+        "g.define_query(#{{name: \"{name}\", folder: \"{folder}\", description: \"{description}\", \
+         params: #{{text: #{{schema: #{{type: \"string\"}}}}}}, \
+         body: \"fn {name}(text) {{ g.v().has_label(\\\"person\\\").values(\\\"name\\\") }}\"}})"
+    );
+    execute(fx, Who::Bearer(OPERATOR), db, &script);
+}
+
+#[test]
+fn mcp_directory_gives_each_databases_guidance_after_use_graph() {
+    let fx = fixture("access-mcp-guidance");
+    let (alice, bob) = (fx.alice.as_str(), fx.bob.as_str());
+    define_saved_query(&fx, "w", "people", "kb", "The people.");
+    define_saved_query(&fx, "w", "deep", "kb/sub", "Deeper people.");
+    define_saved_query(&fx, "w", "other", "misc", "Not offered.");
+    for (name, profile) in [
+        (
+            "w",
+            json!({
+                "instructions": {"mode": "append", "text": "W holds the people graph."},
+                "tools": {"include": ["gql", "query", "set_schema", "list_saved_queries", "run_saved_query"]},
+                "saved_query_tools": {"folders": ["kb"]},
+            }),
+        ),
+        (
+            "r",
+            json!({
+                "instructions": {"mode": "replace", "text": "R is for reading."},
+                "tools": {"include": ["gql", "set_schema"]},
+            }),
+        ),
+    ] {
+        let set = put(
+            &fx,
+            Who::Bearer(alice),
+            &format!("/api/admin/mcp/databases/{name}/profile"),
+            json!({ "profile": profile }),
+        );
+        assert_eq!(set.status(), 200, "{}", String::from_utf8_lossy(set.body()));
+    }
+    let session = mcp_initialize(&fx, Who::Bearer(bob), "/mcp");
+
+    // list_graphs marks the names with a profile of their own (an alias: its database's).
+    let (text, error) = directory_tool(&fx, Who::Bearer(bob), &session, "list_graphs", json!({}));
+    assert!(!error, "{text}");
+    let listing: Value = serde_json::from_str(&text).unwrap();
+    let marked = |name: &str| {
+        listing["graphs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|g| g["name"] == name)
+            .unwrap()
+            .get("hasInstructions")
+            .cloned()
+    };
+    assert_eq!(marked("w"), Some(json!(true)));
+    assert_eq!(marked("r"), Some(json!(true)));
+    assert_eq!(marked("cur"), Some(json!(true)), "{text}");
+    assert!(
+        text.starts_with("{\"graphs\":[{\"name\":"),
+        "graphersal-mcp's key order: {text}"
+    );
+
+    // use_graph: a writer's block (instructions, tools, the profile's saved queries).
+    let (text, error) = directory_tool(
+        &fx,
+        Who::Bearer(bob),
+        &session,
+        "use_graph",
+        json!({"name": "w"}),
+    );
+    assert!(!error, "{text}");
+    let w_block = guidance_of(&text).expect("the block after use_graph");
+    assert!(
+        w_block.starts_with(
+            "--- Instructions for this database \"w\" ---\nW holds the people graph.\n"
+        ),
+        "{w_block}"
+    );
+    let tools_line = w_block
+        .lines()
+        .find(|l| l.starts_with("Tools available on \"w\" for you: "))
+        .unwrap();
+    for tool in ["gql", "query", "set_schema", "run_saved_query"] {
+        assert!(tools_line.contains(tool), "{tools_line}");
+    }
+    assert!(
+        w_block.contains("statistics"),
+        "the session's other tools are named: {w_block}"
+    );
+    assert!(
+        w_block.contains("(not offered by the database's MCP profile)"),
+        "{w_block}"
+    );
+    assert!(
+        w_block.contains("- people: The people. Parameters: text (string, required)."),
+        "{w_block}"
+    );
+    assert!(w_block.contains("- deep: Deeper people."), "{w_block}");
+    assert!(!w_block.contains("- other"), "{w_block}");
+    assert!(w_block.contains("run_saved_query"), "{w_block}");
+    // The answer of use_graph itself is unchanged before the block.
+    let answer: Value = serde_json::from_str(text.split("\n\n---").next().unwrap()).unwrap();
+    assert_eq!(answer["selected"], "w");
+    // The calls on the selected graph after it: no block again.
+    let (text, error) = directory_tool(
+        &fx,
+        Who::Bearer(bob),
+        &session,
+        "gql",
+        json!({"query": "MATCH (p:person) RETURN count(p) AS n"}),
+    );
+    assert!(!error && guidance_of(&text).is_none(), "{text}");
+
+    // A reader: other tools, the reason named.
+    let (text, _) = directory_tool(
+        &fx,
+        Who::Bearer(bob),
+        &session,
+        "use_graph",
+        json!({"name": "r"}),
+    );
+    let r_block = guidance_of(&text).unwrap();
+    assert!(r_block.contains("\nR is for reading.\n"), "{r_block}");
+    assert!(
+        r_block.contains("Tools available on \"r\" for you: gql."),
+        "{r_block}"
+    );
+    assert!(
+        r_block.contains("set_schema (your access to this database is read-only)"),
+        "{r_block}"
+    );
+    let writer = mcp_initialize(&fx, Who::Bearer(alice), "/mcp");
+    let (text, _) = directory_tool(
+        &fx,
+        Who::Bearer(alice),
+        &writer,
+        "use_graph",
+        json!({"name": "r"}),
+    );
+    assert!(
+        guidance_of(&text)
+            .unwrap()
+            .contains("Tools available on \"r\" for you: gql, set_schema."),
+        "{text}"
+    );
+
+    // The previews give the same text as the session got (the admin API, the console's route).
+    let preview = json_of(&post(
+        &fx,
+        Who::Bearer(alice),
+        "/api/admin/mcp/preview",
+        json!({"name": "r", "level": "read"}),
+    ));
+    assert_eq!(preview["directoryBlock"], json!(r_block));
+    let preview = json_of(&post(
+        &fx,
+        Who::Bearer(alice),
+        "/api/admin/mcp/preview",
+        json!({"name": "w", "endpoint": "server", "level": "write"}),
+    ));
+    assert_eq!(preview["endpoint"], "/mcp");
+    assert_eq!(preview["directoryBlock"], json!(w_block));
+    assert!(
+        json_of(&post(
+            &fx,
+            Who::Bearer(alice),
+            "/api/admin/mcp/preview",
+            json!({})
+        ))["directoryBlock"]
+            .is_null()
+    );
+
+    // A refused tool names the tools available on the database.
+    let refused = mcp(
+        &fx,
+        Who::Bearer(bob),
+        "/mcp",
+        Some(&session),
+        json!({"jsonrpc": "2.0", "id": 9, "method": "tools/call",
+               "params": {"name": "set_schema", "arguments": {"graph": "r", "schema": {}}}}),
+    );
+    let message = json_of(&refused)["error"]["message"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        message.starts_with("unknown tool \"set_schema\""),
+        "{message}"
+    );
+    assert!(message.contains("On \"r\" you can use: gql."), "{message}");
+    assert!(
+        message.contains("Instructions for this database"),
+        "{message}"
+    );
+}
+
+#[test]
+fn mcp_directory_shows_a_databases_guidance_once_until_it_changes() {
+    let fx = fixture("access-mcp-guidance-once");
+    let (alice, bob) = (fx.alice.as_str(), fx.bob.as_str());
+    let profile = |text: &str| json!({"instructions": {"mode": "append", "text": text}});
+    for name in ["w", "r"] {
+        let set = put(
+            &fx,
+            Who::Bearer(alice),
+            &format!("/api/admin/mcp/databases/{name}/profile"),
+            json!({ "profile": profile(&format!("About {name}.")) }),
+        );
+        assert_eq!(set.status(), 200);
+    }
+    let session = mcp_initialize(&fx, Who::Bearer(bob), "/mcp");
+    let count = json!({"query": "MATCH (p:person) RETURN count(p) AS n", "graph": "w"});
+    // The first call naming a database with `graph` gets the block, the second does not.
+    let (text, error) = directory_tool(&fx, Who::Bearer(bob), &session, "gql", count.clone());
+    assert!(!error, "{text}");
+    assert!(guidance_of(&text).unwrap().contains("About w."), "{text}");
+    let (text, _) = directory_tool(&fx, Who::Bearer(bob), &session, "gql", count.clone());
+    assert!(guidance_of(&text).is_none(), "{text}");
+    // Another session gets it again.
+    let other = mcp_initialize(&fx, Who::Bearer(bob), "/mcp");
+    let (text, _) = directory_tool(&fx, Who::Bearer(bob), &other, "gql", count.clone());
+    assert!(guidance_of(&text).is_some(), "{text}");
+
+    // The profile changed: shown again, once.
+    assert_eq!(
+        put(
+            &fx,
+            Who::Bearer(alice),
+            "/api/admin/mcp/databases/w/profile",
+            json!({"profile": profile("New notes on w.")}),
+        )
+        .status(),
+        200
+    );
+    let (text, _) = directory_tool(&fx, Who::Bearer(bob), &session, "gql", count.clone());
+    assert!(
+        guidance_of(&text).unwrap().contains("New notes on w."),
+        "{text}"
+    );
+    let (text, _) = directory_tool(&fx, Who::Bearer(bob), &session, "gql", count.clone());
+    assert!(guidance_of(&text).is_none(), "{text}");
+
+    // The grant changed (write -> read): shown again with the reason.
+    let grant = post(
+        &fx,
+        Who::Bearer(alice),
+        "/api/admin/grants",
+        json!({"subject": "user:bob", "database": "w", "level": "read"}),
+    );
+    assert_eq!(
+        grant.status(),
+        200,
+        "{}",
+        String::from_utf8_lossy(grant.body())
+    );
+    let (text, _) = directory_tool(&fx, Who::Bearer(bob), &session, "gql", count.clone());
+    let block = guidance_of(&text).unwrap();
+    assert!(
+        block.contains("(your access to this database is read-only)"),
+        "{block}"
+    );
+    let (text, _) = directory_tool(&fx, Who::Bearer(bob), &session, "gql", count);
+    assert!(guidance_of(&text).is_none(), "{text}");
+
+    // An alias re-pointed: shown again, naming the new database.
+    let by_alias = json!({"query": "MATCH (p:person) RETURN count(p) AS n", "graph": "cur"});
+    let (text, _) = directory_tool(&fx, Who::Bearer(bob), &session, "gql", by_alias.clone());
+    let block = guidance_of(&text).unwrap();
+    assert!(
+        block.starts_with(
+            "--- Instructions for this database \"cur\" (alias of \"r\") ---\nAbout r."
+        ),
+        "{block}"
+    );
+    let (text, _) = directory_tool(&fx, Who::Bearer(bob), &session, "gql", by_alias.clone());
+    assert!(guidance_of(&text).is_none(), "{text}");
+    let flip = put(
+        &fx,
+        Who::Bearer(alice),
+        "/api/admin/aliases/cur",
+        json!({"target": "w"}),
+    );
+    assert_eq!(
+        flip.status(),
+        200,
+        "{}",
+        String::from_utf8_lossy(flip.body())
+    );
+    let (text, _) = directory_tool(&fx, Who::Bearer(bob), &session, "gql", by_alias);
+    let block = guidance_of(&text).unwrap();
+    assert!(
+        block.starts_with(
+            "--- Instructions for this database \"cur\" (alias of \"w\") ---\nNew notes on w."
+        ),
+        "{block}"
+    );
+
+    // A session that ended is forgotten.
+    let control = fx.loader.mcp_control().unwrap();
+    let before = control.shown().len();
+    let ended = send(
+        &fx,
+        Who::Bearer(bob),
+        Method::Delete,
+        "/mcp",
+        None,
+        &[("Mcp-Session-Id", other.as_str())],
+    );
+    assert_eq!(ended.status(), 200);
+    assert_eq!(control.shown().len(), before - 1);
+}
+
+#[test]
+fn mcp_directory_guidance_obeys_the_answer_limit() {
+    let fx = fixture("access-mcp-guidance-limit");
+    let alice = fx.alice.as_str();
+    for n in 0..40 {
+        define_saved_query(
+            &fx,
+            "h",
+            &format!("query_{n:02}"),
+            "kb",
+            "A saved query with a description long enough to fill the answer limit soon.",
+        );
+    }
+    let profile = json!({
+        "answer_limit_chars": 1000,
+        "instructions": {"mode": "append", "text": "H has many saved queries."},
+        "saved_query_tools": {"folders": ["kb"]},
+    });
+    assert_eq!(
+        put(
+            &fx,
+            Who::Bearer(alice),
+            "/api/admin/mcp/databases/h/profile",
+            json!({ "profile": profile }),
+        )
+        .status(),
+        200
+    );
+    let session = mcp_initialize(&fx, Who::Bearer(alice), "/mcp");
+    let (text, error) = directory_tool(
+        &fx,
+        Who::Bearer(alice),
+        &session,
+        "use_graph",
+        json!({"name": "h"}),
+    );
+    assert!(!error, "{text}");
+    let block = guidance_of(&text).unwrap();
+    assert!(
+        block.chars().count() <= 1000,
+        "{} chars: {block}",
+        block.chars().count()
+    );
+    assert!(block.contains("H has many saved queries."), "{block}");
+    assert!(block.contains("- query_00:"), "{block}");
+    assert!(!block.contains("- query_39:"), "{block}");
+    assert!(
+        block.contains("more saved queries are not shown here: list_saved_queries {\"graph\": \"h\"} lists them all"),
+        "{block}"
     );
 }
