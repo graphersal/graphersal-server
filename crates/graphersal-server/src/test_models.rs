@@ -94,9 +94,10 @@ pub(crate) fn tiny_model_dir(seed: u8, dir: &std::path::Path) {
 }
 
 /// A fake Hugging Face endpoint on 127.0.0.1 serving the tiny model as the repository
-/// `acme/tiny` at `main` (no network): the three model files, a card and the repository's
-/// metadata with the licence `license`. `slow`: the weights are an endless trickle (a download
-/// that only a cancel ends). Every other path is `404`. Each connection has a thread of its
+/// `acme/tiny` at `main` and at its commit [`FakeHub::COMMIT`] (no network): the three model
+/// files, a card and the repository's metadata with the licence `license`, each file answered
+/// with `X-Repo-Commit`. `slow`: the weights are an endless trickle (a download that only a
+/// cancel ends). Every other path is `404`. Each connection has a thread of its
 /// own; the listener lives as long as the process (tests only).
 pub(crate) struct FakeHub {
     /// `http://127.0.0.1:<port>`.
@@ -104,31 +105,37 @@ pub(crate) struct FakeHub {
 }
 
 impl FakeHub {
+    /// The commit `main` resolves to (`X-Repo-Commit`); the files are served under it too.
+    pub(crate) const COMMIT: &'static str = "0123456789abcdef0123456789abcdef01234567";
+
     pub(crate) fn start(license: &str, slow: bool) -> FakeHub {
         use std::io::{BufRead, BufReader, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a port");
         let url = format!("http://{}", listener.local_addr().expect("its address"));
-        let base = "/acme/tiny/resolve/main";
         let mut files: std::collections::HashMap<String, Vec<u8>> =
             std::collections::HashMap::new();
-        files.insert(format!("{base}/config.json"), CONFIG.as_bytes().to_vec());
-        files.insert(
-            format!("{base}/tokenizer.json"),
-            tokenizer_json().into_bytes(),
-        );
-        files.insert(format!("{base}/model.safetensors"), safetensors(1));
-        files.insert(
-            format!("{base}/README.md"),
-            format!("---\nlicense: {license}\n---\n# tiny\n").into_bytes(),
-        );
-        files.insert(
-            "/api/models/acme/tiny/revision/main".to_string(),
-            format!(
-                r#"{{"cardData": {{"license": "{license}"}}, "gated": false,
-                    "siblings": [{{"rfilename": "config.json"}}]}}"#
-            )
-            .into_bytes(),
-        );
+        // The same files at the branch `main` and at its commit `FakeHub::COMMIT`.
+        for revision in ["main", Self::COMMIT] {
+            let base = format!("/acme/tiny/resolve/{revision}");
+            files.insert(format!("{base}/config.json"), CONFIG.as_bytes().to_vec());
+            files.insert(
+                format!("{base}/tokenizer.json"),
+                tokenizer_json().into_bytes(),
+            );
+            files.insert(format!("{base}/model.safetensors"), safetensors(1));
+            files.insert(
+                format!("{base}/README.md"),
+                format!("---\nlicense: {license}\n---\n# tiny\n").into_bytes(),
+            );
+            files.insert(
+                format!("/api/models/acme/tiny/revision/{revision}"),
+                format!(
+                    r#"{{"cardData": {{"license": "{license}"}}, "gated": false,
+                        "siblings": [{{"rfilename": "config.json"}}]}}"#
+                )
+                .into_bytes(),
+            );
+        }
         let files = std::sync::Arc::new(files);
         std::thread::spawn(move || {
             for stream in listener.incoming() {
@@ -172,8 +179,14 @@ impl FakeHub {
                         Some(body) => ("200 OK", body.clone()),
                         None => ("404 Not Found", b"not found".to_vec()),
                     };
+                    // The hub names the commit a revision resolves to on every file.
+                    let commit = if path.contains("/resolve/") {
+                        format!("X-Repo-Commit: {}\r\n", FakeHub::COMMIT)
+                    } else {
+                        String::new()
+                    };
                     let head = format!(
-                        "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        "HTTP/1.1 {status}\r\nContent-Length: {}\r\n{commit}Connection: close\r\n\r\n",
                         body.len()
                     );
                     let _ = stream.write_all(head.as_bytes());

@@ -94,9 +94,14 @@ lack a model's blob. At the import:
 - otherwise the database is created in the state **`needs-model`** (the model's repository is
   shown). It cannot load until the model is added.
 
-Fix it by adding the model, from any source above (a model downloaded from Hugging Face is
-another copy than the one the database was made with: it resolves the database only when its
-blob is the same), or by its repository when `models/` already holds it:
+Fix it by adding the model, from any source above, or by its repository when `models/` already
+holds it. Any copy of the SAME model resolves the database: the same repository and the same
+model files (`config.json`, `tokenizer.json`, `model.safetensors`; the model identity
+`model2vec/<repo>@<12 hex>` names them). So a new download from Hugging Face resolves a database
+made with an earlier one, also when it names the revision differently (`main` or the commit it
+resolved to) or carries another card or licence: the database's Store then takes the new copy
+under its model's name. Another model of the repository (other weights: a newer commit, for
+example) does not resolve it, since its vectors would not match; the database keeps waiting.
 
 ```bash
 graphersal-server models add org/model --dir ./srv

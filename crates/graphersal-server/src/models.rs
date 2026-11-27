@@ -27,7 +27,11 @@
 //! - [`ModelsDir::resolve`] fills the models a Store needs from `models/`: a blob the Store's
 //!   catalog references but lacks through `Store::restore_blobs_from` (`models/` has the blob
 //!   layout); a model the schema names without a definition by `Store::import_model_dir` from
-//!   the blob's files unpacked into `tmp/`.
+//!   the blob's files unpacked into `tmp/`; a model whose blob is still missing then (`models/`
+//!   holds another blob of the same model: another download, another card, licence or revision
+//!   named, the same model files) by the same import of the blob with the SAME identity, which
+//!   the engine takes as a restore (the Store's definition rewritten under its name with that
+//!   blob). Another identity of the repository never resolves it (other vectors).
 //!
 //! Server-directory backups by external tools: `rsync -H` keeps the links; `cp -r` or a zip
 //! duplicates them (bigger, still correct).
@@ -49,6 +53,10 @@ use crate::layout::{ServerDir, write_atomic};
 pub const MODELS_FILE: &str = "models.toml";
 /// The model manifest inside a model blob (a ustar archive).
 const MODEL_MANIFEST: &str = "graphersal-model.json";
+/// The manifest of a model directory the engine's directory import reads (its download cache's
+/// manifest: `repo`, `revision`, `commit`, `license`, `base_models`, `gated`, the same keys as
+/// [`MODEL_MANIFEST`]).
+const DIR_MANIFEST: &str = "graphersal-embed-model.json";
 /// The largest manifest read.
 const MAX_MANIFEST_BYTES: u64 = 1 << 20;
 /// The most archive entries read before giving up.
@@ -438,13 +446,33 @@ impl ModelsDir {
                     .push(format!("cannot restore the blobs from models/: {err}")),
             }
         }
+        // What the restore by blob hash left missing.
+        let listed = Store::models_dir(store_dir).unwrap_or(listed);
         for repo in repos {
-            if listed.iter().any(|m| &m.repo == repo) {
+            let defined: Vec<_> = listed.iter().filter(|m| &m.repo == repo).collect();
+            if defined.is_empty() {
+                // The schema names the model, the catalog has no definition: import its files.
+                if let Err(note) = self.import_files(store_dir, repo, None) {
+                    out.notes.push(note);
+                }
                 continue;
             }
-            // The schema names the model, the catalog has no definition: import its files.
-            if let Err(note) = self.import_files(store_dir, repo) {
-                out.notes.push(note);
+            // Defined, its blob still missing: another blob of the same model (the same
+            // identity) in `models/` restores it (the engine rewrites the definition).
+            for model in defined {
+                if !matches!(model.state, ModelState::Missing) {
+                    continue;
+                }
+                match self.blob_of(repo, Some(&model.identity)) {
+                    Ok(Some(_)) => {
+                        if let Err(note) = self.import_files(store_dir, repo, Some(&model.identity))
+                        {
+                            out.notes.push(note);
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(err) => out.notes.push(format!("cannot read models/: {err}")),
+                }
             }
         }
         match self.adopt(store_dir) {
@@ -477,24 +505,39 @@ impl ModelsDir {
     /// Whether `models/blobs/` holds a model of the repository `repo` (read from the blobs'
     /// manifests; a directory that cannot be read holds nothing).
     pub fn holds(&self, repo: &str) -> bool {
-        matches!(self.blob_of(repo), Ok(Some(_)))
+        matches!(self.blob_of(repo, None), Ok(Some(_)))
     }
 
-    /// The first blob of `models/blobs/` whose manifest names the repository `repo`.
-    fn blob_of(&self, repo: &str) -> Result<Option<(PathBuf, Manifest)>, String> {
+    /// The first blob of `models/blobs/` whose manifest names the repository `repo` (and the
+    /// model identity `identity`, when given).
+    fn blob_of(
+        &self,
+        repo: &str,
+        identity: Option<&str>,
+    ) -> Result<Option<(PathBuf, Manifest)>, String> {
         Ok(blob_files(&self.blobs())
             .map_err(|err| err.to_string())?
             .into_iter()
             .find_map(|(_, path, _)| match manifest_of(&path) {
-                Ok(Some(m)) if m.repo.as_deref() == Some(repo) => Some((path, m)),
+                Ok(Some(m))
+                    if m.repo.as_deref() == Some(repo)
+                        && identity.is_none_or(|i| m.identity.as_deref() == Some(i)) =>
+                {
+                    Some((path, m))
+                }
                 _ => None,
             }))
     }
 
     /// `Store::import_model_dir` of the repository `repo`'s model from `models/` (its blob's
-    /// files unpacked into `tmp/`).
-    fn import_files(&self, store_dir: &Path, repo: &str) -> Result<(), String> {
-        let Some((blob, manifest)) = self.blob_of(repo)? else {
+    /// files unpacked into `tmp/`); `identity`: only a blob of that model identity.
+    fn import_files(
+        &self,
+        store_dir: &Path,
+        repo: &str,
+        identity: Option<&str>,
+    ) -> Result<(), String> {
+        let Some((blob, manifest)) = self.blob_of(repo, identity)? else {
             return Err(format!("models/ has no model of '{repo}'"));
         };
         let unpacked = self.dir.tmp().join(format!(
@@ -701,8 +744,8 @@ pub(crate) fn manifest_of(path: &Path) -> io::Result<Option<Manifest>> {
     }))
 }
 
-/// Unpacks the model blob at `blob` into the new directory `dir`: every file but the manifest
-/// (plain names only).
+/// Unpacks the model blob at `blob` into the new directory `dir`: every file (plain names
+/// only), its manifest as the directory manifest [`DIR_MANIFEST`].
 fn unpack(blob: &Path, dir: &Path) -> io::Result<()> {
     let mut file = File::open(blob)?;
     let entries = tar_entries(&mut file)?;
@@ -712,12 +755,19 @@ fn unpack(blob: &Path, dir: &Path) -> io::Result<()> {
             && !entry.name.contains(['/', '\\'])
             && entry.name != "."
             && entry.name != ".."
-            && entry.name != MODEL_MANIFEST;
+            && entry.name != DIR_MANIFEST;
         if !plain {
             continue;
         }
+        // The blob's manifest as the model directory's manifest: the import takes the
+        // repository, revision, commit, licence, base models and gated flag from it.
+        let name = if entry.name == MODEL_MANIFEST {
+            DIR_MANIFEST
+        } else {
+            entry.name.as_str()
+        };
         file.seek(SeekFrom::Start(entry.offset))?;
-        let mut out = File::create(dir.join(&entry.name))?;
+        let mut out = File::create(dir.join(name))?;
         let copied = io::copy(&mut (&mut file).take(entry.size), &mut out)?;
         if copied != entry.size {
             return Err(io::Error::other(format!("{} is truncated", entry.name)));
