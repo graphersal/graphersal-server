@@ -4,8 +4,10 @@
 //! `[limits.query]` bounds every query of a database: set in `server.toml` for every database
 //! and in a database's `database.toml` to override single keys for that database. Both files
 //! are read again at every load: the merged limits ([`QueryLimits::over`]) become the
-//! graphersal-session presets of the loaded database ([`QueryLimits::presets`]), so a change
-//! applies at the database's next load (unload + load). A database's overrides are set or
+//! graphersal-session presets of the loaded database ([`QueryLimits::presets`]). A change made
+//! through the server (a database's settings, `server.toml` through the admin API) applies at
+//! once to the new runs of a loaded database (`Loader::apply_limits`); a hand edit of a file at
+//! the next load or the next change through the server. A database's overrides are set or
 //! cleared at runtime through its settings (`crate::settings`: the admin API, `db set NAME
 //! limit KEY VALUE|--clear`, the web UI's Database settings tab), with the same refusals as
 //! this parser. Default: no limit at all (the presets of the graphersal playground).

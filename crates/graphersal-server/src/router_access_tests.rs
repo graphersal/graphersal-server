@@ -2844,7 +2844,7 @@ fn database_settings_show_everything_and_change_with_revisions_validation_and_au
         view["limits"]["applies"]
             .as_str()
             .unwrap()
-            .contains("next load"),
+            .contains("applies at once"),
         "{view}"
     );
     let keys: Vec<&str> = view["limits"]["keys"]
@@ -2988,7 +2988,7 @@ fn database_settings_show_everything_and_change_with_revisions_validation_and_au
     let _ = run_as_operator(&fx, "w", WRITE);
     assert_eq!(person_count(&fx, "w"), before + 1, "writable again");
 
-    // A limit override: written at once, in effect at the next load.
+    // A limit override: written and in effect at once (S1: `Context::set_presets`).
     assert_eq!(run_as_operator(&fx, "w", HEAVY)["ok"], true);
     let changed = expect(
         put(&fx, alice, url, json!({"limits": {"max_operations": 1000}})),
@@ -2999,8 +2999,8 @@ fn database_settings_show_everything_and_change_with_revisions_validation_and_au
     assert_eq!(row["override"], 1000);
     assert_eq!(row["effective"], 1000);
     assert_eq!(row["source"], "database");
-    assert_eq!(row["inEffect"], Value::Null, "the load's limits");
-    assert_eq!(changed["limits"]["reloadNeeded"], true);
+    assert_eq!(row["inEffect"], 1000, "applied to the loaded database");
+    assert_eq!(changed["limits"]["reloadNeeded"], false);
     let file = fx
         .loader
         .registry()
@@ -3017,11 +3017,8 @@ fn database_settings_show_everything_and_change_with_revisions_validation_and_au
         text.contains("description = \"Acme's graph\""),
         "the other settings are kept: {text}"
     );
-    assert_eq!(
-        run_as_operator(&fx, "w", HEAVY)["ok"],
-        true,
-        "not before the next load"
-    );
+    let answer = run_as_operator(&fx, "w", HEAVY);
+    assert!(refused_with(&answer, "operations"), "at once: {answer}");
     unload_as_admin(&fx, "w");
     let unloaded = expect(get(&fx, alice, url), 200);
     assert_eq!(unloaded["limits"]["loaded"], false);
@@ -3036,7 +3033,7 @@ fn database_settings_show_everything_and_change_with_revisions_validation_and_au
     let loaded = expect(get(&fx, alice, url), 200);
     assert_eq!(loaded["limits"]["reloadNeeded"], false);
     assert_eq!(limit_row(&loaded, "max_operations")["inEffect"], 1000);
-    // Cleared: the server's default (none) applies at the next load.
+    // Cleared: the server's default (none) applies at once.
     let changed = expect(
         put(&fx, alice, url, json!({"limits": {"max_operations": null}})),
         200,
@@ -3044,8 +3041,13 @@ fn database_settings_show_everything_and_change_with_revisions_validation_and_au
     let row = limit_row(&changed, "max_operations");
     assert_eq!(row["override"], Value::Null);
     assert_eq!(row["source"], "none");
-    assert_eq!(row["inEffect"], 1000);
-    assert_eq!(changed["limits"]["reloadNeeded"], true);
+    assert_eq!(row["inEffect"], Value::Null);
+    assert_eq!(changed["limits"]["reloadNeeded"], false);
+    assert_eq!(
+        run_as_operator(&fx, "w", HEAVY)["ok"],
+        true,
+        "unlimited again"
+    );
     assert!(
         !std::fs::read_to_string(&file).unwrap().contains("limits"),
         "the empty table is not written"
@@ -3103,7 +3105,7 @@ fn database_settings_show_everything_and_change_with_revisions_validation_and_au
         "database 'w' description set to \"Acme's graph\"",
         "database 'w' read-only on",
         "database 'w' auto-load on",
-        "database 'w' query limit max_operations = 1000 (applies at its next load)",
+        "database 'w' query limit max_operations = 1000 (applies to its new runs)",
         "database 'w' query limit max_operations cleared",
     ] {
         assert!(
@@ -3979,7 +3981,7 @@ fn a_layer_reset_over_http_discards_the_changes_and_keeps_grants_aliases_and_mcp
         405
     );
 
-    // The reset (loaded: unloaded, reset, loaded again).
+    // The reset (loaded: in place, on its open Store).
     let done = expect(
         post(
             &fx,
@@ -3991,13 +3993,11 @@ fn a_layer_reset_over_http_discards_the_changes_and_keeps_grants_aliases_and_mcp
     );
     assert_eq!(done["name"], "l0", "{done}");
     assert_eq!(done["base"], "b0");
-    assert_eq!(done["reloaded"], true);
+    assert_eq!(done["inPlace"], true);
+    assert_eq!(done["state"], "loaded");
     assert_eq!(done["discarded"]["added"]["vertices"], 2);
     assert_eq!(done["jobsKept"], 0);
-    assert!(
-        done["trash"].as_str().unwrap().starts_with("trash/l0-"),
-        "{done}"
-    );
+    assert!(done.get("trash").is_none(), "{done}");
     assert_eq!(done["description"], "scratch");
     assert_eq!(fx.loader.wait("l0", WAIT).unwrap(), DbState::Loaded);
     assert_eq!(mounted_count(&fx, alice, "l0"), 0);
@@ -4106,7 +4106,7 @@ fn a_reader_cannot_see_or_cancel_another_identitys_runs() {
     let feed = expect(get(&fx, Who::Bearer(&fx.bob), "/db/r/api/changes"), 200);
     assert!(!feed.to_string().contains("victim-page-1"), "{feed}");
     let last = feed["recent"].as_array().unwrap().last().unwrap().clone();
-    assert_eq!(last["by"], super::mounts::OTHER_IDENTITY, "{feed}");
+    assert_eq!(last["by"], "another identity", "{feed}");
     // The writer sees its own page id as it sent it (the playground tells its own changes).
     let own = expect(
         send(
@@ -4322,4 +4322,71 @@ fn every_page_refuses_framing() {
             .count();
         assert_eq!(count, 1, "{url}");
     }
+}
+
+/// S1: the model download routes are admin routes like every other (anonymous `401`, other
+/// users the unknown-endpoint `404`); an admin reads the state (`null` before any download),
+/// a bad repository is `400` before anything runs, a cancel without a download is `false`.
+#[test]
+fn the_model_download_routes_are_for_admins_only() {
+    let fx = fixture("access-model-download");
+    let (alice, bob) = (fx.alice.as_str(), fx.bob.as_str());
+    for (url, body) in [
+        (
+            "/api/admin/models/download",
+            Some(json!({"repo": "acme/tiny"})),
+        ),
+        ("/api/admin/models/download/cancel", Some(json!({}))),
+        ("/api/admin/models/download", None),
+    ] {
+        let send_as = |who: Who<'_>| match &body {
+            Some(body) => post(&fx, who, url, body.clone()),
+            None => get(&fx, who, url),
+        };
+        assert_unauthorized(&send_as(Who::Anonymous), url);
+        assert_eq!(send_as(Who::Bearer(bob)).status(), 404, "{url}");
+    }
+    let state = expect(
+        get(&fx, Who::Bearer(alice), "/api/admin/models/download"),
+        200,
+    );
+    assert_eq!(state["download"], Value::Null, "{state}");
+    let refused = post(
+        &fx,
+        Who::Bearer(alice),
+        "/api/admin/models/download",
+        json!({"repo": "not a repo"}),
+    );
+    assert_eq!(refused.status(), 400, "{}", json_of(&refused));
+    assert!(
+        json_of(&refused)["error"]
+            .as_str()
+            .unwrap()
+            .contains("not a Hugging Face repository name")
+    );
+    let unknown = post(
+        &fx,
+        Who::Bearer(alice),
+        "/api/admin/models/download",
+        json!({"repo": "acme/tiny", "endpoint": "http://evil.example"}),
+    );
+    assert_eq!(unknown.status(), 400, "a client never names the endpoint");
+    let cancel = expect(
+        post(
+            &fx,
+            Who::Bearer(alice),
+            "/api/admin/models/download/cancel",
+            json!({}),
+        ),
+        200,
+    );
+    assert_eq!(cancel, json!({"cancelled": false, "download": null}));
+    assert_eq!(
+        expect(
+            get(&fx, Who::Bearer(alice), "/api/admin/models/download"),
+            200
+        )["download"],
+        Value::Null,
+        "the refused request started nothing"
+    );
 }

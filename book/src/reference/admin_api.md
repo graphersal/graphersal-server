@@ -142,7 +142,7 @@ A `failed` database whose `database.toml` cannot be read has only `name`, `state
 | POST | `/api/admin/databases/<name>/load` | | `202` entry + `"load": "started"` or `"already-loading"`; `200` entry + `"load": "already-loaded"` |
 | POST | `/api/admin/databases/<name>/unload` | | `200` entry + `"unloaded": true` (was loaded) or `false` (was not) |
 | POST | `/api/admin/databases/<name>/promote` | | `200` entry (`role: base`, `readOnly: true`; one way) |
-| POST | `/api/admin/databases/<name>/reset-layer` | `{"confirm": true}` | `200` entry + `"base"`, `"trash"`, `"discarded"`, `"jobsKept"`, `"reloaded"` (a layer's changes discarded: [Reset a layer](#reset-a-layer)) |
+| POST | `/api/admin/databases/<name>/reset-layer` | `{"confirm": true}` | `200` entry + `"base"`, `"discarded"`, `"schemaReset"`, `"definitionsReset"`, `"jobsKept"`, `"inPlace"` (a layer's changes discarded: [Reset a layer](#reset-a-layer)) |
 | PUT | `/api/admin/databases/<name>/read-only` | `{"readOnly": bool, "revision"?}` | `200` entry (with its new `revision`) |
 | PUT | `/api/admin/databases/<name>/auto-load` | `{"autoLoad": bool, "revision"?}` | `200` entry (with its new `revision`) |
 | GET | `/api/admin/databases/<name>/settings` | | `200` the settings: everything about the database (see Database settings; `<name>` may be an alias; `ETag`: its `revision`) |
@@ -158,6 +158,9 @@ A `failed` database whose `database.toml` cannot be read has only `name`, `state
 | POST | `/api/admin/models` | `{"path"?, "repo"?, "license"?}` | `201` (from a path) or `200` (a repository) `{"added": [model...], "resolved": [database...], "stillMissing": [{"database", "model"}...], "notes": [string...]}` |
 | POST | `/api/admin/models?repo=<r>&license=<l>&format=<gsnap\|tar>` | the file itself (anything but JSON): a `.gsnap` carrying model blobs or a `.tar` (or gzip-compressed `.tar.gz`/`.tgz`) of a Model2Vec model directory | `201`, the same answer |
 | DELETE | `/api/admin/models/<repo or blob hash>` | | `200 {"model", "removed": [blob...], "bytes"}` |
+| POST | `/api/admin/models/download` | `{"repo", "modelRevision"?}` | `202 {"download": download}`: the download from Hugging Face runs in the background ([Model download](#model-download)) |
+| GET | `/api/admin/models/download` | | `200 {"download": download \| null}`: the running or last download |
+| POST | `/api/admin/models/download/cancel` | | `200 {"cancelled": bool, "download": download \| null}` |
 | GET | `/api/admin/aliases` | | `200 {"aliases": {alias: database}, "revision"}` (`ETag`: the revision) |
 | PUT | `/api/admin/aliases/<alias>` | `{"target", "mcp"?, "revision"?}` | `200 {"alias", "target", "mcpExposed", "leftoverGrantsRemoved"?}` (new alias or flip; `mcp` applies to a new alias only) |
 | DELETE | `/api/admin/aliases/<alias>` | | `200 {"alias", "removed": true, "grantsRemoved"}` (the grants on the alias go with it) |
@@ -306,37 +309,42 @@ base cannot get a model later); a failed one. An unknown name is `404`.
 
 `POST /api/admin/databases/<name>/reset-layer` with `{"confirm": true}` discards every change
 of the layer database `<name>` over its base; the base and the other layers over it are not
-touched. A new empty layer Store over the same base takes the old one's place (graphersal 0.8.0
-has no reset inside a Store); the old layer Store moves to `trash/<name>-<UTC time>/` with a
-copy of its `database.toml` (recoverable by hand: [Reset a
+touched. The reset is ONE commit of the layer's own Store (the engine's layer reset): the Store
+and its history stay, so a rollback of the Store (or a backup) can go back before it ([Reset a
 layer](../guide/databases.md#reset-a-layer)).
 
 Kept: the name, kind and base, `database.toml` (description, read-only and auto-load flags,
-query limit overrides), the grants (also via aliases), the aliases, the MCP settings and the
-layer's scheduled job definitions. Discarded: the data changes, the layer's own schema and other
-catalog changes, its history, workload statistics and last verify. A loaded layer is unloaded
-first and loaded again afterwards; the answer waits for that load (at most a minute).
+query limit overrides), the grants (also via aliases), the aliases, the MCP settings, the
+history and the layer's scheduled job definitions (set back in the same commit). Discarded: the
+data changes and the layer's own schema and other catalog changes. A loaded layer is reset in
+place and stays loaded (`inPlace: true`); the reset waits for queries running on it at most
+30 s.
 
 The answer is the entry plus:
 
 ```json
 {
   "name": "scratch", "kind": "layer", "base": "world", "state": "loaded",
-  "trash": "trash/scratch-2026-11-26T10-00-00Z",
   "discarded": {
     "added": {"vertices": 2, "edges": 1},
     "modified": {"vertices": 1, "edges": 0},
     "removed": {"vertices": 0, "edges": 1}
   },
+  "schemaReset": false,
+  "definitionsReset": 1,
   "jobsKept": 1,
-  "reloaded": true
+  "inPlace": true
 }
 ```
 
+`schemaReset`: the layer's own schema was discarded; `definitionsReset`: catalog definitions
+that differed from the base's (before the layer's jobs were set back).
+
 `400` without `"confirm": true`. `409` for a plain database (help: restore a backup), a base
-(help: names its layers' reset), a failed database, or a layer being loaded; `500` when the old
-layer cannot be read (a damaged layer: restore a backup, or delete and create it again) or the
-new one cannot be written (nothing changed). Audited as `LayerReset`.
+(help: names its layers' reset), a failed database, a layer being loaded or unloaded, or a
+loaded layer whose queries did not end within 30 s (help: its runs, to cancel them); `500` when
+the layer Store cannot be opened or written (a damaged layer: restore a backup, or delete and
+create it again; nothing changed). Audited as `LayerReset`.
 
 ### Read-only and auto-load
 
@@ -658,6 +666,48 @@ blob of the repository from `models/` (a blob hash removes that blob); refused (
 message names them, with help) while any database holds one of its blobs, waits for it, or
 names it in its Store's catalog.
 
+### Model download
+
+`POST /api/admin/models/download` with `{"repo": "owner/name", "modelRevision"?: "main"}`
+downloads a Model2Vec model from Hugging Face on the server itself (the engine's download: the
+three model files, the card, the licence files and the repository's metadata; each hash the
+hub states checked; the model loaded once as a check), imports it into a scratch Store in
+`tmp/` and adds its blob to the shared `models/` like any added model; then every plain
+`needs-model` database waiting for the repository gets it (`added.resolved`). One download
+runs at a time (a second one `409`, naming the running one). A repository or revision that is
+not one is `400` before anything runs. The answer is `202` with the download's first state;
+the console offline (no server: it holds the lock) runs it to its end and answers `200`.
+
+Where from: `https://huggingface.co`, or the endpoint in the server process's environment
+variable `GRAPHERSAL_HF_ENDPOINT` (a mirror); a gated or private repository needs the token in
+`HF_TOKEN` (sent to that endpoint's host only). A request cannot name the endpoint (a body with
+any other field is `400`): the server would fetch any URL for its client.
+
+`GET /api/admin/models/download` answers the running or last download since the server
+started (`null`: none); `POST /api/admin/models/download/cancel` asks it to stop at its next
+chunk (`cancelled: true`; nothing is kept; `false` when none runs; offline `409`). A download:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `id` | number | unique within this server run |
+| `repo`, `revision` | string | what is downloaded |
+| `state` | string | `running`, `done`, `failed`, `cancelled` |
+| `phase` | string | `download` (fetching and checking), `install` (adding to `models/`) |
+| `actor` | string | who started it (`operator`, `user:<name>`) |
+| `startedAtMs`, `finishedAtMs` | number, number or null | Unix milliseconds |
+| `file` | object or null | the file being fetched: `name`, `bytes`, `total` (the size the hub states, or null) |
+| `filesDone` | [object] | the files fetched completely: `name`, `bytes` |
+| `receivedBytes` | number | every file together |
+| `cancelRequested` | bool | a cancel was asked for |
+| `report` | object or null | once downloaded: `identity`, `commit`, `dimension`, `license` (SPDX id or `unknown`), `licenseFile`, `gated`, `baseModels` (`[{"repo", "license"}]`), `warnings` (an unknown or non-commercial licence, custom terms, a gated repository), `files` |
+| `added` | object or null | when `done`: as the answer of `POST models` (`added`, `resolved`, `stillMissing`, `notes`) |
+| `error`, `errorKind` | string or null | when `failed`/`cancelled`: the text, and `invalid-request`, `refused` (401/403: private or gated, a token needed), `not-found`, `transfer`, `integrity`, `not-a-model`, `io`, `cancelled`, `install` |
+| `notes` | [string] | e.g. the repository's metadata could not be read (licence unknown) |
+
+Audited: `model download of R (REV) started`, `model R (REV) downloaded into models/: <identity>,
+licence L`, `model download of R (REV) failed: <reason>`. The state lives in memory: a restart
+forgets the last download (a download running at the stop is cancelled).
+
 ### Runs
 
 The run administration: every query that waits or runs on a loaded database, whatever its
@@ -677,7 +727,7 @@ runs when it is not loaded; `404` for an unknown name, `409` offline). A run:
 |---|---|---|
 | `database` | string | the database it runs on |
 | `id` | number | its id, unique within the database (not across databases) |
-| `client` | string | the client's key: `page:<id>` (a page's `X-Graphersal-Client`), `mcp:<session>` or `mcp`, ... |
+| `client` | string | the client's key: `page:<id>` (a page's `X-Graphersal-Client`), `mcp:<session>` or `mcp`, ...; with an identity (every request but anonymous's) prefixed `<length>:<identity>/`, e.g. `10:user:alice/page:tab1` |
 | `alias` | string or null | the client's own id of the run (a page's `runId`, an MCP request id) |
 | `kind` | string | `query`, `layout`, `tool` (an MCP tool call), `other` |
 | `state` | string | `queued` (its job waits for the database's session) or `running` |

@@ -8,15 +8,22 @@
 // `uploadBytes` (`api.info.host`) first; Cancel aborts it), a model directory, .tar(.gz) or .gsnap on
 // the server, or a repository models/ already holds; every add also resolves the waiting
 // databases) and remove (`DELETE api/admin/models/<repo>`; refused with help while a database
-// uses it). Rules and texts: ./admin-api.js (`modelUploadRequest`, `addModelBody`). The models
+// uses it), and download (S1: "Download from Hugging Face": `POST api/admin/models/download`
+// `{repo, modelRevision?}`, the server fetches the model itself, one download at a time; its
+// progress is read from `GET api/admin/models/download` every DOWNLOAD_POLL_MS while it runs
+// and the tab is shown, Cancel is `POST api/admin/models/download/cancel`; when it ends a toast
+// names the licence and its warnings, or the error; the last download stays shown). Rules and
+// texts: ./admin-api.js (`modelUploadRequest`, `addModelBody`, `downloadRequest`,
+// `downloadView`, `downloadNotice`). The models
 // are read again whenever the database list was reloaded, and with the database list on every
 // visit of the tab and when the window gets the focus back (./shared.js `useFreshData`; the Add
 // dialog keeps its input); both tables sort by any column.
 
-import { reactive, ref, computed, nextTick, watch } from 'vue';
+import { reactive, ref, computed, nextTick, watch, onDeactivated, onUnmounted } from 'vue';
 import {
   modelRows, missingRows, removeModelAction, addModelBody, modelUploadRequest, uploadImport,
   uploadLimit, uploadSizeProblem, progressText, confirmText, outcomeText, bytesText,
+  downloadRequest, downloadView, downloadNotice,
 } from './admin-api.js';
 import {
   admin, ROOT, headers, list, reload, errorNotice, notify, useFreshData, useSort, SortTh, FormError,
@@ -35,6 +42,9 @@ import { hostInfo } from './databases.js';
 
 const freshForm = () => ({ source: 'upload', file: null, path: '', repo: '', license: '' });
 
+/** How often a running download's progress is read while the tab is shown. */
+const DOWNLOAD_POLL_MS = 500;
+
 export default {
   components: { SortTh, FormError },
   props: { api: { type: Object, required: true }, params: { type: Object, default: () => ({}) } },
@@ -52,6 +62,62 @@ export default {
     const fileProblem = computed(() => (dialog.form.source === 'upload' && dialog.form.file
       ? uploadSizeProblem(dialog.form.file.size, limit.value, 'model') : null));
     const percent = computed(() => (dialog.total > 0 ? Math.min(100, (dialog.loaded / dialog.total) * 100) : 0));
+    const dl = reactive({ form: { repo: '', revision: '' }, problems: [], error: null, busy: false, download: null });
+    const dlView = computed(() => downloadView(dl.download));
+    let dlTimer = null;
+    let alive = true;
+
+    /** Reads the download's state; polls while it runs; a download that just ended is announced. */
+    async function readDownload() {
+      clearTimeout(dlTimer);
+      const before = dl.download;
+      try {
+        const answer = await admin.modelDownload();
+        dl.download = answer.download || null;
+      } catch (err) {
+        dl.error = errorNotice(err);
+      }
+      const now = dl.download;
+      if (before && before.state === 'running' && now && now.id === before.id && now.state !== 'running') {
+        const notice = downloadNotice(now);
+        if (notice) notify(notice);
+        await changed();
+      }
+      if (alive && fresh.active && now && now.state === 'running') dlTimer = setTimeout(readDownload, DOWNLOAD_POLL_MS);
+    }
+    async function startDownload() {
+      const request = downloadRequest(dl.form);
+      dl.problems = request.problems;
+      dl.error = null;
+      if (!request.repo) return;
+      dl.busy = true;
+      try {
+        const answer = await admin.startModelDownload(request.repo, request.revision);
+        dl.download = answer.download || null;
+      } catch (err) {
+        dl.error = errorNotice(err);
+      } finally {
+        dl.busy = false;
+      }
+      await readDownload();
+    }
+    async function cancelDownload() {
+      dl.busy = true;
+      try {
+        await admin.cancelModelDownload();
+      } catch (err) {
+        notify(errorNotice(err));
+      } finally {
+        dl.busy = false;
+      }
+      await readDownload();
+    }
+    /** A waiting database's missing model, put into the download form. */
+    function prefillDownload(repo) {
+      dl.form.repo = repo;
+      dl.problems = [];
+      dl.error = null;
+    }
 
     async function load() {
       try {
@@ -162,7 +228,12 @@ export default {
       }
     }
 
-    useFreshData(() => Promise.all([load(), reload()]));
+    const fresh = useFreshData(() => Promise.all([load(), reload(), readDownload()]));
+    onDeactivated(() => clearTimeout(dlTimer));
+    onUnmounted(() => {
+      alive = false;
+      clearTimeout(dlTimer);
+    });
     const modelSort = useSort('models', MODEL_COLUMNS);
     const missingSort = useSort('missing-models', MISSING_COLUMNS);
     const modelList = computed(() => modelSort.rows(models.value));
@@ -171,6 +242,7 @@ export default {
     return {
       models, missing, modelSort, missingSort, modelList, missingList, error, loaded, busy, dlg, dialog, load, remove, addByRepo, openAdd, closeAdd, cancelAdd, submitAdd,
       fileInput, pickFile, limit, fileProblem, percent, progressText,
+      dl, dlView, startDownload, cancelDownload, prefillDownload,
       bytesText, removeAct: removeModelAction,
       held: (repo) => models.value.some((m) => m.repo === repo),
       shortHash: (h) => h.slice(0, 12),
@@ -188,7 +260,30 @@ export default {
       <div class="srv-notice-text"><span>The models could not be read: {{ error.text }}</span>
         <p v-if="error.help" class="srv-help">{{ error.help }}</p></div>
     </div>
-    <p v-else-if="loaded && !models.length" class="muted">No embedding models. The server keeps one copy of each model in its models/ directory and hard-links it into every database that uses it.</p>
+    <section class="srv-download" data-model-download>
+      <h2 class="srv-sub-head">Download from Hugging Face</h2>
+      <form class="srv-inline-form srv-form" @submit.prevent="startDownload">
+        <label>Repository <input v-model="dl.form.repo" name="download-repo" class="mono" autocomplete="off" spellcheck="false" placeholder="minishlab/potion-base-8M" :disabled="dl.busy || (dlView && dlView.running)"></label>
+        <label>Revision <input v-model="dl.form.revision" name="download-revision" class="mono" autocomplete="off" spellcheck="false" placeholder="main" :disabled="dl.busy || (dlView && dlView.running)"></label>
+        <button type="submit" class="btn primary" :disabled="dl.busy || (dlView && dlView.running)">Download</button>
+      </form>
+      <form-error :error="dl.error" :problems="dl.problems"></form-error>
+      <div v-if="dlView" class="srv-download-state" role="status" :data-download-state="dlView.state">
+        <p :class="{ 'srv-warn': dlView.tone !== 'ok' }">{{ dlView.headline }}</p>
+        <div v-if="dlView.running" class="srv-progress">
+          <progress :value="dlView.percent === null ? null : dlView.percent" max="100"></progress>
+          <span class="muted">{{ dlView.progress || dlView.received }}</span>
+          <button type="button" class="btn small" data-download-cancel :disabled="dl.busy || (dl.download && dl.download.cancelRequested)" @click="cancelDownload">Cancel</button>
+        </div>
+        <template v-else-if="dlView.state === 'done'">
+          <p>Licence: <span class="mono">{{ dlView.license || 'unknown' }}</span><template v-if="dlView.gated"> (gated: its terms were accepted with the server's token)</template><template v-if="dlView.baseModels.length"> · made from {{ dlView.baseModels.join(', ') }}</template></p>
+          <ul v-if="dlView.warnings.length" class="srv-warn"><li v-for="w in dlView.warnings" :key="w">{{ w }}</li></ul>
+        </template>
+        <p v-else-if="dlView.error" class="srv-help">{{ dlView.error }}</p>
+      </div>
+      <p class="muted srv-sub">The server fetches the Model2Vec model itself, checks it and adds it to its models/ directory; every database waiting for it gets it. One download at a time. The server's environment names a mirror (GRAPHERSAL_HF_ENDPOINT) and the token of a gated repository (HF_TOKEN).</p>
+    </section>
+    <p v-if="!error && loaded && !models.length" class="muted">No embedding models. The server keeps one copy of each model in its models/ directory and hard-links it into every database that uses it.</p>
     <div v-if="models.length" class="srv-table-wrap">
     <table class="data-table srv-table srv-model-table">
       <thead><tr><sort-th :s="modelSort" k="model">Model</sort-th><sort-th :s="modelSort" k="size" num>Size</sort-th><sort-th :s="modelSort" k="users">Used by</sort-th><th><span class="sr-only">Actions</span></th></tr></thead>
@@ -219,7 +314,10 @@ export default {
             <td class="mono">{{ m.model }}</td>
             <td class="srv-actions">
               <button v-if="held(m.model)" type="button" class="btn small" :disabled="!!busy['repo:' + m.model]" title="models/ holds it: give it to the waiting databases" @click="addByRepo(m.model)">Use from models/</button>
-              <button v-else type="button" class="btn small" title="Add it: upload a .gsnap or a .tar / .tar.gz of the model directory, or name one on the server" @click="openAdd({ repo: m.model })">Add…</button>
+              <template v-else>
+                <button type="button" class="btn small" title="Put it into the Hugging Face download form above" @click="prefillDownload(m.model)">Download…</button>
+                <button type="button" class="btn small" title="Add it: upload a .gsnap or a .tar / .tar.gz of the model directory, or name one on the server" @click="openAdd({ repo: m.model })">Add…</button>
+              </template>
             </td>
           </tr>
         </tbody>

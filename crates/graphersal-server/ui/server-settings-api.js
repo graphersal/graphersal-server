@@ -50,7 +50,6 @@ export const SECTIONS = Object.freeze([
 /** When a change of each class applies, in words, and the badge's tone. */
 export const APPLIES = Object.freeze({
   now: { text: 'applies now', tone: 'ok', title: 'The running server applies a change at once.' },
-  load: { text: 'at next load', tone: '', title: "Read at every load of a database: a loaded database keeps its value until it is unloaded and loaded again." },
   create: { text: 'new databases', tone: '', title: 'Read when a database is created or imported; existing databases keep theirs.' },
   restart: { text: 'after restart', tone: 'warn', title: 'Saved now; the running server applies it at its next start.' },
 });
@@ -225,16 +224,16 @@ export function savedNotice(answer = {}) {
   if (applied.length) parts.push(`Applied now: ${applied.join(', ')}.`);
   if (pending.length) parts.push(`Restart pending: ${pending.join(', ')}.`);
   const later = changed.filter((k) => !applied.includes(k) && !pending.includes(k));
-  if (later.length) parts.push(`Applies when used: ${later.join(', ')} (query limits at each database's next load, [defaults] for new databases).`);
+  if (later.length) parts.push(`Applies when used: ${later.join(', ')} ([defaults] for new databases).`);
   if (answer.rewritten === true) parts.push('server.toml was rewritten from its keys: its own comments could not be kept.');
   return { tone: pending.length || answer.rewritten === true ? 'warn' : 'ok', text: `Saved ${changed.join(', ')}.`, help: parts.join(' ') };
 }
 
 /** What the "Server defaults" entry says about inheritance. */
-export const DEFAULTS_HELP = 'Every database inherits the query limits below, key by key, unless it overrides a key in its own settings (Reset to inherited there removes the override); a change applies at each database\'s next load. The new-database values are copied into a database when it is created or imported: changing them never touches an existing database. The creation parameters (chunk size, damage policy) are fixed for a database\'s life.';
+export const DEFAULTS_HELP = 'Every database inherits the query limits below, key by key, unless it overrides a key in its own settings (Reset to inherited there removes the override); a change applies at once to every loaded database\'s new runs (a run already going keeps its limits). The new-database values are copied into a database when it is created or imported: changing them never touches an existing database. The creation parameters (chunk size, damage policy) are fixed for a database\'s life.';
 
 /** What the "Server" entry says about saving. */
-export const SERVER_HELP = 'Every key of server.toml. Saving writes the file at once (its comments are kept; an unusual layout is rewritten, which the notice says). "applies now" keys take effect at once; query limits at each database\'s next load; [defaults] for new databases; the rest after a restart, marked "restart pending" until then. A change made from a stale page is refused: the page reads the file again.';
+export const SERVER_HELP = 'Every key of server.toml. Saving writes the file at once (its comments are kept; an unusual layout is rewritten, which the notice says). "applies now" keys take effect at once (query limits too: every loaded database\'s new runs); [defaults] for new databases; the rest after a restart, marked "restart pending" until then. A change made from a stale page is refused: the page reads the file again.';
 
 /**
  * What a new database gets from the server defaults, in words, from a database settings view's

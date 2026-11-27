@@ -36,7 +36,7 @@ graphersal-server --help
 graphersal-server config get --dir ./srv                               # every key: value, default, when it applies, restart pending
 graphersal-server config get limits.upload_bytes --dir ./srv           # one key
 graphersal-server config set limits.upload_bytes 1073741824 --dir ./srv  # through a running server: applied at once
-graphersal-server config set limits.query.timeout_ms 30000 --dir ./srv # every database without its own value, at its next load
+graphersal-server config set limits.query.timeout_ms 30000 --dir ./srv # every database without its own value, at once
 graphersal-server config set defaults.auto_load true --dir ./srv       # what new databases start with
 graphersal-server config set http.allowed_hosts db.example.com --dir ./srv   # after a restart (restart pending)
 graphersal-server config unset sessions.lifetime_secs --dir ./srv      # back to the default
@@ -67,7 +67,8 @@ graphersal-server db export acme --out acme.gsnap --dir ./srv          # a packe
 graphersal-server db export acme --out acme.gsnap --no-models --dir ./srv
 ```
 
-A query limit change applies at the database's next load:
+A query limit change through the server applies at once to the database's new runs; a hand edit
+of `database.toml` applies at its next load:
 
 ```bash
 graphersal-server db unload acme --dir ./srv && graphersal-server db load acme --dir ./srv
@@ -77,7 +78,7 @@ graphersal-server db unload acme --dir ./srv && graphersal-server db load acme -
 
 ```bash
 graphersal-server db promote products --dir ./srv                      # an unloaded plain database becomes a base, for good
-graphersal-server db reset-layer scratch --yes --dir ./srv             # discard a layer's changes; base untouched, old layer to trash/
+graphersal-server db reset-layer scratch --yes --dir ./srv             # discard a layer's changes; base untouched, history kept
 graphersal-server db create products --role base --dir ./srv           # an empty base
 graphersal-server db create acme --base products --dir ./srv           # a layer over the base
 graphersal-server db export acme --out acme-full.gsnap --materialize --dir ./srv   # a layer as a standalone snapshot
@@ -138,6 +139,8 @@ graphersal-server models add /models/model.tar.gz --repo org/model --license mit
 graphersal-server models add /data/with-models.gsnap --dir ./srv                 # the models a .gsnap carries
 graphersal-server models add org/model --dir ./srv                               # a model models/ already holds
 graphersal-server models remove org/model --dir ./srv                            # refused while a database uses it
+graphersal-server models download minishlab/potion-base-8M --dir ./srv          # from Hugging Face, by the server; shows the licence
+graphersal-server models download --cancel --dir ./srv                          # stop a running download
 ```
 
 ## Users, tokens and grants

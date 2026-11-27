@@ -35,7 +35,7 @@ path = "src/main.rs"
 # `persist-zip`: verified ZIP backups of a database (`backups/<name>/<UTC time>.zip`; no extra
 # dependency, the engine writes the archive itself); `io`: imports of GraphSON and GraphML files
 # into new databases (adds graphersal's `quick-xml` dependency for GraphML).
-graphersal = { workspace = true, features = ["persist", "persist-zip", "io", "script"] }
+graphersal = { workspace = true, features = ["persist", "persist-zip", "io", "script", "model-download"] }
 # `ui-assets`: every database mount and the server's UI at `/` (the playground showing the
 # `server` UI profile of `ui/`) serve the embedded playground;
 # `mcp`: each database context is a host of the shared MCP endpoint (`/db/<name>/mcp`, and the

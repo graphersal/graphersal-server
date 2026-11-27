@@ -174,7 +174,9 @@ const based = (request, revision) => (typeof revision === 'string' && revision ?
  * backup(name), backups(name), restore(name, backup, newName?) (no `name` field when restoring
  * over the database itself), importPath({path | inbox, name, base?, format?, description?, role?}),
  * imports (the import inbox `imports/` of the server directory), models,
- * addModel({path?, repo?, license?}), removeModel(repo or blob hash), promote(name) (no body;
+ * addModel({path?, repo?, license?}), removeModel(repo or blob hash), modelDownload (the running
+ * or last Hugging Face download), startModelDownload(repo, revision?), cancelModelDownload,
+ * promote(name) (no body;
  * one way: a base is frozen forever), resetLayer(name) (a layer's changes discarded, confirmed), runs(name?) (one loaded database's queued and running runs,
  * or every loaded database's without a name), cancelRun(name, id) (the run administration: a
  * run id is unique within its database only), the users and grants: users, addUser(name,
@@ -220,6 +222,13 @@ export const adminRequest = Object.freeze({
   models: () => ({ method: 'GET', path: 'api/admin/models' }),
   addModel: (body) => ({ method: 'POST', path: 'api/admin/models', body }),
   removeModel: (id) => ({ method: 'DELETE', path: `api/admin/models/${modelSegs(id)}` }),
+  modelDownload: () => ({ method: 'GET', path: 'api/admin/models/download' }),
+  startModelDownload: (repo, revision) => ({
+    method: 'POST',
+    path: 'api/admin/models/download',
+    body: revision ? { repo, modelRevision: revision } : { repo },
+  }),
+  cancelModelDownload: () => ({ method: 'POST', path: 'api/admin/models/download/cancel' }),
   promote: (name) => ({ method: 'POST', path: `api/admin/databases/${seg(name)}/promote` }),
   resetLayer: (name) => ({ method: 'POST', path: `api/admin/databases/${seg(name)}/reset-layer`, body: { confirm: true } }),
   users: () => ({ method: 'GET', path: 'api/admin/users' }),
@@ -1441,7 +1450,7 @@ export function promoteAction(row, { busy = false } = {}) {
 
 /**
  * Whether a row's layer may be reset (`POST .../reset-layer`): `{enabled, title}`. Only a layer
- * database whose config is readable; a loaded one is unloaded and loaded again by the server.
+ * database whose config is readable; a loaded one is reset in place (it stays loaded).
  * Every other row is disabled with the reason (the server refuses the same with `409`).
  */
 export function resetLayerAction(row, { busy = false } = {}) {
@@ -1458,9 +1467,9 @@ export function resetLayerAction(row, { busy = false } = {}) {
 /** The confirmation of a layer reset: what is lost and what is kept. */
 export function resetLayerConfirmText(name, base = '') {
   const over = base ? ` over its base "${base}"` : ' over its base';
-  return `Reset the layer "${name}"? Every change it made${over} is discarded: the vertices and edges it added, changed and removed, its own schema and saved queries, and its history. The base and the other layers stay unchanged.\n\n`
-    + `The old layer moves to the server's trash/ directory (recoverable by hand only).\n\n`
-    + `Kept: the name, base, description, read-only and auto-load flags, query limits, grants, aliases, MCP settings and scheduled jobs. A loaded layer is unloaded and loaded again.`;
+  return `Reset the layer "${name}"? Every change it made${over} is discarded: the vertices and edges it added, changed and removed, its own schema and saved queries. The base and the other layers stay unchanged.\n\n`
+    + `The reset is one commit of the layer's own Store: its history keeps the state before (a Store rollback or a backup can bring it back).\n\n`
+    + `Kept: the name, base, description, read-only and auto-load flags, query limits, grants, aliases, MCP settings, history and scheduled jobs. A loaded layer stays loaded: its pages see the base's data at their next request.`;
 }
 
 /** The outcome of a layer reset (`POST .../reset-layer` answer). */
@@ -1475,8 +1484,7 @@ export function resetLayerOutcomeText(name, answer = {}) {
     ? 'it had no data changes'
     : `discarded ${counted(added, 'added element')}, ${counted(modified, 'changed element')} and ${counted(removed, 'removal')}`;
   const base = answer.base ? ` "${answer.base}"` : '';
-  const trash = answer.trash || "the server's trash/ directory";
-  return `"${answer.name || name}" was reset and reads exactly its base${base} now: ${what}; the old layer moved to ${trash}${answer.reloaded ? '; loaded again' : ''}.`;
+  return `"${answer.name || name}" was reset and reads exactly its base${base} now: ${what}; its Store keeps the history before the reset${answer.inPlace ? '; it stayed loaded' : ''}.`;
 }
 
 // ------------------------------------------------------------------ the run administration
@@ -1800,4 +1808,88 @@ export function shownToken(answer) {
   return answer && typeof answer.token === 'string' && answer.token
     ? { name: typeof answer.name === 'string' ? answer.name : '', token: answer.token }
     : null;
+}
+
+// ------------------------------------------------------------------ model download (S1)
+
+/** The Hugging Face repository rule of a download (src/ops_models.rs `is_download_repo`). */
+function isDownloadRepo(repo) {
+  const part = (p) => p.length > 0 && p.length <= 96 && !p.startsWith('.') && /^[A-Za-z0-9._-]+$/.test(p);
+  const parts = repo.split('/');
+  return parts.length === 2 && part(parts[0]) && part(parts[1]);
+}
+
+/** The revision rule of a download (src/ops_models.rs `is_revision`). */
+function isRevision(revision) {
+  return revision.length > 0 && !revision.startsWith('/') && !revision.includes('..') && /^[A-Za-z0-9._/-]+$/.test(revision);
+}
+
+/**
+ * The request of the download form `{repo, revision}`: `{repo, revision, problems}` (`repo`
+ * null with the problems; the same refusals as the server).
+ */
+export function downloadRequest(form = {}) {
+  const repo = typeof form.repo === 'string' ? form.repo.trim() : '';
+  const revision = typeof form.revision === 'string' ? form.revision.trim() : '';
+  const problems = [];
+  if (!repo) problems.push('Enter the repository (owner/name), for example minishlab/potion-base-8M.');
+  else if (!isDownloadRepo(repo)) problems.push(`'${repo}' is not a Hugging Face repository name: owner/name of letters, digits, '.', '_' and '-'.`);
+  if (revision && !isRevision(revision)) problems.push(`'${revision}' is not a revision: a branch, tag or commit of letters, digits, '.', '_', '-' and '/'.`);
+  return problems.length ? { repo: null, revision: null, problems } : { repo, revision: revision || null, problems };
+}
+
+/**
+ * A download (`GET api/admin/models/download` `download`) for the Models tab: `{state, running,
+ * headline, file, percent (null: size unknown), progress (text), received, license, gated,
+ * warnings, baseModels, error, tone}`; null for none.
+ */
+export function downloadView(download) {
+  if (!download || typeof download !== 'object' || typeof download.repo !== 'string') return null;
+  const state = ['running', 'done', 'failed', 'cancelled'].includes(download.state) ? download.state : 'failed';
+  const what = `${download.repo} (${download.revision || 'main'})`;
+  const report = download.report && typeof download.report === 'object' ? download.report : null;
+  const file = download.file && typeof download.file === 'object' ? download.file : null;
+  const received = Number(download.receivedBytes) || 0;
+  const list = (v) => (Array.isArray(v) ? v.filter((x) => typeof x === 'string' && x) : []);
+  let headline;
+  if (state === 'running') {
+    headline = download.cancelRequested ? `Cancelling the download of ${what}…`
+      : download.phase === 'install' ? `Adding ${what} to the shared models…`
+        : `Downloading ${what}…`;
+  } else if (state === 'done') {
+    headline = `Downloaded ${what} into the shared models.`;
+  } else if (state === 'cancelled') {
+    headline = `The download of ${what} was cancelled; nothing was kept.`;
+  } else {
+    headline = `The download of ${what} failed; nothing was kept.`;
+  }
+  const total = file && typeof file.total === 'number' ? file.total : null;
+  const fileBytes = file ? Number(file.bytes) || 0 : 0;
+  return {
+    state,
+    running: state === 'running',
+    headline,
+    file: file && typeof file.name === 'string' ? file.name : null,
+    percent: total && total > 0 ? Math.min(100, (fileBytes / total) * 100) : null,
+    progress: file ? `${file.name}: ${progressText(fileBytes, total)}`.replace(/ sent$/, ' received') : '',
+    received: `${bytesText(received) || '0 B'} received`,
+    license: report && typeof report.license === 'string' ? report.license : null,
+    gated: !!(report && report.gated),
+    identity: report && typeof report.identity === 'string' ? report.identity : null,
+    warnings: list(report && report.warnings),
+    baseModels: report && Array.isArray(report.baseModels)
+      ? report.baseModels.filter((b) => b && typeof b.repo === 'string').map((b) => (b.license ? `${b.repo} (${b.license})` : b.repo))
+      : [],
+    error: typeof download.error === 'string' ? download.error : null,
+    tone: state === 'done' ? (list(report && report.warnings).length ? 'warn' : 'ok') : state === 'running' ? 'ok' : 'error',
+  };
+}
+
+/** The toast of a download that ended (`downloadView`): the licence and its warnings, or the error. */
+export function downloadNotice(download) {
+  const view = downloadView(download);
+  if (!view || view.running) return null;
+  if (view.state !== 'done') return { tone: view.state === 'cancelled' ? 'warn' : 'error', text: view.headline, help: view.error || '' };
+  const help = [`Licence: ${view.license || 'unknown'}.`, ...view.warnings].join(' ');
+  return { tone: view.tone, text: view.headline, help };
 }

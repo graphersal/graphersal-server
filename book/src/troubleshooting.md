@@ -60,7 +60,7 @@ Restore](guide/backups.md#restore-one-database).
 `Error: database 'acme' has no backup '...'`: the name is the one `db backups` prints (the UTC
 time with dashes), without the `.zip`.
 
-## Throw away a layer's changes, or get a reset layer back
+## Throw away a layer's changes, or undo a reset
 
 A layer (a database made with `--base`) collected changes you do not want: reset it. The base
 and the other layers are untouched; the name, settings, grants, aliases, MCP settings and
@@ -70,19 +70,11 @@ scheduled jobs stay:
 graphersal-server db reset-layer scratch --yes --dir ./srv
 ```
 
-Reset by mistake? The old layer is in `trash/scratch-<UTC time>/` (the output names it). Bring
-it back as another database, then copy what you need or point the alias at it:
-
-```bash
-graphersal-server stop --dir ./srv
-mv ./srv/trash/scratch-2026-11-26T10-00-00Z ./srv/databases/scratch-old
-graphersal-server start --dir ./srv
-graphersal-server db alias set current scratch-old --dir ./srv    # if clients use an alias
-```
-
-The recovered `scratch-old` has no grants of its own (grant them on the Users tab or with `user
-grant`). A plain database cannot be reset: restore a backup ([Restore a database from a
-backup](#restore-a-database-from-a-backup)).
+Reset by mistake? The reset is one commit of the layer's own Store, and its history keeps the
+state before: open the layer's playground (`/db/scratch/`), Store menu, and roll back to the
+commit before the reset (the rolled-back commits go to the attic, so the rollback has an undo
+too). Or restore a backup of the layer taken before the reset ([Restore a database from a
+backup](#restore-a-database-from-a-backup)). A plain database cannot be reset: restore a backup.
 
 ## Restore a whole server on a new machine
 
@@ -447,7 +439,9 @@ allowed_hosts = ["db.example.com"]
 - A `memory.limit` diagnostic: the query, import or write would take the process over its
   memory ceiling (`[limits] memory_limit`) and was rolled back. Look at `graphersal-server status
   --dir ./srv` (memory rows), unload unused databases, or raise the limit and restart.
-- A limit change made with `db set` did not apply: it applies at the database's next load.
+- A limit change made with `db set` applies at once to the database's new runs (a query already
+  running keeps its limits). A hand edit of `database.toml` or `server.toml` applies at the
+  database's next load (or the next change through the server).
 
 ## An upload is refused with 413
 

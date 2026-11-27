@@ -181,41 +181,29 @@ fn the_server_description_is_a_valid_openapi_document() {
     }
 }
 
+/// The engine's description carries what the server once patched in itself (graphersal-serve
+/// 0.9.0): the `409` of a request marked read-only on every writing route and the file root's
+/// `403`/`500`.
 #[test]
-fn the_engine_patch_is_still_needed_and_applies() {
-    let raw = served_engine_spec().unwrap();
-    let patch: Value = serde_json::from_str(ENGINE_PATCH).unwrap();
+fn the_engine_describes_read_only_requests_and_the_file_root() {
+    let engine = engine_spec().unwrap();
     assert_eq!(
-        patch["engineVersion"], raw["info"]["version"],
-        "openapi/engine-patch.json was made for another graphersal-serve: check what the new \
-         version's openapi.json carries and drop what it has"
-    );
-    for (name, _) in patch["responses"].as_object().unwrap() {
-        assert!(
-            raw["components"]["responses"].get(name).is_none(),
-            "the engine has the response {name} now: drop it from engine-patch.json"
-        );
-    }
-    for (key, operation) in patch["operations"].as_object().unwrap() {
-        let (method, path) = key.split_once(' ').unwrap();
-        let theirs = &raw["paths"][path][method.to_ascii_lowercase()];
-        assert!(theirs.is_object(), "the engine has no {key}");
-        assert_ne!(
-            theirs, operation,
-            "the engine has {key} as patched: drop it"
-        );
-    }
-    let patched = engine_spec().unwrap();
-    assert_eq!(
-        patched["paths"]["/api/schema/set"]["post"]["responses"]["409"]["$ref"],
+        engine["paths"]["/api/schema/set"]["post"]["responses"]["409"]["$ref"],
         "#/components/responses/E409ReadOnlyRequest"
     );
-    assert!(patched["components"]["responses"]["E403FileRoot"].is_object());
+    assert!(engine["components"]["responses"]["E403FileRoot"].is_object());
+    assert!(engine["components"]["responses"]["E500FileRoot"].is_object());
     assert!(
-        patched["paths"]["/api/store/backup"]["post"]["responses"]["403"]["$ref"]
+        engine["paths"]["/api/store/backup"]["post"]["responses"]["403"]["$ref"]
             .as_str()
             .unwrap()
             .ends_with("E403FileRoot")
+    );
+    assert!(
+        engine["paths"]["/api/changes"]["get"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("another identity")
     );
 }
 

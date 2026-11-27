@@ -63,6 +63,7 @@ pub fn failed(command: &DbCommand, answer: &Value) -> bool {
             answer["ok"] != Value::Bool(true) || answer["state"] == "maintenance"
         }
         DbCommand::Verify { name: None } => answer["ok"] != Value::Bool(true),
+        DbCommand::ModelsDownload { .. } => answer["download"]["state"] != "done",
         _ => false,
     }
 }
@@ -207,8 +208,8 @@ fn render_with(command: &DbCommand, answer: &Value, dir: &Path, server: Option<&
             )
             .text()
         }
-        DbCommand::ResetLayer { .. } => render_reset_layer(answer, dir, &dir_arg),
-        DbCommand::Set { name, setting } => render_set(name, setting, answer, &dir_arg),
+        DbCommand::ResetLayer { .. } => render_reset_layer(answer, &dir_arg),
+        DbCommand::Set { name, setting } => render_set(name, setting, answer),
         DbCommand::AliasSet { .. } => mcp_note(
             leftover_note(
                 Note::new(format!(
@@ -296,6 +297,8 @@ fn render_with(command: &DbCommand, answer: &Value, dir: &Path, server: Option<&
         DbCommand::InboxList => render_inbox(answer, &dir_arg),
         DbCommand::ModelsList => render_models(answer, &dir_arg),
         DbCommand::ModelsAdd { .. } => render_models_add(answer, &dir_arg),
+        DbCommand::ModelsDownload { .. } => render_models_download(&answer["download"], &dir_arg),
+        DbCommand::ModelsDownloadCancel => render_download_cancel(answer),
         DbCommand::ModelsRemove { .. } => Note::new(format!(
             "Removed model '{}' from the shared models",
             s("model")
@@ -1088,7 +1091,7 @@ fn render_info(answer: &Value, dir_arg: &str) -> String {
                 .collect()
         })
         .unwrap_or_default();
-    let mut header = vec!["KEY", "DATABASE", "SERVER", "NEXT LOAD", "FROM"];
+    let mut header = vec!["KEY", "DATABASE", "SERVER", "EFFECTIVE", "FROM"];
     if loaded {
         header.push("NOW");
     }
@@ -1097,7 +1100,11 @@ fn render_info(answer: &Value, dir_arg: &str) -> String {
         limit_section.row("server.toml", problem);
     }
     if limits["reloadNeeded"] == Value::Bool(true) {
-        limit_section.row("note", "changed since the load: applies at the next load");
+        limit_section.row(
+            "note",
+            "the files changed by hand since the limits were applied: they apply at the next \
+             load or the next change",
+        );
         limit_section.unwrapped(
             "reload",
             format!(
@@ -1335,7 +1342,7 @@ fn render_info(answer: &Value, dir_arg: &str) -> String {
 }
 
 /// `db set NAME ...`.
-fn render_set(name: &str, setting: &DbSetting, answer: &Value, dir_arg: &str) -> String {
+fn render_set(name: &str, setting: &DbSetting, answer: &Value) -> String {
     match setting {
         DbSetting::Description(text) if text.is_empty() => {
             Note::new(format!("Cleared the description of database '{name}'")).text()
@@ -1354,16 +1361,10 @@ fn render_set(name: &str, setting: &DbSetting, answer: &Value, dir_arg: &str) ->
                 Some(value) => format!("Set the query limit {key} = {value} of database '{name}'"),
                 None => format!("Cleared the query limit override {key} of database '{name}'"),
             };
-            let note = Note::new(headline).detail("next load", effective);
+            let note = Note::new(headline).detail("effective", effective);
             if answer["limits"]["loaded"] == Value::Bool(true) {
                 let now = row.map_or("-".to_string(), |r| limit_text(key, &r["inEffect"]));
-                note.detail("now", format!("{now} (it is loaded: the change applies at its next load)"))
-                    .command(
-                        "apply it now",
-                        format!(
-                            "{BIN} db unload {name} --dir {dir_arg}\n{BIN} db load {name} --dir {dir_arg}"
-                        ),
-                    )
+                note.detail("now", format!("{now} (it is loaded: its new runs use it)"))
                     .text()
             } else {
                 note.detail("applies", "when it is loaded").text()
@@ -1842,6 +1843,96 @@ fn render_models(answer: &Value, dir_arg: &str) -> String {
 }
 
 /// `models add`: the models added, then the databases they resolved.
+/// `models download`: the model and its licence (with the warnings about passing it on), what
+/// was added and resolved; a failure or cancel in words.
+fn render_models_download(download: &Value, dir_arg: &str) -> String {
+    let s = |value: &Value| value.as_str().unwrap_or_default().to_string();
+    let repo = s(&download["repo"]);
+    let revision = s(&download["revision"]);
+    match download["state"].as_str() {
+        Some("done") => {}
+        Some("running") => {
+            return Note::new(format!("The download of {repo} ({revision}) still runs"))
+                .detail(
+                    "received",
+                    text::bytes(download["receivedBytes"].as_u64().unwrap_or_default()),
+                )
+                .command(
+                    "stop it",
+                    format!("{BIN} models download --cancel --dir {dir_arg}"),
+                )
+                .text();
+        }
+        _ => {
+            let what = if download["state"] == "cancelled" {
+                "was cancelled"
+            } else {
+                "failed"
+            };
+            return Note::new(format!(
+                "The download of {repo} ({revision}) {what}; nothing was kept"
+            ))
+            .detail("error", s(&download["error"]))
+            .text();
+        }
+    }
+    let report = &download["report"];
+    let mut note = Note::new(format!(
+        "Downloaded {repo} ({revision}) into the shared models"
+    ))
+    .detail("identity", s(&report["identity"]))
+    .detail("licence", s(&report["license"]));
+    if let Some(dimension) = report["dimension"].as_u64() {
+        note = note.detail("dimension", dimension.to_string());
+    }
+    if report["gated"] == Value::Bool(true) {
+        note = note.detail(
+            "gated",
+            "yes: its terms were accepted with the token's account",
+        );
+    }
+    let bases: Vec<String> = report["baseModels"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|b| match b["license"].as_str() {
+            Some(license) => format!("{} ({license})", s(&b["repo"])),
+            None => s(&b["repo"]),
+        })
+        .collect();
+    if !bases.is_empty() {
+        note = note.detail("made from", bases.join(", "));
+    }
+    for warning in report["warnings"].as_array().into_iter().flatten() {
+        note = note.detail("warning", s(warning));
+    }
+    note = note.detail(
+        "received",
+        text::bytes(download["receivedBytes"].as_u64().unwrap_or_default()),
+    );
+    let mut text = note.text();
+    if download["added"].is_object() {
+        text.push('\n');
+        text.push_str(&render_models_add(&download["added"], dir_arg));
+    }
+    text
+}
+
+/// `models download --cancel`.
+fn render_download_cancel(answer: &Value) -> String {
+    let repo = answer["download"]["repo"].as_str().unwrap_or_default();
+    if answer["cancelled"] == Value::Bool(true) {
+        format!("The download of {repo} stops at its next chunk; nothing is kept\n")
+    } else if answer["download"].is_object() {
+        format!(
+            "No download runs (the last one, {repo}, is {})\n",
+            answer["download"]["state"].as_str().unwrap_or("over")
+        )
+    } else {
+        "No download runs\n".to_string()
+    }
+}
+
 fn render_models_add(answer: &Value, dir_arg: &str) -> String {
     let strings = |value: &Value| -> Vec<String> {
         value
@@ -2039,8 +2130,8 @@ pub fn usage_error_text(message: &str) -> String {
         .text()
 }
 
-/// `db reset-layer`: what was discarded, kept, and where the old layer went.
-fn render_reset_layer(answer: &Value, dir: &Path, dir_arg: &str) -> String {
+/// `db reset-layer`: what was discarded and kept, and how to go back.
+fn render_reset_layer(answer: &Value, dir_arg: &str) -> String {
     let s = |key: &str| answer[key].as_str().unwrap_or("").to_string();
     let name = s("name");
     let base = s("base");
@@ -2057,20 +2148,22 @@ fn render_reset_layer(answer: &Value, dir: &Path, dir_arg: &str) -> String {
     ))
     .detail("discarded added", pair("added"))
     .detail("discarded changes of", pair("modified"))
-    .detail("discarded removals of", pair("removed"))
-    .detail("old layer", format!("moved to {}", below(dir, &s("trash"))))
-    .detail(
+    .detail("discarded removals of", pair("removed"));
+    if answer["schemaReset"] == Value::Bool(true) {
+        note = note.detail("schema", "the base's again");
+    }
+    if answer["inPlace"] == Value::Bool(true) {
+        note = note.detail("applied", "in place: it stays loaded");
+    }
+    note.detail(
         "kept",
         format!(
-            "name, base, description, flags, query limits, grants, aliases, MCP settings and \
-             {} scheduled job(s)",
+            "name, base, description, flags, query limits, grants, aliases, MCP settings, the \
+             Store's history and {} scheduled job(s)",
             answer["jobsKept"].as_u64().unwrap_or(0)
         ),
-    );
-    if answer["reloaded"] == Value::Bool(true) {
-        note = note.detail("loaded", "again (it was loaded)");
-    }
-    note.command(
+    )
+    .command(
         "everything about it",
         format!("{BIN} db info {name} --dir {dir_arg}"),
     )

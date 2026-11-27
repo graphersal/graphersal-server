@@ -61,6 +61,23 @@ From a packed snapshot that carries models:
 graphersal-server models add /data/with-models.gsnap --dir ./srv
 ```
 
+From Hugging Face, downloaded by the server itself (into `tmp/` first, then into `models/`):
+
+```bash
+graphersal-server models download minishlab/potion-base-8M --dir ./srv
+graphersal-server models download org/model --revision v1.0 --dir ./srv   # a branch, tag or commit
+```
+
+Through a running server the download runs there (the web UI's Models tab shows its progress
+and has Cancel; `models download --cancel` stops it from the console); the console waits for
+its end and prints the model's identity and **licence**, with warnings about passing it on (an
+unknown or non-commercial licence, custom terms, a gated repository). Read them before you hand
+databases holding the model to others. One download runs at a time. The server process's
+environment decides where from: `GRAPHERSAL_HF_ENDPOINT` names a mirror (default
+`https://huggingface.co`), `HF_TOKEN` the token of a gated or private repository (accept its
+terms on the hub with that account first). Set them where the server starts (the service unit,
+`docker run -e`, the shell of `start`).
+
 From another computer: the web UI's Models tab uploads a `.gsnap` or a `.tar`/`.tar.gz` with a
 progress bar ("A file from this computer"). The upload limit is `server.toml`'s `[limits]
 upload_bytes`.
@@ -78,7 +95,13 @@ lack a model's blob. At the import:
   shown). It cannot load until the model is added.
 
 Fix it by adding the model, from any source above, or by its repository when `models/` already
-holds it:
+holds it. Any copy of the SAME model resolves the database: the same repository and the same
+model files (`config.json`, `tokenizer.json`, `model.safetensors`; the model identity
+`model2vec/<repo>@<12 hex>` names them). So a new download from Hugging Face resolves a database
+made with an earlier one, also when it names the revision differently (`main` or the commit it
+resolved to) or carries another card or licence: the database's Store then takes the new copy
+under its model's name. Another model of the repository (other weights: a newer commit, for
+example) does not resolve it, since its vectors would not match; the database keeps waiting.
 
 ```bash
 graphersal-server models add org/model --dir ./srv

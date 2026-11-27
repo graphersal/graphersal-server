@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::database::{DatabaseConfig, DatabaseKind, DatabaseRole, RESET_STORE_DIR, STORE_DIR};
+use crate::database::{DatabaseConfig, DatabaseKind, DatabaseRole, STORE_DIR};
 use crate::error::ServerError;
 use crate::limits::DatabaseLimits;
 use crate::names::{fold, validate_name, validate_new_name};
@@ -791,105 +791,6 @@ impl Registry {
         );
         let out = after(&other);
         Ok((entry, trash, out))
-    }
-
-    /// Puts the new layer Store that the caller built in `databases/<name>/store-reset/`
-    /// ([`RESET_STORE_DIR`]) in place of the layer database `name`'s Store (round 4 B-LAYER,
-    /// [`crate::ops::Admin::reset_layer`]): a new `trash/<name>-<UTC time>/` gets a copy of
-    /// `database.toml`, the last verify (`verify.json`, it described the old Store) and then
-    /// the old `store/` (a rename), and `store-reset/` is renamed to `store/`. A crash between
-    /// the two renames leaves `store-reset/` without `store/`: the next scan finishes the
-    /// rename; a crash before the first leaves both, and the scan removes `store-reset/`. So a
-    /// kill never leaves the database without a Store. If the second rename fails, the old
-    /// Store is moved back. `database.toml` itself is not touched (name, base, description,
-    /// flags, limits stay; so do the grants, aliases and MCP settings, which are keyed by the
-    /// name). Answers the trash directory. Refused while the database is loaded or being
-    /// loaded (the caller holding the loader makes sure it stays so), being built or replaced,
-    /// and for anything but a layer database.
-    pub(crate) fn reset_layer_store(&self, name: &str) -> Result<PathBuf, ServerError> {
-        let key = fold(name);
-        let inner = self.write();
-        let entry = inner.entries.get(&key).ok_or_else(|| not_found(name))?;
-        let refuse = |message: String| ServerError::Refused {
-            name: key.clone(),
-            message,
-        };
-        if entry.state.is_busy() {
-            return Err(refuse(format!(
-                "it is {}; unload it first",
-                entry.state.as_str()
-            )));
-        }
-        if inner.pending.contains(&key) {
-            return Err(refuse(
-                "it is being built or replaced; try again when that ends".to_string(),
-            ));
-        }
-        if !entry
-            .config
-            .as_ref()
-            .is_some_and(|c| c.kind == DatabaseKind::Layer)
-        {
-            return Err(refuse("only a layer database can be reset".to_string()));
-        }
-        let dir = entry.dir.clone();
-        let store = dir.join(STORE_DIR);
-        let fresh = dir.join(RESET_STORE_DIR);
-        if !fresh.is_dir() {
-            return Err(refuse(format!(
-                "the new layer Store is missing ({RESET_STORE_DIR}/)"
-            )));
-        }
-        let trash = self.trash_target(&key)?;
-        fs::create_dir(&trash).map_err(|err| ServerError::io("create directory", &trash, err))?;
-        let config = dir.join(crate::database::DATABASE_FILE);
-        if let Err(err) = fs::copy(&config, trash.join(crate::database::DATABASE_FILE)) {
-            let _ = fs::remove_dir_all(&trash);
-            return Err(ServerError::io("copy", &config, err));
-        }
-        let verify = dir.join(crate::layout::LAST_VERIFY_FILE);
-        match fs::rename(&verify, trash.join(crate::layout::LAST_VERIFY_FILE)) {
-            Ok(()) => {}
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-            Err(err) => tracing::warn!(
-                target: "graphersal_server",
-                "database '{key}': the last verify could not be moved to {}: {err}",
-                trash.display()
-            ),
-        }
-        if let Err(err) = fs::rename(&store, trash.join(STORE_DIR)) {
-            if let Err(back) = fs::rename(trash.join(crate::layout::LAST_VERIFY_FILE), &verify)
-                && back.kind() != std::io::ErrorKind::NotFound
-            {
-                tracing::warn!(
-                    target: "graphersal_server",
-                    "database '{key}': the last verify stays in {}: {back}",
-                    trash.display()
-                );
-            }
-            let _ = fs::remove_dir_all(&trash);
-            return Err(ServerError::io("rename", &store, err));
-        }
-        crate::layout::sync_parent(&store);
-        if let Err(err) = fs::rename(&fresh, &store) {
-            if let Err(back) = fs::rename(trash.join(STORE_DIR), &store) {
-                tracing::error!(
-                    target: "graphersal_server",
-                    "database '{key}': cannot move {} back after a failed reset: {back}; it is \
-                     kept there (the next start finishes the reset from {RESET_STORE_DIR}/)",
-                    trash.display()
-                );
-            }
-            return Err(ServerError::io("rename", &fresh, err));
-        }
-        crate::layout::sync_parent(&store);
-        crate::layout::sync_parent(&trash.join(STORE_DIR));
-        tracing::info!(
-            target: "graphersal_server",
-            "layer database '{key}' reset (the old layer moved to {})",
-            trash.display()
-        );
-        Ok(trash)
     }
 
     /// Moves the database `name` out of the registry into `trash/<name>-<UTC time>/` (a

@@ -102,16 +102,12 @@ limits](../reference/configuration.md#query-limits)). `0` lifts the limit for th
 database (for `max_value_depth`: the default, 128). `--clear` lets the server's default apply
 again.
 
-**A limit change applies at the database's next load.** The engine fixes a loaded database's
-limits when it loads it. Reload it:
-
-```bash
-graphersal-server db unload acme --dir ./srv
-graphersal-server db load acme --dir ./srv
-```
-
-`db info` (and the Settings tab) show both the limits in effect now and those of the
-next load. The tab offers "Unload and load now…" when they differ.
+**A limit change applies at once.** A loaded database's runs that start afterwards use it; a
+query already running keeps the limits it started with. A database that is not loaded uses it
+from its next load. A hand edit of `database.toml` (or `server.toml`) applies at the next load,
+or with the next limit change through the server; until then `db info` (and the Settings tab)
+show the limits in effect now beside the files' values, and the tab offers "Unload and load
+now…".
 
 Every settings change names the revision it was based on. When someone else changed the same
 database meanwhile, the change is refused with `409` "changed by someone else: reload" and
@@ -161,31 +157,17 @@ other layer over it stay exactly as they were. Afterwards `scratch` reads exactl
 
 **Kept:** the name, kind and base, the description, the read-only and auto-load flags, the
 query limit overrides (`database.toml` is not touched), the grants (also those given through an
-alias), the aliases, the MCP settings, and the layer's scheduled job definitions. A loaded
-layer is unloaded, reset and loaded again (`loaded: again`); queries running on it get up to
-30 s, as with an unload, and its pages answer "not loaded" for that moment. `--yes` is required:
-the command discards data.
+alias), the aliases, the MCP settings, the layer's scheduled job definitions, and the layer's
+Store with its history. A loaded layer is reset in place and stays loaded (`applied: in place`):
+its pages and MCP sessions see the base's data at their next request; a query running on it
+finishes first (the reset waits up to 30 s, then refuses and names the runs to cancel). `--yes`
+is required: the command discards data.
 
-**The old layer goes to `trash/`.** graphersal 0.8.0 has no reset inside a Store, so the server
-builds a new empty layer Store over the same base and swaps it in. The old one moves to
-`trash/scratch-<UTC time>/` with a copy of its `database.toml`, so the trash entry is a whole
-database directory. To get it back (as another database, here `scratch-old`): stop the server,
-move it into `databases/`, and start again:
-
-```bash
-graphersal-server stop --dir ./srv
-mv ./srv/trash/scratch-2026-11-26T10-00-00Z ./srv/databases/scratch-old
-graphersal-server start --dir ./srv
-```
-
-(To have it under its own name again, delete or move away the reset `databases/scratch/` first.
-`trash/` is never emptied automatically.) Its history, its workload statistics and its last
-verify stay with the old Store: a rollback of the reset layer's Store (the graphersal CLI's
-`graphersal store rollback`) cannot go back before the reset.
-
-A kill in the middle leaves either the old layer or the new one, never none: the new Store is
-built beside the old one (`store-reset/`), and the next start finishes or discards an
-interrupted swap.
+**The reset is one commit of the layer's own Store** (the engine's layer reset): nothing goes to
+`trash/`, and the Store's history keeps the state before. A kill in the middle leaves the layer
+either as it was or reset with its jobs, never in between. To go back, roll the layer's Store
+back to the commit before the reset (its playground's Store menu, which keeps the rolled-back
+commits in the attic as the undo), or restore a backup (`db restore`).
 
 Refused: a plain database (restore a backup instead), a base (reset the layers over it), a
 failed database, and a layer that is being loaded. Web UI: "Reset layer…" in the row's "…"

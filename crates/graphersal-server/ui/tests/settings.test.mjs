@@ -108,7 +108,7 @@ function answerOf({ loaded = true, override = null, inEffect = null, reloadNeede
   };
 }
 
-test('limit rows: override, server default, next load, source, in effect now', () => {
+test('limit rows: override, server default, effective, source, in effect now', () => {
   const rows = limitRows(answerOf({ override: 1000, inEffect: null, reloadNeeded: true }));
   assert.deepEqual(rows.map((r) => r.key), LIMIT_KEYS);
   const ops = rows.find((r) => r.key === 'max_operations');
@@ -116,7 +116,7 @@ test('limit rows: override, server default, next load, source, in effect now', (
   assert.equal(ops.effective, 1000);
   assert.equal(ops.sourceText, 'this database');
   assert.equal(ops.inEffect, null);
-  assert.equal(ops.differs, true, 'the next load differs from now');
+  assert.equal(ops.differs, true, 'the files (a hand edit) differ from now');
   const timeout = rows.find((r) => r.key === 'timeout_ms');
   assert.equal(timeout.sourceText, 'server default');
   assert.equal(timeout.differs, false);
@@ -171,7 +171,7 @@ test('sections: identity, state and sizes, store, grants, MCP, backups', () => {
   assert.equal(backupsText(a), '2 backups (4.0 KB), latest 2026-11-26T10-00-00Z');
   assert.equal(backupsText({ backups: { count: 0 } }), 'No backups yet.');
   assert.equal(changedText('acme', { changed: ['description'] }), 'acme: changed description.');
-  assert.equal(changedText('acme', { changed: ['limits.timeout_ms'], limits: { loaded: true } }), 'acme: changed limits.timeout_ms. The limits apply at its next load.');
+  assert.equal(changedText('acme', { changed: ['limits.timeout_ms'], limits: { loaded: true } }), 'acme: changed limits.timeout_ms. The limits apply to its new runs now.');
 });
 
 /** A stateful mock of the settings route of `acme` (alias `prod`). */

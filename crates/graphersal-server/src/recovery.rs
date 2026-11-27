@@ -551,10 +551,12 @@ impl VerifyFacts {
     /// Names the embedding models of the missing blobs among the problems (`kind` `model`)
     /// and sets the verdict `needs-model` when they are the only problems.
     ///
-    /// - `known(hash)`: the model of a blob known exactly (the loaded database's catalog, or
-    ///   the manifest of the same blob in the server's shared models);
+    /// - `known(hash)`: the model of a blob known exactly (the verify's own models by their
+    ///   `ModelInfo::blob_hash`, else the manifest of the same blob in the server's shared
+    ///   models);
     /// - `missing`: the models the engine reports missing (`ModelState::Missing` of the
-    ///   verify's models): a missing blob no `known` names belongs to one of them, by
+    ///   verify's models): only a fallback for a missing blob no `known` names (none should be
+    ///   left since graphersal 0.9.0 names every model's blob): it belongs to one of them by
     ///   elimination (one left: that one; as many blobs as models left: one of them, listed);
     /// - `shared(repo)`: whether the shared models hold `repo` (the remedy differs).
     ///

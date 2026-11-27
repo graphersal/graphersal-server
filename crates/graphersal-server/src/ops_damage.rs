@@ -98,16 +98,16 @@ impl Admin {
         let verified = match open {
             Some((_context, OpenStoreRef::Plain(store))) => store.verify().map(|report| {
                 let frozen = frozen(store.damage_found().ok(), store.damage_policy().ok());
-                (report, "open store", frozen, catalog_blobs(&store))
+                (report, "open store", frozen)
             }),
             Some((_context, OpenStoreRef::Layer(store))) => store.verify().map(|report| {
                 let frozen = frozen(store.damage_found().ok(), store.damage_policy().ok());
-                (report, "open store", frozen, Vec::new())
+                (report, "open store", frozen)
             }),
             None => Store::verify_dir(entry.store_dir().as_path())
-                .map(|report| (report, "files", false, Vec::new())),
+                .map(|report| (report, "files", false)),
         };
-        let (report, how, frozen, catalog) = match verified {
+        let (report, how, frozen) = match verified {
             Ok(verified) => verified,
             Err(err) => {
                 let err = failed(err);
@@ -125,11 +125,14 @@ impl Admin {
                 .filter(|m| matches!(m.state, ModelState::Missing))
                 .map(|m| m.repo.clone())
                 .collect();
+            // Exactly by the blob's content address (`ModelInfo::blob_hash`, every model the
+            // Store's catalog defines, in every state), else the shared models' manifest.
             let known = |hash: &str| {
-                catalog
+                report
+                    .models
                     .iter()
-                    .find(|(h, _)| h == hash)
-                    .map(|(_, repo)| repo.clone())
+                    .find(|m| m.blob_hash == hash)
+                    .map(|m| m.repo.clone())
                     .or_else(|| models.repo_of_blob(hash))
             };
             facts.name_models(&known, &missing, &|repo| models.holds(repo));
@@ -408,21 +411,6 @@ impl Admin {
             grants_removed: grants.unwrap_or(0),
         })
     }
-}
-
-/// The model blobs of an open Store's catalog: `(blob hash, repository)`.
-fn catalog_blobs(store: &Store) -> Vec<(String, String)> {
-    use graphersal::prelude::GraphStorage;
-    let Ok(graph) = store.graph().read_checked() else {
-        return Vec::new();
-    };
-    let Ok(definitions) = graph.definitions() else {
-        return Vec::new();
-    };
-    definitions
-        .filter_map(|d| d.as_model())
-        .map(|m| (m.blob().hash_hex(), m.repo().to_string()))
-        .collect()
 }
 
 /// Now in Unix milliseconds.

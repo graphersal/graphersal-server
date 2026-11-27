@@ -32,6 +32,11 @@ ignore = [
     # database) pulls in. An unmaintained-crate notice, not a vulnerability. Revisit with the
     # Graphersal version that drops it (the same entry as Graphersal's deny.toml).
     "RUSTSEC-2026-0249",
+    # paste is unmaintained (archived upstream) and has no fixed release: a compile-time macro
+    # crate (no code of it runs in the binary) and a mandatory dependency of `tokenizers`, which
+    # Graphersal's `model2vec` runtime pulls in (S1: `model-download`). An unmaintained-crate
+    # notice, not a vulnerability (the same entry as Graphersal's deny.toml).
+    "RUSTSEC-2024-0436",
 ]
 
 # ---------------------------------------------------------------------------------------------
@@ -47,6 +52,8 @@ allow = [
     "Apache-2.0 WITH LLVM-exception",
     "MIT",
     "BSD-2-Clause",
+    # BSD-3-Clause (subtle, via rustls of the model download): permissive, attribution only.
+    "BSD-3-Clause",
     # ISC (ring, untrusted): permissive, functionally equivalent to MIT.
     "ISC",
     # Public-domain dedications (as an alternative to MIT; tiny-keccak via rhai).
@@ -65,7 +72,19 @@ exceptions = [
     # Apache-2.0 work; its source stays available on crates.io. Allowed for this crate only, so a
     # new MPL dependency is a conscious decision.
     { allow = ["MPL-2.0"], crate = "smartstring" },
+    # CDLA-Permissive-2.0 is a permissive data licence (redistribution with the licence text, no
+    # copyleft). webpki-roots is the Mozilla root-certificate list the Hugging Face model
+    # download trusts (graphersal's `model-download`: ureq with rustls).
+    { allow = ["CDLA-Permissive-2.0"], crate = "webpki-roots" },
 ]
+
+# model2vec-rs (Graphersal's `model2vec` runtime) declares its licence only as `license-file =
+# "LICENSE"`, no SPDX expression; that file is the MIT licence text. The hash pins the file (the
+# same entry as Graphersal's deny.toml).
+[[licenses.clarify]]
+crate = "model2vec-rs"
+expression = "MIT"
+license-files = [{ path = "LICENSE", hash = 0x1f86646e }]
 
 [licenses.private]
 # The workspace crate is checked like any other crate (it declares Apache-2.0).

@@ -169,12 +169,12 @@ per-client limits in front of a server reachable from untrusted networks.
 
 A database's playground names its page with `X-Graphersal-Client`, and the engine keys a page's
 runs (stopping them with `POST /db/<name>/api/cancel`) and names its changes (`GET
-/db/<name>/api/changes`, `recent[].by`) by it. The header is chosen by the client, so the server
-never passes it on: it replaces it with a keyed hash of the principal's identity (a key made at
-each start, never the identity itself) followed by the page's own id. Another principal sending
-the same id gets another key and stops nothing. The change feed shows a reader only its own
-page ids; a change of another identity is `by: "another identity"` without its detail. The run
-administration (`/api/admin/runs`) shows the rewritten ids.
+/db/<name>/api/changes`, `recent[].by`) by it. The header is chosen by the client, so the engine
+keys both by the principal's identity too, which the server sets on every request to a
+database: another principal sending the same id gets another key and stops nothing. The change
+feed shows a reader only its own page ids; a change of another identity is `by: "another
+identity"` without its detail. The run administration (`/api/admin/runs`) shows each run's key
+as `<length>:<identity>/page:<id>`.
 
 ## Pages and framing
 

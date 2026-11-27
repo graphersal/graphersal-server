@@ -835,7 +835,9 @@ fn the_run_administration_lists_and_cancels_a_databases_runs_over_http() {
     assert_eq!(run["alias"], "r1");
     assert_eq!(run["text"], endless);
     assert_eq!(run["cancelled"], false);
-    assert!(run["client"].as_str().unwrap().starts_with("page"), "{run}");
+    // `<length>:<identity>/page:<id>`: graphersal-serve keys a run by the identity too.
+    let client = run["client"].as_str().unwrap();
+    assert!(client.starts_with("8:operator/page"), "{run}");
     assert!(run["startedAtMs"].as_u64().unwrap() > 0, "{run}");
     assert!(run["durationMs"].is_u64(), "{run}");
     let (_, all) = call(address, "GET", "/api/admin/runs", None);

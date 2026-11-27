@@ -12,11 +12,12 @@
 //! `revision` (of its `database.toml`), `database` (the listing row: state, kind, role, base,
 //! readOnly, autoLoad, description, created, sizeBytes, memoryBytes, ...), `aliases` (the
 //! aliases naming it), `layers` (a base: the layers over it), `limits` (`loaded`,
-//! `reloadNeeded` (loaded and the limits in effect differ from what the next load reads),
+//! `reloadNeeded` (loaded and the limits in effect differ from what the files say: a hand edit
+//! not applied yet; the next change through the server or the next load applies it),
 //! `applies` (when a change applies), `serverError` (a `server.toml` that cannot be read, else
 //! `null`), `keys`: one row per key of `[limits.query]`: `key`, `override` (the database's
-//! own value or `null`), `server` (`server.toml`'s or `null`), `effective` (what the next load
-//! uses), `source` (`database` | `server` | `none`), `inEffect` (only when loaded: what the
+//! own value or `null`), `server` (`server.toml`'s or `null`), `effective` (what the files say
+//! now: what a change applies and the next load uses), `source` (`database` | `server` | `none`), `inEffect` (only when loaded: what the
 //! running session uses)), `mcp` (the MCP state's `enabled`, `endpointBuilt`, `serving`,
 //! `revision` and `names`: the MCP rows of the database and its aliases; or `{"error"}`),
 //! `grants` (`{"subject", "database", "level", "via": "database" | "alias" | "all"}`: the
@@ -43,8 +44,8 @@
 //! `0..=9223372036854775807` or clears it with `null` (the server's default applies again);
 //! the change is ONE write of `database.toml`, based on `revision` (else `If-Match`; a stale
 //! one is `409` with the current `revision`), and audited field by field. Description and
-//! auto-load apply at once, read-only at once (a loaded database is flipped), a limit at the
-//! database's next load. Errors: `400` (an empty change, an unknown key, a bad value or
+//! auto-load apply at once, read-only at once (a loaded database is flipped), a limit at once
+//! (a loaded database's new runs; `Loader::apply_limits`). Errors: `400` (an empty change, an unknown key, a bad value or
 //! description), `404`, `409` (stale revision, read-only off for a base, a failed database),
 //! `500`.
 

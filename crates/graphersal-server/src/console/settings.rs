@@ -146,7 +146,6 @@ pub(crate) fn render_set(answer: &Value, dir_arg: &str) -> String {
                     "restart pending"
                 }
                 Some(Applies::Now) | Some(Applies::Restart) => "at the next start",
-                Some(Applies::NextLoad) => "at each database's next load",
                 Some(Applies::NewDatabases) => "for new databases",
                 _ => "",
             };

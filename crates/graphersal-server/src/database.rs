@@ -34,10 +34,6 @@ use crate::names::validate_name;
 pub const DATABASE_FILE: &str = "database.toml";
 /// The directory of a database's Store, beside its `database.toml`.
 pub const STORE_DIR: &str = "store";
-/// The directory a layer reset builds the new, empty layer Store in, beside [`STORE_DIR`]
-/// (round 4 B-LAYER): renamed to [`STORE_DIR`] once the old Store moved to `trash/`. The scan
-/// finishes or discards one a crash left behind ([`crate::Registry::scan`]).
-pub const RESET_STORE_DIR: &str = "store-reset";
 
 /// What a database is made of.
 ///
@@ -133,7 +129,8 @@ pub struct DatabaseConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub needs_model: Option<String>,
     /// The database's own limits (`[limits.query]`, each key over `server.toml`'s): read
-    /// again from the file at every load, so a change applies at the next load. Only a
+    /// again from the file at every load and at every limit change through the server (which
+    /// applies to a loaded database's new runs at once). Only a
     /// settings change (`PUT /api/admin/databases/<name>/settings`, `db set NAME limit`)
     /// writes them; every other rewrite of the file keeps the file's (a hand edit survives).
     #[serde(default, skip_serializing_if = "DatabaseLimits::is_empty")]

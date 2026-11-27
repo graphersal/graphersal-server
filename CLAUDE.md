@@ -17,8 +17,11 @@ cited from tracked files). When this file disagrees with the code, the code wins
   server's own `server` UI profile) and `mcp` (each
   context a host of the shared MCP endpoint); graphersal-mcp (the endpoint, directory mode).
 - The four Graphersal crates (graphersal, graphersal-serve, graphersal-session, graphersal-mcp)
-  from crates.io, pinned exactly (`=0.8.0`: EXPERIMENTAL crates, exact pin during 0.x), all on
-  the same version; `Cargo.lock` is committed and CI builds `--locked`. The embedded playground
+  from crates.io, pinned exactly (EXPERIMENTAL crates, exact pin during 0.x), all on the same
+  version (today `=0.9.0`); `Cargo.lock` is committed and CI builds `--locked`. Never commit
+  path dependencies or a `[patch]` section (`cargo publish` and `cargo deny` refuse them).
+  graphersal also with `model-download` (S1: the server-side
+  Hugging Face download; it brings `model2vec`, so the server runs the models it stores). The embedded playground
   is the `ui/` of the published graphersal-serve crate. Moving to a new Graphersal version:
   bump the four pins together, `cargo update -p graphersal ...`, commit the lock. Never edit the
   graphersal repository from a task here. This repository keeps its own `target/` (never share
@@ -83,8 +86,12 @@ cited from tracked files). When this file disagrees with the code, the code wins
   B7, private: a database's runtime-editable settings as ONE change, `SettingsChange
   {description, read_only, auto_load, limits: [(key, Option<u64>)]}` + `check` (description one
   line, <= `MAX_DESCRIPTION_CHARS` 1000; keys; values), `limit_value_of_json`/`_of_text`,
-  `LIMITS_APPLY_TEXT` (a limit applies at the NEXT LOAD: graphersal-serve 0.8.0 fixes a
-  context's presets at build); writer `Registry::change_settings` (one `update_config` under the
+  `LIMITS_APPLY_TEXT` (S1: a limit applies AT ONCE to a loaded database's new runs:
+  `Loader::apply_limits` = `Context::set_presets` of graphersal-serve 0.9.0, called by
+  `Loader::change_settings` (a failure only warns: the file is written), after every load
+  (a change made while loading) and, for `server.toml [limits.query]` through the admin API, by
+  `Admin::change_server_settings` -> `Loader::apply_limits_everywhere`; a hand edit applies at
+  the next load; `reloadNeeded` = a hand edit not applied yet); writer `Registry::change_settings` (one `update_config` under the
   registry's write lock, revision checked; a base with layers refuses read-only off), online
   `Loader::change_settings` (flip lock, then registry, then the context's read-only flip),
   `Admin::change_settings` in `ops_settings.rs` (offline base rule; audits `DescriptionSet`,
@@ -192,9 +199,9 @@ cited from tracked files). When this file disagrees with the code, the code wins
   `/db/<name>/api/openapi.json`; after the grant check, before the loaded check; anonymous `401`,
   not a page) via `openapi` (B-OPENAPI: the server's hand-written `openapi/server.json`; a
   database's = graphersal-serve's description asked once from a throwaway context
-  (`engine_spec`), `openapi/engine-patch.json` (what serve's description gained after 0.8.0;
-  `the_engine_patch_is_still_needed_and_applies` fails when the pin carries an entry: drop it),
-  then `database_spec`: servers = `<public_scheme>://<Host>/db/<name>`, security schemes
+  (`engine_spec`; S1 dropped the old `openapi/engine-patch.json`: graphersal-serve 0.9.0
+  describes all of it; to patch the engine's description again, reintroduce such a file with a
+  test that fails once the pin carries the entry), then `database_spec`: servers = `<public_scheme>://<Host>/db/<name>`, security schemes
   `bearerAuth`/`sessionCookie` (+ `{}` when anonymous reaches the name or access is off), the
   access layer's 401/404/409 on every operation, `x-graphersal-access` read|query|write (a
   write = the engine's `E409ReadOnlyRequest`/`E409Write`), no filtering by level, the
@@ -289,19 +296,17 @@ cited from tracked files). When this file disagrees with the code, the code wins
   way (U11: a base is frozen forever, no demotion), under `Loader::while_idle`, `Store::inspect`
   refuses a layer store, `Registry::promote_to_base` / `admin::promote_refusal` hold the rules;
   a base's Store is never opened for writing afterwards, so its `BaseRef` stays fixed);
-  `reset_layer` in `ops_layer.rs` (round 4 B-LAYER, `db reset-layer NAME --yes`, `POST
-  .../reset-layer {"confirm": true}`, UI "Reset layer…"): graphersal 0.8.0 has no reset inside
-  a Store, so a NEW empty layer Store over the same base (the old one's chunk size and damage
-  policy, its JOB definitions copied, base's JOB definitions dropped) is built in
-  `databases/<name>/store-reset/` (`database::RESET_STORE_DIR`) and swapped in by
-  `Registry::reset_layer_store` (trash dir gets a copy of `database.toml` + `verify.json` +
-  `store/`, then `store-reset/` -> `store/`); the scan (`registry::finish_layer_resets`, clean
-  scans only) removes a `store-reset/` beside `store/` and renames one without it; a loaded
-  layer is unloaded, reset under `Loader::while_idle` (the base is taken BEFORE that lock:
-  `base_of` reads the loader's pool under the same mutex), loaded again and waited for
-  (`RELOAD_WAIT` 60 s); audited `LayerReset`; FOLLOW-UP: the engine's `reset_layer` once
-  released (keeps the Store and its history); tests `ops_layer_tests.rs`,
-  `router_access_tests.rs` `a_layer_reset_over_http_*`, `server_tests.rs`
+  `reset_layer` in `ops_layer.rs` (round 4 B-LAYER, S1: the engine's `reset_layer`; `db
+  reset-layer NAME --yes`, `POST .../reset-layer {"confirm": true}`, UI "Reset layer…"): ONE
+  transaction on the layer's own Store graph: the old layer's JOB definitions read, the engine's
+  `reset_layer` (catalog back to the base's), the base's jobs removed and the layer's set again;
+  journaled as one commit (history kept: a Store rollback / backup goes back; nothing to
+  `trash/`); a loaded layer in place on its open Store (`Loader::open_store_of`, context held,
+  `try_write_checked` polled up to `LOCK_WAIT` 30 s, else `Refused` naming the runs), an
+  unloaded one (also offline) `Store::open_layer` under `Loader::while_idle` (the base taken
+  BEFORE that lock: `base_of` reads the loader's pool under the same mutex); answer `inPlace`,
+  `discarded`, `schemaReset`, `definitionsReset`, `jobsKept`; audited `LayerReset`; tests
+  `ops_layer_tests.rs`, `router_access_tests.rs` `a_layer_reset_over_http_*`, `server_tests.rs`
   `db_reset_layer_offline_and_through_a_server`, `ui/tests/layer-reset.test.mjs`;
   backup/backups/restore/export in `ops_transfer.rs` (a child module of `ops`:
   backups = `Store::backup_zip` of the open Store (context held) or `Store::backup_zip_dir`,
@@ -471,11 +476,11 @@ cited from tracked files). When this file disagrees with the code, the code wins
   `blob`, `shared`, `remedy` (serde defaults: old `recovery.json` reads); `VerifyFacts` gained
   `verdict` (`ok` | `needs-model` | `damaged`; `verdict()` derives it for old reports) and
   `models_missing`; `VerifyFacts::name_models(known, missing, shared)` names a missing blob
-  (engine text "the blob is missing", path `blobs/../<hash>`) by `known(hash)` (the open plain
-  Store's catalog via `GraphStorage::definitions` + `ModelDefinition::blob().hash_hex()`, else
-  `ModelsDir::repo_of_blob` = the manifest of `models/blobs/<hash>`), else by elimination among
-  `VerifyReport::models` in `ModelState::Missing` (graphersal 0.8.0 exposes no blob hash per
-  `ModelInfo`); only model problems = verdict `needs-model`. `Admin::verify` then
+  (engine text "the blob is missing", path `blobs/../<hash>`) by `known(hash)` (S1: the verify's
+  own `VerifyReport::models` by `ModelInfo::blob_hash`, exact for every model of the catalog,
+  plain or layer, open or files; else `ModelsDir::repo_of_blob` = the manifest of
+  `models/blobs/<hash>`), else (a fallback only) by elimination among `VerifyReport::models` in
+  `ModelState::Missing`; only model problems = verdict `needs-model`. `Admin::verify` then
   `follow_models` (plain, not base, state unloaded/needs-model: `Registry::set_needs_model` +
   state `needs-model`, so `models add` resolves it; a `needs-model` db verifying ok: marker
   cleared, `unloaded`; loaded/layer/base untouched) and `keep_last_verify`: `LastVerify`
@@ -496,7 +501,7 @@ cited from tracked files). When this file disagrees with the code, the code wins
   `a_loaded_database_names_a_vanished_model_blob_from_its_catalog_and_stays_loaded`, console
   `db_verify_names_a_missing_model_and_the_command_that_adds_it`, `ui/tests/verify.test.mjs`.
 - `server_settings` (round 4 B-SETTINGS, public): `server.toml` edited at runtime. `KEYS` (every
-  key by dotted name, file order, `Kind` bool/count/text/memory/hosts, `Applies` now|load|create|
+  key by dotted name, file order, `Kind` bool/count/text/memory/hosts, `Applies` now|create| (S1: the query limits are `now`, `load` is gone)
   restart, help), `value_of(config, key)` (JSON), `toml_of_json`/`toml_of_text` (API / console
   values), `edit(text, path, changes)` -> `Edited {text, config, changed, rewritten}`: the change on
   the TOML table, checked by `ServerConfig::parse`, then a LINE PATCH of the file's own text
@@ -595,8 +600,34 @@ cited from tracked files). When this file disagrees with the code, the code wins
   file is another inode (unix), `waiting` = `needs_model` markers), rebuilt at every listing
   and model change, never read back. `resolve(store_dir, repos)`: `Store::restore_blobs_from(..,
   BlobSource::store(models/))` when a definition's blob is missing; a repo without a definition
-  -> its blob unpacked into `tmp/` + `Store::import_model_dir`; then adopt. `copied_blobs` feeds
-  the listing's `linkWarning`. Admin side in `ops_models.rs` (`models_index`, `model_add`
+  -> its blob unpacked into `tmp/` (its manifest as `graphersal-embed-model.json`, so revision
+  and commit survive) + `Store::import_model_dir`; a definition still `Missing` after that and a
+  `models/` blob with the SAME identity (repo + the three model files' hashes; another revision
+  string, card or licence = other blob bytes) -> the same import, which the engine plans as
+  `ImportPlan::Restore` (definition rewritten under its name); another identity never resolves
+  (S2, tests `a_download_*` in `models_tests.rs`); then adopt. `copied_blobs` feeds
+  the listing's `linkWarning`. S1 model download (`model_download.rs`, private: `Downloads` on the
+  loader = ONE download slot, a leaf mutex; `DownloadStatus` running|done|failed|cancelled,
+  progress from the engine's `DownloadEvent`s, `ReportFacts` of `ModelDownloadReport`;
+  `ENDPOINT_ENV` `GRAPHERSAL_HF_ENDPOINT` / `TOKEN_ENV` `HF_TOKEN` read from the server's
+  environment at each download start, never from a request; `ModelDownloadSpec::endpoint` is the
+  tests' only): `Admin::model_download_start` (repo/revision checked first, `Refused` while one
+  runs, online a thread `graphersal-server-model-download`, offline synchronous),
+  `run_download` = `ModelCache::at(tmp scratch).download_staged` -> `StagedModel::new_model` ->
+  `Store::import_model_dir` into a scratch Store in `tmp/` -> `ModelsDir::adopt` ->
+  `finish_add` (shared with `model_add`: scan, `resolve_waiting`); audited
+  `ModelDownloadStarted`/`ModelDownloaded`/`ModelDownloadFailed`; `Loader::shutdown` cancels a
+  running one (waits up to 10 s); routes `GET|POST models/download`, `POST
+  models/download/cancel` (body `{"repo", "modelRevision"?}`: not `revision`, the API's
+  optimistic-concurrency word; `admin_api::download_json`; `DELETE models/download...` is 405,
+  not a model removal), console `models download REPO [--revision R]` / `models download
+  --cancel` (`DbCommand::ModelsDownload*`; through a server `console::wait_for_download` polls
+  until it ends), UI Models tab section "Download from Hugging Face" (`admin-api.js`
+  `downloadRequest`/`downloadView`/`downloadNotice`, poll `DOWNLOAD_POLL_MS` while shown); tests
+  `model_download::tests`, `models_tests.rs` `an_offline_download_*`/`an_online_download_*`
+  (fake hub `test_models::FakeHub`), `router_access_tests.rs`
+  `the_model_download_routes_are_for_admins_only`, `server_tests.rs`
+  `models_download_offline_and_through_a_server`, `ui/tests/model-download.test.mjs`. Admin side in `ops_models.rs` (`models_index`, `model_add`
   (`ModelAddSpec`: a model dir via a scratch Store + `import_model_dir`, a ustar `.tar` of one
   (a `.tar.gz` gunzipped into a third scratch first) unpacked first by `model_archive::unpack` into a second scratch in `tmp/` (V18; refuses
   absolute paths, `..`, `\`/`:`, links, devices, GNU long names, > 1000 entries, depth > 16,
@@ -771,8 +802,8 @@ cited from tracked files). When this file disagrees with the code, the code wins
   `book/src/cheat_sheet.md` (every console command: a new command or option goes there and into
   `reference/console.md`), and the release notes `book/src/release_notes/<version>.md`
   (release.yml uses the page of the tagged version as the release text; 0.2.0 = the access
-  series, on Graphersal 0.8.0; 0.3.0 = the unreleased draft of round 3, extended by every
-  change).
+  series, on Graphersal 0.8.0; 0.3.0 = the first public release, on Graphersal 0.9.0; a new
+  version's page starts as a draft extended by every change).
 - `scripts/smoke.sh`: the end-to-end smoke test (bash + curl + python3 only): builds, inits a
   temp server dir, serves on `127.0.0.1:0` (URL from `server.run`), walks create/load/execute/
   alias/read-only/backup/restore/export/upload import/promote + layer/models/MCP/unload/delete,
@@ -880,9 +911,9 @@ mdbook build book                            # the book (book/CLAUDE.md); must b
   `/mcp` refuses anonymous without an anonymous grant (`Access::anonymous_has_grant`), every
   `initialize` first runs `mcp::make_room` (per-identity quota; plain ids of this run's sessions
   kept in `McpUsage`, redacted `Debug`), anonymous MCP bodies <= 1 MiB (`mcp::body_limit`);
-  `mounts::forward` replaces `X-Graphersal-Client` with `<HMAC tag of the identity>-<id>`
-  (`mounts::client_tag`, per-process key) and `mounts::own_changes` masks other identities in
-  `GET /db/<n>/api/changes`; the login body <= 4 KiB (`router::MAX_LOGIN_BODY`); `serve`
+  `X-Graphersal-Client` is forwarded as sent: graphersal-serve 0.9.0 keys runs and change-feed
+  entries by the identity the router sets on the forwarded request (S1 removed the server's own
+  HMAC rewrite and feed masking); the login body <= 4 KiB (`router::MAX_LOGIN_BODY`); `serve`
   gives bodies of requests that may run without credentials
   (`Router::may_run_without_credentials`) `UNAUTHENTICATED_BODY_DEADLINE` (10 s) and every
   drain 5 s, answers the probes on the async task (also over the cap), bounds the blocking pool

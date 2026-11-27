@@ -4,7 +4,8 @@
 # Builds the binary, makes a server directory in a temporary directory, serves it on
 # 127.0.0.1:0 (the URL read from server.run) and walks through the admin API, the database
 # pages (with a promotion to a base and a layer over it), users and a read-only user, the run
-# administration, the import inbox, a model upload (.tar, .tar.gz), the MCP endpoint, a clean
+# administration, the import inbox, a model upload (.tar, .tar.gz), a model download from a
+# local stand-in for Hugging Face (python3 -m http.server), the MCP endpoint, a clean
 # stop, a restart that keeps the browser and MCP sessions, and start/status/stop in the
 # background.
 # Prints one `ok <step>` line per step, or `FAIL <step>: <why>` and exits 1 at the first
@@ -25,6 +26,7 @@ BODY="$WORK/body"
 HEAD="$WORK/head"
 LOG="$WORK/server.log"
 SERVER_PID=""
+HUB_PID=""
 URL=""
 STEP="start"
 FAILED=0
@@ -41,6 +43,9 @@ cleanup() {
       sleep 0.2
     done
     kill -9 "$SERVER_PID" 2>/dev/null
+  fi
+  if [ -n "$HUB_PID" ]; then
+    kill "$HUB_PID" 2>/dev/null
   fi
   if [ "${SMOKE_KEEP:-0}" = 1 ]; then
     echo "kept $WORK"
@@ -514,7 +519,7 @@ execute acme 'g.v().has_label("person").count().next()'
 [ "$RESULT" = 1 ] || fail "acme counts $RESULT after the refused write"
 ok
 
-STEP="database settings: view, a change based on the revision, 409, a limit at the next load (B7)"
+STEP="database settings: view, a change based on the revision, 409, a limit applied at once (B7, S1)"
 req GET /api/admin/databases/acme/settings
 expect_status 200
 expect_json name acme
@@ -533,22 +538,15 @@ jreq PUT /api/admin/databases/acme/settings '{"limits": {"max_operations": -1}}'
 expect_status 400
 jreq PUT /api/admin/databases/acme/settings '{"limits": {"max_operations": 1000}}'
 expect_status 200
-expect_json limits.reloadNeeded true
+expect_json limits.reloadNeeded false
 HEAVY='let n = 0; while n < 20000 { n += 1; } n'
-execute acme "$HEAVY"
-[ "$RESULT" = 20000 ] || fail "not limited before the next load: $RESULT"
-req POST /api/admin/databases/acme/unload
-expect_status 200
-load acme
 jreq POST /db/acme/api/execute "$(python3 -I -c 'import json,sys; print(json.dumps({"script": sys.argv[1]}))' "$HEAVY")"
-[ "$(jget ok)" = false ] || fail "the limit did not apply after the load: $(head -c 400 "$BODY")"
+[ "$(jget ok)" = false ] || fail "the limit did not apply at once: $(head -c 400 "$BODY")"
 expect_body_contains "operations"
 jreq PUT /api/admin/databases/acme/settings '{"limits": {"max_operations": null}}'
 expect_status 200
-req POST /api/admin/databases/acme/unload
-expect_status 200
-load acme
 execute acme "$HEAVY"
+[ "$RESULT" = 20000 ] || fail "still limited after the override was cleared: $RESULT"
 ok
 
 STEP="run administration (list and stop another client's query)"
@@ -577,8 +575,8 @@ print(next((str(r["id"]) for r in runs if r.get("alias") == "endless" and r.get(
 done
 [ -n "$RUN_ID" ] || fail "the endless query never showed: $(head -c 400 "$BODY")"
 req GET /api/admin/runs
-# The page's client id as the server forwards it: a tag of the caller's identity, then its own.
-expect_body_contains '"client":"page:[0-9a-f]\{12\}-smoke"'
+# The page's run key as graphersal-serve keeps it: the caller's identity, then its client id.
+expect_body_contains '"client":"[0-9]\{1,\}:[^"/]\{1,\}/page:smoke"'
 jreq POST /api/admin/databases/acme/runs/cancel "{\"id\": $RUN_ID}"
 expect_status 200
 expect_json cancelled true
@@ -715,6 +713,25 @@ req POST "/api/admin/models?repo=smoke%2Ftiny&license=mit" \
   -H 'Content-Type: application/octet-stream' --data-binary "@$WORK/tiny-model.tar.gz"
 expect_status 201
 expect_json added.0.repo smoke/tiny
+ok
+
+STEP="a local stand-in for Hugging Face (the restarted server downloads from it)"
+# The tiny model as the repository acme/tiny at main, the way the hub lays out its URLs.
+mkdir -p "$WORK/hub/acme/tiny/resolve/main" "$WORK/hub/api/models/acme/tiny/revision"
+for f in config.json tokenizer.json model.safetensors README.md; do
+  cp "$WORK/tiny-model/$f" "$WORK/hub/acme/tiny/resolve/main/$f" || fail "cannot copy $f"
+done
+printf '%s' '{"cardData": {"license": "mit"}, "gated": false, "siblings": []}' \
+  > "$WORK/hub/api/models/acme/tiny/revision/main"
+python3 -I -u -m http.server 0 --bind 127.0.0.1 --directory "$WORK/hub" >"$WORK/hub.out" 2>&1 &
+HUB_PID=$!
+HUB_PORT=""
+for _ in $(seq 1 50); do
+  HUB_PORT=$(sed -n 's/.* port \([0-9][0-9]*\) .*/\1/p' "$WORK/hub.out" | head -n 1)
+  [ -n "$HUB_PORT" ] && break
+  sleep 0.1
+done
+[ -n "$HUB_PORT" ] || fail "the stand-in did not start: $(cat "$WORK/hub.out")"
 ok
 
 # --- MCP ----------------------------------------------------------------------------------
@@ -863,7 +880,8 @@ grep -q "^Stopped: " "$LOG" || fail "no stop line on stderr: $(tail -c 400 "$LOG
 ok
 
 STEP="restart: the browser and MCP sessions survive"
-"$BIN" serve --dir "$DIR" --listen 127.0.0.1:0 >"$WORK/server2.out" 2>"$WORK/server2.log" &
+GRAPHERSAL_HF_ENDPOINT="http://127.0.0.1:$HUB_PORT" \
+  "$BIN" serve --dir "$DIR" --listen 127.0.0.1:0 >"$WORK/server2.out" 2>"$WORK/server2.log" &
 SERVER_PID=$!
 for _ in $(seq 1 150); do
   [ -s "$DIR/server.run" ] && break
@@ -888,6 +906,21 @@ case "$TOOL_TEXT" in
   *"database 'acme' is not loaded"*) ;;
   *) fail "the MCP session lost its selection: $TOOL_TEXT" ;;
 esac
+ok
+
+STEP="model download from Hugging Face (the stand-in), then stop"
+jreq POST /api/admin/models/download '{"repo": "acme/tiny"}'
+expect_status 202
+for _ in $(seq 1 300); do
+  req GET /api/admin/models/download
+  [ "$(jget download.state)" = running ] || break
+  sleep 0.1
+done
+expect_json download.state done
+expect_json download.report.license mit
+expect_json download.added.added.0.repo acme/tiny
+req GET /api/admin/models
+expect_body_contains '"repo":"acme/tiny"'
 kill -TERM "$SERVER_PID"
 for _ in $(seq 1 300); do
   kill -0 "$SERVER_PID" 2>/dev/null || break

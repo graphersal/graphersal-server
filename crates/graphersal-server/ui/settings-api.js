@@ -2,8 +2,8 @@
 // settings route (`GET/PUT api/admin/databases/<name>/settings`; book/src/reference/admin_api.md "Database
 // settings"), the rules of an edit (the same refusals and texts as the server's
 // src/settings.rs), and the rows of the tab's sections: identity, state and sizes, query
-// limits (the database's own override, the server's default, what the next load uses, what
-// the loaded session runs under now), MCP, grants, backups and the Store's creation
+// limits (the database's own override, the server's default, what the files say (in effect
+// at once after a change), what the loaded session runs under now), MCP, grants, backups and the Store's creation
 // parameters (read-only). Imports only ./admin-api.js.
 
 import { sendAdmin, bytesText, problemText, modelRemedy } from './admin-api.js';
@@ -60,7 +60,7 @@ export const MAX_LIMIT_TEXT = '9223372036854775807';
 export const MAX_UI_LIMIT = Number.MAX_SAFE_INTEGER;
 
 /** When a limit change applies (src/settings.rs `LIMITS_APPLY_TEXT`; the server's answer carries it too). */
-export const LIMITS_APPLY = "A query limit change applies at the database's next load: unload and load it (or restart the server); a loaded database keeps the limits it was loaded with until then.";
+export const LIMITS_APPLY = "A query limit change applies at once: every run that starts afterwards uses it, a run already going keeps its limits; a database that is not loaded uses it from its next load.";
 
 /** The longest description (src/settings.rs `MAX_DESCRIPTION_CHARS`). */
 export const MAX_DESCRIPTION_CHARS = 1000;
@@ -117,8 +117,8 @@ export const SOURCE_TEXT = Object.freeze({
 
 /**
  * The limit rows of a settings answer: `{key, label, unit, help, override, server, effective,
- * source, sourceText, inEffect, loaded, differs}` (`differs`: loaded and the next load would use
- * another value than the running session).
+ * source, sourceText, inEffect, loaded, differs}` (`differs`: loaded and the files say another
+ * value than the running session: a hand edit not applied yet).
  */
 export function limitRows(answer = {}) {
   const limits = answer.limits || {};
@@ -146,11 +146,11 @@ export function limitRows(answer = {}) {
   });
 }
 
-/** The note under the limits: when a change applies, and whether one waits for the next load. */
+/** The note under the limits: when a change applies, and whether a hand edit waits for a load. */
 export function limitsNote(answer = {}) {
   const limits = answer.limits || {};
   if (limits.reloadNeeded === true) {
-    return { tone: 'warn', text: 'The limits changed since the database was loaded: they apply at its next load.', help: LIMITS_APPLY };
+    return { tone: 'warn', text: 'The files were changed by hand since the limits were applied: they apply at the next load or the next change here.', help: LIMITS_APPLY };
   }
   return { tone: 'ok', text: LIMITS_APPLY, help: '' };
 }
@@ -354,6 +354,6 @@ export function changedText(name, answer = {}) {
   const fields = arr(answer.changed);
   const limits = fields.some((f) => String(f).startsWith('limits.'));
   const what = fields.length ? fields.join(', ') : 'nothing';
-  const later = limits && (answer.limits || {}).loaded === true ? ' The limits apply at its next load.' : '';
+  const later = limits && (answer.limits || {}).loaded === true ? ' The limits apply to its new runs now.' : '';
   return `${name}: changed ${what}.${later}`;
 }

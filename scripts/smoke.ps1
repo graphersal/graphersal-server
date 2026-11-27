@@ -6,7 +6,8 @@
 # Makes a server directory in a temporary directory, serves it on 127.0.0.1:0 (the URL read from
 # server.run) and walks through the admin API, the database pages (with a promotion to a base and
 # a layer over it), users and a read-only user, the run administration, the import inbox, a model
-# upload (.tar, .tar.gz), the MCP endpoint, a clean stop, a restart that keeps the browser and
+# upload (.tar, .tar.gz), a model download from a local stand-in for Hugging Face (python's
+# http.server), the MCP endpoint, a clean stop, a restart that keeps the browser and
 # MCP sessions, start/status/stop in the background, and a hard kill with the unclean-shutdown
 # check. Prints one `ok   <step>` line per step, or `FAIL <step>: <why>` and stops at the first
 # failure. Every server it started is stopped on any exit.
@@ -40,6 +41,7 @@ $dir = Join-Path $work "srv"
 $script:log = Join-Path $work "server.log"
 $script:server = $null       # the `serve` process started by Start-Server
 $script:bgPid = $null        # the pid of a server started with `start`
+$script:hub = $null          # the local stand-in for Hugging Face (python's http.server)
 $script:step = "start"
 $script:url = ""
 $script:AUTH = ""
@@ -605,7 +607,7 @@ try {
     Expect ($script:Result -eq "1") "acme counts $($script:Result) after the refused write"
     Ok
 
-    $script:step = "database settings: view, a change based on the revision, 409, a limit at the next load (B7)"
+    $script:step = "database settings: view, a change based on the revision, 409, a limit applied at once (B7, S1)"
     Req GET /api/admin/databases/acme/settings
     Expect-Status 200
     Expect-Json name acme
@@ -624,22 +626,15 @@ try {
     Expect-Status 400
     Req PUT /api/admin/databases/acme/settings -Json '{"limits": {"max_operations": 1000}}'
     Expect-Status 200
-    Expect-Json limits.reloadNeeded true
+    Expect-Json limits.reloadNeeded false
     $heavy = 'let n = 0; while n < 20000 { n += 1; } n'
-    Execute acme $heavy
-    Expect ($script:Result -eq "20000") "not limited before the next load: $($script:Result)"
-    Req POST /api/admin/databases/acme/unload
-    Expect-Status 200
-    Load acme
     Req POST /db/acme/api/execute -Json (JsonOf @{ script = $heavy })
-    Expect ((J ok) -eq "false") "the limit did not apply after the load: $(Head400 $script:Body)"
+    Expect ((J ok) -eq "false") "the limit did not apply at once: $(Head400 $script:Body)"
     Expect-BodyContains "operations"
     Req PUT /api/admin/databases/acme/settings -Json '{"limits": {"max_operations": null}}'
     Expect-Status 200
-    Req POST /api/admin/databases/acme/unload
-    Expect-Status 200
-    Load acme
     Execute acme $heavy
+    Expect ($script:Result -eq "20000") "still limited after the override was cleared: $($script:Result)"
     Ok
 
     $script:step = "run administration (list and stop another client's query)"
@@ -666,8 +661,8 @@ try {
     }
     Expect ($runId -ne "") "the endless query never showed: $(Head400 $script:Body)"
     Req GET /api/admin/runs
-    # The page's client id as the server forwards it: a tag of the caller's identity, then its own.
-    Expect ($script:Body -match '"client":"page:[0-9a-f]{12}-smoke"') "the answer lacks the client page:<tag>-smoke: $(Head400 $script:Body)"
+    # The page's run key as graphersal-serve keeps it: the caller's identity, then its client id.
+    Expect ($script:Body -match '"client":"[0-9]+:[^"/]+/page:smoke"') "the answer lacks the client <n>:<identity>/page:smoke: $(Head400 $script:Body)"
     Req POST /api/admin/databases/acme/runs/cancel -Json "{`"id`": $runId}"
     Expect-Status 200
     Expect-Json cancelled true
@@ -817,6 +812,27 @@ try {
     Expect-Json added.0.repo smoke/tiny
     Ok
 
+    $script:step = "a local stand-in for Hugging Face (the restarted server downloads from it)"
+    # The tiny model as the repository acme/tiny at main, the way the hub lays out its URLs.
+    $files = Join-Path $work "hub/acme/tiny/resolve/main"
+    $meta = Join-Path $work "hub/api/models/acme/tiny/revision"
+    New-Item -ItemType Directory -Path $files, $meta | Out-Null
+    foreach ($f in @("config.json", "tokenizer.json", "model.safetensors", "README.md")) {
+        Copy-Item (Join-Path $model $f) (Join-Path $files $f)
+    }
+    [System.IO.File]::WriteAllText((Join-Path $meta "main"), '{"cardData": {"license": "mit"}, "gated": false, "siblings": []}')
+    $script:hub = Start-Process -FilePath "python" -PassThru -NoNewWindow `
+        -ArgumentList @("-I", "-u", "-m", "http.server", "0", "--bind", "127.0.0.1", "--directory", "`"$(Join-Path $work 'hub')`"") `
+        -RedirectStandardOutput (W "hub.out") -RedirectStandardError (W "hub.err")
+    $hubPort = ""
+    for ($i = 0; $i -lt 50; $i++) {
+        $line = Get-Content (W "hub.out") -ErrorAction SilentlyContinue | Where-Object { $_ -match ' port (\d+) ' } | Select-Object -First 1
+        if ($line) { $null = $line -match ' port (\d+) '; $hubPort = $Matches[1]; break }
+        Start-Sleep -Milliseconds 100
+    }
+    Expect ($hubPort -ne "") "the stand-in did not start: $(Text (W 'hub.out')) $(Text (W 'hub.err'))"
+    Ok
+
     # --- MCP ----------------------------------------------------------------------------------
 
     $script:step = "mcp initialize"
@@ -953,13 +969,31 @@ try {
 
     $script:step = "restart: the browser and MCP sessions survive"
     $script:log = W "server2.log"
+    # The restarted server downloads models from the stand-in (its environment, inherited).
+    $env:GRAPHERSAL_HF_ENDPOINT = "http://127.0.0.1:$hubPort"
     Start-Server "server2.out"
+    Remove-Item Env:GRAPHERSAL_HF_ENDPOINT
     Req GET /api/admin/databases -Auth "" -Session (New-CookieSession $keptCookie)
     Expect-Status 200
     # The session keeps its selection: acme is not loaded after the restart, and the call names it.
     Tool gql '{"query": "MATCH (p:person) RETURN count(p) AS n"}'
     Expect ($script:ToolError -eq "true") "acme answered although it is not loaded: $($script:ToolText)"
     Expect ($script:ToolText.Contains("database 'acme' is not loaded")) "the MCP session lost its selection: $($script:ToolText)"
+    Ok
+
+    $script:step = "model download from Hugging Face (the stand-in), then stop"
+    Req POST /api/admin/models/download -Json '{"repo": "acme/tiny"}'
+    Expect-Status 202
+    for ($i = 0; $i -lt 300; $i++) {
+        Req GET /api/admin/models/download
+        if ((J download.state) -ne "running") { break }
+        Start-Sleep -Milliseconds 100
+    }
+    Expect-Json download.state done
+    Expect-Json download.report.license mit
+    Expect-Json download.added.added.0.repo acme/tiny
+    Req GET /api/admin/models
+    Expect-BodyContains '"repo":"acme/tiny"'
     Stop-Server
     Expect (-not (Text $script:log).Contains("panicked")) "the log shows a panic"
     Ok
@@ -1033,6 +1067,9 @@ finally {
     }
     if ($script:bgPid -and (Test-Running $script:bgPid)) {
         Stop-Process -Id $script:bgPid -Force -ErrorAction SilentlyContinue
+    }
+    if ($script:hub -and -not $script:hub.HasExited) {
+        Stop-Process -Id $script:hub.Id -Force -ErrorAction SilentlyContinue
     }
     if ($Keep) {
         Write-Host "kept $work"

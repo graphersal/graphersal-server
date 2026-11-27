@@ -11,7 +11,7 @@
 //! | POST | `databases/<name>/load` | | `202` entry + `"load": "started" \| "already-loading"`, `200` + `"already-loaded"` |
 //! | POST | `databases/<name>/unload` | | `200` entry + `"unloaded": bool` |
 //! | POST | `databases/<name>/promote` | | `200` entry (now `role: base`, read-only; one way) |
-//! | POST | `databases/<name>/reset-layer` | `{"confirm": true}` | `200` entry + `"base"`, `"trash"`, `"discarded"` (`{"added", "modified", "removed"}`, each `{"vertices", "edges"}`), `"jobsKept"`, `"reloaded"`: a layer's changes discarded ([`crate::ops::Admin::reset_layer`]); `400` without the confirmation, `409` for a plain, base or failed database |
+//! | POST | `databases/<name>/reset-layer` | `{"confirm": true}` | `200` entry + `"base"`, `"discarded"` (`{"added", "modified", "removed"}`, each `{"vertices", "edges"}`), `"schemaReset"`, `"definitionsReset"`, `"jobsKept"`, `"inPlace"`: a layer's changes discarded in one commit of its own Store ([`crate::ops::Admin::reset_layer`]); `400` without the confirmation, `409` for a plain, base or failed database |
 //! | PUT | `databases/<name>/read-only` | `{"readOnly": bool, "revision"?}` | `200` entry |
 //! | PUT | `databases/<name>/auto-load` | `{"autoLoad": bool, "revision"?}` | `200` entry |
 //! | POST | `databases/<name>/backup` | | `201` backup |
@@ -26,6 +26,9 @@
 //! | POST | `models` | `{"path"?, "repo"?, "license"?}` (`path`: a Model2Vec directory or a `.gsnap`, absolute, on the server's machine; `repo` alone: a model `models/` holds) | `201` (from a path) / `200` `{"added": [model...], "resolved": [database...], "stillMissing": [{"database", "model"}...], "notes": [text...]}` |
 //! | POST | `models?repo=<r>&license=<l>&format=<gsnap\|tar>` | the file itself (any content type but JSON): a `.gsnap` carrying model blobs or a tar archive (or `.tar.gz`) of a Model2Vec model directory (format detected unless given) | `201` as above |
 //! | DELETE | `models/<repo or blob hash>` | | `200 {"model", "removed": [blob...], "bytes"}`; `409` while a database uses it |
+//! | POST | `models/download` | `{"repo", "modelRevision"?}` | `202 {"download": download}` (started in the background; offline `200` with the final state); `400` a bad name, `409` a download is running ([`crate::model_download`]) |
+//! | GET | `models/download` | | `200 {"download": download \| null}`: the running or last download (progress, report, outcome) |
+//! | POST | `models/download/cancel` | | `200 {"cancelled": bool, "download": download \| null}` (`true`: it stops at its next chunk); offline `409` |
 //! | GET | `runs` | | `200 {"runs": [run...], "textHeadChars"}`: every loaded database's queued and running runs |
 //! | GET | `databases/<name>/runs` | | `200 {"database", "loaded", "runs": [run...], "textHeadChars"}` |
 //! | POST | `databases/<name>/runs/cancel` | `{"id"}` | `200 {"database", "id", "cancelled": bool}` (`false`: no such run now) |
@@ -160,7 +163,7 @@ use crate::loader::LoadStart;
 use crate::names::fold;
 use crate::ops::{
     Admin, BackupInfo, CreateSpec, DatabaseRun, ExportSpec, ImportFormat, ImportSource, InboxFile,
-    ModelAddSpec, ModelAdded, TmpFile,
+    ModelAddSpec, ModelAdded, ModelDownloadSpec, TmpFile,
 };
 use crate::registry::{DatabaseEntry, DbState, Registry};
 
@@ -302,14 +305,15 @@ pub(crate) fn route(
             let body: ResetLayerBody = body_of(request)?;
             if !body.confirm {
                 return Err(HttpError::bad_request(format!(
-                    "a layer reset discards every change of the layer '{}' over its base (the \
-                     old layer moves to trash/): confirm it with \"confirm\": true",
+                    "a layer reset discards every change of the layer '{}' over its base (its \
+                     Store keeps the history: a rollback can go back): confirm it with \
+                     \"confirm\": true",
                     fold(name)
                 )));
             }
             admin
                 .reset_layer(name)
-                .map(|done| Response::json(200, &reset_layer_json(registry, &done)))
+                .map(|done| Response::json(200, &reset_layer_json(&done)))
                 .map_err(|err| {
                     let help = reset_layer_help(registry, name, &err);
                     (err, help)
@@ -391,8 +395,35 @@ pub(crate) fn route(
                 model_upload(admin, request)
             };
         }
+        (_, ["models", "download"]) if read => Ok(Response::json(
+            200,
+            &json!({ "download": admin.model_download_status().as_ref().map(download_json) }),
+        )),
+        (Method::Post, ["models", "download"]) => {
+            let body: ModelDownloadBody = body_of(request)?;
+            let spec = ModelDownloadSpec::new(body.repo).with_revision(body.model_revision);
+            let status = if admin.is_online() { 202 } else { 200 };
+            admin
+                .model_download_start(&spec)
+                .map(|download| {
+                    Response::json(status, &json!({ "download": download_json(&download) }))
+                })
+                .map_err(|err| (err, None))
+        }
+        (Method::Post, ["models", "download", "cancel"]) => admin
+            .model_download_cancel()
+            .map(|cancelled| {
+                let (stopped, download) = match cancelled {
+                    Some((stopped, download)) => (stopped, Some(download_json(&download))),
+                    None => (false, None),
+                };
+                Response::json(200, &json!({ "cancelled": stopped, "download": download }))
+            })
+            .map_err(|err| (err, None)),
         (Method::Delete, ["models", rest @ ..])
-            if rest.iter().all(|s| !s.is_empty()) && !rest.is_empty() =>
+            if rest.iter().all(|s| !s.is_empty())
+                && !rest.is_empty()
+                && rest.first() != Some(&"download") =>
         {
             let model = rest.join("/");
             admin
@@ -1190,21 +1221,22 @@ fn unload_help(admin: &Admin, name: &str, err: &ServerError) -> Option<String> {
 }
 
 /// The help of a refused promotion: unload it first, or what a layer can do instead.
-/// The answer of a layer reset: the entry + `"base"`, `"trash"`, `"discarded"`
-/// (`{"added", "modified", "removed"}`, each `{"vertices", "edges"}`), `"jobsKept"`,
-/// `"reloaded"`.
-fn reset_layer_json(registry: &Registry, done: &crate::ops::LayerResetDone) -> Value {
+/// The answer of a layer reset: the entry + `"base"`, `"discarded"` (`{"added", "modified",
+/// "removed"}`, each `{"vertices", "edges"}`), `"schemaReset"`, `"definitionsReset"`,
+/// `"jobsKept"`, `"inPlace"` (it was loaded: reset on its open Store).
+fn reset_layer_json(done: &crate::ops::LayerResetDone) -> Value {
     let counts = |(vertices, edges): (u64, u64)| json!({ "vertices": vertices, "edges": edges });
     let mut entry = entry_json(&done.entry, None);
     entry["base"] = Value::String(done.base.clone());
-    entry["trash"] = Value::String(relative(registry.dir().root(), &done.trash));
     entry["discarded"] = json!({
         "added": counts(done.discarded.added),
         "modified": counts(done.discarded.modified),
         "removed": counts(done.discarded.removed),
     });
+    entry["schemaReset"] = Value::Bool(done.schema);
+    entry["definitionsReset"] = json!(done.definitions);
     entry["jobsKept"] = json!(done.jobs_kept);
-    entry["reloaded"] = Value::Bool(done.reloaded);
+    entry["inPlace"] = Value::Bool(done.loaded);
     entry
 }
 
@@ -1884,6 +1916,81 @@ fn model_added_answer(added: Result<ModelAdded, ServerError>, status: u16) -> Re
         }
         Err(err) => error_answer(&err, None),
     }
+}
+
+/// `POST /api/admin/models/download`.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ModelDownloadBody {
+    repo: String,
+    /// The Hugging Face revision (branch, tag or commit; not the optimistic-concurrency
+    /// `revision` of the admin API's objects).
+    #[serde(default, rename = "modelRevision")]
+    model_revision: Option<String>,
+}
+
+/// A model download as JSON (`crate::model_download`; the book's admin API page): `id`,
+/// `repo`, `revision`, `state`, `phase`, `actor`, `startedAtMs`, `finishedAtMs`, `file`
+/// (`{"name", "bytes", "total"}` or null), `filesDone` (`[{"name", "bytes"}]`), `receivedBytes`,
+/// `cancelRequested`, `report` (null until downloaded: `identity`, `commit`, `dimension`,
+/// `license`, `licenseFile`, `gated`, `baseModels` `[{"repo", "license"}]`, `warnings`,
+/// `files`), `added` (null until done: the add answer's `added`, `resolved`, `stillMissing`,
+/// `notes`), `error`, `errorKind`, `notes`.
+fn download_json(status: &crate::model_download::DownloadStatus) -> Value {
+    let file = status.file.as_ref().map(
+        |name| json!({ "name": name, "bytes": status.file_bytes, "total": status.file_total }),
+    );
+    let report = status.report.as_ref().map(|r| {
+        json!({
+            "identity": r.identity,
+            "commit": r.commit,
+            "dimension": r.dimension,
+            "license": r.license,
+            "licenseFile": r.license_file,
+            "gated": r.gated,
+            "baseModels": r.base_models.iter().map(|(repo, license)| {
+                json!({ "repo": repo, "license": license })
+            }).collect::<Vec<_>>(),
+            "warnings": r.warnings,
+            "files": r.files.iter().map(|(name, bytes)| {
+                json!({ "name": name, "bytes": bytes })
+            }).collect::<Vec<_>>(),
+        })
+    });
+    let added = status.added.as_ref().map(|added| {
+        let missing: Vec<Value> = added
+            .missing
+            .iter()
+            .map(|(database, model)| json!({ "database": database, "model": model }))
+            .collect();
+        json!({
+            "added": added.added.iter().map(model_json).collect::<Vec<_>>(),
+            "resolved": added.resolved,
+            "stillMissing": missing,
+            "notes": added.notes,
+        })
+    });
+    json!({
+        "id": status.id,
+        "repo": status.repo,
+        "revision": status.revision,
+        "state": status.state.as_str(),
+        "phase": status.phase,
+        "actor": status.actor,
+        "startedAtMs": status.started_at_ms,
+        "finishedAtMs": status.finished_at_ms,
+        "file": file,
+        "filesDone": status.files_done.iter().map(|(name, bytes)| {
+            json!({ "name": name, "bytes": bytes })
+        }).collect::<Vec<_>>(),
+        "receivedBytes": status.received_bytes(),
+        "cancelRequested": status.cancel_requested,
+        "report": report,
+        "added": added,
+        "error": status.error,
+        "errorKind": status.error_kind,
+        "notes": status.notes,
+    })
 }
 
 /// `POST /api/admin/models`.

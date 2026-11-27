@@ -123,7 +123,8 @@ struct LoadedDb {
     /// The pooled base this database uses (a layer's base, or a base's own name).
     base: Option<String>,
     /// The query limits its session runs under (`server.toml`'s with its `database.toml`'s
-    /// over them, as read by this load; [`Loader::limits_in_effect`]).
+    /// over them, as read by this load or the last [`Loader::apply_limits`];
+    /// [`Loader::limits_in_effect`]).
     limits: QueryLimits,
 }
 
@@ -209,6 +210,8 @@ pub struct Loader {
     open_record: std::sync::OnceLock<Arc<crate::recovery::OpenRecord>>,
     /// The last unclean shutdown's report (`serve` sets it once).
     recovery: std::sync::OnceLock<Arc<crate::recovery::Recovery>>,
+    /// The server-side model download (S1, [`crate::model_download`]): one at a time.
+    downloads: crate::model_download::Downloads,
 }
 
 /// The memory of the loaded databases ([`Loader::memory`]): the engine's footprint of each
@@ -291,7 +294,13 @@ impl Loader {
             memory_seen: Mutex::new(BTreeMap::new()),
             open_record: std::sync::OnceLock::new(),
             recovery: std::sync::OnceLock::new(),
+            downloads: crate::model_download::Downloads::default(),
         })
+    }
+
+    /// The server's model download slot ([`crate::model_download`]).
+    pub(crate) fn downloads(&self) -> &crate::model_download::Downloads {
+        &self.downloads
     }
 
     /// Sets the `server.open` writer (once) and records the open set now.
@@ -383,9 +392,9 @@ impl Loader {
             .map(|db| db.context.clone())
     }
 
-    /// The query limits the loaded database `name` runs under: what its last load read from
-    /// `server.toml` and its `database.toml` (a change of either applies at the next load).
-    /// `None` when it is not loaded.
+    /// The query limits the loaded database `name` runs under: what its load (or the last
+    /// [`Loader::apply_limits`]) read from `server.toml` and its `database.toml`. `None` when it
+    /// is not loaded.
     pub(crate) fn limits_in_effect(&self, name: &str) -> Option<QueryLimits> {
         self.lock()
             .loaded
@@ -764,7 +773,8 @@ impl Loader {
     /// Changes the settings of the database `name` ([`Registry::change_settings`], based on
     /// its revision `expected`), and, when the change sets read-only, flips its context at once
     /// when it is loaded (as [`Loader::set_read_only`]; a base refuses `false`). A query limit
-    /// override applies at the next load ([`crate::settings`]).
+    /// override applies at once to the new runs of a loaded database ([`Loader::apply_limits`],
+    /// [`crate::settings`]).
     pub(crate) fn change_settings(
         &self,
         name: &str,
@@ -797,7 +807,78 @@ impl Loader {
                     message: format!("cannot turn read-only {}: {err}", on_off(read_only)),
                 })?;
         }
+        // The file is written: a failure to apply (a `server.toml` broken by hand) leaves the
+        // limits in effect as they were and is logged; the next load reports it.
+        if !change.limits.is_empty()
+            && let Err(err) = self.apply_limits_locked(&entry.name)
+        {
+            tracing::warn!(
+                target: "graphersal_server",
+                "database '{}': its new query limits are written but not applied: {err}",
+                entry.name
+            );
+        }
         Ok(entry)
+    }
+
+    /// Applies the query limits of the loaded database `name` as the files say NOW
+    /// (`server.toml`'s `[limits.query]` with its `database.toml`'s over it): its context's
+    /// session presets are replaced (`Context::set_presets`), so every run that starts from
+    /// now on runs under them; a run already going keeps its limits. Nothing happens when it
+    /// is not loaded (its next load reads the files) or the limits did not change.
+    ///
+    /// `Err`: [`ServerError::NotFound`]; [`ServerError::Serve`] (a file that does not parse:
+    /// the limits in effect stay; or the context refused).
+    pub(crate) fn apply_limits(&self, name: &str) -> Result<(), ServerError> {
+        let _flip = self.flips.lock().unwrap_or_else(|p| p.into_inner());
+        self.apply_limits_locked(name)
+    }
+
+    /// [`Loader::apply_limits`] of every loaded database (a change of `server.toml`'s
+    /// `[limits.query]`); a failure is logged and the first one answered, the others are
+    /// applied anyway.
+    pub(crate) fn apply_limits_everywhere(&self) -> Result<(), ServerError> {
+        let _flip = self.flips.lock().unwrap_or_else(|p| p.into_inner());
+        let mut first = None;
+        for name in self.loaded() {
+            if let Err(err) = self.apply_limits_locked(&name) {
+                tracing::warn!(
+                    target: "graphersal_server",
+                    "database '{name}': cannot apply its query limits: {err}"
+                );
+                first.get_or_insert(err);
+            }
+        }
+        first.map_or(Ok(()), Err)
+    }
+
+    /// [`Loader::apply_limits`] with the flips lock held (it serializes the appliers, so the
+    /// last file state wins).
+    fn apply_limits_locked(&self, name: &str) -> Result<(), ServerError> {
+        let Some(context) = self.context(name) else {
+            return Ok(());
+        };
+        let entry = self.registry.get(name)?;
+        let (presets, limits) = self.query_presets(&entry).map_err(|failure| {
+            let (LoadFailure::Failed(message) | LoadFailure::NeedsModel(message)) = failure;
+            ServerError::Serve {
+                name: entry.name.clone(),
+                message: format!("cannot read its query limits: {message}"),
+            }
+        })?;
+        if self.limits_in_effect(name).as_ref() == Some(&limits) {
+            return Ok(());
+        }
+        context
+            .set_presets(presets)
+            .map_err(|err| ServerError::Serve {
+                name: entry.name.clone(),
+                message: format!("cannot change its query limits: {err}"),
+            })?;
+        if let Some(db) = self.lock().loaded.get_mut(&fold(name)) {
+            db.limits = limits;
+        }
+        Ok(())
     }
 
     /// Starts loading every database with `auto_load = true` in the background; a failed one
@@ -827,6 +908,23 @@ impl Loader {
     /// first is answered.
     pub fn shutdown(&self) -> Result<(), ServerError> {
         self.stopping.store(true, Ordering::SeqCst);
+        // A model download stops at its next chunk; its thread cleans up after itself.
+        if let Some((true, status)) = self.downloads.cancel() {
+            tracing::info!(
+                target: "graphersal_server",
+                "the download of {} is cancelled: the server stops",
+                status.repo
+            );
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while self
+                .downloads
+                .current()
+                .is_some_and(|s| s.state == crate::model_download::DownloadState::Running)
+                && std::time::Instant::now() < deadline
+            {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
         let threads: Vec<JoinHandle<()>> =
             std::mem::take(&mut *self.threads.lock().unwrap_or_else(|p| p.into_inner()));
         for thread in threads {
@@ -908,6 +1006,13 @@ impl Loader {
                     started.elapsed().as_millis()
                 );
                 self.sync_read_only(&key, config.read_only);
+                // A limit change made while the database was loading reaches its context.
+                if let Err(err) = self.apply_limits(&key) {
+                    tracing::warn!(
+                        target: "graphersal_server",
+                        "database '{key}': cannot apply its query limits: {err}"
+                    );
+                }
                 // An import's `needs_model` marker: the model is there now.
                 if let Err(err) = self.registry.clear_needs_model(&key) {
                     tracing::warn!(
@@ -1105,8 +1210,8 @@ impl Loader {
     }
 
     /// The session presets of the database of `entry`: `server.toml`'s `[limits.query]` with
-    /// its `database.toml`'s over it, both read now (`crate::limits`: a change applies at the
-    /// next load); the registry's copy of the database's limits is refreshed. A file that does
+    /// its `database.toml`'s over it, both read now (`crate::limits`); the registry's copy of
+    /// the database's limits is refreshed. A file that does
     /// not parse fails the load with its reason.
     /// Also answers the merged limits themselves (kept as the limits in effect).
     fn query_presets(

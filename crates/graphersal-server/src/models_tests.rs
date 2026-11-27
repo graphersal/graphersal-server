@@ -1347,3 +1347,366 @@ fn a_loaded_database_names_a_vanished_model_blob_from_its_catalog_and_stays_load
     assert_eq!(config.needs_model, None);
     loader.shutdown().unwrap();
 }
+
+// S1: the server-side download from Hugging Face (`Admin::model_download_start`), against the
+// fake endpoint of `test_models::FakeHub` (no network).
+
+/// The download spec of `acme/tiny` from `hub`.
+fn tiny_download(hub: &crate::test_models::FakeHub) -> crate::ops::ModelDownloadSpec {
+    let mut spec = crate::ops::ModelDownloadSpec::new("acme/tiny");
+    spec.endpoint = Some(hub.url.clone());
+    spec
+}
+
+/// The entries of `tmp/` (a download leaves none behind).
+fn tmp_entries(dir: &ServerDir) -> Vec<String> {
+    fs::read_dir(dir.tmp())
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().to_string())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[test]
+fn an_offline_download_adds_the_model_with_its_licence_and_audits() {
+    use crate::model_download::DownloadState;
+    let temp = TempDir::new("models-download-offline");
+    let dir = server(&temp);
+    let hub = crate::test_models::FakeHub::start("cc-by-nc-4.0", false);
+    let memory = Arc::new(crate::audit::MemoryAudit::default());
+    let admin = offline(&dir).with_audit(
+        crate::audit::Audit::new(memory.clone()).with_actor(Some("operator".to_string())),
+    );
+    let done = admin.model_download_start(&tiny_download(&hub)).unwrap();
+    assert_eq!(done.state, DownloadState::Done, "{done:?}");
+    assert_eq!(done.revision, "main");
+    let report = done.report.clone().unwrap();
+    assert_eq!(report.license, "cc-by-nc-4.0");
+    assert!(
+        !report.warnings.is_empty(),
+        "a non-commercial licence warns"
+    );
+    assert!(
+        report.identity.starts_with("model2vec/acme/tiny@"),
+        "{report:?}"
+    );
+    assert!(
+        report
+            .files
+            .iter()
+            .any(|(name, _)| name == "model.safetensors"),
+        "{report:?}"
+    );
+    assert!(done.received_bytes() > 0);
+    let added = done.added.clone().unwrap();
+    assert_eq!(added.added.len(), 1, "{added:?}");
+    assert_eq!(added.added[0].repo.as_deref(), Some("acme/tiny"));
+    assert_eq!(added.added[0].license.as_deref(), Some("cc-by-nc-4.0"));
+    let index = admin.models_index().unwrap();
+    assert_eq!(index.of_repo("acme/tiny").count(), 1);
+    assert!(tmp_entries(&dir).is_empty(), "{:?}", tmp_entries(&dir));
+    let lines = memory.lines();
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("model download of acme/tiny (main) started")),
+        "{lines:#?}"
+    );
+    assert!(
+        lines.iter().any(
+            |l| l.contains("model acme/tiny (main) downloaded into models/")
+                && l.contains("licence cc-by-nc-4.0")
+        ),
+        "{lines:#?}"
+    );
+    // A repository the endpoint does not have: failed, nothing kept, audited.
+    let mut missing = crate::ops::ModelDownloadSpec::new("acme/none");
+    missing.endpoint = Some(hub.url.clone());
+    let failed = admin.model_download_start(&missing).unwrap();
+    assert_eq!(failed.state, DownloadState::Failed, "{failed:?}");
+    assert_eq!(failed.error_kind, Some("not-found"), "{failed:?}");
+    assert!(tmp_entries(&dir).is_empty());
+    assert!(
+        memory
+            .lines()
+            .iter()
+            .any(|l| l.contains("model download of acme/none (main) failed"))
+    );
+    // Bad names are refused before anything runs; offline there is nothing to cancel.
+    for repo in ["tiny", "a/b/c", "../x", ""] {
+        assert!(
+            matches!(
+                admin.model_download_start(&crate::ops::ModelDownloadSpec::new(repo)),
+                Err(ServerError::InvalidInput { .. })
+            ),
+            "{repo}"
+        );
+    }
+    let bad = crate::ops::ModelDownloadSpec::new("acme/tiny").with_revision(Some("../x".into()));
+    assert!(matches!(
+        admin.model_download_start(&bad),
+        Err(ServerError::InvalidInput { .. })
+    ));
+    assert!(matches!(
+        admin.model_download_cancel(),
+        Err(ServerError::Refused { .. })
+    ));
+}
+
+#[test]
+fn an_online_download_shows_its_progress_runs_alone_and_is_cancelled() {
+    use crate::model_download::DownloadState;
+    let temp = TempDir::new("models-download-online");
+    let dir = server(&temp);
+    let loader = loader_of(&dir);
+    let admin = Admin::online(loader.clone());
+    assert!(admin.model_download_status().is_none());
+    assert_eq!(admin.model_download_cancel().unwrap(), None);
+    let slow = crate::test_models::FakeHub::start("mit", true);
+    let started = admin.model_download_start(&tiny_download(&slow)).unwrap();
+    assert_eq!(started.state, DownloadState::Running);
+    // Progress: the weights trickle in.
+    let deadline = std::time::Instant::now() + WAIT;
+    loop {
+        let now = admin.model_download_status().unwrap();
+        if now.file.as_deref() == Some("model.safetensors") && now.file_bytes > 0 {
+            assert_eq!(now.file_total, Some(64 * 1024 * 1024));
+            assert!(now.files_done.len() >= 2, "{now:?}");
+            break;
+        }
+        assert_eq!(now.state, DownloadState::Running, "{now:?}");
+        assert!(std::time::Instant::now() < deadline, "no progress: {now:?}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // One at a time.
+    let hub = crate::test_models::FakeHub::start("mit", false);
+    assert!(matches!(
+        admin.model_download_start(&tiny_download(&hub)),
+        Err(ServerError::Refused { .. })
+    ));
+    // Cancelled: stops at its next chunk, nothing kept.
+    let (stopped, status) = admin.model_download_cancel().unwrap().unwrap();
+    assert!(stopped && status.cancel_requested);
+    let deadline = std::time::Instant::now() + WAIT;
+    let ended = loop {
+        let now = admin.model_download_status().unwrap();
+        if now.state != DownloadState::Running {
+            break now;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "not cancelled: {now:?}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert_eq!(ended.state, DownloadState::Cancelled, "{ended:?}");
+    assert_eq!(ended.error_kind, Some("cancelled"));
+    assert!(admin.models_index().unwrap().models.is_empty());
+    assert!(tmp_entries(&dir).is_empty(), "{:?}", tmp_entries(&dir));
+    assert!(!admin.model_download_cancel().unwrap().unwrap().0);
+    // The next one runs to its end in the background.
+    let second = admin.model_download_start(&tiny_download(&hub)).unwrap();
+    assert_eq!(second.id, started.id + 1);
+    let deadline = std::time::Instant::now() + WAIT;
+    let done = loop {
+        let now = admin.model_download_status().unwrap();
+        if now.state != DownloadState::Running {
+            break now;
+        }
+        assert!(std::time::Instant::now() < deadline, "never ended: {now:?}");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert_eq!(done.state, DownloadState::Done, "{done:?}");
+    assert_eq!(done.phase, "install");
+    assert_eq!(
+        admin.models_index().unwrap().of_repo("acme/tiny").count(),
+        1
+    );
+    loader.shutdown().unwrap();
+}
+
+// S2 (follow-up of A7): a database waiting for a model whose blob it lost is resolved by any
+// copy of the same model (the same repository and model files: the same identity), also when
+// that copy's blob differs in what travels beside the files (the revision named, the card, the
+// licence): the Store takes the copy's blob under its model's name (the engine's restore of an
+// import of the same identity).
+
+/// A database `name` that waits for `acme/tiny`: a Store made with the model `model`, exported
+/// without models, imported back (`needs-model`), the source deleted. Answers the blob hash the
+/// database waits for.
+fn waiting_for(admin: &Admin, temp: &TempDir, name: &str, model: ModelSource) -> String {
+    let source = format!("{name}-source");
+    let entry = admin.create(&source, &CreateSpec::plain()).unwrap();
+    let store = Store::open(entry.store_dir(), StoreOptions::new()).unwrap();
+    store
+        .import_model(model, ImportModelOptions::new())
+        .expect("the model");
+    store.close().unwrap();
+    let hash = db_blobs(admin, &source)[0].0.clone();
+    let without = temp.path().join(format!("{name}.gsnap"));
+    admin
+        .export_to_file(&source, ExportSpec::new().with_models(false), &without)
+        .unwrap();
+    admin.delete(&source).unwrap();
+    let imported = admin
+        .import(&ImportSource::new(&without), name, None, None)
+        .unwrap();
+    assert_eq!(imported.entry.state, DbState::needs_model("acme/tiny"));
+    hash
+}
+
+/// The model `acme/tiny` downloaded from `hub` at `revision` as the engine stages it (what an
+/// earlier download, by the server or the graphersal CLI, put into a database).
+fn downloaded(temp: &TempDir, hub: &crate::test_models::FakeHub, revision: &str) -> ModelSource {
+    use graphersal::persist::{ModelCache, ModelDownload};
+    let request = ModelDownload::new("acme/tiny")
+        .with_endpoint(hub.url.as_str())
+        .with_revision(revision);
+    let cache = temp.path().join(format!("cache-{revision}"));
+    let staged = ModelCache::at(&cache)
+        .download_staged(&request, |_| {})
+        .unwrap();
+    ModelSource::Files(staged.new_model().unwrap())
+}
+
+/// A server-side download of `acme/tiny` from `hub` at `revision`, to its end.
+fn download_now(
+    admin: &Admin,
+    hub: &crate::test_models::FakeHub,
+    revision: Option<&str>,
+) -> crate::ops::ModelAdded {
+    use crate::model_download::DownloadState;
+    let spec = tiny_download(hub).with_revision(revision.map(str::to_string));
+    let done = admin.model_download_start(&spec).unwrap();
+    assert_eq!(done.state, DownloadState::Done, "{done:?}");
+    done.added.clone().unwrap()
+}
+
+/// The database `name` is resolved: unloaded, no marker, its model present, and it loads.
+fn assert_resolved(dir: &ServerDir, admin: &Admin, name: &str) {
+    let entry = admin.registry().get(name).unwrap();
+    assert_eq!(entry.state, DbState::Unloaded, "{name}");
+    assert_eq!(entry.config.as_ref().unwrap().needs_model, None, "{name}");
+    assert!(
+        matches!(model_state(admin, name, "acme/tiny"), Some(s) if s != ModelState::Missing),
+        "{name}"
+    );
+    let loader = loader_of(dir);
+    loader.load(name).unwrap();
+    assert_eq!(loader.wait(name, WAIT).unwrap(), DbState::Loaded, "{name}");
+    loader.shutdown().unwrap();
+}
+
+#[test]
+fn a_fresh_download_of_the_same_revision_gives_the_same_blob_and_resolves() {
+    let temp = TempDir::new("models-redownload");
+    let dir = server(&temp);
+    let admin = offline(&dir);
+    let hub = crate::test_models::FakeHub::start("mit", false);
+    let wanted = waiting_for(&admin, &temp, "w", downloaded(&temp, &hub, "main"));
+    let added = download_now(&admin, &hub, None);
+    assert_eq!(added.added.len(), 1, "{added:?}");
+    assert_eq!(added.added[0].blob, wanted, "the same blob: {added:?}");
+    assert_eq!(added.resolved, ["w"], "{added:?}");
+    assert_resolved(&dir, &admin, "w");
+}
+
+#[test]
+fn a_download_by_branch_resolves_a_database_made_from_the_commit() {
+    let temp = TempDir::new("models-redownload-commit");
+    let dir = server(&temp);
+    let admin = offline(&dir);
+    let hub = crate::test_models::FakeHub::start("mit", false);
+    let commit = crate::test_models::FakeHub::COMMIT;
+    // Made from the commit, downloaded again by the branch name: other blob bytes (the revision
+    // string is in the blob), the same model files.
+    let wanted = waiting_for(&admin, &temp, "c", downloaded(&temp, &hub, commit));
+    let added = download_now(&admin, &hub, None);
+    assert_ne!(added.added[0].blob, wanted, "{added:?}");
+    assert_eq!(added.resolved, ["c"], "{added:?}");
+    assert_resolved(&dir, &admin, "c");
+    // An import of another database waiting for it is resolved at once from models/.
+    waiting_for_resolved_at_import(&admin, &temp, downloaded(&temp, &hub, "main"));
+    // And the other way round (a new server directory): made by the branch, a download by the
+    // commit resolves it.
+    let other = TempDir::new("models-redownload-branch");
+    let dir = server(&other);
+    let admin = offline(&dir);
+    let wanted = waiting_for(&admin, &other, "b", downloaded(&other, &hub, "main"));
+    let added = download_now(&admin, &hub, Some(commit));
+    assert_ne!(added.added[0].blob, wanted, "{added:?}");
+    assert_eq!(added.resolved, ["b"], "{added:?}");
+    assert_resolved(&dir, &admin, "b");
+}
+
+/// An import of a database made with `model` (another blob of the model `models/` holds) is
+/// resolved in its build: `unloaded`, its model present.
+fn waiting_for_resolved_at_import(admin: &Admin, temp: &TempDir, model: ModelSource) {
+    let entry = admin.create("r-source", &CreateSpec::plain()).unwrap();
+    let store = Store::open(entry.store_dir(), StoreOptions::new()).unwrap();
+    store
+        .import_model(model, ImportModelOptions::new())
+        .expect("the model");
+    store.close().unwrap();
+    let without = temp.path().join("r.gsnap");
+    admin
+        .export_to_file("r-source", ExportSpec::new().with_models(false), &without)
+        .unwrap();
+    admin.delete("r-source").unwrap();
+    let imported = admin
+        .import(&ImportSource::new(&without), "r", None, None)
+        .unwrap();
+    assert_eq!(imported.entry.state, DbState::Unloaded);
+    assert!(matches!(
+        model_state(admin, "r", "acme/tiny"),
+        Some(state) if state != ModelState::Missing
+    ));
+}
+
+#[test]
+fn a_download_resolves_a_database_made_with_another_copy_of_the_same_model() {
+    let temp = TempDir::new("models-redownload-copy");
+    let dir = server(&temp);
+    let admin = offline(&dir);
+    // Made from the same model files with another card, no revision, another licence.
+    let hub = crate::test_models::FakeHub::start("apache-2.0", false);
+    waiting_for(
+        &admin,
+        &temp,
+        "w",
+        ModelSource::Files(crate::test_models::tiny_model(1, "acme/tiny")),
+    );
+    let added = download_now(&admin, &hub, None);
+    assert_eq!(added.resolved, ["w"], "{added:?}");
+    assert_resolved(&dir, &admin, "w");
+}
+
+#[test]
+fn another_model_of_the_repository_does_not_resolve_the_database() {
+    let temp = TempDir::new("models-redownload-other");
+    let dir = server(&temp);
+    let admin = offline(&dir);
+    // Other weights (seed 2) under the same repository: another identity.
+    let wanted = waiting_for(
+        &admin,
+        &temp,
+        "w",
+        ModelSource::Files(crate::test_models::tiny_model(2, "acme/tiny")),
+    );
+    let hub = crate::test_models::FakeHub::start("mit", false);
+    let added = download_now(&admin, &hub, None);
+    assert!(added.resolved.is_empty(), "{added:?}");
+    let entry = admin.registry().get("w").unwrap();
+    assert_eq!(entry.state, DbState::needs_model("acme/tiny"));
+    assert_eq!(
+        model_state(&admin, "w", "acme/tiny"),
+        Some(ModelState::Missing)
+    );
+    // Its catalog still names the blob it waits for; nothing was replaced.
+    let models = Store::models_dir(entry.store_dir()).unwrap();
+    assert_eq!(models.len(), 1);
+    assert_eq!(models[0].blob_hash, wanted);
+}

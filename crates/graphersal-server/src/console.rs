@@ -77,6 +77,9 @@ const LOAD_WAIT: Duration = Duration::from_secs(600);
 /// How long the console waits for a starting server (its run file, its `503 loading`).
 const START_WAIT: Duration = Duration::from_secs(10);
 
+/// How long `models download` through a server waits for the download's end.
+const DOWNLOAD_WAIT: Duration = Duration::from_secs(4 * 3600);
+
 /// One admin command of the console.
 ///
 /// `#[non_exhaustive]`: further commands will be added.
@@ -286,6 +289,16 @@ pub enum DbCommand {
         /// The repository (or blob hash).
         model: String,
     },
+    /// `models download REPO [--revision R]`: the model downloaded from Hugging Face into the
+    /// shared models (through a running server it runs there; the console waits for its end).
+    ModelsDownload {
+        /// The repository (`owner/name`).
+        repo: String,
+        /// The branch, tag or commit (`None`: `main`).
+        revision: Option<String>,
+    },
+    /// `models download --cancel`: the running download of a server stops.
+    ModelsDownloadCancel,
     /// `db export NAME --out FILE [--no-models] [--materialize]`.
     Export {
         /// The database.
@@ -576,6 +589,16 @@ impl DbCommand {
                 (Method::Post, "models".into(), Some(Value::Object(body)))
             }
             DbCommand::ModelsRemove { model } => (Method::Delete, format!("models/{model}"), None),
+            DbCommand::ModelsDownload { repo, revision } => {
+                let mut body = json!({ "repo": repo });
+                if let Some(revision) = revision {
+                    body["modelRevision"] = json!(revision);
+                }
+                (Method::Post, "models/download".into(), Some(body))
+            }
+            DbCommand::ModelsDownloadCancel => {
+                (Method::Post, "models/download/cancel".into(), None)
+            }
             DbCommand::UserList => (Method::Get, "users".into(), None),
             DbCommand::UserAdd { name, admin } => (
                 Method::Post,
@@ -787,6 +810,9 @@ fn through_server(server: RunInfo, command: &DbCommand) -> Result<Outcome, Serve
         if let DbCommand::Load { name, wait: true } = command {
             answer = wait_for_load(&server, name, answer)?;
         }
+        if let DbCommand::ModelsDownload { .. } = command {
+            answer = wait_for_download(&server, answer)?;
+        }
         answer
     };
     Ok(Outcome {
@@ -974,6 +1000,24 @@ fn wait_for_load(server: &RunInfo, name: &str, answer: Value) -> Result<Value, S
     }
     if let Some(load) = load {
         current["load"] = load;
+    }
+    Ok(current)
+}
+
+/// A model download started through `server`, polled until it ends (at most
+/// [`DOWNLOAD_WAIT`]; then its state so far, still `running`).
+fn wait_for_download(server: &RunInfo, answer: Value) -> Result<Value, ServerError> {
+    let deadline = Instant::now() + DOWNLOAD_WAIT;
+    let id = answer["download"]["id"].clone();
+    let mut current = answer;
+    while current["download"]["state"] == "running" && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(250));
+        let polled = remote(server, &Method::Get, "models/download", None)?;
+        // Another download replaced it (an admin started one after this one ended).
+        if polled["download"]["id"] != id {
+            break;
+        }
+        current = polled;
     }
     Ok(current)
 }

@@ -8,10 +8,9 @@
 //!   admin API, so a route cannot stay undescribed.
 //! - `GET /db/<name>/openapi.json` (also `/db/<name>/api/openapi.json`): one database's own HTTP
 //!   API, built from the engine's description (graphersal-serve's `openapi.json`, taken from
-//!   the pinned crate by asking a throwaway context once: [`engine_spec`]), patched with
-//!   `openapi/engine-patch.json` (what graphersal-serve's description gained after the pinned
-//!   version: the `409` of a request marked read-only on every writing route, the file root's
-//!   `403`/`500`) and then for this server ([`database_spec`]): `servers` = the request's URL
+//!   the pinned crate by asking a throwaway context once: [`engine_spec`]; it carries the
+//!   `409` of a request marked read-only on every writing route and the file root's
+//!   `403`/`500`), then made for this server ([`database_spec`]): `servers` = the request's URL
 //!   followed by `/db/<name>` (an alias's name stays the alias's), the security schemes `bearerAuth` and
 //!   `sessionCookie` (plus `{}` when the name is open to anonymous: an anonymous grant, or
 //!   access control off), the access layer's answers on every operation (`401` anonymous, `404`
@@ -45,9 +44,6 @@ pub(crate) const DATABASE_SPEC_PATHS: [&str; 2] = ["openapi.json", "api/openapi.
 
 /// The hand-written description of the server's own routes.
 const SERVER_SPEC: &str = include_str!("../openapi/server.json");
-
-/// What graphersal-serve's description gained after the pinned version (module docs).
-const ENGINE_PATCH: &str = include_str!("../openapi/engine-patch.json");
 
 /// The paths of the engine's description the server does not serve below `/db/<name>/`: the
 /// probes (`/healthz`, `/readyz`: the server's own, in its description), the engine's run
@@ -83,15 +79,11 @@ pub fn server_spec(base_url: &str) -> Result<Value, ServerError> {
 }
 
 /// The engine's description of one database's HTTP API (graphersal-serve's `openapi.json` of
-/// the pinned crate, asked once from a throwaway context over an empty graph and kept), with
-/// `openapi/engine-patch.json` applied.
+/// the pinned crate, asked once from a throwaway context over an empty graph and kept).
 pub fn engine_spec() -> Result<Value, ServerError> {
     static ENGINE: OnceLock<Result<Value, String>> = OnceLock::new();
     ENGINE
-        .get_or_init(|| {
-            let raw = served_engine_spec()?;
-            apply_engine_patch(raw)
-        })
+        .get_or_init(served_engine_spec)
         .clone()
         .map_err(|message| ServerError::Serve {
             name: "openapi.json".to_string(),
@@ -129,33 +121,6 @@ pub(crate) fn served_engine_spec() -> Result<Value, String> {
     }
     serde_json::from_slice(answer.body())
         .map_err(|err| format!("the engine's API description is not JSON: {err}"))
-}
-
-/// `raw` (the engine's description) with `openapi/engine-patch.json` applied: its responses
-/// added to `components.responses`, its operations replacing the engine's.
-pub(crate) fn apply_engine_patch(mut raw: Value) -> Result<Value, String> {
-    let patch: Value =
-        serde_json::from_str(ENGINE_PATCH).map_err(|err| format!("engine-patch.json: {err}"))?;
-    if let Some(responses) = patch["responses"].as_object() {
-        let target = raw["components"]["responses"]
-            .as_object_mut()
-            .ok_or("the engine's description has no components.responses")?;
-        for (name, response) in responses {
-            target.insert(name.clone(), response.clone());
-        }
-    }
-    if let Some(operations) = patch["operations"].as_object() {
-        for (key, operation) in operations {
-            let (method, path) = key
-                .split_once(' ')
-                .ok_or_else(|| format!("engine-patch.json: bad operation key {key:?}"))?;
-            let slot = raw["paths"][path]
-                .get_mut(method.to_ascii_lowercase())
-                .ok_or_else(|| format!("engine-patch.json: the engine has no {key}"))?;
-            *slot = operation.clone();
-        }
-    }
-    Ok(raw)
 }
 
 /// The description of the database (or alias) `name` for clients of the server at `base_url`

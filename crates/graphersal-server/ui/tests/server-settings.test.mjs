@@ -30,9 +30,8 @@ function viewOf({ set = {}, pending = [], running = true } = {}) {
   const kinds = { listen: 'text', 'mcp.enabled': 'bool', 'defaults.damage_policy': 'text', 'defaults.auto_load': 'bool', 'defaults.read_only': 'bool', 'limits.memory_limit': 'memory', 'access.enabled': 'bool', 'http.public_scheme': 'text', 'http.allowed_hosts': 'hosts', 'jobs.backup_root': 'text' };
   const defaults = { listen: '127.0.0.1:8484', 'mcp.enabled': true, 'defaults.auto_load': false, 'limits.upload_bytes': 4294967296, 'http.public_scheme': 'http', 'http.allowed_hosts': [], 'defaults.damage_policy': 'maintenance' };
   const applies = (key) => {
-    if (key.startsWith('limits.query.')) return 'load';
     if (key.startsWith('defaults.')) return 'create';
-    if (['limits.upload_bytes', 'limits.memory_limit', 'limits.memory_headroom', 'sessions.lifetime_secs', 'sessions.idle_timeout_secs', 'http.public_scheme'].includes(key)) return 'now';
+    if (key.startsWith('limits.query.') || ['limits.upload_bytes', 'limits.memory_limit', 'limits.memory_headroom', 'sessions.lifetime_secs', 'sessions.idle_timeout_secs', 'http.public_scheme'].includes(key)) return 'now';
     return 'restart';
   };
   return {
@@ -72,7 +71,7 @@ test('the sections cover every key of the server, in file order', () => {
   assert.deepEqual(defaults.map((s) => s.id), ['defaults', 'limits.query']);
   assert.equal(defaults[1].rows.length, 8);
   // Every class the server sends has its words.
-  for (const cls of ['now', 'load', 'create', 'restart']) assert.ok(SETTINGS_RS.includes(`"${cls}"`) && APPLIES[cls].text, cls);
+  for (const cls of ['now', 'create', 'restart']) assert.ok(SETTINGS_RS.includes(`"${cls}"`) && APPLIES[cls].text, cls);
 });
 
 test('rows: value or default, the class, pending with the running value, creation parameters', () => {
@@ -85,7 +84,7 @@ test('rows: value or default, the class, pending with the running value, creatio
   assert.equal(row('mcp.enabled').text, 'on (default)');
   assert.equal(row('http.allowed_hosts').text, 'a, b');
   assert.equal(row('limits.query.timeout_ms').text, 'not limited (default)');
-  assert.equal(row('limits.query.timeout_ms').appliesText, 'at next load');
+  assert.equal(row('limits.query.timeout_ms').appliesText, 'applies now');
   assert.equal(row('listen').pending, true);
   assert.equal(row('listen').running, '127.0.0.1:8484');
   assert.equal(row('defaults.chunk_bytes').creation, true);

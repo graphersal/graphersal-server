@@ -123,8 +123,8 @@ pub enum AuditEvent {
         /// The new description (empty: cleared).
         description: String,
     },
-    /// A query limit override of a database was set or cleared (round 3 B7; it applies at the
-    /// database's next load).
+    /// A query limit override of a database was set or cleared (round 3 B7; it applies to the
+    /// database's new runs at once).
     #[non_exhaustive]
     QueryLimitSet {
         /// The database.
@@ -331,15 +331,44 @@ pub enum AuditEvent {
         trash: PathBuf,
     },
     /// A layer database was reset (round 4 B-LAYER `db reset-layer`): its changes over its
-    /// base were discarded; the old layer Store went to `trash/`.
+    /// base were discarded in one commit of its own Store (its history keeps the state
+    /// before).
     #[non_exhaustive]
     LayerReset {
         /// The layer database.
         name: String,
         /// Its base database.
         base: String,
-        /// Where the old layer Store went (`trash/<name>-<UTC time>/`).
-        trash: PathBuf,
+    },
+    /// A model download from Hugging Face started (S1, `models download`).
+    #[non_exhaustive]
+    ModelDownloadStarted {
+        /// The repository.
+        repo: String,
+        /// The revision asked for.
+        revision: String,
+    },
+    /// A model download ended with the model in `models/`.
+    #[non_exhaustive]
+    ModelDownloaded {
+        /// The repository.
+        repo: String,
+        /// The revision asked for.
+        revision: String,
+        /// The model identity (`model2vec/<repo>@<12 hex>`).
+        identity: String,
+        /// The licence the repository states (`unknown` when it states none).
+        license: String,
+    },
+    /// A model download failed or was cancelled; nothing was kept.
+    #[non_exhaustive]
+    ModelDownloadFailed {
+        /// The repository.
+        repo: String,
+        /// The revision asked for.
+        revision: String,
+        /// Why (the error's text).
+        reason: String,
     },
 }
 
@@ -431,7 +460,7 @@ impl fmt::Display for AuditEvent {
                 value: Some(value),
             } => write!(
                 f,
-                "database '{name}' query limit {key} = {value} (applies at its next load)"
+                "database '{name}' query limit {key} = {value} (applies to its new runs)"
             ),
             AuditEvent::QueryLimitSet {
                 name,
@@ -439,8 +468,8 @@ impl fmt::Display for AuditEvent {
                 value: None,
             } => write!(
                 f,
-                "database '{name}' query limit {key} cleared (the server's default applies at \
-                 its next load)"
+                "database '{name}' query limit {key} cleared (the server's default applies to \
+                 its new runs)"
             ),
             AuditEvent::AliasSet { alias, target } => {
                 write!(f, "alias '{alias}' set to database '{target}'")
@@ -540,10 +569,27 @@ impl fmt::Display for AuditEvent {
                 "database '{with}' took the name '{name}'; the old '{name}' moved to {}",
                 trash.display()
             ),
-            AuditEvent::LayerReset { name, base, trash } => write!(
+            AuditEvent::ModelDownloadStarted { repo, revision } => {
+                write!(f, "model download of {repo} ({revision}) started")
+            }
+            AuditEvent::ModelDownloaded {
+                repo,
+                revision,
+                identity,
+                license,
+            } => write!(
                 f,
-                "layer database '{name}' reset to its base '{base}'; the old layer moved to {}",
-                trash.display()
+                "model {repo} ({revision}) downloaded into models/: {identity}, licence {license}"
+            ),
+            AuditEvent::ModelDownloadFailed {
+                repo,
+                revision,
+                reason,
+            } => write!(f, "model download of {repo} ({revision}) failed: {reason}"),
+            AuditEvent::LayerReset { name, base } => write!(
+                f,
+                "layer database '{name}' reset to its base '{base}' (its Store keeps the history \
+                 before the reset)"
             ),
         }
     }

@@ -132,8 +132,7 @@ impl Admin {
         self.loader.as_ref()?.limits_in_effect(name)
     }
 
-    /// The server's default query limits: `server.toml`'s `[limits.query]`, read now (what
-    /// the next load reads).
+    /// The server's default query limits: `server.toml`'s `[limits.query]`, read now.
     ///
     /// `Err`: [`ServerError::Config`] / [`ServerError::Io`] for a `server.toml` that cannot be
     /// read.
@@ -223,6 +222,19 @@ impl Admin {
             Some(live) => live.writing(write)?,
             None => write()?,
         };
+        // New query limits reach every loaded database at once (its next runs).
+        if let Some(loader) = &self.loader
+            && edited
+                .changed
+                .iter()
+                .any(|key| key.starts_with("limits.query."))
+            && let Err(err) = loader.apply_limits_everywhere()
+        {
+            tracing::warn!(
+                target: "graphersal_server",
+                "server.toml was changed, but a database keeps its query limits: {err}"
+            );
+        }
         for key in &edited.changed {
             let value =
                 server_settings::value_of(&edited.config, key).unwrap_or(serde_json::Value::Null);
