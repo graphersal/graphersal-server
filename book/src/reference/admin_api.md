@@ -417,8 +417,8 @@ a bad description or an unknown body field; `404`; `409` (stale revision, a base
 a failed database). The answer is the settings (with the new `revision`) plus `"changed"`:
 the fields in body order (`description`, `readOnly`, `autoLoad`, `limits.<key>`). Each field
 is audited: `database '<n>' description set to "..."` (or `cleared`), `read-only on|off`,
-`auto-load on|off`, `query limit <key> = <n> (applies at its next load)` or `query limit <key>
-cleared`.
+`auto-load on|off`, `query limit <key> = <n> (applies to its new runs)` or `query limit <key>
+cleared (the server's default applies to its new runs)`.
 
 ### Aliases
 
