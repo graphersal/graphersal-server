@@ -2793,6 +2793,7 @@ fn user_commands_offline_and_through_a_server() {
             .stderr(Stdio::null()),
     );
     let info = wait_for_run_file(&dir);
+    wait_ready(info.address);
     let note = format!("sent to its admin API at {}", info.address);
     let bob_info = |token: &str| {
         let auth = format!("Authorization: Bearer {token}\r\n");
